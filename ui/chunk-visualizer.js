@@ -1794,10 +1794,11 @@ function bindDetailEvents() {
         }
     });
 
-    // Enabled toggle
+    // Enabled toggle - save immediately (no pending changes, direct write)
     $('#vecthare_detail_enabled').on('change', function() {
         const enabled = $(this).is(':checked');
-        updateChunkData(chunk.hash, { enabled });
+        const existing = getChunkMetadata(chunk.hash) || {};
+        saveChunkMetadata(chunk.hash, { ...existing, disabled: !enabled, enabled });
         chunk.data.enabled = enabled;
         renderChunkList();
     });

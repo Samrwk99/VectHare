@@ -922,6 +922,8 @@ export function filterChunksByConditions(chunks, baseContext) {
 export function buildSearchContext(chat, contextWindow = 10, activeChunks = [], metadata = {}) {
     const recentMessages = chat.slice(-contextWindow).map(m => m.mes || '');
     const lastMessage = chat[chat.length - 1] || {};
+    //currentCharacterId: metadata.currentCharacterId || null,
+    //currentChatId: metadata.currentChatId || null,
 
     // Extract speakers from recent messages
     const messageSpeakers = chat.slice(-contextWindow).map(m => {
@@ -948,6 +950,8 @@ export function buildSearchContext(chat, contextWindow = 10, activeChunks = [], 
         activeLorebookEntries: metadata.activeLorebookEntries || [], // Active lorebook entries
         isGroupChat: metadata.isGroupChat || false,                  // Whether this is a group chat
         currentCharacter: metadata.currentCharacter || null,         // Current character name (for expressions extension)
+        currentCharacterId: metadata.currentCharacterId || null,     // FIX: Pass character ID for character lock checks
+        currentChatId: metadata.currentChatId || null,               // FIX: Pass chat ID for chat lock checks
 
         // Context for chunk-only conditionals (set per-chunk during evaluation)
         currentChunkScore: metadata.currentChunkScore || 0,          // For similarity condition

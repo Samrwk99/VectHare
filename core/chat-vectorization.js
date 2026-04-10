@@ -1716,18 +1716,47 @@ export async function rearrangeChat(chat, settings, type) {
         // === STAGE 4: Query all collections and merge results ===
         let chunks = await queryAndMergeCollections(activeCollections, queryText, settings, chat, debugData);
 
+        // === STAGE 4.1: Filter disabled chunks ===
+        const beforeDisabledFilter = chunks.length;
+        chunks = chunks.filter(chunk => {
+            const meta = getChunkMetadata(chunk.hash);
+            if (meta?.disabled === true || meta?.enabled === false) {
+                recordChunkFate(debugData, chunk.hash, 'disabled_filter', 'dropped',
+                                'Chunk is disabled', { hash: chunk.hash });
+                return false;
+            }
+            return true;
+        });
+        if (chunks.length !== beforeDisabledFilter) {
+            console.log(`VectHare: Disabled filter: ${beforeDisabledFilter} → ${chunks.length} chunks (${beforeDisabledFilter - chunks.length} disabled chunks removed)`);
+            addTrace(debugData, 'disabled_filter', 'Disabled chunks removed', {
+                before: beforeDisabledFilter,
+                after: chunks.length,
+                removed: beforeDisabledFilter - chunks.length
+            });
+        }
+
         // === STAGE 4.3: Boost chunks with matching query keywords ===
-        if (queryKeywordTexts.length > 0 && chunks.length > 0) {
+        if (chunks.length > 0) {
             let keywordMatchCount = 0;
+            // FIX: Match chunk keywords against BOTH auto-extracted query keywords AND
+            // the full raw query text. The extraction cap (e.g. balanced = max 8 keywords)
+            // previously silently dropped names beyond the cap, preventing their boost.
+            const queryLower = queryText.toLowerCase();
 
             for (const chunk of chunks) {
                 // Get chunk keywords from metadata
                 const chunkKeywords = (chunk.metadata?.keywords || [])
-                    .map(kw => (typeof kw === 'object' ? kw.text : kw)?.toLowerCase())
-                    .filter(Boolean);
+                .map(kw => (typeof kw === 'object' ? kw.text : kw)?.toLowerCase())
+                .filter(Boolean);
 
-                // Check if chunk has any matching keywords
-                const matchedKeywords = queryKeywordTexts.filter(qk => chunkKeywords.includes(qk));
+                // Check chunk keywords against extracted list OR raw query text
+                // Word-boundary match to avoid partial hits (e.g. "mel" inside "melody")
+                const matchedKeywords = chunkKeywords.filter(ck => {
+                    if (queryKeywordTexts.includes(ck)) return true;
+                    const escaped = ck.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    return new RegExp(`(?<![\\w])${escaped}(?![\\w])`, 'i').test(queryLower);
+                });
 
                 if (matchedKeywords.length > 0) {
                     // Chunk matches query keywords - boost to perfect hit
