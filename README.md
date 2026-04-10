@@ -6,6 +6,8 @@
 
 ---
 
+This is forked from Coneja-Chibi/Vecthare since it is missing fixes.
+
 ## 🎯 What is VectHare?
 
 VectHare is an **advanced Retrieval-Augmented Generation (RAG) system** for SillyTavern that transforms how your AI characters recall and use past events. Instead of traditional memory tokens, VectHare vectorizes your chat history and intelligently retrieves relevant context when generating responses.
@@ -189,7 +191,7 @@ Supports 28 emotion types with Character Expressions integration!
 3. Click **"Install Extension"**
 4. Paste this URL:
    ```
-   https://github.com/Coneja-Chibi/VectHare
+   https://github.com/Dogoo9/VectHare
    ```
 5. Click **Install**
 
