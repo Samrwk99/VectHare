@@ -74,6 +74,7 @@ const defaultSettings = {
     openrouter_model: 'openai/text-embedding-3-large',
     cohere_model: 'embed-english-v3.0',
     ollama_model: 'mxbai-embed-large',
+    llamacpp_model: '',
     ollama_keep: false,
     vllm_model: '',
     webllm_model: '',
