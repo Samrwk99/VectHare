@@ -380,9 +380,13 @@ async function rerankWithBananaBread(query, chunks, settings) {
  *
  * @param {object} settings VectHare settings
  * @param {number} batchSize Number of messages to process per call
+ * @param {object} options Synchronization options
+ * @param {boolean} options.ignoreAutoSync If true, bypasses auto-sync checks (manual vectorization)
  * @returns {Promise<object>} Progress info
  */
-export async function synchronizeChat(settings, batchSize = 5) {
+export async function synchronizeChat(settings, batchSize = 5, options = {}) {
+    const { ignoreAutoSync = false } = options;
+
     // Build proper collection ID using chat UUID first
     const collectionId = getChatCollectionId();
     console.log(`🔍 VectHare DEBUG: getChatCollectionId() returned: "${collectionId}"`);
@@ -392,10 +396,17 @@ export async function synchronizeChat(settings, batchSize = 5) {
         return { remaining: -1, messagesProcessed: 0, chunksCreated: 0 };
     }
 
-    // Check per-collection autoSync setting instead of global enabled_chats
-    const { isCollectionAutoSyncEnabled } = await import('./collection-metadata.js');
-    if (!isCollectionAutoSyncEnabled(collectionId)) {
-        return { remaining: -1, messagesProcessed: 0, chunksCreated: 0 };
+    if (!ignoreAutoSync) {
+        // Global gate: do not auto-vectorize unless chat sync is enabled.
+        if (!settings.enabled_chats) {
+            return { remaining: -1, messagesProcessed: 0, chunksCreated: 0 };
+        }
+
+        // Per-collection auto-sync gate
+        const { isCollectionAutoSyncEnabled } = await import('./collection-metadata.js');
+        if (!isCollectionAutoSyncEnabled(collectionId)) {
+            return { remaining: -1, messagesProcessed: 0, chunksCreated: 0 };
+        }
     }
 
     // Per Scene strategy: don't auto-vectorize on message events
@@ -1960,10 +1971,6 @@ export async function rearrangeChat(chat, settings, type) {
  */
 export async function vectorizeAll(settings, batchSize) {
     try {
-        if (!settings.enabled_chats) {
-            return;
-        }
-
         const chatId = getCurrentChatId();
         if (!chatId) {
             toastr.info('No chat selected', 'Vectorization aborted');
@@ -2001,7 +2008,7 @@ export async function vectorizeAll(settings, batchSize) {
                 throw new Error('Message generation in progress');
             }
 
-            const result = await synchronizeChat(settings, batchSize);
+            const result = await synchronizeChat(settings, batchSize, { ignoreAutoSync: true });
 
             // Handle disabled/blocked state
             if (result.remaining === -1) {
