@@ -56,7 +56,6 @@ export const EMBEDDING_PROVIDERS = {
         name: 'llama.cpp',
         local: true,
         requiresModel: false,
-        modelField: 'llamacpp_model',
         requiresApiKey: false,
         requiresUrl: true,
     },

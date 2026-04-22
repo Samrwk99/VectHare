@@ -199,54 +199,37 @@ export class QdrantBackend extends VectorBackend {
     async getSavedHashes(collectionId, settings) {
         const strippedCollectionId = this._stripRegistryPrefix(collectionId);
         const actualCollectionId = getActualCollectionId(strippedCollectionId, settings);
-        const pageSize = Math.min(VECTOR_LIST_LIMIT, 5000);
-        const hashes = new Set();
-        let offset = 0;
-        let hasMore = true;
 
-        while (hasMore) {
-            const body = {
-                backend: BACKEND_TYPE,
-                collectionId: actualCollectionId,
-                source: settings.source || 'transformers',
-                model: getModelFromSettings(settings),
-                limit: pageSize,
-                offset,
+        const body = {
+            backend: BACKEND_TYPE,
+            collectionId: actualCollectionId,
+            source: settings.source || 'transformers',
+            model: getModelFromSettings(settings),
+            limit: VECTOR_LIST_LIMIT,
+        };
+
+        // Add content_type filter for multitenancy mode
+        if (settings.qdrant_multitenancy) {
+            body.filter = {
+                must: [
+                    { key: 'content_type', match: { value: strippedCollectionId } }
+                ]
             };
-
-            // Add content_type filter for multitenancy mode
-            if (settings.qdrant_multitenancy) {
-                body.filter = {
-                    must: [
-                        { key: 'content_type', match: { value: strippedCollectionId } }
-                    ]
-                };
-            }
-
-            const response = await fetch('/api/plugins/similharity/chunks/list', {
-                method: 'POST',
-                headers: getRequestHeaders(),
-                body: JSON.stringify(body),
-            });
-
-            if (!response.ok) {
-                const errorBody = await response.text().catch(() => 'No response body');
-                throw new Error(`[Qdrant] Failed to get saved hashes for ${collectionId}: ${response.status} ${response.statusText} - ${errorBody}`);
-            }
-
-            const data = await response.json();
-            const items = Array.isArray(data.items) ? data.items : [];
-            for (const item of items) {
-                if (item?.hash !== undefined) {
-                    hashes.add(item.hash);
-                }
-            }
-
-            hasMore = items.length === pageSize;
-            offset += items.length;
         }
 
-        return Array.from(hashes);
+        const response = await fetch('/api/plugins/similharity/chunks/list', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify(body),
+        });
+
+        if (!response.ok) {
+            const errorBody = await response.text().catch(() => 'No response body');
+            throw new Error(`[Qdrant] Failed to get saved hashes for ${collectionId}: ${response.status} ${response.statusText} - ${errorBody}`);
+        }
+
+        const data = await response.json();
+        return data.items ? data.items.map(item => item.hash) : [];
     }
 
     async insertVectorItems(collectionId, items, settings) {
@@ -464,8 +447,13 @@ export class QdrantBackend extends VectorBackend {
                 };
 
 
-                if (!searchText?.trim()) {
-                    console.warn(`[Qdrant] No searchText provided for ${collectionId}`);
+                // Use queryVector if provided, otherwise searchText
+                if (queryVector) {
+                    body.queryVector = queryVector;
+                } else if (searchText?.trim()) {
+                    body.searchText = searchText;
+                } else {
+                    console.warn(`[Qdrant] No queryVector or searchText for ${collectionId}`);
                     results[collectionId] = { hashes: [], metadata: [] };
                     continue;
                 }

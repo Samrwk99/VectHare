@@ -191,7 +191,7 @@ Supports 28 emotion types with Character Expressions integration!
 3. Click **"Install Extension"**
 4. Paste this URL:
    ```
-   https://github.com/Dogoo9/VectHare
+    https://github.com/Dogoo9/VectHare
    ```
 5. Click **Install**
 

@@ -272,11 +272,6 @@ export function renderSettings(containerId, settings, callbacks) {
                                     <i class="fa-solid fa-info-circle"></i>
                                     LlamaCPP requires the --embedding flag to be enabled. Restart your server with this flag if not already set.
                                 </small>
-                                <label for="vecthare_llamacpp_model" style="margin-top: 8px;">
-                                    <small>LlamaCPP Model (optional):</small>
-                                </label>
-                                <input type="text" id="vecthare_llamacpp_model" class="vecthare-input" placeholder="Leave blank to use server default" />
-                                <small class="vecthare_hint">Set this if your llama.cpp endpoint requires an explicit model name in embedding requests</small>
                             </div>
 
                             <!-- OpenAI Model -->
@@ -2498,15 +2493,6 @@ function bindSettingsEvents(settings, callbacks) {
         .prop('checked', settings.ollama_keep)
         .on('input', function() {
             settings.ollama_keep = $(this).prop('checked');
-            Object.assign(extension_settings.vecthare, settings);
-            saveSettingsDebounced();
-        });
-
-    // LlamaCPP model (optional)
-    $('#vecthare_llamacpp_model')
-        .val(settings.llamacpp_model || '')
-        .on('input', function() {
-            settings.llamacpp_model = String($(this).val());
             Object.assign(extension_settings.vecthare, settings);
             saveSettingsDebounced();
         });
