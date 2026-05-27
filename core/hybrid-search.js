@@ -183,7 +183,16 @@ async function clientSideHybridSearch(backend, collectionId, searchText, topK, s
             vectorRank: r.ranks?.vector,
             textRank: r.ranks?.text,
             fusionMethod: fusionMethod,
-            hybridSearch: true
+            hybridSearch: true,
+            explain: {
+                retrieval: 'hybrid',
+                fusionMethod,
+                vectorScore: r.vectorScore ?? 0,
+                textScore: r.textScore ?? r.bm25Score ?? 0,
+                vectorRank: r.ranks?.vector,
+                textRank: r.ranks?.text,
+                finalScore: r.rrfScore ?? r.combinedScore ?? 0
+            }
         }))
     };
 }

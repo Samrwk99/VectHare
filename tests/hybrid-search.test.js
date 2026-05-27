@@ -700,6 +700,8 @@ describe('hybridSearch', () => {
         expect(meta.score).toBeDefined();
         expect(meta.vectorScore).toBeDefined();
         expect(meta.textScore).toBeDefined();
+        expect(meta.explain).toBeDefined();
+        expect(meta.explain.retrieval).toBe('hybrid');
     });
 
     it('should pass options to native hybrid query', async () => {

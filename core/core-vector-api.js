@@ -895,7 +895,16 @@ export async function queryCollection(collectionId, searchText, topK, settings) 
             vectorScore: r.vectorScore,
             matchedKeywords: r.matchedKeywords,
             matchedKeywordsWithWeights: r.matchedKeywordsWithWeights,
-            keywordBoosted: r.keywordBoosted
+            keywordBoosted: r.keywordBoosted,
+            explain: {
+                retrieval: 'vector',
+                vectorScore: r.vectorScore ?? r.originalScore ?? r.score,
+                keywordBoost: r.keywordBoost ?? 1,
+                keywordBoostConfidence: r.keywordBoostConfidence ?? 0,
+                keywordOverlapRatio: r.keywordOverlapRatio ?? 0,
+                matchedKeywords: r.matchedKeywords || [],
+                finalScore: r.score
+            }
         }))
     };
 }
