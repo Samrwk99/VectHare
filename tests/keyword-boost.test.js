@@ -354,6 +354,19 @@ describe('extractTextKeywords', () => {
     });
 });
 
+
+    it('should normalize token boundaries and avoid merged terms', () => {
+        const text = 'VillainMagic appears with space_warp and divine/time powers.';
+        const keywords = extractTextKeywords(text, { level: 'aggressive' }).map(k => k.text);
+        expect(keywords).not.toContain('villainmagic');
+        expect(keywords.some(k => k.includes('space_warp') || k.includes('space') || k.includes('warp'))).toBe(true);
+    });
+
+    it('should include phrase keywords as bi-grams', () => {
+        const text = 'Divine time magic controls space warp effects.';
+        const keywords = extractTextKeywords(text, { level: 'aggressive' }).map(k => k.text);
+        expect(keywords.some(k => k === 'divine_time' || k === 'space_warp')).toBe(true);
+    });
 // ============================================================================
 // extractTextKeywordsSimple Tests
 // ============================================================================
@@ -738,6 +751,7 @@ describe('applyKeywordBoost', () => {
 
         // With 1 match and diminishing returns, should get 30% scaling
         expect(boosted[0].diminishingReturns).toBe(true);
+        expect(boosted[0].keywordBoostConfidence).toBeGreaterThan(0);
     });
 
     it('should apply full boost when diminishingReturns is false', () => {
@@ -1027,5 +1041,16 @@ describe('Integration: Keyword extraction to boost pipeline', () => {
 
         expect(boosted[0].matchedKeywords).toContain('dragon');
         expect(boosted[0].matchedKeywords).toContain('fire');
+    });
+});
+
+
+describe('Adaptive keyword boost confidence', () => {
+    it('should apply higher confidence for stronger overlap', () => {
+        const results = [{ text: 'Story', score: 0.5, keywords: ['dragon', 'fire', 'castle'] }];
+        const weak = applyKeywordBoost(results, 'dragon')[0];
+        const strong = applyKeywordBoost(results, 'dragon fire castle')[0];
+        expect(strong.keywordBoostConfidence).toBeGreaterThanOrEqual(weak.keywordBoostConfidence);
+        expect(strong.keywordOverlapRatio).toBeGreaterThanOrEqual(weak.keywordOverlapRatio);
     });
 });

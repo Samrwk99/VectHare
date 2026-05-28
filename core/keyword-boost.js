@@ -66,6 +66,22 @@ export const DEFAULT_EXTRACTION_LEVEL = 'balanced';
 /** Default base weight for keywords */
 export const DEFAULT_BASE_WEIGHT = 1.5;
 
+
+/** Normalize text boundaries to improve token detection */
+function normalizeTokenBoundaries(text) {
+    if (!text || typeof text !== 'string') return '';
+    return text
+        .replace(/([a-z])([A-Z])/g, '$1 $2')
+        .replace(/[\/|+]+/g, ' ')
+        .replace(/[_-]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function extractQueryTokens(query) {
+    return new Set(normalizeTokenBoundaries(String(query || '').toLowerCase()).match(/[a-z]{3,}/g) || []);
+}
+
 /** Weight increment per frequency count above minimum */
 const FREQUENCY_WEIGHT_INCREMENT = 0.1;
 
@@ -346,6 +362,7 @@ export function extractTextKeywords(text, options = {}) {
     cleanedText = cleanedText.replace(/\*[^*]+\*/g, ' '); // Remove *italicized examples*
     // Strip possessive 's before tokenization (e.g., "Strovolos's" → "Strovolos")
     cleanedText = cleanedText.replace(/'s\b/g, '');
+    cleanedText = normalizeTokenBoundaries(cleanedText);
 
     // Step 2: Determine scan area based on level
     const scanArea = config.headerSize
@@ -398,6 +415,24 @@ export function extractTextKeywords(text, options = {}) {
                 frequency: 1,
             });
         }
+    }
+
+    // Step 5.5: Extract simple phrases (bi-grams) for better semantic recall
+    const phraseTokens = normalizeTokenBoundaries(scanArea).toLowerCase().match(/\b[a-z]{4,}\b/g) || [];
+    const phraseCounts = new Map();
+    for (let i = 0; i < phraseTokens.length - 1; i++) {
+        const a = phraseTokens[i];
+        const b = phraseTokens[i + 1];
+        if (stopwords.has(a) || stopwords.has(b)) continue;
+        const phrase = `${a}_${b}`;
+        phraseCounts.set(phrase, (phraseCounts.get(phrase) || 0) + 1);
+    }
+    for (const [phrase, count] of phraseCounts) {
+        weightedKeywords.push({
+            text: phrase,
+            weight: Math.min(MAX_KEYWORD_WEIGHT, baseWeight + 0.15 + ((count - 1) * 0.05)),
+            frequency: count,
+        });
     }
 
     // Step 6: Sort by weight (highest first), dedupe, and limit
@@ -948,6 +983,7 @@ export function applyKeywordBoost(results, query, options = {}) {
     } = options;
 
     const queryLower = query.toLowerCase();
+    const queryTokens = extractQueryTokens(query);
 
     console.log(`[VectHare Keyword Boost] Starting keyword boost for query: "${query}" (diminishing=${diminishingReturns}, cap=${perKeywordCap})`);
 
@@ -981,12 +1017,17 @@ export function applyKeywordBoost(results, query, options = {}) {
         if (diminishingReturns && matchedKeywords.length > 0) {
             const matchCount = Math.min(matchedKeywords.length, 3);
             const scalingFactor = MATCH_SCALING_FACTORS[matchCount];
-
-            // Scale only the boost portion, not the base 1.0
             finalBoost = 1.0 + (boostSum * scalingFactor);
         } else {
             finalBoost = rawBoost;
         }
+
+        // Adaptive confidence factor: reward strong query-keyword overlap and strong vector margins
+        const uniqueMatches = new Set(matchedKeywords.map(k => k.text)).size;
+        const overlapRatio = queryTokens.size > 0 ? Math.min(1, uniqueMatches / queryTokens.size) : 0;
+        const vectorConfidence = Math.max(0, Math.min(1, result.score || 0));
+        const confidenceFactor = 0.6 + (overlapRatio * 0.3) + (vectorConfidence * 0.1); // 0.6..1.0
+        finalBoost = 1.0 + ((finalBoost - 1.0) * confidenceFactor);
 
         if (matchedKeywords.length > 0) {
             const scaleInfo = diminishingReturns
@@ -1005,6 +1046,8 @@ export function applyKeywordBoost(results, query, options = {}) {
             matchedKeywordsWithWeights: matchedKeywords,
             keywordBoosted: matchedKeywords.length > 0,
             diminishingReturns: diminishingReturns,
+            keywordOverlapRatio: overlapRatio,
+            keywordBoostConfidence: confidenceFactor,
         };
     });
 
