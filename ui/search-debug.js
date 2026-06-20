@@ -50,6 +50,8 @@ export function createDebugData() {
         query: '',
         timestamp: Date.now(),
         collectionId: null,
+        collectionsQueried: [],
+        collectionDecisions: [],
         settings: {},
         stages: {
             initial: [],
@@ -322,6 +324,8 @@ function createModalHtml(data, historyIndex = 0) {
                         </div>
                     </div>
 
+                    ${createCollectionDecisionCard(data)}
+
                     <!-- Chunks by Stage -->
                     <div class="vecthare-debug-card">
                         <div class="vecthare-debug-card-header">
@@ -425,6 +429,52 @@ function createKeywordBoostStage(data) {
             <div class="vecthare-debug-stage-count">${boostedCount}</div>
             <div class="vecthare-debug-stage-label">Keywords</div>
             ${badge}
+        </div>
+    `;
+}
+
+/**
+ * Creates collection activation decision card.
+ */
+function createCollectionDecisionCard(data) {
+    const decisions = data.collectionDecisions || [];
+    if (!decisions.length) {
+        return '';
+    }
+
+    const rows = decisions.map(decision => {
+        const isQueried = decision.decision === 'queried';
+        const statusClass = isQueried ? 'vecthare-fate-injected' : 'vecthare-fate-dropped';
+        const locks = [
+            ...(decision.chatLocks || []).map(id => `chat:${id}`),
+            ...(decision.characterLocks || []).map(id => `char:${id}`),
+        ];
+
+        return `
+            <div class="vecthare-debug-fate-entry">
+                <div class="vecthare-debug-fate-header">
+                    <span class="vecthare-debug-hash">${escapeHtml(decision.collectionId || 'unknown')}</span>
+                    <span class="vecthare-debug-fate-result ${statusClass}">${isQueried ? 'QUERIED' : 'SKIPPED'}</span>
+                </div>
+                <div class="vecthare-debug-chunk-meta">
+                    <span><strong>Reason:</strong> ${escapeHtml(decision.reason || 'Unknown')}</span>
+                    <span><strong>Lock:</strong> ${escapeHtml(decision.lockMode || 'prefer')}</span>
+                    <span><strong>Force:</strong> ${escapeHtml(decision.forceMode || 'normal')}</span>
+                    ${locks.length ? `<span><strong>Locks:</strong> ${escapeHtml(locks.join(', '))}</span>` : ''}
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    return `
+        <div class="vecthare-debug-card">
+            <div class="vecthare-debug-card-header">
+                <i class="fa-solid fa-route"></i>
+                <span>Collection Decisions</span>
+            </div>
+            <div class="vecthare-debug-card-body">
+                <div class="vecthare-debug-fate-list">${rows}</div>
+            </div>
         </div>
     `;
 }

@@ -42,8 +42,12 @@ const defaultCollectionMeta = {
     // 1. alwaysActive=true → Collection always queries (ignores triggers)
     // 2. triggers[] not empty → Match keywords in recent messages
     // 3. conditions.enabled=true → Advanced rules (secondary method)
-    // 4. No triggers + no conditions → Auto-activates (like alwaysActive)
+    // 4. No triggers + no conditions → Inactive unless forced/locked/always active
     alwaysActive: false,           // If true, ignores triggers and conditions
+    lockMode: 'prefer',            // 'prefer' = locks activate here; 'exclusive' = only activate in locked chats/chars
+    forceMode: 'normal',           // 'normal' or 'forced' for explicitly pinned collections
+    exclusiveWhenActive: false,    // If true, this collection can suppress peers in the same exclusive scope
+    exclusiveScope: 'lorebook',    // 'lorebook' or 'all'
     triggers: [],                  // Array of trigger keywords (case-insensitive)
     triggerMatchMode: 'any',       // 'any' = OR logic, 'all' = AND logic
     triggerCaseSensitive: false,   // Case sensitivity for trigger matching
@@ -95,6 +99,11 @@ const defaultCollectionMeta = {
     // Example: "Things {{char}} remembers about {{user}}:"
     context: '',      // Natural language context shown before this collection's chunks
     xmlTag: '',       // XML tag to wrap this collection's chunks (e.g., "memories")
+};
+
+const defaultChatCollectionPolicy = {
+    mode: 'normal', // 'normal', 'prefer_selected', 'only_selected'
+    selectedCollections: [],
 };
 
 /**
@@ -318,6 +327,146 @@ export function setCollectionEnabled(collectionId, enabled) {
 export function isCollectionEnabled(collectionId) {
     const meta = getCollectionMeta(collectionId);
     return meta.enabled !== false;
+}
+
+// ============================================================================
+// CHAT-SCOPED COLLECTION POLICIES
+// ============================================================================
+
+function normalizeCollectionKey(collectionId) {
+    if (!collectionId) return '';
+    const parsed = parseRegistryKey(collectionId);
+    return parsed.collectionId || collectionId;
+}
+
+function collectionKeysMatch(a, b) {
+    if (!a || !b) return false;
+    return String(a) === String(b) || normalizeCollectionKey(a) === normalizeCollectionKey(b);
+}
+
+function ensureChatCollectionPoliciesObject() {
+    if (!ensureCollectionsObject()) {
+        return false;
+    }
+    if (!extension_settings.vecthare.chatCollectionPolicies) {
+        extension_settings.vecthare.chatCollectionPolicies = {};
+    }
+    return true;
+}
+
+/**
+ * Gets the collection policy for a chat.
+ * @param {string} chatId Chat identifier
+ * @returns {{mode: string, selectedCollections: string[]}}
+ */
+export function getChatCollectionPolicy(chatId) {
+    if (!chatId || !ensureChatCollectionPoliciesObject()) {
+        return { ...defaultChatCollectionPolicy, selectedCollections: [] };
+    }
+
+    const stored = extension_settings.vecthare.chatCollectionPolicies[String(chatId)] || {};
+    const selectedCollections = Array.isArray(stored.selectedCollections) ? stored.selectedCollections : [];
+
+    return {
+        ...defaultChatCollectionPolicy,
+        ...stored,
+        selectedCollections,
+    };
+}
+
+/**
+ * Sets the collection policy for a chat.
+ * @param {string} chatId Chat identifier
+ * @param {object} policy Partial policy data
+ */
+export function setChatCollectionPolicy(chatId, policy) {
+    if (!chatId || !ensureChatCollectionPoliciesObject()) {
+        return;
+    }
+
+    const existing = getChatCollectionPolicy(chatId);
+    const selectedCollections = Array.isArray(policy.selectedCollections)
+        ? [...new Set(policy.selectedCollections.map(String))]
+        : existing.selectedCollections;
+
+    extension_settings.vecthare.chatCollectionPolicies[String(chatId)] = {
+        ...existing,
+        ...policy,
+        selectedCollections,
+    };
+
+    saveSettingsDebounced();
+    console.log(`VectHare: Updated collection policy for chat ${chatId}`);
+}
+
+/**
+ * Adds a collection to the current chat's selected/forced collection list.
+ * @param {string} chatId Chat identifier
+ * @param {string} collectionId Collection identifier or registry key
+ */
+export function addCollectionToChatPolicy(chatId, collectionId) {
+    if (!chatId || !collectionId) return;
+    const policy = getChatCollectionPolicy(chatId);
+    if (!policy.selectedCollections.some(id => collectionKeysMatch(id, collectionId))) {
+        policy.selectedCollections.push(String(collectionId));
+    }
+    setChatCollectionPolicy(chatId, policy);
+}
+
+/**
+ * Removes a collection from the current chat's selected/forced collection list.
+ * @param {string} chatId Chat identifier
+ * @param {string} collectionId Collection identifier or registry key
+ */
+export function removeCollectionFromChatPolicy(chatId, collectionId) {
+    if (!chatId || !collectionId) return;
+    const policy = getChatCollectionPolicy(chatId);
+    policy.selectedCollections = policy.selectedCollections.filter(id => !collectionKeysMatch(id, collectionId));
+    setChatCollectionPolicy(chatId, policy);
+}
+
+/**
+ * Checks whether a collection is selected/forced for a chat.
+ * @param {string} collectionId Collection identifier or registry key
+ * @param {string} chatId Chat identifier
+ * @returns {boolean}
+ */
+export function isCollectionSelectedForChat(collectionId, chatId) {
+    const policy = getChatCollectionPolicy(chatId);
+    return policy.selectedCollections.some(id => collectionKeysMatch(id, collectionId));
+}
+
+/**
+ * Applies the chat-level selected-collection policy to a candidate list.
+ * @param {string[]} collectionIds Candidate collection IDs/registry keys
+ * @param {string} chatId Chat identifier
+ * @param {object} options Options
+ * @param {boolean} options.lorebooksOnly Restrict policy to lorebook collections only
+ * @returns {string[]} Filtered collection IDs
+ */
+export function applyChatCollectionPolicy(collectionIds, chatId, options = {}) {
+    const policy = getChatCollectionPolicy(chatId);
+    const mode = policy.mode || 'normal';
+
+    if (mode === 'normal' || !Array.isArray(collectionIds)) {
+        return collectionIds || [];
+    }
+
+    const isSelected = (id) => policy.selectedCollections.some(selected => collectionKeysMatch(selected, id));
+    const inScope = (id) => !options.lorebooksOnly || String(id).includes('lorebook') || normalizeCollectionKey(id).includes('lorebook');
+
+    if (mode === 'only_selected') {
+        return collectionIds.filter(id => !inScope(id) || isSelected(id));
+    }
+
+    if (mode === 'prefer_selected') {
+        const selected = collectionIds.filter(id => inScope(id) && isSelected(id));
+        const selectedKeys = new Set(selected.map(id => normalizeCollectionKey(id)));
+        const rest = collectionIds.filter(id => !selectedKeys.has(normalizeCollectionKey(id)));
+        return [...selected, ...rest];
+    }
+
+    return collectionIds;
 }
 
 // ============================================================================
@@ -900,7 +1049,7 @@ async function evaluateAdvancedConditions(meta, context, collectionId) {
  * 2.6. Locked to current character → Activate (overrides triggers/conditions)
  * 3. Triggers match → Activate (primary method)
  * 4. Advanced conditions pass → Activate (secondary method)
- * 5. No triggers AND no conditions → Auto-activate (backwards compatible)
+ * 5. No triggers AND no conditions → Inactive unless forced/locked/always active
  *
  * @param {string} collectionId Collection identifier
  * @param {object} context Search context (from buildSearchContext)
@@ -908,30 +1057,82 @@ async function evaluateAdvancedConditions(meta, context, collectionId) {
  */
 export async function shouldCollectionActivate(collectionId, context) {
     const meta = getCollectionMeta(collectionId);
+    const currentChatId = context?.currentChatId;
+    const currentCharacterId = context?.currentCharacterId;
+    const chatLocks = getCollectionLocks(collectionId);
+    const characterLocks = getCollectionCharacterLocks(collectionId);
+    const lockMode = meta.lockMode || 'prefer';
+    const forcedForChat = currentChatId && isCollectionSelectedForChat(collectionId, currentChatId);
+    const recordDecision = (decision, reason, extra = {}) => {
+        if (Array.isArray(context?.collectionDecisions)) {
+            context.collectionDecisions.push({
+                collectionId,
+                decision,
+                reason,
+                enabled: meta.enabled !== false,
+                alwaysActive: meta.alwaysActive === true,
+                lockMode,
+                forceMode: forcedForChat || meta.forceMode === 'forced' ? 'forced' : (meta.forceMode || 'normal'),
+                chatLocks,
+                characterLocks,
+                currentChatId,
+                currentCharacterId,
+                exclusiveWhenActive: meta.exclusiveWhenActive === true,
+                exclusiveScope: meta.exclusiveScope || 'lorebook',
+                ...extra,
+            });
+        }
+    };
 
     // Priority 1: Check if collection is disabled entirely
     if (meta.enabled === false) {
         console.log(`[VectHare Activation Filter] Collection ${collectionId}: ✗ DISABLED`);
+        recordDecision('skipped', 'Collection is disabled');
         return false;
+    }
+
+    // Priority 1.5: Strict locks are allow-lists. If a collection is locked
+    // exclusively and the current chat/character is not in that lock list, it
+    // must not activate through Always Active, triggers, or conditions.
+    if (lockMode === 'exclusive') {
+        const hasChatLocks = chatLocks.length > 0;
+        const hasCharacterLocks = characterLocks.length > 0;
+        const chatAllowed = hasChatLocks && currentChatId && chatLocks.some(id => String(id) === String(currentChatId));
+        const characterAllowed = hasCharacterLocks && currentCharacterId && characterLocks.some(id => String(id) === String(currentCharacterId));
+
+        if ((hasChatLocks || hasCharacterLocks) && !chatAllowed && !characterAllowed) {
+            console.log(`[VectHare Activation Filter] Collection ${collectionId}: ✗ LOCKED_TO_OTHER_CONTEXT`);
+            recordDecision('skipped', 'Collection is locked to another chat/character');
+            return false;
+        }
+    }
+
+    // Priority 1.75: Explicitly selected/forced collections for this chat bypass
+    // triggers and conditions but still respect disabled state and strict locks.
+    if (forcedForChat || meta.forceMode === 'forced') {
+        console.log(`[VectHare Activation Filter] Collection ${collectionId}: ✓ FORCED_FOR_CHAT`);
+        recordDecision('queried', 'Forced for current chat');
+        return true;
     }
 
     // Priority 2: Check if always active (ignores everything else)
     if (meta.alwaysActive === true) {
         console.log(`[VectHare Activation Filter] Collection ${collectionId}: ✓ ALWAYS_ACTIVE`);
+        recordDecision('queried', 'Always Active');
         return true;
     }
 
     // Priority 2.5: Check if locked to current chat (overrides other conditions)
-    const currentChatId = context?.currentChatId;
     if (currentChatId && isCollectionLockedToChat(collectionId, currentChatId)) {
         console.log(`[VectHare Activation Filter] Collection ${collectionId}: ✓ LOCKED_TO_CURRENT_CHAT (${currentChatId})`);
+        recordDecision('queried', 'Locked to current chat');
         return true;
     }
 
     // Priority 2.6: Check if locked to current character (overrides other conditions)
-    const currentCharacterId = context?.currentCharacterId;
     if (currentCharacterId && isCollectionLockedToCharacter(collectionId, currentCharacterId)) {
         console.log(`[VectHare Activation Filter] Collection ${collectionId}: ✓ LOCKED_TO_CURRENT_CHARACTER (${currentCharacterId})`);
+        recordDecision('queried', 'Locked to current character');
         return true;
     }
 
@@ -950,12 +1151,14 @@ export async function shouldCollectionActivate(collectionId, context) {
 
         if (triggersMatch) {
             console.log(`[VectHare Activation Filter] Collection ${collectionId}: ✓ TRIGGERS_MATCHED (${meta.triggers.join(', ')})`);
+            recordDecision('queried', 'Triggers matched', { matchedTriggers: meta.triggers });
             return true;
         }
 
         // Triggers set but didn't match - check if we should fall through to conditions
         if (!hasConditions) {
             console.log(`[VectHare Activation Filter] Collection ${collectionId}: ✗ TRIGGERS_NOT_MATCHED (no conditions to fallthrough)`);
+            recordDecision('skipped', 'Triggers did not match');
             return false;
         }
     }
@@ -964,15 +1167,13 @@ export async function shouldCollectionActivate(collectionId, context) {
     if (hasConditions) {
         const conditionsPass = await evaluateAdvancedConditions(meta, context, collectionId);
         console.log(`[VectHare Activation Filter] Collection ${collectionId}: ${conditionsPass ? '✓' : '✗'} CONDITIONS_${conditionsPass ? 'PASS' : 'FAIL'}`);
+        recordDecision(conditionsPass ? 'queried' : 'skipped', conditionsPass ? 'Conditions passed' : 'Conditions failed');
         return conditionsPass;
     }
 
-    // Priority 5: No triggers AND no conditions = auto-activate (backwards compatible)
-    //console.log(`[VectHare Activation Filter] Collection ${collectionId}: ✓ AUTO_ACTIVATED (no triggers/conditions configured - BACKWARDS COMPAT MODE)`);
-    //return true;
-
-    //Priority 5: No triggers AND no conditions = do not activate
+    // Priority 5: No triggers AND no conditions = do not activate
     console.log(`[VectHare Activation Filter] Collection ${collectionId}: ✗ NO_TRIGGERS_OR_CONDITIONS (not activating)`);
+    recordDecision('skipped', 'No activation triggers or conditions configured');
     return false;
 }
 
@@ -991,13 +1192,27 @@ export async function filterActiveCollections(collectionIds, context) {
     );
 
     const activeIds = results.filter(r => r.active).map(r => r.id);
+    const exclusiveActiveIds = activeIds.filter(id => getCollectionMeta(id).exclusiveWhenActive === true);
+    let finalActiveIds = activeIds;
 
-    console.log(`[VectHare Activation Filter] Summary: ${collectionIds.length} collections → ${activeIds.length} active`);
-    if (activeIds.length > 0) {
-        console.log(`[VectHare Activation Filter] Active collections:`, activeIds);
+    if (exclusiveActiveIds.length > 0) {
+        const suppressAll = exclusiveActiveIds.some(id => (getCollectionMeta(id).exclusiveScope || 'lorebook') === 'all');
+        finalActiveIds = activeIds.filter(id => {
+            if (exclusiveActiveIds.includes(id)) return true;
+            if (suppressAll) return false;
+            const normalized = normalizeCollectionKey(id);
+            return !String(id).includes('lorebook') && !normalized.includes('lorebook');
+        });
+
+        console.log(`[VectHare Activation Filter] Exclusive collection(s) active, suppressed ${activeIds.length - finalActiveIds.length} peer collection(s)`);
     }
 
-    return activeIds;
+    console.log(`[VectHare Activation Filter] Summary: ${collectionIds.length} collections → ${finalActiveIds.length} active`);
+    if (finalActiveIds.length > 0) {
+        console.log(`[VectHare Activation Filter] Active collections:`, finalActiveIds);
+    }
+
+    return finalActiveIds;
 }
 
 // ============================================================================

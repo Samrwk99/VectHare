@@ -12,7 +12,12 @@
 
 import { extension_settings, getContext } from '../../../../extensions.js';
 import { queryCollection } from './core-vector-api.js';
-import { getCollectionMeta, isCollectionEnabled, shouldCollectionActivate } from './collection-metadata.js';
+import {
+    getCollectionMeta,
+    isCollectionEnabled,
+    shouldCollectionActivate,
+    applyChatCollectionPolicy,
+} from './collection-metadata.js';
 import { parseRegistryKey } from './collection-ids.js';
 import { buildLorebookCollectionId } from './collection-ids.js';
 import { setExtensionPrompt, getCurrentChatId } from '../../../../../script.js';
@@ -131,7 +136,11 @@ export async function getSemanticWorldInfoEntries(recentMessages, activeEntries,
  */
 async function getEnabledLorebookCollections(settings, searchContext) {
     const collections = [];
-    const collectionRegistry = settings.vecthare_collection_registry || [];
+    const collectionRegistry = applyChatCollectionPolicy(
+        settings.vecthare_collection_registry || [],
+        searchContext?.currentChatId || getCurrentChatId(),
+        { lorebooksOnly: true }
+    );
 
     for (const collectionId of collectionRegistry) {
         // Check if this is a lorebook collection
@@ -156,6 +165,18 @@ async function getEnabledLorebookCollections(settings, searchContext) {
         const name = meta?.sourceName || collectionId;
 
         collections.push({ id: collectionId, name });
+    }
+
+    const exclusiveCollections = collections.filter(collection => {
+        const meta = getCollectionMeta(collection.id);
+        return meta?.exclusiveWhenActive === true;
+    });
+
+    if (exclusiveCollections.length > 0) {
+        const exclusiveIds = new Set(exclusiveCollections.map(collection => collection.id));
+        const filteredCollections = collections.filter(collection => exclusiveIds.has(collection.id));
+        console.log(`VectHare WI: Exclusive lorebook collection active, suppressing ${collections.length - filteredCollections.length} other lorebook collection(s)`);
+        return filteredCollections;
     }
 
     console.log(`VectHare WI: ${collections.length} lorebook collection(s) passed activation filters`);
