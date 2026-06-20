@@ -27,7 +27,12 @@ import { isBackendAvailable } from '../backends/backend-manager.js';
 import { applyDecayToResults, applySceneAwareDecay } from './temporal-decay.js';
 import { isChunkDisabledByScene } from './scenes.js';
 import { registerCollection, getCollectionRegistry } from './collection-loader.js';
-import { isCollectionEnabled, filterActiveCollections } from './collection-metadata.js';
+import {
+    isCollectionEnabled,
+    filterActiveCollections,
+    getChatCollectionPolicy,
+    applyChatCollectionPolicy,
+} from './collection-metadata.js';
 import { progressTracker } from '../ui/progress-tracker.js';
 import { buildSearchContext, filterChunksByConditions, processChunkLinks } from './conditional-activation.js';
 import { getChunkMetadata, getCollectionMeta } from './collection-metadata.js';
@@ -547,6 +552,8 @@ export async function synchronizeChat(settings, batchSize = 5) {
  */
 function gatherCollectionsToQuery(settings) {
     const chatCollectionId = getChatCollectionId();
+    const currentChatId = getCurrentChatId();
+    const chatPolicy = getChatCollectionPolicy(currentChatId);
     const collectionsToQuery = [];
 
     // Include chat collection if it's enabled AND we have a valid collection ID
@@ -574,7 +581,21 @@ function gatherCollectionsToQuery(settings) {
         }
     }
 
-    return collectionsToQuery;
+    // Add explicitly selected/forced collections for this chat. These bypass
+    // trigger/condition activation later, but still respect disabled state here.
+    for (const selectedId of chatPolicy.selectedCollections || []) {
+        const alreadyIncluded = collectionsToQuery.some(id => {
+            const parsedExisting = parseRegistryKey(id);
+            const parsedSelected = parseRegistryKey(selectedId);
+            return id === selectedId || parsedExisting.collectionId === parsedSelected.collectionId;
+        });
+
+        if (!alreadyIncluded && isCollectionEnabled(selectedId)) {
+            collectionsToQuery.push(selectedId);
+        }
+    }
+
+    return applyChatCollectionPolicy(collectionsToQuery, currentChatId);
 }
 
 /**
@@ -1668,6 +1689,7 @@ export async function rearrangeChat(chat, settings, type) {
 
         // === STAGE 3: Filter by activation conditions ===
         let activeCollections = [];
+        const collectionDecisions = [];
         if (hasCollections) {
             const searchContext = buildSearchContext(chat, settings.query || 10, [], {
                 generationType: type || 'normal',
@@ -1675,8 +1697,10 @@ export async function rearrangeChat(chat, settings, type) {
                 currentCharacter: getContext().name2 || null,
                 activeLorebookEntries: [],
                 currentChatId: getCurrentChatId(),
-                currentCharacterId: getContext().characterId || null
+                currentCharacterId: getContext().characterId || null,
+                collectionDecisions
             });
+            searchContext.collectionDecisions = collectionDecisions;
             activeCollections = await filterActiveCollections(collectionsToQuery, searchContext);
         }
 
@@ -1696,6 +1720,7 @@ export async function rearrangeChat(chat, settings, type) {
         debugData.queryKeywords = queryKeywordTexts;
         debugData.collectionId = activeCollections.length > 0 ? activeCollections.join(', ') : 'world_info_only';
         debugData.collectionsQueried = activeCollections;
+        debugData.collectionDecisions = collectionDecisions;
         const effectiveTopK = settings.top_k ?? settings.insert;
         debugData.settings = {
             threshold: settings.score_threshold,

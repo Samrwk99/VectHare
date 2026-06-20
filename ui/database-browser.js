@@ -54,6 +54,11 @@ import {
   clearCollectionCharacterLocks,
   isCollectionLockedToCharacter,
   getCollectionCharacterLockCount,
+  getChatCollectionPolicy,
+  setChatCollectionPolicy,
+  addCollectionToChatPolicy,
+  removeCollectionFromChatPolicy,
+  isCollectionSelectedForChat,
 } from "../core/collection-metadata.js";
 import { getContext } from "../../../../extensions.js";
 import {
@@ -1737,6 +1742,11 @@ function openActivationEditor(collectionId, collectionName) {
     collectionName,
     collectionType,
     alwaysActive: meta.alwaysActive || false,
+    lockMode: meta.lockMode || "prefer",
+    exclusiveWhenActive: meta.exclusiveWhenActive || false,
+    exclusiveScope: meta.exclusiveScope || "lorebook",
+    selectedForCurrentChat: isCollectionSelectedForChat(collectionId, getCurrentChatId()),
+    chatPolicy: getChatCollectionPolicy(getCurrentChatId()),
     triggers: triggerSettings.triggers || [],
     triggerMatchMode: triggerSettings.matchMode || "any",
     triggerCaseSensitive: triggerSettings.caseSensitive || false,
@@ -1808,6 +1818,41 @@ function createActivationEditorModal() {
                             <strong>∞ Always Active</strong>
                         </label>
                         <small>When enabled, this collection always queries (ignores triggers and conditions)</small>
+                    </div>
+
+                    <div class="vecthare-activation-section vecthare-lock-mode-section">
+                        <label for="vecthare_lock_mode"><strong>🔒 Lock Behavior</strong></label>
+                        <select id="vecthare_lock_mode" class="text_pole">
+                            <option value="prefer">Prefer locked chats/characters</option>
+                            <option value="exclusive">Only use in locked chats/characters</option>
+                        </select>
+                        <small>"Only use" makes locks restrictive: if this collection is locked elsewhere, it cannot activate here.</small>
+                    </div>
+
+                    <div class="vecthare-activation-section vecthare-chat-policy-section">
+                        <label class="vecthare-checkbox-label">
+                            <input type="checkbox" id="vecthare_force_current_chat">
+                            <strong>📌 Force in Current Chat</strong>
+                        </label>
+                        <small>Queries this collection in the current chat without needing triggers or Always Active. Disabled collections still stay disabled.</small>
+                        <label for="vecthare_chat_collection_policy" style="margin-top: 8px; display:block;">Current chat collection policy:</label>
+                        <select id="vecthare_chat_collection_policy" class="text_pole">
+                            <option value="normal">Normal smart activation</option>
+                            <option value="prefer_selected">Prefer forced/selected collections</option>
+                            <option value="only_selected">Only selected lorebook collections</option>
+                        </select>
+                    </div>
+
+                    <div class="vecthare-activation-section vecthare-exclusive-section">
+                        <label class="vecthare-checkbox-label">
+                            <input type="checkbox" id="vecthare_exclusive_when_active">
+                            <strong>🚫 Suppress peer collections when active</strong>
+                        </label>
+                        <select id="vecthare_exclusive_scope" class="text_pole">
+                            <option value="lorebook">Suppress other lorebooks</option>
+                            <option value="all">Suppress all other collections</option>
+                        </select>
+                        <small>Useful when a specific lorebook should be the only lorebook injected for a chat.</small>
                     </div>
 
                     <!-- ========================================== -->
@@ -2032,9 +2077,11 @@ function createActivationEditorModal() {
                         <strong>Activation Priority:</strong>
                         <ol>
                             <li><strong>Always Active</strong> → Collection always queries</li>
+                            <li><strong>Force in Current Chat</strong> → Queries in this chat without triggers</li>
+                            <li><strong>Strict Locks</strong> → Can restrict collection to locked chats/characters only</li>
                             <li><strong>Triggers</strong> → Match keywords in recent messages</li>
                             <li><strong>Advanced Conditions</strong> → Evaluated if triggers empty/don't match</li>
-                            <li><strong>No config</strong> → Auto-activates (backwards compatible)</li>
+                            <li><strong>No config</strong> → Inactive unless forced, locked, or Always Active</li>
                         </ol>
                     </div>
                 </div>
@@ -2186,6 +2233,11 @@ function renderActivationEditor() {
 
   $("#vecthare_activation_collection_name").text(state.collectionName);
   $("#vecthare_always_active").prop("checked", state.alwaysActive);
+  $("#vecthare_lock_mode").val(state.lockMode || "prefer");
+  $("#vecthare_force_current_chat").prop("checked", state.selectedForCurrentChat || false);
+  $("#vecthare_chat_collection_policy").val(state.chatPolicy?.mode || "normal");
+  $("#vecthare_exclusive_when_active").prop("checked", state.exclusiveWhenActive || false);
+  $("#vecthare_exclusive_scope").val(state.exclusiveScope || "lorebook");
 
   // Triggers
   const triggersText = state.triggers.join("\n");
@@ -2346,6 +2398,9 @@ function saveActivation() {
   // Update metadata (all in one call)
   setCollectionMeta(state.collectionId, {
     alwaysActive: $("#vecthare_always_active").prop("checked"),
+    lockMode: $("#vecthare_lock_mode").val() || "prefer",
+    exclusiveWhenActive: $("#vecthare_exclusive_when_active").prop("checked"),
+    exclusiveScope: $("#vecthare_exclusive_scope").val() || "lorebook",
     triggers: triggers,
     triggerMatchMode: $("#vecthare_trigger_match_mode").val(),
     triggerScanDepth: parseInt($("#vecthare_trigger_scan_depth").val()) || 5,
@@ -2364,6 +2419,21 @@ function saveActivation() {
     rules: state.conditions.rules || [],
   };
   setCollectionConditions(state.collectionId, conditions);
+
+  const currentChatId = getCurrentChatId();
+  if (currentChatId) {
+    const policy = getChatCollectionPolicy(currentChatId);
+    setChatCollectionPolicy(currentChatId, {
+      ...policy,
+      mode: $("#vecthare_chat_collection_policy").val() || "normal",
+    });
+
+    if ($("#vecthare_force_current_chat").prop("checked")) {
+      addCollectionToChatPolicy(currentChatId, state.collectionId);
+    } else {
+      removeCollectionFromChatPolicy(currentChatId, state.collectionId);
+    }
+  }
 
   closeActivationEditor();
   refreshCollections();

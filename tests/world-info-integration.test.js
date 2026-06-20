@@ -31,6 +31,7 @@ vi.mock('../core/collection-metadata.js', () => ({
     getCollectionMeta: vi.fn(),
     isCollectionEnabled: vi.fn(),
     shouldCollectionActivate: vi.fn(),
+    applyChatCollectionPolicy: vi.fn((ids) => ids),
 }));
 
 vi.mock('../core/collection-ids.js', () => ({
@@ -57,7 +58,7 @@ vi.mock('../core/conditional-activation.js', () => ({
 import { getContext } from '../core/../../../../extensions.js';
 import { setExtensionPrompt, getCurrentChatId } from '../core/../../../../../script.js';
 import { queryCollection } from '../core/core-vector-api.js';
-import { getCollectionMeta, isCollectionEnabled, shouldCollectionActivate } from '../core/collection-metadata.js';
+import { getCollectionMeta, isCollectionEnabled, shouldCollectionActivate, applyChatCollectionPolicy } from '../core/collection-metadata.js';
 import { parseRegistryKey, buildLorebookCollectionId } from '../core/collection-ids.js';
 import { buildSearchContext } from '../core/conditional-activation.js';
 
@@ -82,6 +83,7 @@ describe('getSemanticWorldInfoEntries', () => {
         isCollectionEnabled.mockReturnValue(true);
         shouldCollectionActivate.mockResolvedValue(true);
         getCollectionMeta.mockReturnValue({ sourceName: 'Test Lorebook' });
+        applyChatCollectionPolicy.mockImplementation((ids) => ids);
     });
 
     it('should return empty array when world info is disabled', async () => {
@@ -299,6 +301,54 @@ describe('getSemanticWorldInfoEntries', () => {
 
         // Should only query collections that pass activation (the 'allowed' one)
         expect(queryCollection).toHaveBeenCalledTimes(1);
+    });
+
+    it('should apply chat collection policy before querying lorebooks', async () => {
+        const settings = {
+            enabled_world_info: true,
+            world_info_threshold: 0.3,
+            world_info_top_k: 3,
+            vecthare_collection_registry: ['lorebook_global_selected', 'lorebook_global_other'],
+        };
+
+        applyChatCollectionPolicy.mockReturnValue(['lorebook_global_selected']);
+        queryCollection.mockResolvedValue({
+            hashes: [1],
+            metadata: [{ uid: 'entry1', text: 'Selected content', score: 0.8 }],
+        });
+
+        await getSemanticWorldInfoEntries(['query'], [], settings);
+
+        expect(applyChatCollectionPolicy).toHaveBeenCalledWith(
+            settings.vecthare_collection_registry,
+            'chat123',
+            { lorebooksOnly: true }
+        );
+        expect(queryCollection).toHaveBeenCalledTimes(1);
+        expect(queryCollection).toHaveBeenCalledWith('lorebook_global_selected', 'query', 3, settings);
+    });
+
+    it('should suppress other lorebooks when an exclusive lorebook passes activation', async () => {
+        const settings = {
+            enabled_world_info: true,
+            world_info_threshold: 0.3,
+            world_info_top_k: 3,
+            vecthare_collection_registry: ['lorebook_global_exclusive', 'lorebook_global_other'],
+        };
+
+        getCollectionMeta.mockImplementation((id) => ({
+            sourceName: id,
+            exclusiveWhenActive: id.includes('exclusive'),
+        }));
+        queryCollection.mockResolvedValue({
+            hashes: [1],
+            metadata: [{ uid: 'entry1', text: 'Exclusive content', score: 0.8 }],
+        });
+
+        await getSemanticWorldInfoEntries(['query'], [], settings);
+
+        expect(queryCollection).toHaveBeenCalledTimes(1);
+        expect(queryCollection).toHaveBeenCalledWith('lorebook_global_exclusive', 'query', 3, settings);
     });
 
     it('should handle query errors gracefully', async () => {

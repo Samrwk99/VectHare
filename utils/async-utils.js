@@ -262,27 +262,32 @@ const AsyncUtils = {
    */
   debounceAsync(fn, wait) {
     let timeout;
-    let pendingPromise;
+    let pendingResolvers = [];
+    let latestArgs;
+    let latestThis;
 
     return function debounced(...args) {
+      latestArgs = args;
+      latestThis = this;
       clearTimeout(timeout);
 
-      if (!pendingPromise) {
-        pendingPromise = new Promise((resolve, reject) => {
-          timeout = setTimeout(async () => {
-            try {
-              const result = await fn.apply(this, args);
-              resolve(result);
-              pendingPromise = null;
-            } catch (error) {
-              reject(error);
-              pendingPromise = null;
-            }
-          }, wait);
-        });
-      }
+      const promise = new Promise((resolve, reject) => {
+        pendingResolvers.push({ resolve, reject });
+      });
 
-      return pendingPromise;
+      timeout = setTimeout(async () => {
+        const resolvers = pendingResolvers;
+        pendingResolvers = [];
+
+        try {
+          const result = await fn.apply(latestThis, latestArgs);
+          resolvers.forEach(({ resolve }) => resolve(result));
+        } catch (error) {
+          resolvers.forEach(({ reject }) => reject(error));
+        }
+      }, wait);
+
+      return promise;
     };
   },
 

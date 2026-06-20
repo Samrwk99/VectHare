@@ -247,6 +247,55 @@ describe('AsyncUtils', () => {
         });
     });
 
+    describe('debounceAsync', () => {
+        afterEach(() => {
+            vi.useRealTimers();
+        });
+
+        it('should execute once with the latest arguments after calls settle', async () => {
+            vi.useFakeTimers();
+            const fn = vi.fn().mockImplementation(async (value) => `latest:${value}`);
+            const debounced = AsyncUtils.debounceAsync(fn, 100);
+
+            const first = debounced('first');
+            vi.advanceTimersByTime(50);
+            const second = debounced('second');
+            vi.advanceTimersByTime(50);
+            const third = debounced('third');
+
+            await vi.advanceTimersByTimeAsync(100);
+
+            await expect(first).resolves.toBe('latest:third');
+            await expect(second).resolves.toBe('latest:third');
+            await expect(third).resolves.toBe('latest:third');
+            expect(fn).toHaveBeenCalledTimes(1);
+            expect(fn).toHaveBeenCalledWith('third');
+        });
+
+        it('should reject all pending callers when the debounced function fails', async () => {
+            vi.useFakeTimers();
+            const fn = vi.fn().mockRejectedValue(new Error('debounced failure'));
+            const debounced = AsyncUtils.debounceAsync(fn, 100);
+
+            const first = debounced('first');
+            const second = debounced('second');
+            const resultsPromise = Promise.allSettled([first, second]);
+
+            await vi.advanceTimersByTimeAsync(100);
+
+            const results = await resultsPromise;
+
+            expect(results).toEqual([
+                { status: 'rejected', reason: expect.any(Error) },
+                { status: 'rejected', reason: expect.any(Error) },
+            ]);
+            expect(results[0].reason.message).toBe('debounced failure');
+            expect(results[1].reason.message).toBe('debounced failure');
+            expect(fn).toHaveBeenCalledTimes(1);
+            expect(fn).toHaveBeenCalledWith('second');
+        });
+    });
+
     describe('memoize', () => {
         it('should cache results', async () => {
             const fn = vi.fn().mockResolvedValue('result');
