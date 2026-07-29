@@ -13,7 +13,7 @@
  */
 
 import { getBackend } from '../backends/backend-manager.js';
-import { createBM25Scorer } from './bm25-scorer.js';
+import { createBM25Scorer, tokenize } from './bm25-scorer.js';
 
 /** Default RRF constant (prevents division by zero, balances contribution) */
 export const DEFAULT_RRF_K = 60;
@@ -414,10 +414,7 @@ function performBM25Search(results, query, options = {}) {
 
     // Get BM25 scores for all results
     const scoredResults = results.map((result, idx) => {
-        const bm25Score = scorer.scoreDocument(
-            query.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(t => t.length > 0),
-            idx
-        );
+        const bm25Score = scorer.scoreDocument(tokenize(query, options), idx);
         return {
             ...result,
             bm25Score

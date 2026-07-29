@@ -121,11 +121,18 @@ export async function getSemanticWorldInfoEntries(recentMessages, activeEntries,
     // Sort by score descending
     semanticEntries.sort((a, b) => b.score - a.score);
 
-    // Deduplicate with already active entries (avoid duplicates from keyword matching)
-    const deduplicatedEntries = deduplicateWithActiveEntries(semanticEntries, activeEntries);
+    // Deduplicate with already active entries unless the user enables all semantic entries.
+    const deduplicatedEntries = settings.world_info_enabled_for_all
+        ? semanticEntries
+        : deduplicateWithActiveEntries(semanticEntries, activeEntries);
 
-    console.log(`VectHare: Found ${deduplicatedEntries.length} semantic WI entries to activate`);
-    return deduplicatedEntries;
+    // Cap the number of entries actually returned for injection.
+    const maxEntries = settings.world_info_max_entries ?? 10;
+    const limitedEntries = deduplicatedEntries.slice(0, maxEntries);
+
+    console.log(`VectHare: Found ${limitedEntries.length} semantic WI entries to activate` +
+        (deduplicatedEntries.length > limitedEntries.length ? ` (capped from ${deduplicatedEntries.length} by Max Entries)` : ''));
+    return limitedEntries;
 }
 
 /**

@@ -324,6 +324,25 @@ const STRATEGIES = {
     },
 
     /**
+     * Per Page - each wiki page becomes one chunk while preserving page metadata.
+     */
+    per_page: (pages, options) => {
+        if (!Array.isArray(pages)) {
+            const text = typeof pages === 'string' ? pages : (pages.text || String(pages));
+            return [text];
+        }
+        return pages.map(p => {
+            if (typeof p === 'string') {
+                return { text: p, metadata: {} };
+            }
+            return {
+                text: p.text || '',
+                metadata: { ...(p.metadata || {}) },
+            };
+        });
+    },
+
+    /**
      * Combined - merge all content then chunk with adaptive
      */
     combined: (content, options) => {

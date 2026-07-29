@@ -12,6 +12,7 @@ vi.mock('../backends/backend-manager.js', () => ({
 
 // Mock the bm25-scorer - provide a working implementation
 vi.mock('../core/bm25-scorer.js', () => ({
+    tokenize: vi.fn((text) => text.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(t => t.length > 0)),
     createBM25Scorer: vi.fn((documents, options) => {
         // Simple mock BM25 scorer that scores based on query term overlap
         const docs = documents.map(d => {

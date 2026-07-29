@@ -127,7 +127,7 @@ export async function classifyEmotion(text, options = {}) {
     }
 
     // Check cache
-    const cacheKey = `${text.substring(0, 100)}:${settings.model}`;
+    const cacheKey = text.substring(0, 100);
     if (classifierCache.has(cacheKey)) {
         return classifierCache.get(cacheKey);
     }
@@ -139,7 +139,6 @@ export async function classifyEmotion(text, options = {}) {
             headers: getRequestHeaders(),
             body: JSON.stringify({
                 text: text,
-                model: options.model || settings.model,
             }),
         });
 
@@ -182,7 +181,7 @@ export async function classifyEmotion(text, options = {}) {
  * @param {string} model - Model ID to test
  * @returns {Promise<{isEmotionClassifier: boolean, sampleLabels: string[], confidence: string}>}
  */
-export async function testClassifierModel(model) {
+export async function testClassifierModel() {
     const testTexts = [
         { text: 'I am so happy and excited!', expected: ['joy', 'excitement', 'happiness', 'love'] },
         { text: 'This makes me really angry and frustrated.', expected: ['anger', 'annoyance', 'frustration', 'disgust'] },
@@ -199,7 +198,6 @@ export async function testClassifierModel(model) {
                 headers: getRequestHeaders(),
                 body: JSON.stringify({
                     text: test.text,
-                    model: model,
                 }),
             });
 
@@ -258,6 +256,7 @@ export async function testClassifierModel(model) {
         sampleLabels: labelsArray,
         confidence: confidence,
         matchRate: matchRate,
+        modelHonored: false,
     };
 }
 

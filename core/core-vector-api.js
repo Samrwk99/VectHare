@@ -874,7 +874,7 @@ export async function queryCollection(collectionId, searchText, topK, settings) 
 
     // Convert to format expected by keyword boost
     const resultsForBoost = rawResults.metadata.map((meta, idx) => ({
-        hash: rawResults.hashes[idx],
+        hash: meta.hash || rawResults.hashes[idx],
         score: meta.score || 0,
         metadata: meta,
         text: meta.text || ''
@@ -1027,7 +1027,7 @@ export async function queryMultipleCollections(collectionIds, searchText, topK, 
 
         // Convert to format expected by scoring functions
         const resultsForBoost = collectionResults.metadata.map((meta, idx) => ({
-            hash: collectionResults.hashes[idx],
+            hash: meta.hash || collectionResults.hashes[idx],
             score: meta.score || 0,
             metadata: meta,
             text: meta.text || ''
