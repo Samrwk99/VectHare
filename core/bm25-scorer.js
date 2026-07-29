@@ -564,7 +564,7 @@ export function applyBM25Scoring(results, query, options = {}) {
         const normalizedBM25 = maxBM25Score > 0 ? bm25Score / maxBM25Score : 0;
 
         // Normalize vector score to [0, 1] range (assuming it's already in [0, 1])
-        const normalizedVector = result.originalScore ?? result.score;
+        const normalizedVector = result.score ?? result.originalScore;
 
         // Combined score: weighted sum of vector and BM25 scores
         const combinedScore = alpha * normalizedVector + beta * normalizedBM25;

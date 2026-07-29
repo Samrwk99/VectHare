@@ -27,6 +27,16 @@ import { getModelField } from '../core/providers.js';
 import { getChunkingStrategies } from '../core/content-types.js';
 
 /**
+ * Applies the current settings snapshot without overwriting collection metadata
+ * and registry updates written by other UI/code paths while the panel was open.
+ * @param {object} settingsSnapshot
+ */
+function applySettingsSnapshot(settingsSnapshot) {
+    const { collections, vecthare_collection_registry, ...safeSettings } = settingsSnapshot;
+    Object.assign(extension_settings.vecthare, safeSettings);
+}
+
+/**
  * Renders the VectHare settings UI
  * @param {string} containerId - The container element ID to render into
  * @param {object} settings - VectHare settings object
@@ -1306,7 +1316,7 @@ export async function loadWebLlmModels(settings) {
         } else if (models.length > 0) {
             settings.webllm_model = models[0].id;
             $select.val(settings.webllm_model);
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         }
     });
@@ -1689,7 +1699,7 @@ function bindSettingsEvents(settings, callbacks) {
 
     strategySelect.on('change', function() {
         settings.chunking_strategy = String($(this).val());
-        Object.assign(extension_settings.vecthare, settings);
+        applySettingsSnapshot(settings);
         saveSettingsDebounced();
         updateStrategyUI(settings.chunking_strategy);
     });
@@ -1702,7 +1712,7 @@ function bindSettingsEvents(settings, callbacks) {
             const value = Number($(this).val());
             $('#vecthare_batch_size_value').text(value);
             settings.batch_size = value;
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
     $('#vecthare_batch_size_value').text(settings.batch_size || 4);
@@ -1713,7 +1723,7 @@ function bindSettingsEvents(settings, callbacks) {
         .on('input', function() {
             const value = Number($(this).val());
             settings.chunk_size = value;
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -1722,7 +1732,7 @@ function bindSettingsEvents(settings, callbacks) {
         .val(settings.vector_backend || 'standard')
         .on('change', function() {
             settings.vector_backend = String($(this).val());
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
 
             // Show/hide Qdrant settings
@@ -1747,7 +1757,7 @@ function bindSettingsEvents(settings, callbacks) {
         .prop('checked', settings.qdrant_use_cloud || false)
         .on('change', async function() {
             settings.qdrant_use_cloud = $(this).prop('checked');
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
 
             // Toggle between local and cloud settings
@@ -1785,7 +1795,7 @@ function bindSettingsEvents(settings, callbacks) {
         .val(settings.qdrant_host || 'localhost')
         .on('input', function() {
             settings.qdrant_host = String($(this).val());
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -1794,7 +1804,7 @@ function bindSettingsEvents(settings, callbacks) {
         .on('input', function() {
             const value = parseInt($(this).val());
             settings.qdrant_port = isNaN(value) ? 6333 : value;
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -1802,7 +1812,7 @@ function bindSettingsEvents(settings, callbacks) {
         .val(settings.qdrant_url || '')
         .on('input', function() {
             settings.qdrant_url = String($(this).val());
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -1810,7 +1820,7 @@ function bindSettingsEvents(settings, callbacks) {
         .val(settings.qdrant_api_key || '')
         .on('input', function() {
             settings.qdrant_api_key = String($(this).val());
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -1819,7 +1829,7 @@ function bindSettingsEvents(settings, callbacks) {
         .prop('checked', settings.qdrant_multitenancy || false)
         .on('change', function() {
             settings.qdrant_multitenancy = $(this).prop('checked');
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -1833,7 +1843,7 @@ function bindSettingsEvents(settings, callbacks) {
         .val(settings.milvus_host || 'localhost')
         .on('input', function() {
             settings.milvus_host = String($(this).val());
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -1842,7 +1852,7 @@ function bindSettingsEvents(settings, callbacks) {
         .on('input', function() {
             const value = parseInt($(this).val());
             settings.milvus_port = isNaN(value) ? 19530 : value;
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -1850,7 +1860,7 @@ function bindSettingsEvents(settings, callbacks) {
         .val(settings.milvus_username || '')
         .on('input', function() {
             settings.milvus_username = String($(this).val());
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -1858,7 +1868,7 @@ function bindSettingsEvents(settings, callbacks) {
         .val(settings.milvus_password || '')
         .on('input', function() {
             settings.milvus_password = String($(this).val());
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -1866,7 +1876,7 @@ function bindSettingsEvents(settings, callbacks) {
         .val(settings.milvus_token || '')
         .on('input', function() {
             settings.milvus_token = String($(this).val());
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -1875,7 +1885,7 @@ function bindSettingsEvents(settings, callbacks) {
         .on('input', function() {
             const value = parseInt($(this).val());
             settings.milvus_dimensions = isNaN(value) ? '' : value;
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -1883,7 +1893,7 @@ function bindSettingsEvents(settings, callbacks) {
         .val(settings.milvus_address || '')
         .on('input', function() {
             settings.milvus_address = String($(this).val());
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -1897,7 +1907,7 @@ function bindSettingsEvents(settings, callbacks) {
         .val(settings.source)
         .on('change', function() {
             settings.source = String($(this).val());
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
             toggleProviderSettings(settings.source, settings);
             console.log(`VectHare: Embedding provider changed to ${settings.source}`);
@@ -1913,7 +1923,7 @@ function bindSettingsEvents(settings, callbacks) {
             const safeValue = isNaN(value) ? 0.3 : value;
             $('#vecthare_threshold_value').text(safeValue.toFixed(2));
             settings.score_threshold = safeValue;
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
     $('#vecthare_threshold_value').text(settings.score_threshold.toFixed(2));
@@ -1926,7 +1936,7 @@ function bindSettingsEvents(settings, callbacks) {
             const safeValue = isNaN(value) ? 50 : Math.max(0, value);
             $('#vecthare_deduplication_depth_value').text(safeValue);
             settings.deduplication_depth = safeValue;
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
     $('#vecthare_deduplication_depth_value').text(settings.deduplication_depth ?? 50);
@@ -1936,7 +1946,7 @@ function bindSettingsEvents(settings, callbacks) {
         .val(settings.keyword_scoring_method || 'keyword')
         .on('change', function() {
             settings.keyword_scoring_method = String($(this).val());
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
 
             // Show/hide BM25 parameters
@@ -1961,7 +1971,7 @@ function bindSettingsEvents(settings, callbacks) {
             const safeValue = isNaN(value) ? 1.5 : value;
             $('#vecthare_bm25_k1_value').text(safeValue.toFixed(1));
             settings.bm25_k1 = safeValue;
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
     $('#vecthare_bm25_k1_value').text((settings.bm25_k1 || 1.5).toFixed(1));
@@ -1974,7 +1984,7 @@ function bindSettingsEvents(settings, callbacks) {
             const safeValue = isNaN(value) ? 0.75 : value;
             $('#vecthare_bm25_b_value').text(safeValue.toFixed(2));
             settings.bm25_b = safeValue;
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
     $('#vecthare_bm25_b_value').text((settings.bm25_b || 0.75).toFixed(2));
@@ -1987,7 +1997,7 @@ function bindSettingsEvents(settings, callbacks) {
         .on('change', function() {
             const enabled = $(this).prop('checked');
             settings.hybrid_search_enabled = enabled;
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
             $('#vecthare_hybrid_params').toggle(enabled);
             console.log(`VectHare: Hybrid search ${enabled ? 'enabled' : 'disabled'}`);
@@ -2000,7 +2010,7 @@ function bindSettingsEvents(settings, callbacks) {
         .val(settings.hybrid_fusion_method || 'rrf')
         .on('change', function() {
             settings.hybrid_fusion_method = String($(this).val());
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
             // Show weights only for weighted method, RRF settings for RRF
             const isWeighted = settings.hybrid_fusion_method === 'weighted';
@@ -2021,7 +2031,7 @@ function bindSettingsEvents(settings, callbacks) {
             const safeValue = isNaN(value) ? 0.5 : value;
             $('#vecthare_hybrid_vector_weight_value').text(safeValue.toFixed(1));
             settings.hybrid_vector_weight = safeValue;
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
     $('#vecthare_hybrid_vector_weight_value').text((settings.hybrid_vector_weight ?? 0.5).toFixed(1));
@@ -2034,7 +2044,7 @@ function bindSettingsEvents(settings, callbacks) {
             const safeValue = isNaN(value) ? 0.5 : value;
             $('#vecthare_hybrid_text_weight_value').text(safeValue.toFixed(1));
             settings.hybrid_text_weight = safeValue;
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
     $('#vecthare_hybrid_text_weight_value').text((settings.hybrid_text_weight ?? 0.5).toFixed(1));
@@ -2047,7 +2057,7 @@ function bindSettingsEvents(settings, callbacks) {
             const safeValue = isNaN(value) ? 60 : value;
             $('#vecthare_hybrid_rrf_k_value').text(safeValue);
             settings.hybrid_rrf_k = safeValue;
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
     $('#vecthare_hybrid_rrf_k_value').text(settings.hybrid_rrf_k || 60);
@@ -2057,7 +2067,7 @@ function bindSettingsEvents(settings, callbacks) {
         .prop('checked', settings.hybrid_native_prefer !== false)
         .on('change', function() {
             settings.hybrid_native_prefer = $(this).prop('checked');
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -2069,7 +2079,7 @@ function bindSettingsEvents(settings, callbacks) {
             const safeValue = isNaN(value) ? 2 : value;
             $('#vecthare_query_depth_value').text(safeValue);
             settings.query = safeValue;
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
     $('#vecthare_query_depth_value').text(settings.query || 2);
@@ -2081,7 +2091,7 @@ function bindSettingsEvents(settings, callbacks) {
             const value = parseInt($(this).val());
             const safeValue = isNaN(value) ? (settings.insert || 3) : value;
             settings.top_k = safeValue;
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -2091,7 +2101,7 @@ function bindSettingsEvents(settings, callbacks) {
         .on('change', function() {
             const enabled = $(this).prop('checked');
             settings.enabled_world_info = enabled;
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
             // Show/hide the detailed world info settings panel
             $('#vecthare_world_info_settings').toggle(enabled);
@@ -2103,7 +2113,7 @@ function bindSettingsEvents(settings, callbacks) {
             const value = parseFloat($(this).val());
             const safeValue = isNaN(value) ? 0.3 : Math.max(0, Math.min(1, value));
             settings.world_info_threshold = safeValue;
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -2113,7 +2123,7 @@ function bindSettingsEvents(settings, callbacks) {
             const value = parseInt($(this).val());
             const safeValue = isNaN(value) ? 3 : Math.max(1, Math.min(20, value));
             settings.world_info_top_k = safeValue;
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -2123,7 +2133,24 @@ function bindSettingsEvents(settings, callbacks) {
             const value = parseInt($(this).val());
             const safeValue = isNaN(value) ? 3 : Math.max(1, Math.min(10, value));
             settings.world_info_query_depth = safeValue;
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
+            saveSettingsDebounced();
+        });
+
+    $('#vecthare_enabled_for_all')
+        .prop('checked', settings.world_info_enabled_for_all || false)
+        .on('change', function() {
+            settings.world_info_enabled_for_all = $(this).prop('checked');
+            applySettingsSnapshot(settings);
+            saveSettingsDebounced();
+        });
+
+    $('#vecthare_max_entries')
+        .val(settings.world_info_max_entries ?? 10)
+        .on('input', function() {
+            const value = parseInt($(this).val());
+            settings.world_info_max_entries = isNaN(value) ? 10 : Math.max(1, Math.min(9999, value));
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -2132,7 +2159,7 @@ function bindSettingsEvents(settings, callbacks) {
         .val(settings.custom_stopwords || '')
         .on('input', function() {
             settings.custom_stopwords = $(this).val();
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -2325,7 +2352,7 @@ function bindSettingsEvents(settings, callbacks) {
         .on('change', function() {
             const value = parseInt($(this).val());
             settings.position = value;
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
             // Show/hide depth slider based on position
             $('#vecthare_injection_depth_row').toggle(value === 1);
@@ -2341,7 +2368,7 @@ function bindSettingsEvents(settings, callbacks) {
             const safeValue = isNaN(value) ? 2 : value;
             $('#vecthare_injection_depth_value').text(safeValue);
             settings.depth = safeValue;
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
     $('#vecthare_injection_depth_value').text(settings.depth ?? 2);
@@ -2351,7 +2378,7 @@ function bindSettingsEvents(settings, callbacks) {
         .val(settings.rag_context || '')
         .on('input', function() {
             settings.rag_context = $(this).val();
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -2362,7 +2389,7 @@ function bindSettingsEvents(settings, callbacks) {
             const sanitized = $(this).val().replace(/[^a-zA-Z0-9_-]/g, '');
             $(this).val(sanitized);
             settings.rag_xml_tag = sanitized;
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -2389,7 +2416,7 @@ function bindSettingsEvents(settings, callbacks) {
             const enabled = $(this).prop('checked');
             settings.default_decay_enabled = enabled;
             updateDecayTypeSection(enabled);
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -2398,7 +2425,7 @@ function bindSettingsEvents(settings, callbacks) {
 
     $('input[name="vecthare_default_decay_type"]').on('change', function() {
         settings.default_decay_type = $(this).val();
-        Object.assign(extension_settings.vecthare, settings);
+        applySettingsSnapshot(settings);
         saveSettingsDebounced();
     });
 
@@ -2409,7 +2436,7 @@ function bindSettingsEvents(settings, callbacks) {
         .val(settings.electronhub_model)
         .on('change', function() {
             settings.electronhub_model = String($(this).val());
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -2418,7 +2445,7 @@ function bindSettingsEvents(settings, callbacks) {
         .prop('checked', settings.use_alt_endpoint)
         .on('input', function() {
             settings.use_alt_endpoint = $(this).prop('checked');
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
             $('#vecthare_alt_endpoint_url').toggle(settings.use_alt_endpoint);
         });
@@ -2428,7 +2455,7 @@ function bindSettingsEvents(settings, callbacks) {
         .toggle(settings.use_alt_endpoint)
         .on('input', function() {
             settings.alt_endpoint_url = String($(this).val());
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -2437,7 +2464,7 @@ function bindSettingsEvents(settings, callbacks) {
         .val(settings.webllm_model)
         .on('change', function() {
             settings.webllm_model = String($(this).val());
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -2485,7 +2512,7 @@ function bindSettingsEvents(settings, callbacks) {
         .val(settings.ollama_model)
         .on('input', function() {
             settings.ollama_model = String($(this).val());
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -2493,7 +2520,7 @@ function bindSettingsEvents(settings, callbacks) {
         .prop('checked', settings.ollama_keep)
         .on('input', function() {
             settings.ollama_keep = $(this).prop('checked');
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -2502,7 +2529,7 @@ function bindSettingsEvents(settings, callbacks) {
         .prop('checked', settings.bananabread_rerank)
         .on('input', function() {
             settings.bananabread_rerank = $(this).prop('checked');
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -2528,7 +2555,7 @@ function bindSettingsEvents(settings, callbacks) {
             if (value) {
                 // Store in extension settings (primary storage for this key)
                 settings.bananabread_api_key = value;
-                Object.assign(extension_settings.vecthare, settings);
+                applySettingsSnapshot(settings);
                 saveSettingsDebounced();
 
                 // Also write to ST secrets for potential future compatibility
@@ -2545,7 +2572,7 @@ function bindSettingsEvents(settings, callbacks) {
         .val(settings.openai_model)
         .on('change', function() {
             settings.openai_model = String($(this).val());
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -2554,7 +2581,7 @@ function bindSettingsEvents(settings, callbacks) {
         .val(settings.cohere_model)
         .on('change', function() {
             settings.cohere_model = String($(this).val());
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -2563,7 +2590,7 @@ function bindSettingsEvents(settings, callbacks) {
         .val(settings.togetherai_model)
         .on('change', function() {
             settings.togetherai_model = String($(this).val());
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -2572,7 +2599,7 @@ function bindSettingsEvents(settings, callbacks) {
         .val(settings.vllm_model)
         .on('input', function() {
             settings.vllm_model = String($(this).val());
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -2581,7 +2608,7 @@ function bindSettingsEvents(settings, callbacks) {
         .val(settings.google_model)
         .on('change', function() {
             settings.google_model = String($(this).val());
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -2590,7 +2617,7 @@ function bindSettingsEvents(settings, callbacks) {
         .val(settings.openrouter_model)
         .on('input', function() {
             settings.openrouter_model = String($(this).val());
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -2625,7 +2652,7 @@ function bindSettingsEvents(settings, callbacks) {
         .on('input', function() {
             const value = parseInt($(this).val());
             settings.rate_limit_calls = isNaN(value) ? 0 : value;
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -2634,7 +2661,7 @@ function bindSettingsEvents(settings, callbacks) {
         .on('input', function() {
             const value = parseInt($(this).val());
             settings.rate_limit_interval = isNaN(value) ? 60 : value;
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -2645,7 +2672,7 @@ function bindSettingsEvents(settings, callbacks) {
             const value = parseInt($(this).val());
             $('#vecthare_insert_batch_size_value').text(value);
             settings.insert_batch_size = value;
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
     $('#vecthare_insert_batch_size_value').text(settings.insert_batch_size || 50);
@@ -2656,7 +2683,7 @@ function bindSettingsEvents(settings, callbacks) {
         .on('input', function() {
             const value = parseInt($(this).val());
             settings.min_chat_length = isNaN(value) ? 0 : Math.max(0, value);
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
@@ -2667,6 +2694,14 @@ function bindSettingsEvents(settings, callbacks) {
     $('#vecthare_vectorize_all').on('click', callbacks.onVectorizeAll);
     $('#vecthare_purge').on('click', callbacks.onPurge);
     $('#vecthare_run_diagnostics').on('click', callbacks.onRunDiagnostics);
+    $('#vecthare_include_production_tests')
+        .prop('checked', settings.include_production_tests || false)
+        .on('change', function() {
+            settings.include_production_tests = $(this).prop('checked');
+            applySettingsSnapshot(settings);
+            saveSettingsDebounced();
+        });
+
     $('#vecthare_database_browser').on('click', () => {
         openDatabaseBrowser();
     });
@@ -2756,7 +2791,7 @@ async function initializeCottonTalesIntegration(settings) {
                 emotionClassifier.updateClassifierSetting('useEmbeddingSimilarity', true);
             }
 
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
             updateMethodUI(method);
         });
@@ -2775,7 +2810,7 @@ async function initializeCottonTalesIntegration(settings) {
             } else {
                 $('#vecthare_custom_classifier_model').hide();
                 settings.emotion_classifier_model = value;
-                Object.assign(extension_settings.vecthare, settings);
+                applySettingsSnapshot(settings);
                 saveSettingsDebounced();
                 emotionClassifier.updateClassifierSetting('model', value);
             }
@@ -2794,7 +2829,7 @@ async function initializeCottonTalesIntegration(settings) {
         .on('input', function() {
             settings.emotion_classifier_custom = $(this).val();
             settings.emotion_classifier_model = $(this).val();
-            Object.assign(extension_settings.vecthare, settings);
+            applySettingsSnapshot(settings);
             saveSettingsDebounced();
             emotionClassifier.updateClassifierSetting('model', $(this).val());
         });
@@ -2808,8 +2843,7 @@ async function initializeCottonTalesIntegration(settings) {
         $result.hide();
 
         try {
-            const model = settings.emotion_classifier_model || 'SamLowe/roberta-base-go_emotions';
-            const testResult = await emotionClassifier.testClassifierModel(model);
+            const testResult = await emotionClassifier.testClassifierModel();
 
             $result.show();
 
@@ -3260,6 +3294,7 @@ ${categoryNames[category] || category.toUpperCase()}  ${catStats}
 export function openDiagnosticsModal() {
     showDiagnosticsPhase('selection');
     $('#vecthare_diagnostics_title').text('Run Diagnostics');
+    $('#vecthare_diag_production').prop('checked', !!extension_settings.vecthare?.include_production_tests);
     $('#vecthare_diagnostics_modal').fadeIn(200);
 }
 

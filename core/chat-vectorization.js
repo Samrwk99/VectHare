@@ -574,10 +574,11 @@ function gatherCollectionsToQuery(settings) {
             continue;
         }
 
-        // Check if collection is enabled (use registryKey for metadata lookup)
-        if (isCollectionEnabled(registryKey)) {
-            // Push registryKey, not collectionId - activation filters need the full key for metadata
-            collectionsToQuery.push(registryKey);
+        // Check if collection is enabled. getCollectionMeta/isCollectionEnabled resolve
+        // metadata across bare-id/registry-key/legacy forms internally, so the bare
+        // collectionId works for both the enabled check and the actual query.
+        if (isCollectionEnabled(collectionId)) {
+            collectionsToQuery.push(collectionId);
         }
     }
 

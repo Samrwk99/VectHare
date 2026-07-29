@@ -213,11 +213,11 @@ function evaluatePatternCondition(rule, context) {
     let messagesToSearch = context.recentMessages || [];
 
     // Apply scan depth
-    messagesToSearch = messagesToSearch.slice(0, scanDepth);
+    messagesToSearch = messagesToSearch.slice(-scanDepth);
 
     // Filter by role if needed
     if (searchIn !== 'all' && context.messageRoles) {
-        const roles = context.messageRoles.slice(0, scanDepth);
+        const roles = context.messageRoles.slice(-scanDepth);
         messagesToSearch = messagesToSearch.filter((_, idx) => {
             const role = roles[idx];
             if (searchIn === 'user') return role === 'user';

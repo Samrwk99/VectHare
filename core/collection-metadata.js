@@ -215,6 +215,34 @@ function ensureCollectionsObject() {
     return true;
 }
 
+
+/**
+ * Finds the actual extension_settings key a collection's metadata is stored under.
+ * Supports bare IDs, full registry keys (backend:source:id), and legacy keys (source:id).
+ * @param {string} collectionId Collection identifier in any supported key form
+ * @returns {string|null} The stored key, or null if no equivalent record exists
+ */
+function resolveStoredCollectionKey(collectionId) {
+    if (!collectionId || !extension_settings?.vecthare?.collections) {
+        return null;
+    }
+
+    const collections = extension_settings.vecthare.collections;
+    if (Object.prototype.hasOwnProperty.call(collections, collectionId)) {
+        return collectionId;
+    }
+
+    const targetBareId = parseRegistryKey(collectionId).collectionId || collectionId;
+    for (const key of Object.keys(collections)) {
+        const bareId = parseRegistryKey(key).collectionId || key;
+        if (bareId === targetBareId) {
+            return key;
+        }
+    }
+
+    return null;
+}
+
 /**
  * Gets metadata for a collection
  * @param {string} collectionId Collection identifier
@@ -226,26 +254,8 @@ export function getCollectionMeta(collectionId) {
         return { ...defaultCollectionMeta };
     }
 
-    let stored = extension_settings.vecthare.collections[collectionId];
-
-    // Fallback: Try alternate key formats for backward compatibility
-    if (!stored && collectionId) {
-        // If looking up with full key (backend:source:id), try without backend
-        const parsed = parseRegistryKey(collectionId);
-        if (parsed.backend && parsed.source) {
-            // Try source:collectionId format
-            const legacyKey = `${parsed.source}:${parsed.collectionId}`;
-            stored = extension_settings.vecthare.collections[legacyKey];
-
-            // Try just collectionId
-            if (!stored) {
-                stored = extension_settings.vecthare.collections[parsed.collectionId];
-            }
-        } else if (parsed.source) {
-            // Already source:collectionId format, try just collectionId
-            stored = extension_settings.vecthare.collections[parsed.collectionId];
-        }
-    }
+    const key = resolveStoredCollectionKey(collectionId);
+    const stored = key ? extension_settings.vecthare.collections[key] : null;
 
     if (!stored) {
         return { ...defaultCollectionMeta };
@@ -271,16 +281,17 @@ export function setCollectionMeta(collectionId, data) {
 
     ensureCollectionsObject();
 
-    const existing = extension_settings.vecthare.collections[collectionId] || {};
+    const key = resolveStoredCollectionKey(collectionId) || collectionId;
+    const existing = extension_settings.vecthare.collections[key] || {};
 
-    extension_settings.vecthare.collections[collectionId] = {
+    extension_settings.vecthare.collections[key] = {
         ...defaultCollectionMeta,
         ...existing,
         ...data,
     };
 
     saveSettingsDebounced();
-    console.log(`VectHare: Updated metadata for collection ${collectionId}`);
+    console.log(`VectHare: Updated metadata for collection ${key}`);
 }
 
 /**
@@ -290,10 +301,11 @@ export function setCollectionMeta(collectionId, data) {
 export function deleteCollectionMeta(collectionId) {
     ensureCollectionsObject();
 
-    if (extension_settings.vecthare.collections[collectionId]) {
-        delete extension_settings.vecthare.collections[collectionId];
+    const key = resolveStoredCollectionKey(collectionId);
+    if (key) {
+        delete extension_settings.vecthare.collections[key];
         saveSettingsDebounced();
-        console.log(`VectHare: Deleted metadata for collection ${collectionId}`);
+        console.log(`VectHare: Deleted metadata for collection ${key}`);
     }
 }
 
@@ -954,7 +966,7 @@ function checkTriggers(triggers, context, options = {}) {
 
     // Get recent message text to scan
     const recentMessages = context.recentMessages || [];
-    const messagesToScan = recentMessages.slice(0, scanDepth);
+    const messagesToScan = recentMessages.slice(-scanDepth);
     const searchText = messagesToScan.join('\n');
 
     if (!searchText) {
@@ -1342,22 +1354,20 @@ const defaultTemporalDecay = {
  */
 export function getCollectionDecaySettings(collectionId) {
     const meta = getCollectionMeta(collectionId);
+    const collectionType = meta.scope === 'chat' ? 'chat' : (meta.type || 'unknown');
+    const typeDefaults = getDefaultDecayForType(collectionType);
 
-    // If collection has explicit decay settings, use them
-    if (meta.temporalDecay) {
+    const key = resolveStoredCollectionKey(collectionId);
+    const rawStored = key ? extension_settings.vecthare?.collections?.[key] : null;
+
+    if (rawStored?.temporalDecay) {
         return {
-            enabled: meta.temporalDecay.enabled ?? false,
-            mode: meta.temporalDecay.mode || 'exponential',
-            halfLife: meta.temporalDecay.halfLife || 50,
-            linearRate: meta.temporalDecay.linearRate || 0.01,
-            minRelevance: meta.temporalDecay.minRelevance || 0.3,
-            sceneAware: meta.temporalDecay.sceneAware ?? false,
+            ...typeDefaults,
+            ...rawStored.temporalDecay,
         };
     }
 
-    // Otherwise use type-aware defaults
-    const collectionType = meta.scope === 'chat' ? 'chat' : (meta.type || 'unknown');
-    return getDefaultDecayForType(collectionType);
+    return typeDefaults;
 }
 
 /**
