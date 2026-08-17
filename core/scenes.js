@@ -280,7 +280,7 @@ export function isChunkDisabledByScene(hash) {
  */
 export function getDisablingSceneHash(hash) {
     const meta = getChunkMetadata(hash);
-    return meta?.disabledByScene || null;
+    return meta?.disabledByScene ?? null;
 }
 
 /**
