@@ -9,6 +9,24 @@
 import { isChunkTemporallyBlind } from './collection-metadata.js';
 import { DEFAULT_DECAY_HALF_LIFE, DEFAULT_DECAY_FLOOR, DEFAULT_NOSTALGIA_MAX_BOOST } from './constants.js';
 
+const DEFAULT_LINEAR_DECAY_RATE = 0.01;
+const DEFAULT_LINEAR_NOSTALGIA_RATE = 0.005;
+
+function normalizeMessageAge(messageAge) {
+    const age = Number(messageAge);
+    return Number.isFinite(age) ? Math.max(0, age) : 0;
+}
+
+function positiveNumberOrDefault(value, fallback) {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function minimumNumberOrDefault(value, minimum, fallback) {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= minimum ? number : fallback;
+}
+
 /**
  * Calculates exponential decay multiplier
  * @param {number} age - Age in messages
@@ -16,7 +34,7 @@ import { DEFAULT_DECAY_HALF_LIFE, DEFAULT_DECAY_FLOOR, DEFAULT_NOSTALGIA_MAX_BOO
  * @returns {number} Decay multiplier (0-1)
  */
 function calculateExponentialDecay(age, halfLife) {
-    return Math.pow(0.5, age / halfLife);
+    return Math.pow(0.5, normalizeMessageAge(age) / halfLife);
 }
 
 /**
@@ -26,7 +44,7 @@ function calculateExponentialDecay(age, halfLife) {
  * @returns {number} Decay multiplier (0-1)
  */
 function calculateLinearDecay(age, rate) {
-    return Math.max(0, 1 - (age * rate));
+    return Math.max(0, 1 - (normalizeMessageAge(age) * rate));
 }
 
 /**
@@ -41,7 +59,7 @@ function calculateExponentialNostalgia(age, halfLife, maxBoost) {
     // Inverse of decay: starts at 1.0, approaches maxBoost
     // At age=halfLife, multiplier is halfway between 1.0 and maxBoost
     const boostRange = maxBoost - 1.0;
-    const progress = 1 - Math.pow(0.5, age / halfLife);
+    const progress = 1 - Math.pow(0.5, normalizeMessageAge(age) / halfLife);
     return 1.0 + (boostRange * progress);
 }
 
@@ -53,7 +71,7 @@ function calculateExponentialNostalgia(age, halfLife, maxBoost) {
  * @returns {number} Nostalgia multiplier (1.0 to maxBoost)
  */
 function calculateLinearNostalgia(age, rate, maxBoost) {
-    return Math.min(maxBoost, 1.0 + (age * rate));
+    return Math.min(maxBoost, 1.0 + (normalizeMessageAge(age) * rate));
 }
 
 /**
@@ -64,22 +82,24 @@ function calculateLinearNostalgia(age, rate, maxBoost) {
  * @returns {number} Score with decay applied
  */
 export function applyTemporalDecay(score, messageAge, decaySettings) {
-    if (!decaySettings.enabled || messageAge === 0) {
+    const age = normalizeMessageAge(messageAge);
+
+    if (!decaySettings.enabled || age === 0) {
         return score;
     }
 
     let decayMultiplier = 1.0;
 
     if (decaySettings.mode === 'exponential') {
-        const halfLife = decaySettings.halfLife || 50;
-        decayMultiplier = calculateExponentialDecay(messageAge, halfLife);
+        const halfLife = positiveNumberOrDefault(decaySettings.halfLife, DEFAULT_DECAY_HALF_LIFE);
+        decayMultiplier = calculateExponentialDecay(age, halfLife);
     } else if (decaySettings.mode === 'linear') {
-        const rate = decaySettings.linearRate || 0.01;
-        decayMultiplier = calculateLinearDecay(messageAge, rate);
+        const rate = positiveNumberOrDefault(decaySettings.linearRate, DEFAULT_LINEAR_DECAY_RATE);
+        decayMultiplier = calculateLinearDecay(age, rate);
     }
 
     // Enforce minimum relevance
-    const minRelevance = decaySettings.minRelevance || 0.3;
+    const minRelevance = minimumNumberOrDefault(decaySettings.minRelevance, 0, DEFAULT_DECAY_FLOOR);
     decayMultiplier = Math.max(decayMultiplier, minRelevance);
 
     return score * decayMultiplier;
@@ -93,19 +113,21 @@ export function applyTemporalDecay(score, messageAge, decaySettings) {
  * @returns {number} Score with nostalgia boost applied
  */
 export function applyNostalgiaBoost(score, messageAge, nostalgiaSettings) {
-    if (!nostalgiaSettings.enabled || messageAge === 0) {
+    const age = normalizeMessageAge(messageAge);
+
+    if (!nostalgiaSettings.enabled || age === 0) {
         return score;
     }
 
     let boostMultiplier = 1.0;
-    const maxBoost = nostalgiaSettings.maxBoost || DEFAULT_NOSTALGIA_MAX_BOOST;
+    const maxBoost = minimumNumberOrDefault(nostalgiaSettings.maxBoost, 1.0, DEFAULT_NOSTALGIA_MAX_BOOST);
 
     if (nostalgiaSettings.mode === 'exponential') {
-        const halfLife = nostalgiaSettings.halfLife || DEFAULT_NOSTALGIA_HALF_LIFE;
-        boostMultiplier = calculateExponentialNostalgia(messageAge, halfLife, maxBoost);
+        const halfLife = positiveNumberOrDefault(nostalgiaSettings.halfLife, DEFAULT_DECAY_HALF_LIFE);
+        boostMultiplier = calculateExponentialNostalgia(age, halfLife, maxBoost);
     } else if (nostalgiaSettings.mode === 'linear') {
-        const rate = nostalgiaSettings.linearRate || 0.005;
-        boostMultiplier = calculateLinearNostalgia(messageAge, rate, maxBoost);
+        const rate = positiveNumberOrDefault(nostalgiaSettings.linearRate, DEFAULT_LINEAR_NOSTALGIA_RATE);
+        boostMultiplier = calculateLinearNostalgia(age, rate, maxBoost);
     }
 
     return score * boostMultiplier;
@@ -133,8 +155,8 @@ export function applyNostalgiaToResults(chunks, currentMessageId, nostalgiaSetti
         }
 
         // Check if chunk is temporally blind (immune to weighting)
-        const chunkHash = chunk.hash || chunk.metadata?.hash;
-        if (chunkHash && isChunkTemporallyBlind(chunkHash)) {
+        const chunkHash = chunk.hash ?? chunk.metadata?.hash;
+        if (chunkHash !== undefined && chunkHash !== null && isChunkTemporallyBlind(chunkHash)) {
             blindCount++;
             return {
                 ...chunk,
@@ -147,7 +169,7 @@ export function applyNostalgiaToResults(chunks, currentMessageId, nostalgiaSetti
         const chunkMessageId = parseInt(chunk.metadata.messageId, 10);
         const currentMsgId = parseInt(currentMessageId, 10);
         const messageAge = currentMsgId - chunkMessageId;
-        const originalScore = chunk.score || 0;
+        const originalScore = chunk.score ?? 0;
         const boostedScore = applyNostalgiaBoost(originalScore, messageAge, nostalgiaSettings);
 
         return {
@@ -187,8 +209,8 @@ export function applyDecayToResults(chunks, currentMessageId, decaySettings) {
         }
 
         // Check if chunk is temporally blind (immune to decay)
-        const chunkHash = chunk.hash || chunk.metadata?.hash;
-        if (chunkHash && isChunkTemporallyBlind(chunkHash)) {
+        const chunkHash = chunk.hash ?? chunk.metadata?.hash;
+        if (chunkHash !== undefined && chunkHash !== null && isChunkTemporallyBlind(chunkHash)) {
             blindCount++;
             return {
                 ...chunk,
@@ -201,7 +223,7 @@ export function applyDecayToResults(chunks, currentMessageId, decaySettings) {
         const chunkMessageId = parseInt(chunk.metadata.messageId, 10);
         const currentMsgId = parseInt(currentMessageId, 10);
         const messageAge = currentMsgId - chunkMessageId;
-        const originalScore = chunk.score || 0;
+        const originalScore = chunk.score ?? 0;
         const decayedScore = applyTemporalDecay(originalScore, messageAge, decaySettings);
 
         return {
@@ -225,14 +247,15 @@ export function applyDecayToResults(chunks, currentMessageId, decaySettings) {
  * @param {Array} scenes - Array of scenes
  * @returns {Object} { isInScene: boolean, sceneStart: number|null }
  */
-function getSceneContext(messageId, scenes) {
-    const scene = scenes.find(s =>
+function getSceneContext(messageId, scenes = []) {
+    const sceneList = Array.isArray(scenes) ? scenes : [];
+    const scene = sceneList.find(s =>
         messageId >= s.start && (s.end === null || messageId <= s.end)
     );
 
     return {
         isInScene: !!scene,
-        sceneStart: scene?.start || null
+        sceneStart: scene?.start ?? null
     };
 }
 
@@ -260,8 +283,8 @@ export function applySceneAwareDecay(chunks, currentMessageId, scenes, decaySett
         }
 
         // Check if chunk is temporally blind (immune to decay)
-        const chunkHash = chunk.hash || chunk.metadata?.hash;
-        if (chunkHash && isChunkTemporallyBlind(chunkHash)) {
+        const chunkHash = chunk.hash ?? chunk.metadata?.hash;
+        if (chunkHash !== undefined && chunkHash !== null && isChunkTemporallyBlind(chunkHash)) {
             blindCount++;
             return {
                 ...chunk,
@@ -270,7 +293,7 @@ export function applySceneAwareDecay(chunks, currentMessageId, scenes, decaySett
             };
         }
 
-        const chunkMessageId = chunk.metadata.messageId;
+        const chunkMessageId = parseInt(chunk.metadata.messageId, 10);
         const chunkSceneContext = getSceneContext(chunkMessageId, scenes);
 
         let effectiveAge;
@@ -289,7 +312,7 @@ export function applySceneAwareDecay(chunks, currentMessageId, scenes, decaySett
             effectiveAge = currentMessageId - chunkMessageId;
         }
 
-        const originalScore = chunk.score || 0;
+        const originalScore = chunk.score ?? 0;
         const decayedScore = applyTemporalDecay(originalScore, effectiveAge, decaySettings);
 
         return {
@@ -403,16 +426,16 @@ export function getDecayStats(chunks) {
     }
 
     const reductions = decayedChunks.map(c => {
-        const original = c.originalScore || c.score;
-        const current = c.score;
-        return ((original - current) / original) * 100;
+        const original = c.originalScore ?? c.score ?? 0;
+        const current = c.score ?? 0;
+        return original === 0 ? 0 : ((original - current) / original) * 100;
     });
 
     return {
         affected: decayedChunks.length,
         avgReduction: reductions.reduce((a, b) => a + b, 0) / reductions.length,
         maxReduction: Math.max(...reductions),
-        avgAge: decayedChunks.reduce((sum, c) => sum + (c.messageAge || c.effectiveAge || 0), 0) / decayedChunks.length
+        avgAge: decayedChunks.reduce((sum, c) => sum + (c.messageAge ?? c.effectiveAge ?? 0), 0) / decayedChunks.length
     };
 }
 
@@ -429,16 +452,16 @@ export function getNostalgiaStats(chunks) {
     }
 
     const boosts = boostedChunks.map(c => {
-        const original = c.originalScore || c.score;
-        const current = c.score;
-        return ((current - original) / original) * 100;
+        const original = c.originalScore ?? c.score ?? 0;
+        const current = c.score ?? 0;
+        return original === 0 ? 0 : ((current - original) / original) * 100;
     });
 
     return {
         affected: boostedChunks.length,
         avgBoost: boosts.reduce((a, b) => a + b, 0) / boosts.length,
         maxBoost: Math.max(...boosts),
-        avgAge: boostedChunks.reduce((sum, c) => sum + (c.messageAge || 0), 0) / boostedChunks.length
+        avgAge: boostedChunks.reduce((sum, c) => sum + (c.messageAge ?? 0), 0) / boostedChunks.length
     };
 }
 

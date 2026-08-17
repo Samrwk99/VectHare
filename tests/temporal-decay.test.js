@@ -26,7 +26,7 @@ import {
 vi.mock('../core/collection-metadata.js', () => ({
     isChunkTemporallyBlind: vi.fn((hash) => {
         // Mock: hashes starting with 'blind_' are temporally blind
-        return typeof hash === 'string' && hash.startsWith('blind_');
+        return hash === 0 || (typeof hash === 'string' && hash.startsWith('blind_'));
     }),
     getCollectionDecaySettings: vi.fn(() => ({
         enabled: true,
@@ -114,6 +114,16 @@ describe('Linear Decay', () => {
         const result = applyTemporalDecay(1.0, 200, linearSettings);
         expect(result).toBeGreaterThanOrEqual(0.3);
     });
+    it('should allow explicit zero minimum relevance', () => {
+        const result = applyTemporalDecay(1.0, 200, {
+            enabled: true,
+            mode: 'linear',
+            linearRate: 0.01,
+            minRelevance: 0
+        });
+
+        expect(result).toBe(0);
+    });
 });
 
 // =============================================================================
@@ -152,6 +162,26 @@ describe('Exponential Nostalgia', () => {
     it('should never exceed maxBoost', () => {
         const result = applyNostalgiaBoost(1.0, 10000, nostalgiaSettings);
         expect(result).toBeLessThanOrEqual(1.5);
+    });
+    it('should use the default half-life when omitted', () => {
+        const result = applyNostalgiaBoost(1.0, 50, {
+            enabled: true,
+            mode: 'exponential',
+            maxBoost: 1.5
+        });
+
+        expect(result).toBeCloseTo(1.25, 2);
+    });
+
+    it('should allow a neutral max boost of 1.0', () => {
+        const result = applyNostalgiaBoost(1.0, 100, {
+            enabled: true,
+            mode: 'exponential',
+            halfLife: 50,
+            maxBoost: 1.0
+        });
+
+        expect(result).toBe(1.0);
     });
 });
 
@@ -262,6 +292,21 @@ describe('applyDecayToResults', () => {
         expect(result[1].originalScore).toBe(0.8);
     });
 
+    it('should check temporally blind status for zero-valued hashes', () => {
+        const chunks = [{
+            text: 'Zero hash chunk',
+            hash: 0,
+            score: 1.0,
+            metadata: { source: 'chat', messageId: 90 }
+        }];
+
+        const result = applyDecayToResults(chunks, 100, decaySettings);
+
+        expect(result[0].temporallyBlind).toBe(true);
+        expect(result[0].decayApplied).toBe(false);
+        expect(result[0].score).toBe(1.0);
+    });
+
     it('should handle chunks with messageId of 0', () => {
         const chunksWithZeroId = [{
             text: 'First message',
@@ -365,7 +410,42 @@ describe('applySceneAwareDecay', () => {
         expect(result[0].effectiveAge).toBe(10);
 
         // Different scene: age calculated from scene boundary
-        expect(result[1].effectiveAge).toBeDefined();
+        expect(result[1].effectiveAge).toBe(49);
+    });
+
+    it('should preserve scene start at message zero when calculating cross-scene age', () => {
+        const chunks = [{
+            text: 'Opening scene chunk',
+            score: 1.0,
+            metadata: { source: 'chat', messageId: 10 }
+        }];
+
+        const result = applySceneAwareDecay(chunks, 80, scenes, decaySettings);
+
+        expect(result[0].effectiveAge).toBe(80);
+    });
+
+    it('should handle missing scene lists gracefully', () => {
+        const result = applySceneAwareDecay(mockChunks, 80, undefined, decaySettings);
+
+        expect(result).toHaveLength(2);
+        expect(result[0].effectiveAge).toBe(10);
+        expect(result[1].effectiveAge).toBe(40);
+    });
+
+    it('should check temporally blind status for zero-valued hashes', () => {
+        const chunks = [{
+            text: 'Zero hash chunk',
+            hash: 0,
+            score: 1.0,
+            metadata: { source: 'chat', messageId: 70 }
+        }];
+
+        const result = applySceneAwareDecay(chunks, 80, scenes, decaySettings);
+
+        expect(result[0].temporallyBlind).toBe(true);
+        expect(result[0].sceneAwareDecay).toBe(false);
+        expect(result[0].score).toBe(1.0);
     });
 });
 
@@ -604,6 +684,19 @@ describe('Edge Cases', () => {
         const result = applyTemporalDecay(0, 50, settings);
         expect(result).toBe(0);
     });
+
+    it('should not increase decay scores for negative ages', () => {
+        const settings = {
+            enabled: true,
+            mode: 'exponential',
+            halfLife: 50,
+            minRelevance: 0.3
+        };
+
+        const result = applyTemporalDecay(1.0, -10, settings);
+        expect(result).toBe(1.0);
+    });
+
 
     it('should handle very large age', () => {
         const settings = {
