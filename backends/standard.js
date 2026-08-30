@@ -188,8 +188,11 @@ export class StandardBackend extends VectorBackend {
      * Insert vector items into a collection
      * Uses plugin API if available (for metadata support), falls back to native ST API
      */
-    async insertVectorItems(collectionId, items, settings) {
+    async insertVectorItems(collectionId, items, settings, abortSignal = null) {
         if (items.length === 0) return;
+        if (abortSignal?.aborted) {
+            throw Object.assign(new Error('Vectorization stopped by user'), { name: 'AbortError' });
+        }
 
         const providerParams = getProviderSpecificParams(settings, false);
         const model = getModelFromSettings(settings);

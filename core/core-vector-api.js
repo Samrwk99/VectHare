@@ -138,6 +138,142 @@ function chunkArray(array, size) {
     return chunks;
 }
 
+/**
+ * Throw an AbortError when the caller's signal has already been cancelled.
+ * Central helper so every abort check site throws an identical error.
+ * @param {AbortSignal|null} abortSignal
+ */
+function throwIfAborted(abortSignal) {
+    if (abortSignal?.aborted) {
+        throw Object.assign(new Error('Vectorization stopped by user'), { name: 'AbortError' });
+    }
+}
+
+/**
+ * callWithHedge — fire a duplicate request after a threshold to dodge connection-level
+ * routing stalls on multi-upstream embedding providers. Race-first-wins via Promise.
+ *
+ * Two triggers, one ordered sequence of hedges:
+ *   - the fixed schedule (t = i * thresholdMs) covers attempts that HANG;
+ *   - an attempt that FAILS brings the next hedge forward immediately.
+ * Attempts cap at maxHedges + 1 either way.
+ *
+ * Hedge-fatal: if all attempts fail, throws Error with
+ *   name === 'HedgeFatalError' and isHedgeFatal === true.
+ *
+ * @param {Function} fn - Async function (each invocation must be safe to repeat;
+ *   deterministic text -> deterministic embedding -> idempotent upsert by hash)
+ * @param {number} thresholdMs - Time between attempts (e.g., 15000)
+ * @param {number} maxHedges - Number of hedges after primary (e.g., 3)
+ * @param {object} ctx - { debugOn, batchIdx, totalBatches, provider } for logging
+ * @returns {Promise<*>} Result of the first attempt to succeed
+ */
+export function callWithHedge(fn, thresholdMs, maxHedges, ctx) {
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        const timers = [];
+        const errors = [];
+        const { debugOn, batchIdx, totalBatches, provider } = ctx || {};
+
+        const settle = (kind, val) => {
+            if (settled) return;
+            settled = true;
+            for (const t of timers) clearTimeout(t);
+            if (kind === 'ok') resolve(val); else reject(val);
+        };
+
+        const label = (i) => (i === 0 ? 'primary' : `hedge ${i}/${maxHedges}`);
+
+        let hedgesFired = 0;
+        let attemptsInFlight = 0;
+        const hedgeTimers = new Map();
+
+        const buildHedgeFatal = () => {
+            const lastError = errors.length ? errors[errors.length - 1].error : null;
+            const tail = lastError
+                ? `last error: ${lastError?.name || 'Error'}: ${lastError?.message || lastError}`
+                : `${maxHedges + 1} attempts still in-flight at cutoff, none returned`;
+            const fatalErr = new Error(
+                `Hedge fatal: ${maxHedges + 1} attempts to ${provider} over ${((maxHedges + 1) * thresholdMs) / 1000}s — ${tail}`,
+            );
+            fatalErr.name = 'HedgeFatalError';
+            fatalErr.isHedgeFatal = true;
+            return fatalErr;
+        };
+
+        const startHedge = (i, isEarly) => {
+            if (settled || i > maxHedges) return;
+            hedgesFired = i;
+            const scheduled = hedgeTimers.get(i);
+            if (scheduled) {
+                clearTimeout(scheduled);
+                hedgeTimers.delete(i);
+            }
+            if (debugOn) {
+                console.warn(isEarly
+                    ? `VectHare: hedge ${i}/${maxHedges} firing early — batch ${batchIdx}/${totalBatches} via ${provider} (previous attempt FAILED)`
+                    : `VectHare: hedge ${i}/${maxHedges} firing at t=${(i * thresholdMs) / 1000}s — batch ${batchIdx}/${totalBatches} via ${provider} (previous attempt still running)`);
+            }
+            fire(i);
+        };
+
+        const fire = (attemptIdx) => {
+            const start = performance.now();
+            attemptsInFlight++;
+            fn().then(
+                (r) => {
+                    attemptsInFlight--;
+                    if (settled) return;
+                    if (attemptIdx > 0) {
+                        console.warn(`VectHare: hedge — ${label(attemptIdx)} WON for batch ${batchIdx}/${totalBatches} via ${provider} after ${((performance.now() - start) / 1000).toFixed(1)}s`);
+                    } else {
+                        console.log(`VectHare: hedge — primary WON for batch ${batchIdx}/${totalBatches} via ${provider} after ${((performance.now() - start) / 1000).toFixed(1)}s`);
+                    }
+                    settle('ok', r);
+                },
+                (e) => {
+                    attemptsInFlight--;
+                    errors.push({ attemptIdx, error: e });
+                    if (debugOn && !settled) {
+                        console.warn(`VectHare: hedge — ${label(attemptIdx)} FAILED after ${((performance.now() - start) / 1000).toFixed(1)}s for batch ${batchIdx}/${totalBatches} — ${e?.name || 'Error'}: ${e?.message || e}`);
+                    }
+                    // Abort short-circuit: user pressed Stop; stop firing hedges.
+                    if (e?.name === 'AbortError') {
+                        settle('err', e);
+                        return;
+                    }
+                    if (settled) return;
+                    if (hedgesFired < maxHedges) {
+                        startHedge(hedgesFired + 1, true);
+                        return;
+                    }
+                    // Last attempt, nothing left in flight: every attempt has failed.
+                    if (attemptsInFlight === 0) settle('err', buildHedgeFatal());
+                },
+            );
+        };
+
+        // Primary at t=0
+        fire(0);
+
+        // Schedule hedges on the fixed clock
+        for (let i = 1; i <= maxHedges; i++) {
+            const scheduled = setTimeout(() => {
+                if (settled || hedgesFired >= i) return;
+                startHedge(i, false);
+            }, i * thresholdMs);
+            hedgeTimers.set(i, scheduled);
+            timers.push(scheduled);
+        }
+
+        // Hard fatal cutoff
+        timers.push(setTimeout(() => {
+            if (settled) return;
+            settle('err', buildHedgeFatal());
+        }, (maxHedges + 1) * thresholdMs));
+    });
+}
+
 // Retry configuration for transient failures (matches AsyncUtils.retry signature)
 const RETRY_CONFIG = {
     maxAttempts: RETRY_MAX_ATTEMPTS,
@@ -145,11 +281,18 @@ const RETRY_CONFIG = {
     maxDelay: RETRY_MAX_DELAY_MS,
     backoffFactor: RETRY_BACKOFF_MULTIPLIER,
     shouldRetry: (error) => {
-        // Retry on network errors and rate limits
+        // Hedge-fatal: the hedge already burned maxHedges+1 fresh-connection attempts.
+        // An immediate outer retry would just re-trigger another hedge cycle — throw up.
+        if (error?.isHedgeFatal === true) return false;
+        // AbortSignal.timeout()'s DOMException ("TimeoutError" / "signal timed out")
+        // — the word form "timed out" was missed by the keyword list, so embedding
+        // stalls tripped the HTTP timeout and silently killed the run mid-way.
+        if (error?.name === 'TimeoutError') return true;
         const message = error?.message?.toLowerCase() || '';
         const isRetryable =
             message.includes('network') ||
             message.includes('timeout') ||
+            message.includes('timed out') ||
             message.includes('failed to fetch') ||
             message.includes('fetch') ||
             message.includes('suspended') ||
@@ -588,6 +731,11 @@ export async function getSavedHashes(collectionId, settings, includeMetadata = f
     // Use unified chunks API to get full metadata (works with all backends)
     try {
         const backendName = settings.vector_backend || 'standard';
+        // Resolve the model from the provider's actual settings field — settings.model
+        // does not exist; the old lookup silently sent an empty model, mispairing
+        // metadata reads whenever the plugin needed it to route the correct index.
+        const modelField = getModelField(settings.source);
+        const model = modelField ? (settings[modelField] || '') : '';
         const response = await fetch('/api/plugins/similharity/chunks/list', {
             method: 'POST',
             headers: getRequestHeaders(),
@@ -595,7 +743,7 @@ export async function getSavedHashes(collectionId, settings, includeMetadata = f
                 backend: backendName === 'standard' ? 'vectra' : backendName,
                 collectionId: collectionId,
                 source: settings.source || 'transformers',
-                model: settings.model || '',
+                model: model,
                 limit: 10000
             })
         });
@@ -619,15 +767,17 @@ export async function getSavedHashes(collectionId, settings, includeMetadata = f
 
 /**
  * Inserts vector items into a collection
- * Handles batching and rate limiting.
+ * Handles batching, rate limiting, hedging, and parallel-split.
  * For client-side embedding sources (webllm, koboldcpp, bananabread), generates embeddings first.
  * @param {string} collectionId - The collection to insert into
  * @param {{ hash: number, text: string }[]} items - The items to insert
  * @param {object} settings VectHare settings object
  * @param {Function} onProgress - Optional callback (embedded, total) => void for progress updates
+ * @param {AbortSignal|null} [abortSignal] - Optional abort signal for Pause/Stop
  * @returns {Promise<void>}
  */
-export async function insertVectorItems(collectionId, items, settings, onProgress = null) {
+export async function insertVectorItems(collectionId, items, settings, onProgress = null, abortSignal = null) {
+    throwIfAborted(abortSignal);
     const backend = await getBackend(settings);
 
     // Sources that require client-side embedding generation
@@ -646,37 +796,126 @@ export async function insertVectorItems(collectionId, items, settings, onProgres
             });
 
             // Use streaming embedding generation with immediate writes
-            await streamEmbeddingsAndWrite(backend, collectionId, items, textStrings, settings, onProgress);
+            await streamEmbeddingsAndWrite(backend, collectionId, items, textStrings, settings, onProgress, abortSignal);
         } else {
             // Server-side embeddings - backend handles everything
-            // VEC-6: Use configurable batch size for optimized bulk inserts
-            // Some providers need smaller batches - Ollama and Transformers work best with batch size of 1
-            const smallBatchProviders = ['transformers', 'ollama'];
+            // Local-GPU sources work best with batch size 1 (and skip hedge/parallel-split,
+            // which are pointless against a single fixed endpoint).
+            const localGpuSources = ['transformers', 'ollama', 'llamacpp', 'koboldcpp', 'bananabread'];
             const configuredBatchSize = settings.insert_batch_size || 50;
-            const BATCH_SIZE = smallBatchProviders.includes(settings.source) ? 1 : configuredBatchSize;
+            const hasExplicitBatchSize = !!settings.insert_batch_size;
+            const hasRateLimit = settings.rate_limit_calls > 0;
+
+            // Parallel-split (VectFox port): each item becomes its own insert POST, fired
+            // in parallel waves. Contains the blast radius when ONE upstream worker is
+            // stuck — the stuck item retries in isolation while the rest finish.
+            // Opt-in via settings.vector_group_embedding_call (true = legacy batched POST).
+            const groupEmbeddingCall = settings?.vector_group_embedding_call === true;
+            const shouldParallelSplit = (
+                !groupEmbeddingCall
+                && !localGpuSources.includes(settings.source)
+                && !hasRateLimit
+                && items.length > 1
+            );
+
+            const BATCH_SIZE = shouldParallelSplit
+                ? 1
+                : ((!hasExplicitBatchSize && localGpuSources.includes(settings.source)) ? 1 : configuredBatchSize);
             const batches = chunkArray(items, BATCH_SIZE);
 
-            const hasRateLimit = settings.rate_limit_calls > 0;
-            console.log(`VectHare: Processing ${items.length} items in ${batches.length} batch(es) of up to ${BATCH_SIZE}${hasRateLimit ? ` with rate limit (Max ${settings.rate_limit_calls} calls / ${settings.rate_limit_interval}s)` : ''}`);
+            const hasHedgeSetting = (Number(settings.vector_hedge_after_ms) || 0) > 0;
+            const hedgeEnabled = hasHedgeSetting && !localGpuSources.includes(settings.source);
+            const hedgeAfterMs = hedgeEnabled ? Number(settings.vector_hedge_after_ms) : 0;
+            const HEDGE_MAX_COUNT = 3;
+            const debugOn = true; // hedge/failure logs always visible during a run
 
-            for (let i = 0; i < batches.length; i++) {
-                const processBatch = async () => {
-                    await AsyncUtils.retry(async () => {
-                        await backend.insertVectorItems(collectionId, batches[i], settings);
-                    }, RETRY_CONFIG);
-                };
+            console.log(`VectHare: Processing ${items.length} items in ${batches.length} batch(es) of up to ${BATCH_SIZE}${hasRateLimit ? ` with rate limit` : ''}${shouldParallelSplit ? ` [parallel-split: waves of up to 16 concurrent POSTs]` : ''}${hedgeEnabled ? ` [hedge armed: ${hedgeAfterMs}ms × ${HEDGE_MAX_COUNT}]` : ''}`);
 
-                // Apply rate limiting if configured, otherwise execute directly
-                if (hasRateLimit) {
-                    await dynamicRateLimiter.execute(processBatch, settings);
-                } else {
-                    await processBatch();
+            // Factored-out per-batch retry+log closure shared by serial and parallel paths.
+            const makeProcessBatch = (batch, batchIdx, batchItemCount) => async () => {
+                let attemptCount = 0;
+                await AsyncUtils.retry(async () => {
+                    attemptCount++;
+                    const attemptStart = performance.now();
+                    console.log(
+                        `VectHare: insert batch ${batchIdx}/${batches.length} attempt ${attemptCount}/${RETRY_CONFIG.maxAttempts} — POST ${batchItemCount} item(s) via ${settings.source}${hedgeEnabled ? ' [hedge armed]' : ''}`,
+                    );
+                    try {
+                        throwIfAborted(abortSignal);
+                        const insertCall = () => backend.insertVectorItems(collectionId, batch, settings, abortSignal);
+                        if (hedgeEnabled) {
+                            await callWithHedge(insertCall, hedgeAfterMs, HEDGE_MAX_COUNT, {
+                                debugOn,
+                                batchIdx,
+                                totalBatches: batches.length,
+                                provider: settings.source,
+                            });
+                        } else {
+                            await insertCall();
+                        }
+                        if (attemptCount > 1) {
+                            const elapsed = ((performance.now() - attemptStart) / 1000).toFixed(1);
+                            console.log(`VectHare: insert batch ${batchIdx}/${batches.length} attempt ${attemptCount} succeeded after ${elapsed}s`);
+                        }
+                    } catch (err) {
+                        if (debugOn) {
+                            const elapsed = ((performance.now() - attemptStart) / 1000).toFixed(1);
+                            console.warn(
+                                `VectHare: insert batch ${batchIdx}/${batches.length} attempt ${attemptCount}/${RETRY_CONFIG.maxAttempts} FAILED after ${elapsed}s — ${err?.name || 'Error'}: ${err?.message || err} (provider=${settings.source}, items=${batchItemCount})`,
+                            );
+                        }
+                        throw err;
+                    }
+                }, RETRY_CONFIG);
+            };
+
+            if (shouldParallelSplit) {
+                // Parallel waves of up to MAX_PARALLEL concurrent inserts (VectFox port).
+                // Promise.allSettled lets all in-flight finish even if one fails — successful
+                // ones are durable (hash upsert = idempotent). If any failed after retries,
+                // throw composite so the caller sees the batch failed; hash-dedup makes the
+                // eventual retry safe.
+                const MAX_PARALLEL = 16;
+                for (let wave = 0; wave < batches.length; wave += MAX_PARALLEL) {
+                    const slice = batches.slice(wave, wave + MAX_PARALLEL);
+                    const results = await Promise.allSettled(
+                        slice.map((batch, idx) => {
+                            const processBatch = makeProcessBatch(batch, wave + idx + 1, batch.length);
+                            return processBatch();
+                        }),
+                    );
+                    const failed = results.filter(r => r.status === 'rejected');
+                    if (failed.length > 0) {
+                        const sample = failed[0].reason;
+                        const anyHedgeFatal = failed.some(f => f.reason?.isHedgeFatal === true);
+                        const composite = new Error(
+                            `VectHare: ${failed.length}/${slice.length} parallel inserts in wave failed — first failure: ${sample?.name || 'Error'}: ${sample?.message || sample}`,
+                        );
+                        if (anyHedgeFatal) {
+                            composite.name = 'HedgeFatalError';
+                            composite.isHedgeFatal = true;
+                        }
+                        throw composite;
+                    }
+                    if (onProgress) {
+                        onProgress(Math.min(wave + slice.length, items.length), items.length);
+                    }
                 }
-
-                if (onProgress) {
-                    const embeddedCount = (i + 1) * BATCH_SIZE;
-                    const actualEmbedded = Math.min(embeddedCount, items.length);
-                    onProgress(actualEmbedded, items.length);
+            } else {
+                // Serial path — preserves rate-limited and local-GPU semantics.
+                for (let i = 0; i < batches.length; i++) {
+                    throwIfAborted(abortSignal);
+                    const processBatch = makeProcessBatch(batches[i], i + 1, batches[i].length);
+                    if (hasRateLimit) {
+                        await dynamicRateLimiter.execute(processBatch, settings);
+                    } else {
+                        await processBatch();
+                    }
+                    if (onProgress) {
+                        const embeddedCount = (i + 1) * BATCH_SIZE;
+                        const actualEmbedded = Math.min(embeddedCount, items.length);
+                        onProgress(actualEmbedded, items.length);
+                    }
                 }
             }
         }
@@ -699,7 +938,7 @@ export async function insertVectorItems(collectionId, items, settings, onProgres
  * @param {object} settings - Settings object
  * @param {Function} onProgress - Progress callback
  */
-async function streamEmbeddingsAndWrite(backend, collectionId, items, textStrings, settings, onProgress) {
+async function streamEmbeddingsAndWrite(backend, collectionId, items, textStrings, settings, onProgress, abortSignal = null) {
     // VEC-6: Use configurable batch size for optimized bulk inserts
     const EMBEDDING_BATCH_SIZE = settings.insert_batch_size || 50;
     let totalProcessed = 0;
@@ -709,6 +948,7 @@ async function streamEmbeddingsAndWrite(backend, collectionId, items, textString
 
     // Process embeddings in batches
     for (let i = 0; i < textStrings.length; i += EMBEDDING_BATCH_SIZE) {
+        throwIfAborted(abortSignal);
         const batchEnd = Math.min(i + EMBEDDING_BATCH_SIZE, textStrings.length);
         const batchTextStrings = textStrings.slice(i, batchEnd);
         const batchItems = items.slice(i, batchEnd);
@@ -723,6 +963,8 @@ async function streamEmbeddingsAndWrite(backend, collectionId, items, textString
                 return await getAdditionalArgs(batchTextStrings, settings);
             }, RETRY_CONFIG);
         } catch (error) {
+            // AbortError must not be swallowed by the "after retries" wrapper.
+            if (error?.name === 'AbortError') throw error;
             throw new Error(`VectHare: Failed to generate embeddings for batch ${batchNum} after retries: ${error.message}`);
         }
 
@@ -762,9 +1004,12 @@ async function streamEmbeddingsAndWrite(backend, collectionId, items, textString
         console.log(`VectHare: Writing batch ${batchNum} to database (${itemsToWrite.length} items)`);
         try {
             await AsyncUtils.retry(async () => {
-                await backend.insertVectorItems(collectionId, itemsToWrite, settings);
+                throwIfAborted(abortSignal);
+                await backend.insertVectorItems(collectionId, itemsToWrite, settings, abortSignal);
             }, RETRY_CONFIG);
         } catch (error) {
+            // AbortError must not be swallowed by the "after retries" wrapper.
+            if (error?.name === 'AbortError') throw error;
             throw new Error(`VectHare: Failed to write batch ${batchNum} to database after retries: ${error.message}`);
         }
 
@@ -873,8 +1118,8 @@ export async function queryCollection(collectionId, searchText, topK, settings) 
     }
 
     // Convert to format expected by keyword boost
-    const resultsForBoost = rawResults.metadata.map((meta, idx) => ({
-        hash: meta.hash || rawResults.hashes[idx],
+    const resultsForBoost = rawResults.metadata.map((meta) => ({
+        hash: meta.hash,
         score: meta.score || 0,
         metadata: meta,
         text: meta.text || ''
@@ -1026,8 +1271,8 @@ export async function queryMultipleCollections(collectionIds, searchText, topK, 
         }
 
         // Convert to format expected by scoring functions
-        const resultsForBoost = collectionResults.metadata.map((meta, idx) => ({
-            hash: meta.hash || collectionResults.hashes[idx],
+        const resultsForBoost = collectionResults.metadata.map((meta) => ({
+            hash: meta.hash,
             score: meta.score || 0,
             metadata: meta,
             text: meta.text || ''

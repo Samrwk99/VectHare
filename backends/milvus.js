@@ -203,8 +203,11 @@ export class MilvusBackend extends VectorBackend {
         return data.items ? data.items.map(item => item.hash) : [];
     }
 
-    async insertVectorItems(collectionId, items, settings) {
+    async insertVectorItems(collectionId, items, settings, abortSignal = null) {
         if (items.length === 0) return;
+        if (abortSignal?.aborted) {
+            throw Object.assign(new Error('Vectorization stopped by user'), { name: 'AbortError' });
+        }
 
         const { type, sourceId } = this._parseCollectionId(collectionId);
 

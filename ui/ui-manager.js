@@ -403,7 +403,20 @@ export function renderSettings(containerId, settings, callbacks) {
                             </label>
                             <input type="range" id="vecthare_insert_batch_size" class="vecthare-slider" min="10" max="100" step="10" />
                             <small class="vecthare_hint">Chunks per insert batch (50-100 recommended for faster bulk operations)</small>
+                            <!-- Embedding resilience -->
+                            <div class="vecthare-setting-group" style="margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--grey30);">
+                                <label class="checkbox_label" for="vecthare_vector_group_embedding_call">
+                                    <input type="checkbox" id="vecthare_vector_group_embedding_call" />
+                                    <span><small><b>Group embedding calls</b></small></span>
+                                </label>
+                                <small class="vecthare_hint">Checked (default): all items in one batched POST — cheaper. Unchecked: each item gets its own POST, fired in parallel — one stuck upstream item only blocks itself.</small>
 
+                                <label class="checkbox_label" for="vecthare_vector_hedge_enabled" style="margin-top: 8px;">
+                                    <input type="checkbox" id="vecthare_vector_hedge_enabled" />
+                                    <span><small><b>Hedge slow embedding calls</b></small></span>
+                                </label>
+                                <small class="vecthare_hint">When an embedding POST hasn't returned in 15s, fire a duplicate on a fresh connection — first to finish wins. Recovers routing stalls in seconds instead of the full HTTP timeout. Skipped for local providers.</small>
+                            </div>
                             <label for="vecthare_min_chat_length" style="margin-top: 16px;">
                                 <small>Minimum Messages Before Injection</small>
                             </label>
@@ -2676,6 +2689,24 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
         });
     $('#vecthare_insert_batch_size_value').text(settings.insert_batch_size || 50);
+
+    // Embedding resilience toggles (VectFox port)
+    $('#vecthare_vector_group_embedding_call')
+        .prop('checked', settings.vector_group_embedding_call !== false)
+        .on('change', function() {
+            settings.vector_group_embedding_call = $(this).prop('checked');
+            applySettingsSnapshot(settings);
+            saveSettingsDebounced();
+        });
+    $('#vecthare_vector_group_embedding_call').prop('checked', settings.vector_group_embedding_call !== false);
+
+    $('#vecthare_vector_hedge_enabled')
+        .prop('checked', (Number(settings.vector_hedge_after_ms) || 0) > 0)
+        .on('change', function() {
+            settings.vector_hedge_after_ms = $(this).prop('checked') ? 15000 : 0;
+            applySettingsSnapshot(settings);
+            saveSettingsDebounced();
+        });
 
     // Minimum chat length before injection starts
     $('#vecthare_min_chat_length')

@@ -46,9 +46,12 @@ export class VectorBackend {
      * @param {string} collectionId
      * @param {object[]} items - {hash, text, index, vector}
      * @param {object} settings
+     * @param {AbortSignal|null} [abortSignal] - Optional abort signal for user pause/stop.
+     *   Implementations MUST check abortSignal?.aborted before each network call and
+     *   throw Object.assign(new Error('Vectorization stopped by user'), {name:'AbortError'}).
      * @returns {Promise<void>}
      */
-    async insertVectorItems(collectionId, items, settings) {
+    async insertVectorItems(collectionId, items, settings, abortSignal = null) {
         throw new Error('Backend must implement insertVectorItems()');
     }
 

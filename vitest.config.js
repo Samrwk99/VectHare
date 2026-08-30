@@ -8,24 +8,31 @@ const openaiStub = fileURLToPath(new URL('./tests/stubs/openai.js', import.meta.
 const secretsStub = fileURLToPath(new URL('./tests/stubs/secrets.js', import.meta.url));
 const utilsStub = fileURLToPath(new URL('./tests/stubs/utils.js', import.meta.url));
 const world_infoStub = fileURLToPath(new URL('./tests/stubs/world-info.js', import.meta.url));
+const sharedStub = fileURLToPath(new URL('./tests/stubs/shared.js', import.meta.url));
 
 export default defineConfig({
     resolve: {
         alias: [
-            { find: /\/extensions\.js$/, replacement: extensionsStub },
-            { find: /\/script\.js$/, replacement: scriptStub },
-            { find: /\/textgen-settings\.js$/, replacement: textgen_settingsStub },
-            { find: /\/openai\.js$/, replacement: openaiStub },
-            { find: /\/secrets\.js$/, replacement: secretsStub },
-            { find: /\/utils\.js$/, replacement: utilsStub },
-            { find: /\/world-info\.js$/, replacement: world_infoStub },
+            { find: /extensions\.js$/, replacement: extensionsStub },
+            { find: /script\.js$/, replacement: scriptStub },
+            { find: /secrets\.js$/, replacement: secretsStub },
+            { find: /textgen-settings\.js$/, replacement: textgen_settingsStub },
+            { find: /openai\.js$/, replacement: openaiStub },
+            { find: /world-info\.js$/, replacement: world_infoStub },
+            { find: /utils\.js$/, replacement: utilsStub },
+            { find: /shared\.js$/, replacement: sharedStub },
         ],
     },
     test: {
         include: ['tests/**/*.test.js'],
         environment: 'node',
         globals: true,
-        coverage: { provider: 'v8', reporter: ['text', 'html', 'lcov'], include: ['core/**/*.js', 'utils/**/*.js'], exclude: ['**/node_modules/**', 'tests/**'] },
+        coverage: {
+            provider: 'v8',
+            reporter: ['text', 'html', 'lcov'],
+            include: ['core/**/*.js', 'utils/**/*.js'],
+            exclude: ['**/node_modules/**', 'tests/**']
+        },
         reporters: ['verbose'],
         testTimeout: 10000,
         hookTimeout: 10000

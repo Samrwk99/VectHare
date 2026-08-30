@@ -232,8 +232,11 @@ export class QdrantBackend extends VectorBackend {
         return data.items ? data.items.map(item => item.hash) : [];
     }
 
-    async insertVectorItems(collectionId, items, settings) {
+    async insertVectorItems(collectionId, items, settings, abortSignal = null) {
         if (items.length === 0) return;
+        if (abortSignal?.aborted) {
+            throw Object.assign(new Error('Vectorization stopped by user'), { name: 'AbortError' });
+        }
 
         // Strip registry key prefix to get the actual collection ID for Qdrant
         const strippedCollectionId = this._stripRegistryPrefix(collectionId);
@@ -253,6 +256,10 @@ export class QdrantBackend extends VectorBackend {
         for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
             const batch = batches[batchIndex];
             const batchNum = batchIndex + 1;
+
+            if (abortSignal?.aborted) {
+                throw Object.assign(new Error('Vectorization stopped by user'), { name: 'AbortError' });
+            }
 
             const response = await fetch('/api/plugins/similharity/chunks/insert', {
                 method: 'POST',

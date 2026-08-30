@@ -68,6 +68,9 @@ const defaultSettings = {
 
     // VEC-6: Batch insert optimization
     insert_batch_size: 50, // Chunks per insert batch (50-100 recommended)
+    // Embedding resilience (VectFox port)
+    vector_hedge_after_ms: 15000,      // 0 = hedge disabled. 15000 = fire duplicate insert after 15s stall
+    vector_group_embedding_call: true, // true = legacy batched POST (proven default); false = parallel-split per-item
     togetherai_model: 'togethercomputer/m2-bert-80M-32k-retrieval',
     openai_model: 'text-embedding-ada-002',
     electronhub_model: 'text-embedding-3-small',
