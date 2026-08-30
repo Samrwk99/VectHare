@@ -2051,8 +2051,7 @@ export async function rearrangeChat(chat, settings, type) {
  * @param {object} [opts] { isResume } — bypass enabled_chats gate on explicit resume
  */
 export async function vectorizeAll(settings, batchSize, opts = {}) {
-    const { getChatUUID: getUUID } = await import('./collection-ids.js');
-    const uuid = getUUID();
+    const uuid = getChatUUID();
     const chatId = getCurrentChatId();
 
     try {
@@ -2077,21 +2076,22 @@ export async function vectorizeAll(settings, batchSize, opts = {}) {
         }
 
         // Config fingerprint check (requirement #15): provider/model/strategy changed?
+        // Uses plain confirm() — callGenericPopup created a circular import
+        // (popup.js loads chat modules) that killed this whole module at load time,
+        // which is why Sync Chat did nothing.
         const collectionId = getChatCollectionId();
         const fingerprint = computeConfigFingerprint(settings);
         const storedFp = existingJob?.configFingerprint;
-        if (storedFp && storedFp !== fingerprint && !isResumeWithSameConfig(storedFp, fingerprint)) {
-            const proceed = await callGenericPopup(
-                '<div style="text-align:left;"><p><strong>Vectorization settings changed</strong> since this chat was last vectorized (provider/model/strategy/batch).</p><p>Existing vectors will be replaced (old ones removed, chat re-vectorized). Continue?</p></div>',
-                POPUP_TYPE.CONFIRM, '', { okButton: 'Continue', cancelButton: 'Cancel' }
+        if (storedFp && storedFp !== fingerprint) {
+            const proceed = confirm(
+                'Vectorization settings changed since this chat was last vectorized (provider/model/strategy/batch).\n\n' +
+                'Existing vectors will be replaced (old ones removed, chat re-vectorized). Continue?'
             );
             if (!proceed) {
                 toastr.info('Vectorization cancelled', 'VectHare');
                 return;
             }
         }
-        // helper defined below file-scope
-        function isResumeWithSameConfig() { return false; } // placeholder — mismatch always prompts
 
         // Create or reuse job
         const registryKey = `${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}`;
@@ -2099,7 +2099,7 @@ export async function vectorizeAll(settings, batchSize, opts = {}) {
         updateJob(uuid, { status: 'running', pauseReason: undefined, configFingerprint: fingerprint, collectionId, registryKey, chatId });
 
         // Progress panel + Pause/Stop wiring (progress-tracker gains these in Phase 4;
-        // guard so this works even before that lands)
+        // guarded so this works even before that lands)
         const context = getContext();
         const totalMessages = context.chat ? context.chat.filter(x => !x.is_system).length : 0;
         progressTracker.show(isResume ? 'Resuming Vectorization' : 'Vectorizing Chat', totalMessages, 'Messages');
@@ -2175,8 +2175,8 @@ export async function vectorizeAll(settings, batchSize, opts = {}) {
                 console.log(`VectHare: Vectorization iteration ${iteration}, ${result.remaining > 0 ? result.remaining + ' remaining' : 'complete'} (${result.chunksCreated} chunks this batch)`);
 
                 // Auto-pause on repeated total failure (requirement #4):
-                // failed items accumulate naturally, but 3 consecutive iterations with
-                // failures and ZERO progress = provider down → pause, preserve counts.
+                // 3 consecutive iterations with failures and ZERO progress = provider
+                // down → pause, preserve counts for a later resume.
                 if (result.itemsFailed > 0 && result.messagesProcessed === 0) {
                     consecutiveFailedIterations++;
                     if (consecutiveFailedIterations >= 3) {
@@ -2207,6 +2207,7 @@ export async function vectorizeAll(settings, batchSize, opts = {}) {
 
             updateJob(uuid, { status: 'completed' });
             deleteJob(uuid); // completed — clean up
+
             if (totalFailed > 0) {
                 progressTracker.complete(true, `Vectorized ${processedCount} messages (${totalChunks} chunks, ${totalFailed} failed, ${totalGhosts} stale removed)`);
                 toastr.warning(`Chat vectorized with ${totalFailed} item(s) failed - see progress panel`, 'VectHare');
