@@ -9,6 +9,8 @@
  * ============================================================================
  */
 
+import { getJob, createJob, updateJob, deleteJob, getJobByChatId, computeConfigFingerprint } from './vectorization-jobs.js';
+import { callGenericPopup, POPUP_TYPE } from '../../../../popup.js';
 import { getCurrentChatId, is_send_press, setExtensionPrompt, substituteParams, chat_metadata, extension_prompts } from '../../../../../script.js';
 import { getContext } from '../../../../extensions.js';
 import { getStringHash as calculateHash, waitUntilCondition, onlyUnique } from '../../../../utils.js';
@@ -408,7 +410,7 @@ async function rerankWithBananaBread(query, chunks, settings) {
  * @param {number} batchSize Number of messages to process per call
  * @returns {Promise<object>} Progress info
  */
-export async function synchronizeChat(settings, batchSize = 5) {
+export async function synchronizeChat(settings, batchSize = 5, abortSignal = null) {
     // Build proper collection ID using chat UUID first
     const collectionId = getChatCollectionId();
     console.log(`🔍 VectHare DEBUG: getChatCollectionId() returned: "${collectionId}"`);
@@ -449,7 +451,11 @@ export async function synchronizeChat(settings, batchSize = 5) {
         let isRegistered = false;
 
         // Step 1: What's already vectorized? (source of truth = DB)
-        const existingHashes = new Set(await getSavedHashes(collectionId, settings));
+        const savedResult = await getSavedHashes(collectionId, settings, true);
+        const metadataAvailable = !Array.isArray(savedResult) && savedResult.metadata;
+        const dbHashList = metadataAvailable ? savedResult.hashes : savedResult;
+        const dbMetaList = metadataAvailable ? savedResult.metadata : [];
+        const existingHashes = new Set(dbHashList);
 
         // Step 2: Build list of messages NOT in DB
         const strategy = settings.chunking_strategy || 'per_message';
@@ -476,6 +482,37 @@ export async function synchronizeChat(settings, batchSize = 5) {
         const keywordLevel = settings.keyword_extraction_level || 'balanced';
         const groupedItems = groupMessagesByStrategy(allMessages, strategy, strategyBatchSize, keywordLevel);
 
+        // REVERSE PASS (ghost deletion): delete DB vectors whose hash is not in the
+        // current chat's grouped-hash set. Covers edited messages (old hash becomes
+        // ghost → deleted → re-vectorized), deleted messages, swipe churn. Excludes
+        // scene chunks (isScene) and summary chunks (isSummary*) — created outside
+        // message grouping, would be mass-deleted otherwise. Metadata unavailable
+        // (no plugin → bare array) → skip, never guess.
+        let ghostsDeleted = 0;
+        if (metadataAvailable) {
+            const currentHashes = new Set(groupedItems.map(g => g.hash));
+            const protectedHashes = new Set();
+            for (const meta of dbMetaList) {
+                if (meta && (meta.isScene === true || meta.isSummaryChunk || meta.isSummary || meta.isSummaryVector)) {
+                    if (meta.hash !== undefined && meta.hash !== null) protectedHashes.add(String(meta.hash));
+                }
+            }
+            const ghosts = dbHashList.filter(h => !currentHashes.has(h) && !protectedHashes.has(String(h)));
+            if (ghosts.length > 0) {
+                try {
+                    await deleteVectorItems(collectionId, ghosts, settings);
+                    for (const h of ghosts) {
+                        const { deleteChunkMetadata } = await import('./collection-metadata.js');
+                        deleteChunkMetadata(String(h));
+                    }
+                    ghostsDeleted = ghosts.length;
+                    console.log(`VectHare: Reverse pass: removed ${ghosts.length} ghost vector(s) (edited/deleted sources)`);
+                } catch (ghostError) {
+                    console.warn('VectHare: Reverse pass failed (non-fatal):', ghostError.message);
+                }
+            }
+        }
+
         // Filter out already vectorized items (by their grouped hash)
         const queue = new Queue();
         for (const item of groupedItems) {
@@ -485,7 +522,7 @@ export async function synchronizeChat(settings, batchSize = 5) {
         }
 
         if (queue.isEmpty()) {
-            return { remaining: 0, messagesProcessed: 0, chunksCreated: 0 };
+            return { remaining: 0, messagesProcessed: 0, chunksCreated: 0, ghostsDeleted, itemsFailed: 0 };
         }
 
         // Step 3: Process batch
@@ -498,6 +535,9 @@ export async function synchronizeChat(settings, batchSize = 5) {
             const item = queue.dequeue();
 
             try {
+                if (abortSignal?.aborted) {
+                    throw Object.assign(new Error('Vectorization stopped by user'), { name: 'AbortError' });
+                }
                 // Prepare item for insertion (add source metadata)
                 const chunks = prepareItemsForInsertion([item]);
 
@@ -512,7 +552,7 @@ export async function synchronizeChat(settings, batchSize = 5) {
                         const progressPercent = (embedded / total) * 100;
                         const phase = progressPercent <= 50 ? 'Embedding' : 'Writing to database';
                         progressTracker.updateCurrentItem(`${label} ${itemsProcessed}/${batchSize} - ${phase}: ${embedded}/${total} chunks`);
-                    });
+                    }, abortSignal);
                     chunksCreated += chunks.length;
 
                     // Register on first successful insert (prevents ghost collections)
@@ -529,7 +569,8 @@ export async function synchronizeChat(settings, batchSize = 5) {
                     }
                 }
             } catch (itemError) {
-                // Log error but continue processing other items
+                // Abort = user Pause/Stop — propagate, don't count as item failure
+                if (itemError?.name === 'AbortError') throw itemError;
                 console.warn(`VectHare: Failed to process item (hash: ${item.hash}, index: ${item.index}):`, itemError.message);
                 itemsFailed++;
                 // Don't rethrow - continue with next item
@@ -549,7 +590,8 @@ export async function synchronizeChat(settings, batchSize = 5) {
             remaining: queue.size,
             messagesProcessed: itemsProcessed,
             chunksCreated,
-            itemsFailed
+            itemsFailed,
+            ghostsDeleted
         };
     } catch (error) {
         console.error('VectHare: Sync failed', error);
@@ -2001,91 +2043,199 @@ export async function rearrangeChat(chat, settings, type) {
 }
 
 /**
- * Vectorizes entire chat
+ * Vectorizes entire chat — persistent, resumable job runner.
+ * Pause = abort + status 'paused'; Stop = abort + status 'stopped'.
+ * Both keep completed work (DB-as-checkpoint; hash-dedup makes resume free).
  * @param {object} settings VectHare settings
  * @param {number} batchSize Batch size
+ * @param {object} [opts] { isResume } — bypass enabled_chats gate on explicit resume
  */
-export async function vectorizeAll(settings, batchSize) {
-    try {
-        if (!settings.enabled_chats) {
-            return;
-        }
+export async function vectorizeAll(settings, batchSize, opts = {}) {
+    const { getChatUUID: getUUID } = await import('./collection-ids.js');
+    const uuid = getUUID();
+    const chatId = getCurrentChatId();
 
-        const chatId = getCurrentChatId();
+    try {
         if (!chatId) {
             toastr.info('No chat selected', 'Vectorization aborted');
             return;
         }
 
-        // Pre-flight check: verify backend is available before starting
+        // Resume path bypasses the enabled_chats gate (explicit user intent)
+        const existingJob = uuid ? getJob(uuid) : undefined;
+        const isResume = !!opts.isResume || !!(existingJob && (existingJob.status === 'paused' || existingJob.status === 'stopped'));
+        if (!settings.enabled_chats && !isResume) {
+            return;
+        }
+
+        // Pre-flight: backend available
         const backendName = settings.vector_backend || 'standard';
-        const backendAvailable = await isBackendAvailable(backendName, settings);
-        if (!backendAvailable) {
-            toastr.error(
-                `Backend "${backendName}" is not available. Check your settings or start the backend service.`,
-                'Vectorization aborted'
-            );
+        if (!(await isBackendAvailable(backendName, settings))) {
+            toastr.error(`Backend "${backendName}" is not available. Check your settings or start the backend service.`, 'Vectorization aborted');
             console.error(`VectHare: Backend ${backendName} failed health check before vectorization`);
             return;
         }
 
-        // Calculate total messages to vectorize
+        // Config fingerprint check (requirement #15): provider/model/strategy changed?
+        const collectionId = getChatCollectionId();
+        const fingerprint = computeConfigFingerprint(settings);
+        const storedFp = existingJob?.configFingerprint;
+        if (storedFp && storedFp !== fingerprint && !isResumeWithSameConfig(storedFp, fingerprint)) {
+            const proceed = await callGenericPopup(
+                '<div style="text-align:left;"><p><strong>Vectorization settings changed</strong> since this chat was last vectorized (provider/model/strategy/batch).</p><p>Existing vectors will be replaced (old ones removed, chat re-vectorized). Continue?</p></div>',
+                POPUP_TYPE.CONFIRM, '', { okButton: 'Continue', cancelButton: 'Cancel' }
+            );
+            if (!proceed) {
+                toastr.info('Vectorization cancelled', 'VectHare');
+                return;
+            }
+        }
+        // helper defined below file-scope
+        function isResumeWithSameConfig() { return false; } // placeholder — mismatch always prompts
+
+        // Create or reuse job
+        const registryKey = `${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}`;
+        const job = existingJob || createJob({ chatUUID: uuid, chatId, collectionId, registryKey, configFingerprint: fingerprint });
+        updateJob(uuid, { status: 'running', pauseReason: undefined, configFingerprint: fingerprint, collectionId, registryKey, chatId });
+
+        // Progress panel + Pause/Stop wiring (progress-tracker gains these in Phase 4;
+        // guard so this works even before that lands)
         const context = getContext();
         const totalMessages = context.chat ? context.chat.filter(x => !x.is_system).length : 0;
+        progressTracker.show(isResume ? 'Resuming Vectorization' : 'Vectorizing Chat', totalMessages, 'Messages');
 
-        // Show progress panel
-        progressTracker.show('Vectorizing Chat', totalMessages, 'Messages');
+        const abortController = new AbortController();
+        if (typeof progressTracker.setCancelHandler === 'function') {
+            progressTracker.setCancelHandler((mode) => {
+                // mode: 'pause' | 'stop' — both keep completed work; only status differs
+                updateJob(uuid, { status: mode === 'pause' ? 'paused' : 'stopped', pauseReason: 'user' });
+                abortController.abort(mode);
+            });
+        }
 
         let finished = false;
         let iteration = 0;
-        let processedCount = 0;
-        let totalChunks = 0;
+        let processedCount = job.counts?.completed || 0;
+        let totalChunks = job.counts?.completed || 0;
+        let totalFailed = job.counts?.failed || 0;
+        let totalGhosts = 0;
+        let consecutiveFailedIterations = 0;
 
-        while (!finished) {
-            if (is_send_press) {
-                toastr.info('Message generation is in progress.', 'Vectorization aborted');
-                progressTracker.complete(false, 'Aborted - message generation in progress');
-                throw new Error('Message generation in progress');
+        try {
+            while (!finished) {
+                if (abortController.signal.aborted) break;
+
+                if (is_send_press) {
+                    toastr.info('Message generation is in progress.', 'Vectorization paused');
+                    updateJob(uuid, { status: 'paused', pauseReason: 'user' });
+                    progressTracker.complete(false, 'Paused - message generation in progress (progress saved)');
+                    return;
+                }
+
+                let result;
+                try {
+                    result = await synchronizeChat(settings, batchSize, abortController.signal);
+                } catch (syncError) {
+                    if (syncError?.name === 'AbortError') break; // handled below
+                    throw syncError;
+                }
+
+                if (result.remaining === -1) {
+                    console.log('VectHare: Vectorization blocked or disabled');
+                    progressTracker.complete(false, 'Blocked or disabled');
+                    updateJob(uuid, { status: 'error', lastError: 'blocked or disabled' });
+                    return;
+                }
+
+                finished = result.remaining <= 0;
+                iteration++;
+
+                processedCount += result.messagesProcessed;
+                totalChunks += result.chunksCreated;
+                totalFailed += result.itemsFailed;
+                totalGhosts += result.ghostsDeleted || 0;
+
+                updateJob(uuid, {
+                    counts: { completed: processedCount, failed: totalFailed },
+                });
+
+                // Sync-stats line (requirement #16) — Phase 4 tracker renders it; log for now
+                console.log(`VectHare sync-stats: completed=${processedCount} failed=${totalFailed} deleted=${totalGhosts}`);
+
+                if (typeof progressTracker.setSyncCounts === 'function') {
+                    progressTracker.setSyncCounts({ changed: processedCount, deleted: totalGhosts, failed: totalFailed });
+                }
+
+                progressTracker.updateProgress(
+                    processedCount,
+                    result.remaining > 0 ? `Processing... ${result.remaining} messages remaining` : 'Finalizing...'
+                );
+                progressTracker.updateChunks(totalChunks);
+
+                console.log(`VectHare: Vectorization iteration ${iteration}, ${result.remaining > 0 ? result.remaining + ' remaining' : 'complete'} (${result.chunksCreated} chunks this batch)`);
+
+                // Auto-pause on repeated total failure (requirement #4):
+                // failed items accumulate naturally, but 3 consecutive iterations with
+                // failures and ZERO progress = provider down → pause, preserve counts.
+                if (result.itemsFailed > 0 && result.messagesProcessed === 0) {
+                    consecutiveFailedIterations++;
+                    if (consecutiveFailedIterations >= 3) {
+                        updateJob(uuid, { status: 'paused', pauseReason: 'connection', lastError: 'embedding provider failing' });
+                        progressTracker.complete(false, 'Embedding provider failing - paused, progress saved');
+                        toastr.warning('Embedding provider failing - vectorization paused. Progress saved; try Resume later.', 'VectHare');
+                        return;
+                    }
+                } else {
+                    consecutiveFailedIterations = 0;
+                }
+
+                if (chatId !== getCurrentChatId()) {
+                    updateJob(uuid, { status: 'paused', pauseReason: 'interrupted' });
+                    progressTracker.complete(false, 'Chat changed during vectorization');
+                    throw new Error('Chat changed');
+                }
             }
 
-            const result = await synchronizeChat(settings, batchSize);
-
-            // Handle disabled/blocked state
-            if (result.remaining === -1) {
-                console.log('VectHare: Vectorization blocked or disabled');
-                progressTracker.complete(false, 'Blocked or disabled');
+            if (abortController.signal.aborted) {
+                // Pause or Stop — both land here; status was already set by the handler
+                const job2 = getJob(uuid);
+                const verb = job2?.status === 'stopped' ? 'Stopped' : 'Paused';
+                progressTracker.complete(false, `${verb} - progress saved (${processedCount} completed, ${totalFailed} failed)`);
+                toastr.info(`${verb} - completed work saved. Resume anytime.`, 'VectHare');
                 return;
             }
 
-            finished = result.remaining <= 0;
-            iteration++;
-
-            // Update progress with actual counts
-            processedCount += result.messagesProcessed;
-            totalChunks += result.chunksCreated;
-
-            progressTracker.updateProgress(
-                processedCount,
-                result.remaining > 0 ? `Processing... ${result.remaining} messages remaining` : 'Finalizing...'
-            );
-            progressTracker.updateChunks(totalChunks);
-
-            console.log(`VectHare: Vectorization iteration ${iteration}, ${result.remaining > 0 ? result.remaining + ' remaining' : 'complete'} (${result.chunksCreated} chunks this batch)`);
-
-            if (chatId !== getCurrentChatId()) {
-                progressTracker.complete(false, 'Chat changed during vectorization');
-                throw new Error('Chat changed');
+            updateJob(uuid, { status: 'completed' });
+            deleteJob(uuid); // completed — clean up
+            if (totalFailed > 0) {
+                progressTracker.complete(true, `Vectorized ${processedCount} messages (${totalChunks} chunks, ${totalFailed} failed, ${totalGhosts} stale removed)`);
+                toastr.warning(`Chat vectorized with ${totalFailed} item(s) failed - see progress panel`, 'VectHare');
+            } else {
+                progressTracker.complete(true, `Vectorized ${processedCount} messages (${totalChunks} chunks${totalGhosts ? `, ${totalGhosts} stale removed` : ''})`);
+                toastr.success('Chat vectorized successfully', 'VectHare');
             }
-        }
+            console.log(`VectHare: ✅ Vectorization complete after ${iteration} iterations${totalFailed > 0 ? ` (${totalFailed} items failed)` : ''}`);
+            document.dispatchEvent(new CustomEvent('vecthare:sync-updated'));
 
-        progressTracker.complete(true, `Vectorized ${processedCount} messages (${totalChunks} chunks)`);
-        toastr.success('Chat vectorized successfully', 'VectHare');
-        console.log(`VectHare: ✅ Vectorization complete after ${iteration} iterations`);
+        } catch (innerError) {
+            if (innerError?.name === 'AbortError') {
+                const job2 = getJob(uuid);
+                const verb = job2?.status === 'stopped' ? 'Stopped' : 'Paused';
+                progressTracker.complete(false, `${verb} - progress saved`);
+                return;
+            }
+            throw innerError;
+        }
     } catch (error) {
         console.error('VectHare: Failed to vectorize all', error);
+        if (uuid) updateJob(uuid, { status: 'error', lastError: error.message });
         progressTracker.addError(error.message);
         progressTracker.complete(false, 'Vectorization failed');
         toastr.error(`Vectorization failed: ${error.message}`, 'VectHare');
+    } finally {
+        if (typeof progressTracker.clearCancelHandler === 'function') {
+            progressTracker.clearCancelHandler();
+        }
     }
 }
 

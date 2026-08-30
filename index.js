@@ -10,6 +10,7 @@
  * ============================================================================
  */
 
+import * as vectorizationJobs from './core/vectorization-jobs.js';
 import {
     eventSource,
     event_types,
@@ -262,6 +263,9 @@ jQuery(async () => {
         console.log(`VectHare: Migrated ${migrationResult.migrated} old collection enabled keys`);
     }
 
+    // Crash reinterpretation: jobs found 'running' at load have no live process
+    vectorizationJobs.markInterruptedOnStartup();
+
     // Render UI
     renderSettings('extensions_settings2', settings, {
         onVectorizeAll: onVectorizeAllClick,
@@ -324,22 +328,37 @@ jQuery(async () => {
     eventSource.on(event_types.MESSAGE_SWIPED, onChatEvent);
     // When a chat is deleted, purge its vectors (not full purge, just that chat)
     eventSource.on(event_types.CHAT_DELETED, async (chatId) => {
-        if (chatId) {
-            const collectionId = getChatCollectionId(chatId);
-            if (collectionId) {
-                await purgeVectorIndex(collectionId, settings);
-                console.log(`VectHare: Purged vectors for deleted chat: ${chatId}`);
-            }
+        if (!chatId) return;
+        // Job store is the reliable map (getChatCollectionId(chatId) misreads chatId
+        // as a chatUUID and pairs it with the CURRENT chat's character name).
+        const job = vectorizationJobs.getJobByChatId(chatId);
+        if (job) {
+            await purgeVectorIndex(job.collectionId, settings);
+            vectorizationJobs.deleteJob(job.chatUUID);
+            console.log(`VectHare: Purged vectors for deleted chat via job record: ${job.collectionId}`);
+            return;
         }
+        // Fallbacks for pre-job collections
+        const legacyId = getLegacyChatCollectionId
+            ? getLegacyChatCollectionId(chatId)
+            : null;
+        if (legacyId) await purgeVectorIndex(legacyId, settings);
+        const guessedId = getChatCollectionId(chatId);
+        if (guessedId) await purgeVectorIndex(guessedId, settings);
+        console.log(`VectHare: Purged vectors for deleted chat (best-effort): ${chatId}`);
     });
     eventSource.on(event_types.GROUP_CHAT_DELETED, async (chatId) => {
-        if (chatId) {
-            const collectionId = getChatCollectionId(chatId);
-            if (collectionId) {
-                await purgeVectorIndex(collectionId, settings);
-                console.log(`VectHare: Purged vectors for deleted group chat: ${chatId}`);
-            }
+        // Same logic
+        if (!chatId) return;
+        const job = vectorizationJobs.getJobByChatId(chatId);
+        if (job) {
+            await purgeVectorIndex(job.collectionId, settings);
+            vectorizationJobs.deleteJob(job.chatUUID);
+            return;
         }
+        const guessedId = getChatCollectionId(chatId);
+        if (guessedId) await purgeVectorIndex(guessedId, settings);
+        console.log(`VectHare: Purged vectors for deleted group chat (best-effort): ${chatId}`);
     });
 
     // When WebLLM extension is loaded, refresh the model list
