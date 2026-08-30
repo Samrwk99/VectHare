@@ -10,6 +10,7 @@
  * ============================================================================
  */
 
+import { getJob } from '../core/vectorization-jobs.js';
 import { saveSettingsDebounced, getCurrentChatId, eventSource, event_types } from '../../../../../script.js';
 import { extension_settings, openThirdPartyExtensionMenu } from '../../../../extensions.js';
 import { writeSecret, SECRET_KEYS, secret_state, readSecretState } from '../../../../secrets.js';
@@ -25,6 +26,7 @@ import { getChatCollectionId } from '../core/chat-vectorization.js';
 import { doesChatHaveVectors } from '../core/collection-loader.js';
 import { getModelField } from '../core/providers.js';
 import { getChunkingStrategies } from '../core/content-types.js';
+import { callGenericPopup, POPUP_TYPE } from '../../../../popup.js';
 
 /**
  * Applies the current settings snapshot without overwriting collection metadata
@@ -705,7 +707,7 @@ export function renderSettings(containerId, settings, callbacks) {
                                 <span>Enable Auto-Sync</span>
                             </label>
                             <small class="vecthare_hint">Automatically vectorize new chat messages</small>
-
+<div id="vecthare_autosync_status" style="margin-top: 6px; font-size: 0.82em; opacity: 0.85;"></div>
                             <!-- Collection lock moved to Database Browser (per-collection settings) -->
 
                             <label for="vecthare_chunking_strategy" style="margin-top: 12px;">
@@ -1336,6 +1338,34 @@ export async function loadWebLlmModels(settings) {
 }
 
 /**
+ * Resume prompt (#18): if an interrupted/paused/stopped job exists for the current
+ * chat, offer Continue. Cancel = discard the PROMPT only (vectors stay; job deleted
+ * so it won't nag again).
+ */
+export async function checkResumableJobs() {
+    const { getJob, deleteJob } = await import('../core/vectorization-jobs.js');
+    const uuid = getChatUUID();
+    if (!uuid) return;
+    const job = getJob(uuid);
+    if (!job || (job.status !== 'paused' && job.status !== 'stopped')) return;
+
+    const completed = job.counts?.completed || 0;
+    const failed = job.counts?.failed || 0;
+    const proceed = await callGenericPopup(
+        `<div style="text-align:left;"><p><strong>Unfinished vectorization found</strong> for this chat.</p><p>${completed} message(s) complete${failed ? `, ${failed} failed` : ''}. Continue where it left off?</p></div>`,
+        POPUP_TYPE.CONFIRM, '', { okButton: 'Continue', cancelButton: 'Discard' }
+    );
+    if (proceed) {
+        toastr.info('Resuming vectorization...', 'VectHare');
+        const { vectorizeAll } = await import('../core/chat-vectorization.js');
+        await vectorizeAll(extension_settings.vecthare, undefined, { isResume: true });
+    } else {
+        deleteJob(uuid);
+        toastr.info('Resume prompt dismissed - completed vectors kept', 'VectHare');
+    }
+}
+
+/**
  * Updates the WebLLM status display based on availability
  * @returns {boolean} True if WebLLM is available
  */
@@ -1344,17 +1374,31 @@ export async function loadWebLlmModels(settings) {
  * Call this when chat changes to keep UI in sync
  * @param {object} settings - VectHare settings object (unused, kept for API compatibility)
  */
-export function refreshAutoSyncCheckbox(settings) {
+export async function refreshAutoSyncCheckbox(settings) {
     const collectionId = getChatCollectionId();
     if (!collectionId) {
         $('#vecthare_autosync_enabled').prop('checked', false);
+        $('#vecthare_autosync_status')?.html?.('');
         return;
     }
-    // Dynamically import to avoid circular dependency
-    import('../core/collection-metadata.js').then(({ isCollectionAutoSyncEnabled }) => {
-        const isEnabled = isCollectionAutoSyncEnabled(collectionId);
-        $('#vecthare_autosync_enabled').prop('checked', isEnabled);
-    });
+    const { isCollectionAutoSyncEnabled } = await import('../core/collection-metadata.js');
+    const isEnabled = isCollectionAutoSyncEnabled(collectionId);
+    $('#vecthare_autosync_enabled').prop('checked', isEnabled);
+
+    // Status line: chat N msgs · vectorized M chunks · job info
+    try {
+        const { getSavedHashes } = await import('../core/core-vector-api.js');
+        const uuid = getChatUUID();
+        const context = getContext();
+        const chatCount = (context?.chat || []).filter(m => m.mes && !m.is_system).length;
+        let dbCount = 0;
+        try { dbCount = (await getSavedHashes(collectionId, settings)).length; } catch (_) {}
+        const job = uuid ? getJob(uuid) : undefined;
+        const parts = [`chat: ${chatCount} msgs`, `vectorized: ${dbCount} chunks`];
+        if (job) parts.push(`status: ${job.status}`, `failed: ${job.counts?.failed || 0}`);
+        const el = document.getElementById('vecthare_autosync_status');
+        if (el) el.textContent = parts.join(' · ');
+    } catch (_) {}
 }
 
 export function updateWebLlmStatus() {
@@ -1689,6 +1733,7 @@ function bindSettingsEvents(settings, callbacks) {
                 toastr.success('Auto-sync enabled for this chat');
             }
             console.log(`VectHare: Chat auto-sync for ${collectionId}: ${enabling ? 'enabled' : 'disabled'}`);
+            document.addEventListener('vecthare:sync-updated', () => refreshAutoSyncCheckbox(settings));
         });
 
         // Collection lock handled inside Database Browser per-collection settings

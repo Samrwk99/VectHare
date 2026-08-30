@@ -10,6 +10,7 @@
  * ============================================================================
  */
 
+import { checkResumableJobs } from './ui/ui-manager.js';
 import * as vectorizationJobs from './core/vectorization-jobs.js';
 import {
     eventSource,
@@ -316,6 +317,8 @@ jQuery(async () => {
                 { timeOut: 10000 }
             );
         }
+        // Resume prompt after discovery so collection IDs resolve
+        try { await checkResumableJobs(); } catch (e) { console.warn('VectHare: resume prompt failed:', e); }
     })();
 
     // Register event handlers
@@ -374,6 +377,15 @@ jQuery(async () => {
     eventSource.on(event_types.CHAT_CHANGED, () => {
         console.log('VectHare: Chat changed, refreshing UI state');
         refreshAutoSyncCheckbox(settings);
+    });
+
+    // new handler
+    let _resumeCheckTimer = null;
+    eventSource.on(event_types.CHAT_CHANGED, () => {
+        clearTimeout(_resumeCheckTimer);
+        _resumeCheckTimer = setTimeout(async () => {
+            try { await checkResumableJobs(); } catch (e) { console.warn('VectHare: resume check failed:', e); }
+        }, 2000);
     });
 
     console.log('VectHare: ✅ Initialized successfully');

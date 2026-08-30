@@ -457,4 +457,53 @@
         grid-template-columns: repeat(2, 1fr);
     }
 }
+/* Pause/Stop buttons (Phase 4) */
+.vecthare-progress-actions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
 
+.vecthare-progress-pause,
+.vecthare-progress-stop {
+    background: none;
+    border: none;
+    color: var(--SmartThemeBodyColor);
+    font-size: 1em;
+    cursor: pointer;
+    padding: 4px 10px;
+    border-radius: 6px;
+    transition: all 0.2s ease;
+    opacity: 0.85;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.vecthare-progress-pause:hover {
+    opacity: 1;
+    background: color-mix(in srgb, var(--vecthare-primary) 25%, transparent);
+}
+
+.vecthare-progress-stop:hover {
+    opacity: 1;
+    color: var(--vecthare-danger);
+    background: color-mix(in srgb, var(--vecthare-danger) 15%, transparent);
+}
+
+.vecthare-progress-pause:disabled,
+.vecthare-progress-stop:disabled {
+    opacity: 0.4;
+    pointer-events: none;
+}
+
+.vecthare-progress-sync-counts {
+    text-align: center;
+    padding: 6px 12px;
+    margin-bottom: 10px;
+    background: color-mix(in srgb, var(--vecthare-primary) 8%, var(--SmartThemeBlurTintColor));
+    border: 1px solid color-mix(in srgb, var(--vecthare-primary) 18%, var(--SmartThemeBorderColor));
+    border-radius: 8px;
+    font-size: 0.85em;
+    color: var(--vecthare-primary-bright);
+}
