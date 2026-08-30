@@ -255,6 +255,26 @@ function filterSceneDisabledChunks(chunks) {
 }
 
 /**
+ * Filters out chunks the user manually disabled via the chunk visualizer's per-chunk
+ * Enabled toggle / bulk enable-disable (persisted as chunk metadata `disabled: true`,
+ * the same field chunk-groups.js already filters on).
+ * @param {object[]} chunks Chunks to filter
+ * @returns {object[]} Chunks not manually disabled
+ */
+function filterManuallyDisabledChunks(chunks) {
+    const filtered = chunks.filter(chunk => {
+        const meta = getChunkMetadata(chunk.hash);
+        return !meta?.disabled;
+    });
+
+    if (filtered.length !== chunks.length) {
+        console.log(`VectHare: Manual-disable filtering: ${chunks.length} → ${filtered.length} chunks (${chunks.length - filtered.length} manually disabled)`);
+    }
+
+    return filtered;
+}
+
+/**
  * Applies chunk-level conditions to filter results
  * @param {object[]} chunks Chunks with metadata
  * @param {object[]} chat Chat messages for context
@@ -262,8 +282,9 @@ function filterSceneDisabledChunks(chunks) {
  * @returns {Promise<object[]>} Filtered chunks
  */
 async function applyChunkConditions(chunks, chat, settings) {
-    // First filter out chunks disabled by scenes
+    // First filter out chunks disabled by scenes or manually disabled by the user
     let filtered = filterSceneDisabledChunks(chunks);
+    filtered = filterManuallyDisabledChunks(filtered);
 
     // Check if any chunks have conditions (from chunk metadata)
     const chunksWithConditions = filtered.map(chunk => {

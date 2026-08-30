@@ -61,7 +61,8 @@ let filterBy = 'all'; // 'all', 'enabled', 'disabled', 'conditions', 'blind'
 let searchQuery = '';
 let bulkSelectMode = false;
 let selectedHashes = new Set();
-let hasUnsavedChanges = false;
+let hasUnsavedChanges = false; // true when pendingChanges (metadata edits) is non-empty
+let textDirty = false; // true when the contenteditable text box differs from the original text
 let pendingChanges = new Map(); // hash -> {keywords, enabled, conditions, etc.}
 let plaintextKeywordMode = false; // Toggle for plaintext keyword editing
 let activeTab = 'chunks'; // 'chunks' or 'scenes'
@@ -128,10 +129,15 @@ function getChunkData(chunk) {
         score: chunk.score || 1,
         similarity: chunk.similarity || 1,
         messageAge: chunk.messageAge,
-        enabled: stored.enabled !== false,
+        // The retrieval pipeline (filterManuallyDisabledChunks, chunk-groups.js) reads
+        // a `disabled` field, not `enabled` - translate at this storage boundary.
+        enabled: stored.disabled !== true,
         keywords: normalizeKeywords(keywords),
         conditions: stored.conditions || { enabled: false, logic: 'AND', rules: [] },
-        chunkLinks: stored.chunkLinks || [],
+        // Chunk links are persisted under the `links` key as {target, type} - the same
+        // shape processChunkLinks() and chunk-groups.js use. `chunkLinks` is just this
+        // module's in-memory name for the same array.
+        chunkLinks: stored.links || [],
         summaries: stored.summaries || [],
         temporallyBlind: stored.temporallyBlind || false,
         name: stored.name || null,
@@ -263,6 +269,7 @@ export function openVisualizer(results, collectionId, settings) {
     selectedHashes.clear();
     pendingChanges.clear();
     hasUnsavedChanges = false;
+    textDirty = false;
     activeTab = 'chunks'; // Reset to chunks tab on open
 
     // Process chunks - add unique identifier for each chunk
@@ -284,12 +291,13 @@ export function openVisualizer(results, collectionId, settings) {
 }
 
 export function closeVisualizer() {
-    if (hasUnsavedChanges) {
-        if (!confirm('You have unsaved text changes. Are you sure you want to close?')) {
+    if (hasUnsavedChanges || textDirty) {
+        if (!confirm('You have unsaved changes. Are you sure you want to close?')) {
             return;
         }
     }
     hasUnsavedChanges = false;
+    textDirty = false;
     $('#vecthare_visualizer_modal').fadeOut(200);
     currentResults = null;
     currentCollectionId = null;
@@ -1542,13 +1550,19 @@ function renderDetailPanel() {
                 </div>
                 <div class="vecthare-detail-links">
                     <div class="vecthare-links-list" id="vecthare_links_list">
-                        ${(data.chunkLinks || []).map((link, i) => `
-                            <div class="vecthare-link-item ${link.mode}" data-index="${i}">
-                                <span class="vecthare-link-mode-badge ${link.mode}">${link.mode === 'force' ? '🔗 Force' : '〰️ Soft'}</span>
-                                <span class="vecthare-link-target" title="Target hash: ${link.targetHash}">${link.targetHash.toString().substring(0, 12)}...</span>
+                        ${(data.chunkLinks || []).map((link, i) => {
+                            // Stored/read shape is {target, type: 'hard'|'soft'} (matches
+                            // processChunkLinks()). "hard" is shown to the user as "Force".
+                            const cssClass = link.type === 'hard' ? 'force' : 'soft';
+                            const label = link.type === 'hard' ? '🔗 Force' : '〰️ Soft';
+                            return `
+                            <div class="vecthare-link-item ${cssClass}" data-index="${i}">
+                                <span class="vecthare-link-mode-badge ${cssClass}">${label}</span>
+                                <span class="vecthare-link-target" title="Target hash: ${link.target}">${String(link.target).substring(0, 12)}...</span>
                                 <i class="fa-solid fa-xmark vecthare-link-item-remove"></i>
                             </div>
-                        `).join('')}
+                        `;
+                        }).join('')}
                     </div>
                     <div class="vecthare-links-help">
                         <span class="vecthare-help-badge force">Force</span> = Target chunk MUST appear if this chunk appears<br>
@@ -1698,11 +1712,12 @@ function bindEvents() {
             return;
         }
         // Warn if switching chunks with unsaved changes
-        if (hasUnsavedChanges && uid !== selectedChunkId) {
-            if (!confirm('You have unsaved text changes. Switch chunks anyway?')) {
+        if ((hasUnsavedChanges || textDirty) && uid !== selectedChunkId) {
+            if (!confirm('You have unsaved changes. Switch chunks anyway?')) {
                 return;
             }
             hasUnsavedChanges = false;
+            textDirty = false;
         }
         selectedChunkId = uid;
         renderChunkList();
@@ -1741,13 +1756,17 @@ function bindDetailEvents() {
     }, 300));
 
     // Inline text editing - track changes
+    // Track text changes via a dedicated `textDirty` flag, separate from
+    // `hasUnsavedChanges` (which tracks pendingChanges metadata edits). The old single
+    // shared flag meant typing then deleting back to the original silently discarded
+    // pending keyword/condition/link edits without ever asking the user.
     $('#vecthare_chunk_text').on('input', function() {
         const newText = $(this).text().trim();
         if (newText !== originalText) {
-            hasUnsavedChanges = true;
+            textDirty = true;
             $('#vecthare_save_text').removeClass('vecthare-hidden');
         } else {
-            hasUnsavedChanges = false;
+            textDirty = false;
             $('#vecthare_save_text').addClass('vecthare-hidden');
         }
     });
@@ -1778,11 +1797,22 @@ function bindDetailEvents() {
                 saveChunkMetadata(String(newHash), { ...oldMeta });
             }
 
+            // Re-key any pending metadata edit for this chunk from the old hash to the
+            // new hash before reassigning chunk.hash below. Otherwise saveAllChanges()
+            // would later call saveChunkMetadata(oldHash, ...) on a hash that no longer
+            // exists, silently losing those edits.
+            if (pendingChanges.has(chunk.hash)) {
+                const pending = pendingChanges.get(chunk.hash);
+                pendingChanges.delete(chunk.hash);
+                pendingChanges.set(newHash, pending);
+            }
+
             // Update local state
             chunk.hash = newHash;
             chunk.text = newText;
             chunk.data.text = newText;
             hasUnsavedChanges = false;
+            textDirty = false;
 
             renderChunkList();
             renderDetailPanel();
@@ -1794,11 +1824,12 @@ function bindDetailEvents() {
         }
     });
 
-    // Enabled toggle - save immediately (no pending changes, direct write)
+    // Enabled toggle - save immediately. Persist as `disabled` (the field the
+    // retrieval pipeline actually filters on), not `enabled`.
     $('#vecthare_detail_enabled').on('change', function() {
         const enabled = $(this).is(':checked');
         const existing = getChunkMetadata(chunk.hash) || {};
-        saveChunkMetadata(chunk.hash, { ...existing, disabled: !enabled, enabled });
+        saveChunkMetadata(chunk.hash, { ...existing, disabled: !enabled });
         chunk.data.enabled = enabled;
         renderChunkList();
     });
@@ -1928,7 +1959,8 @@ function bindDetailEvents() {
     $('.vecthare-link-item-remove').on('click', function() {
         const index = $(this).closest('.vecthare-link-item').data('index');
         chunk.data.chunkLinks.splice(index, 1);
-        updateChunkData(chunk.hash, { chunkLinks: chunk.data.chunkLinks });
+        // Persist under the `links` key - the same one processChunkLinks() reads.
+        updateChunkData(chunk.hash, { links: chunk.data.chunkLinks });
         renderDetailPanel();
     });
 
@@ -2212,14 +2244,20 @@ function openLinkEditor(chunk) {
             return;
         }
 
+        // processChunkLinks() checks link.type === 'hard'|'soft', not the UI's
+        // 'force'|'soft' radio values - translate here so the type matches.
+        const type = mode === 'force' ? 'hard' : 'soft';
+
         // Check for duplicate
-        if (chunk.data.chunkLinks.some(l => l.targetHash === targetHash)) {
+        if (chunk.data.chunkLinks.some(l => l.target === targetHash)) {
             toastr.warning('Link to this chunk already exists', 'VectHare');
             return;
         }
 
-        chunk.data.chunkLinks.push({ targetHash, mode });
-        updateChunkData(chunk.hash, { chunkLinks: chunk.data.chunkLinks });
+        // Stored shape is {target, type}, matching chunk-groups.js's generated links
+        // and what processChunkLinks() reads - not {targetHash, mode}.
+        chunk.data.chunkLinks.push({ target: String(targetHash), type });
+        updateChunkData(chunk.hash, { links: chunk.data.chunkLinks });
 
         overlay.remove();
         renderDetailPanel();

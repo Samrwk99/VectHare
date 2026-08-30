@@ -343,7 +343,11 @@ export function processChunkLinks(chunks, chunkMetadataMap, softBoost = 0.15) {
 
     // First pass: collect all hard links and soft boosts
     for (const chunk of chunks) {
-        const meta = chunkMetadataMap[chunk.hash];
+        // chunkMetadataMap is a Map keyed by String(hash) — callers
+        // (mergeVirtualLinks, both Map-built call sites in chat-vectorization.js)
+        // all construct it as a Map, so bracket access always returned undefined
+        // and manually-added links never fired.
+        const meta = chunkMetadataMap.get(String(chunk.hash));
         if (!meta?.links || meta.links.length === 0) continue;
 
         for (const link of meta.links) {

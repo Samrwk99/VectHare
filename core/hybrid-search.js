@@ -412,9 +412,12 @@ function performBM25Search(results, query, options = {}) {
         return results;
     }
 
-    // Get BM25 scores for all results
+    // Must use the same tokenize() (stemming + stopword removal) that
+    // createBM25Scorer used to build the index, or query terms systematically
+    // fail to match the stemmed index terms and every score is 0.
+    const queryTokens = tokenize(query);
     const scoredResults = results.map((result, idx) => {
-        const bm25Score = scorer.scoreDocument(tokenize(query, options), idx);
+        const bm25Score = scorer.scoreDocument(queryTokens, idx);
         return {
             ...result,
             bm25Score
