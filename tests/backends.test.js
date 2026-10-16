@@ -747,6 +747,75 @@ describe('QdrantBackend', () => {
         });
     });
 
+    describe('embedding provider endpoint forwarding', () => {
+        it('uses the configured llama.cpp URL for Qdrant inserts, queries, hybrid searches, and re-embedding', async () => {
+            const settings = {
+                ...defaultSettings,
+                source: 'llamacpp',
+                use_alt_endpoint: true,
+                alt_endpoint_url: 'http://127.0.0.1:9977',
+                qdrant_use_cloud: true,
+                qdrant_url: 'https://example.qdrant.io',
+            };
+            fetchMock.mockResolvedValue(mockFetchResponse({ results: [] }));
+
+            await backend.insertVectorItems('vh:chat:test', sampleItems, settings);
+            await backend.queryCollection('vh:chat:test', 'hello', 5, settings);
+            await backend.queryMultipleCollections(['vh:chat:test'], 'hello', 5, 0, settings);
+            await backend.hybridQuery('vh:chat:test', 'hello', 5, settings);
+            await backend.updateChunkText('vh:chat:test', 12345, 'updated text', settings);
+
+            const requestUrls = fetchMock.mock.calls.map(([url]) => url);
+            expect(requestUrls).toEqual([
+                '/api/plugins/similharity/chunks/insert',
+                '/api/plugins/similharity/chunks/query',
+                '/api/plugins/similharity/chunks/query',
+                '/api/plugins/similharity/chunks/hybrid-query',
+                '/api/plugins/similharity/chunks/12345/text',
+            ]);
+            const payloads = fetchMock.mock.calls.map(([, options]) => JSON.parse(options.body));
+            for (const payload of payloads) {
+                expect(payload.apiUrl).toBe('http://127.0.0.1:9977');
+                expect(payload.source).toBe('llamacpp');
+                expect(payload.apiUrl).not.toBe(settings.qdrant_url);
+            }
+        });
+
+        it('uses the SillyTavern llama.cpp URL when the override is disabled', async () => {
+            fetchMock.mockResolvedValueOnce(mockFetchResponse({ results: [] }));
+            await backend.queryCollection('test', 'hello', 5, {
+                ...defaultSettings,
+                source: 'llamacpp',
+                use_alt_endpoint: false,
+                alt_endpoint_url: 'http://127.0.0.1:9977',
+            });
+            const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+            expect(body.apiUrl).toBe('http://localhost:8080');
+        });
+
+        it('preserves Ollama endpoint, model and keep flags', async () => {
+            fetchMock.mockResolvedValueOnce(mockFetchResponse({ results: [] }));
+            await backend.queryCollection('test', 'hello', 5, {
+                ...defaultSettings,
+                source: 'ollama',
+                use_alt_endpoint: true,
+                alt_endpoint_url: 'http://127.0.0.1:11499',
+                ollama_keep: true,
+            });
+            const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+            expect(body.apiUrl).toBe('http://127.0.0.1:11499');
+            expect(body.model).toBe('mxbai-embed-large');
+            expect(body.keep).toBe(true);
+        });
+
+        it('does not add an embedding URL for Transformers', async () => {
+            fetchMock.mockResolvedValueOnce(mockFetchResponse({ results: [] }));
+            await backend.queryCollection('test', 'hello', 5, defaultSettings);
+            const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+            expect(body.apiUrl).toBeUndefined();
+        });
+    });
+
     describe('supportsHybridSearch', () => {
         it('should return true', () => {
             expect(backend.supportsHybridSearch()).toBe(true);
