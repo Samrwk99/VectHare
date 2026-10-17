@@ -40,6 +40,16 @@ import {
 
 // Plugin detection state
 let pluginAvailable = null;
+let pluginCheckedAt = 0;
+const PLUGIN_HEALTHY_TTL_MS = 60_000;
+const PLUGIN_FAILED_TTL_MS = 10_000;
+
+/** Allows explicit retry following plugin installation / restart. */
+export function resetPluginAvailability() {
+    pluginAvailable = null;
+    pluginCheckedAt = 0;
+    pluginCollectionData = null;
+}
 
 /**
  * Gets or initializes the collection registry
@@ -297,9 +307,12 @@ function getCollectionDisplayName(collectionId, metadata) {
  * @returns {Promise<boolean>} True if plugin is available
  */
 async function checkPluginAvailable() {
-    if (pluginAvailable !== null) {
+    const maxAge = pluginAvailable ? PLUGIN_HEALTHY_TTL_MS : PLUGIN_FAILED_TTL_MS;
+    if (pluginAvailable !== null && Date.now() - pluginCheckedAt < maxAge) {
         return pluginAvailable;
     }
+    // A failed probe must not permanently disable discovery; retry after TTL.
+    pluginCheckedAt = Date.now();
 
     try {
         const response = await fetch('/api/plugins/similharity/health', {
@@ -340,6 +353,10 @@ async function discoverViaPlugin(settings) {
         });
 
         if (!response.ok) {
+            // A failed discovery means this cached plugin availability is stale.
+            // Retry from native discovery instead of presenting zero collections.
+            pluginAvailable = false;
+            pluginCheckedAt = Date.now();
             console.warn(`⚠️ VectHare: Plugin collections endpoint failed (status: ${response.status})`);
             console.log('   💡 Make sure the Similharity plugin is installed and running');
             return [];
@@ -613,7 +630,10 @@ export async function discoverExistingCollections(settings) {
 
     if (hasPlugin) {
         console.log('VectHare: Using plugin for collection discovery');
-        return await discoverViaPlugin(settings);
+        const found = await discoverViaPlugin(settings);
+        if (pluginAvailable === true) return found; // an empty but healthy plugin is valid
+        console.warn('VectHare: Plugin discovery failed, retaining registry and trying native fallback');
+        return await discoverViaFallback(settings);
     } else {
         console.log('VectHare: Plugin not available, using fallback discovery');
         return await discoverViaFallback(settings);

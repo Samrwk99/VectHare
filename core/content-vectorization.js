@@ -49,6 +49,12 @@ export async function vectorizeContent({ contentType, source, settings }) {
         throw new Error(`Unknown content type: ${contentType}`);
     }
 
+    // Per Scene is exclusively marker-driven, not a batch-vectorization strategy.
+    // Reject before any collection or vector is changed; other strategies stay intact.
+    if (contentType === 'chat' && settings?.strategy === 'per_scene') {
+        throw new Error('Per Scene is marker-driven: mark scene boundaries in chat instead of vectorizing the full chat here.');
+    }
+
     const sourceName = source.name || source.filename || source.id || contentType;
     progressTracker.show(`Vectorizing ${type.label || contentType}`, 4, 'Steps');
     progressTracker.updateCurrentItem(sourceName);

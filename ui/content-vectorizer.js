@@ -53,6 +53,7 @@ export function openContentVectorizer(initialType = null, replaceCollectionKey =
     currentSettings = initialType ? { ...getContentTypeDefaults(initialType) } : {};
     sourceData = null;
 
+    $(document).off('.vecthareContentVectorizer');
     createModal();
     bindEvents();
 
@@ -76,6 +77,7 @@ export function openContentVectorizer(initialType = null, replaceCollectionKey =
  * Closes the modal
  */
 export function closeContentVectorizer() {
+    $(document).off('.vecthareContentVectorizer');
     $('#vecthare_content_vectorizer_modal').fadeOut(200, function() {
         $(this).remove();
     });
@@ -687,9 +689,20 @@ function updateChunkingSection(type) {
     strategySelect.empty();
 
     strategies.forEach(s => {
+        // Scene markers own scene creation. The Content Vectorizer cannot
+        // reconstruct marked boundaries and must not offer a zero-chunk run.
+        if (type.id === 'chat' && s.id === 'per_scene') return;
         const selected = s.id === selectedStrategyId;
         strategySelect.append(`<option value="${s.id}" ${selected ? 'selected' : ''}>${s.name}</option>`);
     });
+    // If a saved setting references marker-only Per Scene (or an unavailable
+    // strategy), visibly select the real fallback AND update the effective
+    // settings; otherwise the UI and the actual operation disagree.
+    if (!strategies.some(item => item.id === selectedStrategyId &&
+        !(type.id === 'chat' && item.id === 'per_scene'))) {
+        strategySelect.val(type.defaultStrategy);
+        currentSettings.strategy = type.defaultStrategy;
+    }
 
     // Update description
     const currentStrategy = getChunkingStrategy(strategySelect.val());
@@ -1148,26 +1161,26 @@ function bindEvents() {
     });
 
     // Scope selection
-    $(document).on('change', 'input[name="vecthare_cv_scope"]', function() {
+    $(document).on('change.vecthareContentVectorizer', 'input[name="vecthare_cv_scope"]', function() {
         currentSettings.scope = $(this).val();
         $('.vecthare-cv-scope-option').removeClass('selected');
         $(this).closest('.vecthare-cv-scope-option').addClass('selected');
     });
 
     // Keyword level dropdown
-    $(document).on('change', '#vecthare_cv_keyword_level', function() {
+    $(document).on('change.vecthareContentVectorizer', '#vecthare_cv_keyword_level', function() {
         currentSettings.keywordLevel = $(this).val();
     });
 
     // Keyword base weight
-    $(document).on('change', '#vecthare_cv_keyword_weight', function() {
+    $(document).on('change.vecthareContentVectorizer', '#vecthare_cv_keyword_weight', function() {
         const value = parseFloat($(this).val());
         currentSettings.keywordBaseWeight = isNaN(value) ? 1.5 : Math.min(3.0, Math.max(0.01, value));
         $(this).val(currentSettings.keywordBaseWeight);
     });
 
     // Temporal weighting enable/disable
-    $(document).on('change', '#vecthare_cv_temporal_decay', function() {
+    $(document).on('change.vecthareContentVectorizer', '#vecthare_cv_temporal_decay', function() {
         const isEnabled = $(this).prop('checked');
         if (!currentSettings.temporalDecay) {
             currentSettings.temporalDecay = { enabled: false, type: 'decay', mode: 'exponential' };
@@ -1179,7 +1192,7 @@ function bindEvents() {
     });
 
     // Temporal weighting type toggle (decay vs nostalgia)
-    $(document).on('change', 'input[name="vecthare_cv_decay_type"]', function() {
+    $(document).on('change.vecthareContentVectorizer', 'input[name="vecthare_cv_decay_type"]', function() {
         const type = $(this).val();
         if (!currentSettings.temporalDecay) {
             currentSettings.temporalDecay = { enabled: true, type: 'decay', mode: 'exponential' };
@@ -1194,7 +1207,7 @@ function bindEvents() {
     });
 
     // Temporal weighting curve toggle (exponential vs linear)
-    $(document).on('change', 'input[name="vecthare_cv_decay_mode"]', function() {
+    $(document).on('change.vecthareContentVectorizer', 'input[name="vecthare_cv_decay_mode"]', function() {
         const mode = $(this).val();
         if (!currentSettings.temporalDecay) {
             currentSettings.temporalDecay = { enabled: true, type: 'decay', mode: 'exponential' };
@@ -1209,25 +1222,25 @@ function bindEvents() {
     });
 
     // Temporal weighting numeric inputs
-    $(document).on('change', '#vecthare_cv_decay_halflife', function() {
+    $(document).on('change.vecthareContentVectorizer', '#vecthare_cv_decay_halflife', function() {
         if (!currentSettings.temporalDecay) currentSettings.temporalDecay = {};
         currentSettings.temporalDecay.halfLife = parseInt($(this).val()) || 50;
     });
-    $(document).on('change', '#vecthare_cv_decay_rate', function() {
+    $(document).on('change.vecthareContentVectorizer', '#vecthare_cv_decay_rate', function() {
         if (!currentSettings.temporalDecay) currentSettings.temporalDecay = {};
         currentSettings.temporalDecay.linearRate = parseFloat($(this).val()) || 0.01;
     });
-    $(document).on('change', '#vecthare_cv_decay_min', function() {
+    $(document).on('change.vecthareContentVectorizer', '#vecthare_cv_decay_min', function() {
         if (!currentSettings.temporalDecay) currentSettings.temporalDecay = {};
         currentSettings.temporalDecay.minRelevance = parseFloat($(this).val()) || 0.3;
     });
-    $(document).on('change', '#vecthare_cv_decay_max_boost', function() {
+    $(document).on('change.vecthareContentVectorizer', '#vecthare_cv_decay_max_boost', function() {
         if (!currentSettings.temporalDecay) currentSettings.temporalDecay = {};
         currentSettings.temporalDecay.maxBoost = parseFloat($(this).val()) || 1.2;
     });
 
     // Cleaning preset dropdown
-    $(document).on('change', '#vecthare_cv_cleaning_preset', function() {
+    $(document).on('change.vecthareContentVectorizer', '#vecthare_cv_cleaning_preset', function() {
         const presetId = $(this).val();
         currentSettings.cleaningPreset = presetId;
 
@@ -2240,6 +2253,10 @@ function clearChatUpload() {
  * Previews how content will be chunked
  */
 async function previewChunks() {
+    if (currentSettings.strategy === 'per_scene') {
+        toastr.info('Per Scene uses the chat scene markers. Mark scene boundaries in chat instead of batch vectorizing.');
+        return;
+    }
     const type = getContentType(currentContentType);
     const source = getSourceData();
 
@@ -2419,6 +2436,10 @@ function getSourceData() {
  * Starts the vectorization process
  */
 async function startVectorization() {
+    if (currentSettings.strategy === 'per_scene') {
+        toastr.warning('Per Scene is created using scene markers in chat, not the Content Vectorizer.');
+        return;
+    }
     const type = getContentType(currentContentType);
     const source = getSourceData();
 

@@ -10,8 +10,8 @@
  */
 
 import { extension_settings } from '../../../../extensions.js';
-import { saveSettingsDebounced } from '../../../../../script.js';
-import { parseRegistryKey } from './collection-ids.js';
+import { saveSettingsDebounced, getCurrentChatId } from '../../../../../script.js';
+import { parseRegistryKey, getChatUUID } from './collection-ids.js';
 
 // ============================================================================
 // COLLECTION METADATA CRUD
@@ -369,8 +369,37 @@ function collectionKeysMatch(a, b) {
     if (!a || !b) return false;
     if (String(a) === String(b)) return true;
     const pa = parseRegistryKey(a), pb = parseRegistryKey(b);
-    if (pa.backend && pb.backend && (pa.backend !== pb.backend || pa.source !== pb.source)) return false;
-    return normalizeCollectionKey(a) === normalizeCollectionKey(b);
+    if (pa.collectionId !== pb.collectionId) return false;
+    if (pa.backend && pb.backend) {
+        return pa.backend === pb.backend && pa.source === pb.source;
+    }
+    // Legacy policies may contain only a bare collection name. Do not let
+    // them implicitly select BOTH Standard and Qdrant collections with that
+    // name; allow migration only if exactly one registered identity matches.
+    const registry = extension_settings.vecthare?.vecthare_collection_registry || [];
+    return registry.filter(key => parseRegistryKey(key).collectionId === pa.collectionId).length === 1;
+}
+
+/** UUID is the stable identity used by collection ownership. Only translate
+ * chat-file IDs when they refer to the CURRENT chat; never guess another chat's
+ * identity. Read legacy keys until the next explicit policy save migrates them.
+ */
+export function resolveChatPolicyId(chatId) {
+    if (!chatId) return null;
+    const id = String(chatId);
+    const currentFileId = getCurrentChatId();
+    if (currentFileId && id === String(currentFileId)) return String(getChatUUID() || id);
+    return id;
+}
+
+function legacyCurrentChatPolicyId(chatId) {
+    const fileId = getCurrentChatId();
+    const uuid = getChatUUID();
+    if (fileId && uuid && String(uuid) !== String(fileId) &&
+        (String(chatId) === String(fileId) || String(chatId) === String(uuid))) {
+        return String(fileId);
+    }
+    return null;
 }
 
 function ensureChatCollectionPoliciesObject() {
@@ -393,7 +422,10 @@ export function getChatCollectionPolicy(chatId) {
         return { ...defaultChatCollectionPolicy, selectedCollections: [] };
     }
 
-    const stored = extension_settings.vecthare.chatCollectionPolicies[String(chatId)] || {};
+    const canonicalId = resolveChatPolicyId(chatId);
+    const policies = extension_settings.vecthare.chatCollectionPolicies;
+    const legacyId = legacyCurrentChatPolicyId(chatId);
+    const stored = policies[canonicalId] || (legacyId ? policies[legacyId] : null) || {};
     const selectedCollections = Array.isArray(stored.selectedCollections) ? stored.selectedCollections : [];
 
     return {
@@ -418,11 +450,16 @@ export function setChatCollectionPolicy(chatId, policy) {
         ? [...new Set(policy.selectedCollections.map(String))]
         : existing.selectedCollections;
 
-    extension_settings.vecthare.chatCollectionPolicies[String(chatId)] = {
+    const canonicalId = resolveChatPolicyId(chatId);
+    extension_settings.vecthare.chatCollectionPolicies[canonicalId] = {
         ...existing,
         ...policy,
         selectedCollections,
     };
+    const legacyId = legacyCurrentChatPolicyId(chatId);
+    if (legacyId && legacyId !== canonicalId) {
+        delete extension_settings.vecthare.chatCollectionPolicies[legacyId];
+    }
 
     saveSettingsDebounced();
     console.log(`VectHare: Updated collection policy for chat ${chatId}`);
@@ -490,8 +527,7 @@ export function applyChatCollectionPolicy(collectionIds, chatId, options = {}) {
 
     if (mode === 'prefer_selected') {
         const selected = collectionIds.filter(id => inScope(id) && isSelected(id));
-        const selectedKeys = new Set(selected.map(id => normalizeCollectionKey(id)));
-        const rest = collectionIds.filter(id => !selectedKeys.has(normalizeCollectionKey(id)));
+        const rest = collectionIds.filter(id => !selected.some(chosen => collectionKeysMatch(id, chosen)));
         return [...selected, ...rest];
     }
 

@@ -12,7 +12,8 @@
  * ============================================================================
  */
 
-import { getRequestHeaders } from '../../../../../script.js';
+import { getRequestHeaders, saveSettingsDebounced } from '../../../../../script.js';
+import { extension_settings } from '../../../../extensions.js';
 import { VectorBackend } from './backend-interface.js';
 import { getModelField } from '../core/providers.js';
 import { getProviderSpecificParams } from './provider-params.js';
@@ -24,6 +25,53 @@ import { VECTOR_LIST_LIMIT } from '../core/constants.js';
 function getModelFromSettings(settings) {
     const modelField = getModelField(settings.source);
     return modelField ? settings[modelField] || '' : '';
+}
+
+/**
+ * Native SillyTavern vector storage does not persist rich VectHare metadata.
+ * Maintain a per-source/per-collection sidecar for metadata + text. It is
+ * committed ONLY after a successful native write, and dropped ONLY after a
+ * successful delete/purge. This is not a substitute for plugin-side metadata
+ * when sharing databases between installations (export settings together).
+ */
+function nativeSidecars() {
+    if (!extension_settings.vecthare) throw new Error('VectHare settings are unavailable');
+    return extension_settings.vecthare.nativeStandardChunks ||= {};
+}
+function sidecarKey(collectionId, settings) {
+    return JSON.stringify(['standard', settings?.source || 'transformers', getModelFromSettings(settings), collectionId]);
+}
+function nativeRecord(item) {
+    const extras = ['keywords', 'importance', 'customWeights', 'disabledKeywords',
+        'chunkGroup', 'conditions', 'summary', 'isSummaryChunk', 'parentHash'];
+    const metadata = { ...(item.metadata || {}) };
+    for (const key of extras) if (item[key] !== undefined) metadata[key] = item[key];
+    return { hash: item.hash, text: item.text || '', index: item.index ?? 0, metadata };
+}
+function saveSidecar(collectionId, items, settings) {
+    const key = sidecarKey(collectionId, settings);
+    const records = nativeSidecars()[key] ||= {};
+    for (const item of items) records[String(item.hash)] = nativeRecord(item);
+    saveSettingsDebounced();
+}
+function deleteSidecarHashes(collectionId, hashes, settings) {
+    const records = nativeSidecars()[sidecarKey(collectionId, settings)];
+    if (!records) return;
+    for (const hash of hashes) delete records[String(hash)];
+    saveSettingsDebounced();
+}
+function purgeSidecars(collectionId) {
+    let changed = false;
+    for (const key of Object.keys(nativeSidecars())) {
+        try {
+            const [, , , storedCollection] = JSON.parse(key);
+            if (storedCollection === collectionId) {
+                delete nativeSidecars()[key];
+                changed = true;
+            }
+        } catch { /* preserve unknown keys; never guess which collection */ }
+    }
+    if (changed) saveSettingsDebounced();
 }
 
 export class StandardBackend extends VectorBackend {
@@ -216,6 +264,7 @@ export class StandardBackend extends VectorBackend {
                 throw new Error(`Failed to insert vectors: ${response.status} - ${errorBody}`);
             }
 
+            if (!usePluginApi) saveSidecar(collectionId, items, settings);
             console.log(`VectHare Standard: Inserted ${items.length} vectors into ${collectionId}`);
         } catch (error) {
             // Enhanced error logging for OOM debugging
@@ -252,6 +301,7 @@ export class StandardBackend extends VectorBackend {
             const errorBody = await response.text().catch(() => 'No response body');
             throw new Error(`Failed to delete vectors: ${response.status} ${response.statusText} - ${errorBody}`);
         }
+        deleteSidecarHashes(collectionId, hashes, settings);
     }
 
     /**
@@ -291,14 +341,21 @@ export class StandardBackend extends VectorBackend {
         const data = await response.json();
 
         // Native API returns { hashes: [], metadata: [] }
+        const hashes = data.hashes || [];
+        const sidecar = nativeSidecars()[sidecarKey(collectionId, settings)] || {};
         return {
-            hashes: data.hashes || [],
-            metadata: (data.metadata || []).map((m, idx) => ({
-                hash: data.hashes?.[idx],
-                text: m.text,
-                score: m.score || 0,
-                ...m,
-            })),
+            hashes,
+            metadata: hashes.map((hash, idx) => {
+                const m = (data.metadata || [])[idx] || {};
+                const stored = sidecar[String(hash)];
+                return {
+                    ...stored?.metadata,
+                    hash,
+                    text: m.text || stored?.text || '',
+                    ...m,
+                    score: m.score ?? 0,
+                };
+            }),
         };
     }
 
@@ -350,7 +407,19 @@ export class StandardBackend extends VectorBackend {
             return results;
         }
 
-        return await response.json();
+        const results = await response.json();
+        // Preserve locally recorded chunk attributes when native results omit
+        // them; never merge metadata belonging to another collection.
+        for (const [collectionId, result] of Object.entries(results || {})) {
+            if (!result || !Array.isArray(result.hashes)) continue;
+            const sidecar = nativeSidecars()[sidecarKey(collectionId, settings)] || {};
+            result.metadata = result.hashes.map((hash, i) => {
+                const server = result.metadata?.[i] || {};
+                const stored = sidecar[String(hash)];
+                return { ...stored?.metadata, hash, text: server.text || stored?.text || '', ...server };
+            });
+        }
+        return results;
     }
 
     /**
@@ -370,6 +439,7 @@ export class StandardBackend extends VectorBackend {
             const errorBody = await response.text().catch(() => 'No response body');
             throw new Error(`Failed to purge collection: ${response.status} ${response.statusText} - ${errorBody}`);
         }
+        purgeSidecars(collectionId);
     }
 
     async purgeFileVectorIndex(collectionId, settings) {
@@ -390,6 +460,8 @@ export class StandardBackend extends VectorBackend {
             const errorBody = await response.text().catch(() => 'No response body');
             throw new Error(`Failed to purge all: ${response.status} ${response.statusText} - ${errorBody}`);
         }
+        extension_settings.vecthare.nativeStandardChunks = {};
+        saveSettingsDebounced();
     }
 
     // ========================================================================
@@ -427,8 +499,12 @@ export class StandardBackend extends VectorBackend {
 
         // Fallback: use native list (hashes only)
         const hashes = await this.getSavedHashes(collectionId, settings);
+        const records = nativeSidecars()[sidecarKey(collectionId, settings)] || {};
+        const offset = Math.max(0, options.offset || 0);
+        const limit = Math.max(1, options.limit || 100);
         return {
-            items: hashes.map(hash => ({ hash, text: '', metadata: {} })),
+            items: hashes.slice(offset, offset + limit).map(hash => records[String(hash)] ||
+                { hash, text: '', metadata: { unverifiedNativeMetadata: true } }),
             total: hashes.length,
         };
     }
@@ -438,7 +514,11 @@ export class StandardBackend extends VectorBackend {
      * Returns null if plugin unavailable
      */
     async getChunk(collectionId, hash, settings) {
-        if (!this.pluginAvailable) return null;
+        if (!this.pluginAvailable) {
+            const hashes = await this.getSavedHashes(collectionId, settings);
+            if (!hashes.some(h => String(h) === String(hash))) return null;
+            return nativeSidecars()[sidecarKey(collectionId, settings)]?.[String(hash)] || null;
+        }
 
         try {
             const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}?` + new URLSearchParams({

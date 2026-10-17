@@ -44,9 +44,26 @@ function normalizeBackendName(backendName) {
 const backendInstances = {};
 const backendHealthStatus = {};
 const backendAccessTimestamps = {}; // Track last access time for LRU eviction
-const backendHealthTimestamps = {}; // VEC-33: Track when health was last verified
+const backendHealthTimestamps = {};
+const backendConnectionSignatures = {}; // VEC-33: Track when health was last verified
 const MAX_CACHED_BACKENDS = 5; // Limit cache size to prevent unbounded growth
 const HEALTH_CACHE_TTL_MS = 60000; // VEC-33: Health cache TTL (60 seconds)
+
+/** Only parameters captured during backend initialization belong in its cache key.
+ * Do not log this signature: it may include Qdrant/Milvus credentials.
+ * Embedding model/URL is passed per request, except Milvus dimensions which are
+ * selected at initialization and must also invalidate the instance.
+ */
+function backendConnectionSignature(backend, settings = {}) {
+    const fields = {
+        qdrant: ['qdrant_use_cloud', 'qdrant_url', 'qdrant_host', 'qdrant_port', 'qdrant_api_key', 'qdrant_multitenancy'],
+        milvus: ['milvus_host', 'milvus_port', 'milvus_address', 'milvus_username', 'milvus_password', 'milvus_token', 'milvus_dimensions', 'source', 'use_alt_endpoint', 'alt_endpoint_url'],
+        lancedb: ['lancedb_path'],
+        standard: [],
+    }[backend] || [];
+    return JSON.stringify(fields.map(field => [field, settings[field] ?? null]));
+}
+
 
 // VEC-18: Backend metrics tracking for health dashboard
 const backendMetrics = {
@@ -256,6 +273,7 @@ function evictLRUBackendIfNeeded() {
             delete backendHealthStatus[oldestBackend];
             delete backendAccessTimestamps[oldestBackend];
             delete backendHealthTimestamps[oldestBackend]; // VEC-33
+            delete backendConnectionSignatures[oldestBackend];
         }
     }
 }
@@ -270,6 +288,17 @@ function evictLRUBackendIfNeeded() {
 export async function initializeBackend(backendName, settings, throwOnFail = true) {
     // Normalize backend name (vectra -> standard, etc.)
     const normalizedName = normalizeBackendName(backendName);
+    const connectionSignature = backendConnectionSignature(normalizedName, settings);
+    if (backendInstances[normalizedName] &&
+        backendConnectionSignatures[normalizedName] !== connectionSignature) {
+        // Connection settings changed. Health-only checks cannot detect that a
+        // healthy instance is still connected to the OLD endpoint.
+        delete backendInstances[normalizedName];
+        delete backendHealthStatus[normalizedName];
+        delete backendAccessTimestamps[normalizedName];
+        delete backendHealthTimestamps[normalizedName];
+        delete backendConnectionSignatures[normalizedName];
+    }
 
     // VEC-33: If already have a healthy instance, check if health cache is stale
     if (backendInstances[normalizedName] && backendHealthStatus[normalizedName]) {
@@ -338,6 +367,7 @@ export async function initializeBackend(backendName, settings, throwOnFail = tru
 
         // Cache the healthy instance
         backendInstances[normalizedName] = backend;
+        backendConnectionSignatures[normalizedName] = connectionSignature;
         backendHealthStatus[normalizedName] = true;
         backendAccessTimestamps[normalizedName] = Date.now(); // VEC-25: Track access time
         backendHealthTimestamps[normalizedName] = Date.now(); // VEC-33: Track health verification time
@@ -398,6 +428,12 @@ export async function getBackendForCollection(collectionBackend, settings) {
 export async function isBackendAvailable(backendName, settings) {
     const normalizedName = normalizeBackendName(backendName);
 
+    // Even an unhealthy cached connection may have become valid after settings
+    // changed, so do not short-circuit before checking its configuration.
+    if (backendConnectionSignatures[normalizedName] !== backendConnectionSignature(normalizedName, settings)) {
+        resetBackendHealth(normalizedName);
+    }
+
     // If we already know it's unhealthy, return false without retrying
     if (backendHealthStatus[normalizedName] === false) {
         return false;
@@ -423,6 +459,8 @@ export function resetBackendHealth(backendName = null) {
         delete backendHealthStatus[normalizedName];
         delete backendInstances[normalizedName];
         delete backendHealthTimestamps[normalizedName]; // VEC-33
+        delete backendConnectionSignatures[normalizedName];
+        delete backendAccessTimestamps[normalizedName];
         console.log(`VectHare: Reset backend health status for ${normalizedName}${backendName !== normalizedName ? ` (alias: ${backendName})` : ''}`);
     } else {
         // Reset all
@@ -430,6 +468,8 @@ export function resetBackendHealth(backendName = null) {
             delete backendHealthStatus[name];
             delete backendInstances[name];
             delete backendHealthTimestamps[name]; // VEC-33
+            delete backendConnectionSignatures[name];
+            delete backendAccessTimestamps[name];
         }
         console.log('VectHare: Reset backend health status for all backends');
     }

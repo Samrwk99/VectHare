@@ -785,12 +785,19 @@ function renderCollectionCard(collection) {
       chat: '<span class="vecthare-badge vecthare-badge-chat">Chat</span>',
     }[collection.scope] || "";
 
-  const statusBadge = collection.enabled
-    ? '<span class="vecthare-badge vecthare-badge-success">Active</span>'
-    : '<span class="vecthare-badge vecthare-badge-muted">Paused</span>';
+  // Enabled means eligible, NOT necessarily activated for this chat.
+  // A lock or explicit per-chat policy can activate a collection even without
+  // automatic rules; therefore use "No auto rule" rather than "Inactive".
+  const activationSummary = getCollectionActivationSummary(collection.registryKey || collection.id);
+  const statusBadge = !collection.enabled
+    ? '<span class="vecthare-badge vecthare-badge-muted" title="Not eligible for retrieval">Paused</span>'
+    : activationSummary.alwaysActive
+      ? '<span class="vecthare-badge vecthare-badge-success">Enabled · Always</span>'
+      : activationSummary.mode === 'auto'
+        ? '<span class="vecthare-badge vecthare-badge-muted" title="Enabled but has no automatic activation rule; may still activate from a chat lock or selection">Enabled · No auto rule</span>'
+        : '<span class="vecthare-badge vecthare-badge-triggers" title="Enabled, but retrieval depends on matching activation rules or chat selection">Enabled · Conditional</span>';
 
   // Activation badge (shows triggers or conditions)
-  const activationSummary = getCollectionActivationSummary(collection.id);
   let activationBadge = "";
   if (activationSummary.alwaysActive) {
     activationBadge =
