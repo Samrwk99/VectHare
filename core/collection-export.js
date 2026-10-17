@@ -549,11 +549,12 @@ export async function importCollection(exportData, settings, options = {}) {
 
         if (options.overwrite) {
             try {
-                await purgeVectorIndex(collectionId, settings);
+                if (await purgeVectorIndex(collectionId, settings) !== true) {
+                    throw new Error(`Existing collection ${collectionId} was not safely deleted`);
+                }
                 console.log(`VectHare Import: Purged existing collection ${collectionId}`);
             } catch (e) {
-                // Collection might not exist, that's fine - log at debug level
-                console.debug(`VectHare Import: Could not purge ${collectionId} (may not exist):`, e.message);
+                throw new Error(`Import overwrite aborted: ${e.message}`);
             }
         }
 
@@ -738,10 +739,11 @@ async function importCollectionSilent(exportData, settings, options = {}) {
     // Handle existing collection
     if (options.overwrite) {
         try {
-            await purgeVectorIndex(collectionId, settings);
+            if (await purgeVectorIndex(collectionId, settings) !== true) {
+                throw new Error(`Existing collection ${collectionId} was not safely deleted`);
+            }
         } catch (e) {
-            // Collection might not exist - log at debug level
-            console.debug(`VectHare Import: Could not purge ${collectionId} (may not exist):`, e.message);
+            throw new Error(`Import overwrite aborted: ${e.message}`);
         }
     }
 

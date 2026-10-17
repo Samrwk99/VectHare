@@ -15,6 +15,8 @@ import { chunkText } from './chunking.js';
 import { insertVectorItems, purgeVectorIndex } from './core-vector-api.js';
 import { setCollectionMeta, getDefaultDecayForType } from './collection-metadata.js';
 import { registerCollection } from './collection-loader.js';
+import { bindChatCollection, getChatBinding, resolveChatWriteTarget } from './collection-ownership.js';
+import { getChatUUID, parseRegistryKey } from './collection-ids.js';
 import { getBackend } from '../backends/backend-manager.js';
 // Import from collection-ids.js - single source of truth for collection ID operations
 import {
@@ -76,11 +78,34 @@ export async function vectorizeContent({ contentType, source, settings }) {
 
         // Step 3: Enrich and hash
         progressTracker.updateProgress(3, 'Processing chunks...');
-        const collectionId = generateCollectionId(contentType, source, settings);
-        
-        // Get full extension settings for keyword extraction (includes custom_stopwords)
+        // Settings used by the embedding backend, not the modal's chunking options.
         const vecthareSettings = extension_settings.vecthare;
-        
+        const isOpenChat = contentType === 'chat' && source.type === 'current';
+        const chatUUID = isOpenChat ? getChatUUID() : null;
+        const currentBackend = vecthareSettings.vector_backend || 'standard';
+        const currentSource = vecthareSettings.source || 'transformers';
+        let collectionId = generateCollectionId(contentType, source, settings);
+        if (contentType === 'chat' && source.type === 'file') {
+            // Uploaded chat has no trustworthy current-chat ownership. Never
+            // inherit the chat that happens to be open in SillyTavern.
+            const safeName = (source.filename || source.name || 'upload').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 42);
+            collectionId = `vecthare_chat_upload_${safeName}_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+        } else if (isOpenChat) {
+            if (source.replaceExisting) {
+                // Staged replacement: new physical collection, old one retained.
+                // Only switch the chat binding after all vectors are committed.
+                collectionId = `${collectionId}_replacement_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+            } else {
+                const target = resolveChatWriteTarget(vecthareSettings, chatUUID, collectionId);
+                collectionId = target.collectionId;
+                if (target.newCollection && extension_settings.vecthare?.vecthare_collection_registry?.some(k => parseRegistryKey(k).collectionId === collectionId)) {
+                    throw new Error('Existing unconnected collection found. Connect and verify its settings first, or choose Replace All to create a safe replacement.');
+                }
+            }
+        }
+        const collectionKey = `${currentBackend}:${currentSource}:${collectionId}`;
+
+        // Use the same provider settings throughout this operation.
         const enrichedChunks = enrichChunks(chunks, contentType, source, settings, preparedContent, vecthareSettings);
         const hashedChunks = enrichedChunks.map(chunk => ({
             ...chunk,
@@ -128,7 +153,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
         }
 
         // Save collection metadata
-        setCollectionMeta(collectionId, {
+        setCollectionMeta(collectionKey, {
             contentType,
             sourceName,
             scope: settings.scope || 'global',
@@ -144,8 +169,9 @@ export async function vectorizeContent({ contentType, source, settings }) {
         });
 
         // Register collection in the registry so it's discoverable
-        registerCollection(collectionId);
-        console.log(`VectHare: Registered collection ${collectionId}`);
+        registerCollection(collectionKey);
+        if (isOpenChat) bindChatCollection(chatUUID, collectionKey, { replace: !!source.replaceExisting, writeVerified: true });
+        console.log(`VectHare: Registered collection ${collectionKey}`);
 
         progressTracker.complete(true, `Vectorized ${hashedChunks.length} chunks`);
 
@@ -787,6 +813,8 @@ function enrichChunks(chunks, contentType, source, settings, preparedContent, ve
  */
 export async function deleteContentCollection(collectionId) {
     const vecthareSettings = extension_settings.vecthare;
-    await purgeVectorIndex(collectionId, vecthareSettings);
+    if (await purgeVectorIndex(collectionId, vecthareSettings) !== true) {
+        throw new Error(`Failed to delete content collection ${collectionId}`);
+    }
     console.log(`VectHare: Deleted collection: ${collectionId}`);
 }

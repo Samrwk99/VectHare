@@ -232,13 +232,21 @@ function resolveStoredCollectionKey(collectionId) {
         return collectionId;
     }
 
-    const targetBareId = parseRegistryKey(collectionId).collectionId || collectionId;
-    for (const key of Object.keys(collections)) {
-        const bareId = parseRegistryKey(key).collectionId || key;
-        if (bareId === targetBareId) {
-            return key;
-        }
-    }
+    const parsedTarget = parseRegistryKey(collectionId);
+    // Unknown legacy metadata must not be guessed to belong to a new fully
+    // qualified backend identity. Preserve it for explicit future migration.
+    if (parsedTarget.backend) return null;
+    // Never route a fully qualified key to a different backend or provider.
+    const matches = Object.keys(collections).filter(key => {
+        const parsed = parseRegistryKey(key);
+        return parsed.collectionId === parsedTarget.collectionId &&
+            (!parsedTarget.backend || !parsed.backend || parsed.backend === parsedTarget.backend) &&
+            (!parsedTarget.source || !parsed.source || parsed.source === parsedTarget.source);
+    });
+    // Bare and legacy IDs can be migrated only if there is a UNIQUE match.
+    // Ambiguous names must not borrow another backend's metadata.
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) console.warn(`VectHare: Ambiguous metadata key ${collectionId}; refusing implicit match`);
 
     return null;
 }
@@ -281,8 +289,14 @@ export function setCollectionMeta(collectionId, data) {
 
     ensureCollectionsObject();
 
-    const key = resolveStoredCollectionKey(collectionId) || collectionId;
-    const existing = extension_settings.vecthare.collections[key] || {};
+    const resolved = resolveStoredCollectionKey(collectionId);
+    const qualified = !!parseRegistryKey(collectionId).backend;
+    const key = qualified ? collectionId : (resolved || collectionId);
+    const existing = extension_settings.vecthare.collections[key] ||
+        (qualified && resolved && !parseRegistryKey(resolved).backend ? extension_settings.vecthare.collections[resolved] : {}) || {};
+    if (qualified && resolved && resolved !== key && !parseRegistryKey(resolved).backend) {
+        delete extension_settings.vecthare.collections[resolved]; // safe one-to-one legacy migration
+    }
 
     extension_settings.vecthare.collections[key] = {
         ...defaultCollectionMeta,
@@ -353,7 +367,10 @@ function normalizeCollectionKey(collectionId) {
 
 function collectionKeysMatch(a, b) {
     if (!a || !b) return false;
-    return String(a) === String(b) || normalizeCollectionKey(a) === normalizeCollectionKey(b);
+    if (String(a) === String(b)) return true;
+    const pa = parseRegistryKey(a), pb = parseRegistryKey(b);
+    if (pa.backend && pb.backend && (pa.backend !== pb.backend || pa.source !== pb.source)) return false;
+    return normalizeCollectionKey(a) === normalizeCollectionKey(b);
 }
 
 function ensureChatCollectionPoliciesObject() {
@@ -648,29 +665,20 @@ export function migrateOldEnabledKeys() {
  * @param {string[]} actualCollectionIds Array of collection IDs that actually exist
  * @returns {object} Cleanup stats
  */
-export function cleanupOrphanedMeta(actualCollectionIds) {
+export function cleanupOrphanedMeta(actualCollectionIds, { scanComplete = false } = {}) {
+    // Partial discoveries, offline providers and bare-ID lists cannot demonstrate
+    // that a collection is deleted. Keep metadata until explicitly deleted.
     ensureCollectionsObject();
-
+    if (!scanComplete || !Array.isArray(actualCollectionIds) ||
+        actualCollectionIds.some(id => !parseRegistryKey(id).backend)) {
+        return { removed: 0, orphanedIds: [], skipped: true };
+    }
     const actualSet = new Set(actualCollectionIds);
-    const orphaned = [];
-
-    for (const collectionId in extension_settings.vecthare.collections) {
-        if (!actualSet.has(collectionId)) {
-            orphaned.push(collectionId);
-        }
-    }
-
-    for (const collectionId of orphaned) {
-        delete extension_settings.vecthare.collections[collectionId];
-        console.log(`VectHare: Removed orphaned metadata for ${collectionId}`);
-    }
-
-    if (orphaned.length > 0) {
-        saveSettingsDebounced();
-        console.log(`VectHare: Cleaned up ${orphaned.length} orphaned metadata entries`);
-    }
-
-    return { removed: orphaned.length, orphanedIds: orphaned };
+    const orphanedIds = Object.keys(extension_settings.vecthare.collections)
+        .filter(key => parseRegistryKey(key).backend && !actualSet.has(key));
+    // Report potential orphans, but do not delete metadata as discovery can
+    // be incomplete even when a plugin responds successfully.
+    return { removed: 0, orphanedIds, skipped: true };
 }
 
 // ============================================================================

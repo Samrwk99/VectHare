@@ -337,14 +337,8 @@ export function buildChatSearchPatterns(chatId, chatUUID) {
     if (id) {
         patterns.push(`${COLLECTION_PREFIXES.VECTHARE_CHAT}${id}`.toLowerCase());
 
-        // Extract character name (before " - " in filename)
-        const charNameMatch = id.match(/^([^-]+)/);
-        if (charNameMatch) {
-            const charName = charNameMatch[1].trim().toLowerCase();
-            if (charName) {
-                patterns.push(`${COLLECTION_PREFIXES.VECTHARE_CHAT}${charName}`.toLowerCase());
-            }
-        }
+        // Character-name matches are deliberately not ownership evidence.
+
     }
 
     return patterns;

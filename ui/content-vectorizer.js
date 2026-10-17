@@ -2424,40 +2424,23 @@ async function startVectorization() {
         return;
     }
 
-    // Check if vectors already exist for this content (chat specifically)
-    if (currentContentType === 'chat' && source.sourceType === 'current') {
+    // Confirm any replacement without deleting the original vectors first.
+    // A replacement is written to a separate collection and the binding changes
+    // only when the new insertion has fully succeeded.
+    if (currentContentType === 'chat' && source.type === 'current') {
         try {
             const { doesChatHaveVectors } = await import('../core/collection-loader.js');
             const existing = await doesChatHaveVectors(currentSettings);
-
-            if (existing.hasVectors && existing.chunkCount > 0) {
+            if (existing.hasVectors) {
                 const confirmed = await callGenericPopup(
-                    `<div style="text-align: center;">
-                        <p>This chat already has <strong>${existing.chunkCount} chunks</strong> vectorized.</p>
-                        <p style="margin-top: 10px;">What would you like to do?</p>
-                    </div>`,
-                    POPUP_TYPE.CONFIRM,
-                    '',
-                    {
-                        okButton: 'Replace All',
-                        cancelButton: 'Cancel',
-                    }
-                );
-
-                if (!confirmed) {
-                    return;
-                }
-
-                // User wants to replace - purge existing first
-                const { purgeVectorIndex } = await import('../core/core-vector-api.js');
-                const { unregisterCollection } = await import('../core/collection-loader.js');
-                await purgeVectorIndex(existing.collectionId, currentSettings);
-                unregisterCollection(existing.collectionId);
-                toastr.info('Cleared existing vectors', 'VectHare');
+                    `<p>This chat already has a collection (${existing.chunkCount} chunks).</p><p>Replace it with a newly vectorized collection? The original will be preserved until you explicitly delete it.</p>`,
+                    POPUP_TYPE.CONFIRM, '', { okButton: 'Replace All', cancelButton: 'Cancel' });
+                if (!confirmed) return;
+                source.replaceExisting = true;
             }
         } catch (e) {
-            console.warn('VectHare: Could not check for existing vectors:', e);
-            // Continue anyway
+            toastr.error(`Could not verify existing collections: ${e.message}`, 'VectHare');
+            return; // Fail closed; never write blindly after failed discovery.
         }
     }
 

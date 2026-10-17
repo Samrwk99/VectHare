@@ -501,21 +501,18 @@ function bindBrowserEvents() {
     e.preventDefault();
 
     const confirmed = confirm(
-      "This will clear the collection registry and rescan from disk.\n\n" +
-        "Any ghost entries (collections that no longer exist on disk) will be removed.\n\n" +
+      "This will rescan available collections without clearing your saved registry or metadata.\n\n" +
+        "Unverified entries will be preserved for later review.\n\n" +
         "Continue?",
     );
 
     if (!confirmed) return;
 
     try {
-      // Clear the registry
-      clearCollectionRegistry();
-
-      // Refresh collections (will rediscover from disk)
+      // Preserve registry and collection metadata until a complete scan has
+      // succeeded. Discovery merges results; it never drops existing entries.
       await refreshCollections();
-
-      toastr.success("Registry cleared and resynced from disk", "VectHare");
+      toastr.success("Discovery completed; existing records preserved", "VectHare");
     } catch (error) {
       console.error("VectHare: Failed to resync", error);
       toastr.error(`Failed to resync: ${error.message}`, "VectHare");
@@ -663,14 +660,7 @@ async function refreshCollections() {
   try {
     browserState.collections = await loadAllCollections(browserState.settings);
 
-    // Clean up orphaned metadata entries (collections that no longer exist)
-    const actualIds = browserState.collections.map((c) => c.id);
-    const cleanupResult = cleanupOrphanedMeta(actualIds);
-    if (cleanupResult.removed > 0) {
-      console.log(
-        `VectHare: Cleaned up ${cleanupResult.removed} orphaned metadata entries`,
-      );
-    }
+    // Discovery may be incomplete; never auto-delete saved locks or metadata.
 
     renderCollections();
   } catch (error) {
@@ -1109,15 +1099,11 @@ function bindCollectionCardEvents() {
           collection.registryKey,
         );
 
-        // Remove from state
-        browserState.collections = browserState.collections.filter(
-          (c) => (c.registryKey || c.id) !== collectionKey,
-        );
-
-        // Re-render
-        renderCollections();
-
         if (result.success) {
+          browserState.collections = browserState.collections.filter(
+            (c) => (c.registryKey || c.id) !== collectionKey,
+          );
+          renderCollections();
           toastr.success(`Deleted collection "${collection.name}"`, "VectHare");
         } else {
           toastr.warning(

@@ -27,6 +27,7 @@ import { isBackendAvailable } from '../backends/backend-manager.js';
 import { applyDecayToResults, applySceneAwareDecay } from './temporal-decay.js';
 import { isChunkDisabledByScene } from './scenes.js';
 import { registerCollection, getCollectionRegistry } from './collection-loader.js';
+import { getChatBinding, resolveChatWriteTarget } from './collection-ownership.js';
 import {
     isCollectionEnabled,
     filterActiveCollections,
@@ -389,8 +390,11 @@ async function rerankWithBananaBread(query, chunks, settings) {
  */
 export async function synchronizeChat(settings, batchSize = 5) {
     // Build proper collection ID using chat UUID first
-    const collectionId = getChatCollectionId();
-    console.log(`🔍 VectHare DEBUG: getChatCollectionId() returned: "${collectionId}"`);
+    const binding = getChatBinding();
+    if (!binding) return { remaining: -1, messagesProcessed: 0, chunksCreated: 0 };
+    const target = resolveChatWriteTarget(settings, getChatUUID());
+    const collectionId = target.collectionId;
+    console.log(`VectHare: Resolved writable collection: "${target.registryKey}"`);
     console.log(`🔍 VectHare DEBUG: settings.vector_backend = "${settings.vector_backend}"`);
     console.log(`🔍 VectHare DEBUG: settings.source = "${settings.source}"`);
     if (!collectionId) {
@@ -399,7 +403,7 @@ export async function synchronizeChat(settings, batchSize = 5) {
 
     // Check per-collection autoSync setting instead of global enabled_chats
     const { isCollectionAutoSyncEnabled } = await import('./collection-metadata.js');
-    if (!isCollectionAutoSyncEnabled(collectionId)) {
+    if (!isCollectionAutoSyncEnabled(target.registryKey)) {
         return { remaining: -1, messagesProcessed: 0, chunksCreated: 0 };
     }
 
@@ -499,7 +503,7 @@ export async function synchronizeChat(settings, batchSize = 5) {
                         // Construct proper registry key: backend:source:collectionId
                         const backend = settings.vector_backend || 'standard';
                         const source = settings.source || 'transformers';
-                        const registryKey = `${backend}:${source}:${collectionId}`;
+                        const registryKey = target.registryKey;
                         console.log(`🔍 VectHare DEBUG: Registering collection with key: "${registryKey}"`);
                         console.log(`🔍 VectHare DEBUG: Components: backend="${backend}", source="${source}", collectionId="${collectionId}"`);
                         registerCollection(registryKey);
@@ -551,7 +555,7 @@ export async function synchronizeChat(settings, batchSize = 5) {
  * @returns {string[]} Array of collection IDs to query
  */
 function gatherCollectionsToQuery(settings) {
-    const chatCollectionId = getChatCollectionId();
+    const chatCollectionId = getChatBinding()?.registryKey || getChatCollectionId();
     const currentChatId = getCurrentChatId();
     const chatPolicy = getChatCollectionPolicy(currentChatId);
     const collectionsToQuery = [];
@@ -570,15 +574,9 @@ function gatherCollectionsToQuery(settings) {
         const collectionId = parsedKey.collectionId;
 
         // Skip if this is the current chat collection (already handled above)
-        if (collectionId === chatCollectionId) {
-            continue;
-        }
-
-        // Check if collection is enabled. getCollectionMeta/isCollectionEnabled resolve
-        // metadata across bare-id/registry-key/legacy forms internally, so the bare
-        // collectionId works for both the enabled check and the actual query.
-        if (isCollectionEnabled(collectionId)) {
-            collectionsToQuery.push(collectionId);
+        if (registryKey === chatCollectionId) continue;
+        if (isCollectionEnabled(registryKey)) {
+            collectionsToQuery.push(registryKey);
         }
     }
 
@@ -588,7 +586,8 @@ function gatherCollectionsToQuery(settings) {
         const alreadyIncluded = collectionsToQuery.some(id => {
             const parsedExisting = parseRegistryKey(id);
             const parsedSelected = parseRegistryKey(selectedId);
-            return id === selectedId || parsedExisting.collectionId === parsedSelected.collectionId;
+            return id === selectedId || (!parsedExisting.backend || !parsedSelected.backend)
+                && parsedExisting.collectionId === parsedSelected.collectionId;
         });
 
         if (!alreadyIncluded && isCollectionEnabled(selectedId)) {
@@ -2078,12 +2077,15 @@ export async function purgeChatIndex(settings) {
         return;
     }
 
-    const collectionId = getChatCollectionId();
-    if (!collectionId) {
-        toastr.error('Could not get collection ID', 'Purge aborted');
+    const binding = getChatBinding();
+    if (!binding) {
+        toastr.error('No connected writable collection', 'Purge aborted');
         return;
     }
 
+    let collectionId;
+    try { collectionId = resolveChatWriteTarget(settings).collectionId; }
+    catch (error) { toastr.error(error.message, 'Purge aborted'); return; }
     if (await purgeVectorIndex(collectionId, settings)) {
         toastr.success('Vector index purged', 'VectHare');
         console.log('VectHare: Index purged successfully');

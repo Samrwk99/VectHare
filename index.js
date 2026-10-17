@@ -197,10 +197,17 @@ async function onPurgeClick() {
         const { getRequestHeaders } = await import('../../../../script.js');
 
         // 1. Delete entire vectors folder
-        await fetch('/api/plugins/similharity/purge-all', {
+        const response = await fetch('/api/plugins/similharity/purge-all', {
             method: 'POST',
             headers: getRequestHeaders(),
         });
+        if (!response.ok) {
+            throw new Error(`Server did not purge vectors (${response.status}): ${await response.text()}`);
+        }
+        const result = await response.clone().json().catch(() => null);
+        if (result?.success === false || result?.error) {
+            throw new Error(`Server reported purge failure: ${JSON.stringify(result)}`);
+        }
 
         // 2. Clear extension_settings.vecthare
         for (const key in extension_settings.vecthare) {
@@ -319,24 +326,13 @@ jQuery(async () => {
     eventSource.on(event_types.MESSAGE_SENT, onChatEvent);
     eventSource.on(event_types.MESSAGE_RECEIVED, onChatEvent);
     eventSource.on(event_types.MESSAGE_SWIPED, onChatEvent);
-    // When a chat is deleted, purge its vectors (not full purge, just that chat)
-    eventSource.on(event_types.CHAT_DELETED, async (chatId) => {
-        if (chatId) {
-            const collectionId = getChatCollectionId(chatId);
-            if (collectionId) {
-                await purgeVectorIndex(collectionId, settings);
-                console.log(`VectHare: Purged vectors for deleted chat: ${chatId}`);
-            }
-        }
+    // Chat deletion must not automatically erase stored memories. Collections
+    // and their ownership record remain available for explicit recovery/deletion.
+    eventSource.on(event_types.CHAT_DELETED, chatId => {
+        console.info(`VectHare: Chat ${chatId} deleted; preserving vectors and metadata`);
     });
-    eventSource.on(event_types.GROUP_CHAT_DELETED, async (chatId) => {
-        if (chatId) {
-            const collectionId = getChatCollectionId(chatId);
-            if (collectionId) {
-                await purgeVectorIndex(collectionId, settings);
-                console.log(`VectHare: Purged vectors for deleted group chat: ${chatId}`);
-            }
-        }
+    eventSource.on(event_types.GROUP_CHAT_DELETED, chatId => {
+        console.info(`VectHare: Group chat ${chatId} deleted; preserving vectors and metadata`);
     });
 
     // When WebLLM extension is loaded, refresh the model list

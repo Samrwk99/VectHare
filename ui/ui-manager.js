@@ -25,6 +25,8 @@ import { getChatCollectionId } from '../core/chat-vectorization.js';
 import { doesChatHaveVectors } from '../core/collection-loader.js';
 import { getModelField } from '../core/providers.js';
 import { getChunkingStrategies } from '../core/content-types.js';
+import { getChatUUID } from '../core/collection-ids.js';
+import { bindChatCollection, getChatBinding } from '../core/collection-ownership.js';
 
 /**
  * Applies the current settings snapshot without overwriting collection metadata
@@ -32,7 +34,7 @@ import { getChunkingStrategies } from '../core/content-types.js';
  * @param {object} settingsSnapshot
  */
 function applySettingsSnapshot(settingsSnapshot) {
-    const { collections, vecthare_collection_registry, ...safeSettings } = settingsSnapshot;
+    const { collections, vecthare_collection_registry, chatCollectionBindings, ...safeSettings } = settingsSnapshot;
     Object.assign(extension_settings.vecthare, safeSettings);
 }
 
@@ -1332,14 +1334,14 @@ export async function loadWebLlmModels(settings) {
  * @param {object} settings - VectHare settings object (unused, kept for API compatibility)
  */
 export function refreshAutoSyncCheckbox(settings) {
-    const collectionId = getChatCollectionId();
+    const collectionId = getChatBinding()?.registryKey;
     if (!collectionId) {
         $('#vecthare_autosync_enabled').prop('checked', false);
         return;
     }
     // Dynamically import to avoid circular dependency
     import('../core/collection-metadata.js').then(({ isCollectionAutoSyncEnabled }) => {
-        const isEnabled = isCollectionAutoSyncEnabled(collectionId);
+        const isEnabled = getChatBinding()?.writeVerified === true && isCollectionAutoSyncEnabled(collectionId);
         $('#vecthare_autosync_enabled').prop('checked', isEnabled);
     });
 }
@@ -1425,14 +1427,14 @@ async function showAutoSyncConfirmModal(allMatches, settings) {
 
     return new Promise((resolve) => {
         const hasMultiple = allMatches.length > 1;
-        const hasGhosts = allMatches.some(m => m.chunkCount === 0);
+        const hasGhosts = allMatches.some(m => m.chunkCount === 0 && m.countVerified === true);
 
         // Build collection list HTML
         const collectionListHtml = allMatches.map((match, index) => {
             const displayId = match.collectionId.length > 35
                 ? match.collectionId.substring(0, 18) + '...' + match.collectionId.substring(match.collectionId.length - 12)
                 : match.collectionId;
-            const isGhost = match.chunkCount === 0;
+            const isGhost = match.chunkCount === 0 && match.countVerified === true;
             const isRecommended = index === 0 && !isGhost;
 
             return `
@@ -1622,7 +1624,7 @@ function bindSettingsEvents(settings, callbacks) {
                 return;
             }
 
-            const collectionId = getChatCollectionId();
+            const collectionId = getChatBinding()?.registryKey || getChatCollectionId();
             if (!collectionId) {
                 toastr.warning('Could not get collection ID for this chat');
                 $checkbox.prop('checked', false);
@@ -1645,8 +1647,12 @@ function bindSettingsEvents(settings, callbacks) {
                     return;
                 }
 
-                // Found existing vectors - show confirmation modal with all matches
-                const result = await showAutoSyncConfirmModal(allMatches, settings);
+                // Bound and already verified by the write binding: simply resume.
+                // Unbound legacy matches require an explicit Connect confirmation.
+                const existingBinding = getChatBinding();
+                const result = existingBinding && allMatches?.some(c => c.registryKey === existingBinding.registryKey)
+                    ? { action: 'reconnect', selectedCollection: allMatches.find(c => c.registryKey === existingBinding.registryKey) }
+                    : await showAutoSyncConfirmModal(allMatches, settings);
 
                 if (result.action === 'cancel') {
                     // User cancelled - don't enable
@@ -1655,10 +1661,33 @@ function bindSettingsEvents(settings, callbacks) {
                 }
 
                 if (result.action === 'reconnect' && result.selectedCollection) {
-                    // Connect to selected collection
                     const selected = result.selectedCollection;
-                    toastr.success(`Connected to collection with ${selected.chunkCount} chunks`, 'Auto-Sync Enabled');
-                    console.log(`VectHare: Auto-sync enabled - connected to ${selected.collectionId} (${selected.chunkCount} chunks)`);
+                    try {
+                        const key = selected.registryKey;
+                        const parsed = (await import('../core/collection-ids.js')).parseRegistryKey(key);
+                        if (!parsed.backend || !parsed.source || parsed.backend !== (settings.vector_backend || 'standard') || parsed.source !== (settings.source || 'transformers')) {
+                            throw new Error('Selected collection backend or embedding source does not match current settings');
+                        }
+                        // An explicitly selected legacy collection is connected as read-only.
+                        // Only collections created through this safeguarded vectorizer are
+                        // currently verified for writes. Full model revalidation is P1.
+                        const alreadyVerified = getChatBinding()?.registryKey === key && getChatBinding()?.writeVerified === true;
+                        bindChatCollection(getChatUUID(), key);
+                        if (!alreadyVerified) {
+                            // Connection and permission to write are separate: preserve
+                            // the user's selection, but require a verified profile before sync.
+                            setCollectionAutoSync(key, false);
+                            $checkbox.prop('checked', false);
+                            toastr.warning('Collection connected read-only. Original embedding/chunking settings are unverified; use safe Re-vectorize before enabling Auto-Sync.', 'VectHare');
+                            return;
+                        }
+                        setCollectionAutoSync(key, true);
+                        toastr.success(`Connected to verified collection with ${selected.chunkCount} chunks`, 'Auto-Sync Enabled');
+                    } catch (error) {
+                        toastr.error(error.message, 'VectHare');
+                        $checkbox.prop('checked', false);
+                        return;
+                    }
                 } else if (result.action === 'revectorize') {
                     // User wants to start fresh - open vectorizer
                     $checkbox.prop('checked', false);
@@ -1667,8 +1696,19 @@ function bindSettingsEvents(settings, callbacks) {
                 }
             }
 
-            // Save to per-collection metadata instead of global setting
-            setCollectionAutoSync(collectionId, enabling);
+            // Save on the actual bound collection, never on a calculated surrogate.
+            const boundKey = getChatBinding()?.registryKey;
+            if (!boundKey) {
+                $checkbox.prop('checked', false);
+                if (enabling) toastr.warning('No verified writable collection is connected. Vectorize this chat first.');
+                return;
+            }
+            if (enabling && getChatBinding()?.writeVerified !== true) {
+                $checkbox.prop('checked', false);
+                toastr.warning('Connected legacy collection is read-only until its original settings are verified.');
+                return;
+            }
+            setCollectionAutoSync(boundKey, enabling);
 
             if (!enabling) {
                 toastr.info('Auto-sync disabled for this chat');

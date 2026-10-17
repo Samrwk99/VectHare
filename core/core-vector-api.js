@@ -29,6 +29,7 @@ import { textgen_types, textgenerationwebui_settings } from '../../../../textgen
 import { oai_settings } from '../../../../openai.js';
 import { isWebLlmSupported } from '../../../shared.js';
 import { getWebLlmProvider } from '../providers/webllm.js';
+import { parseRegistryKey } from './collection-ids.js';
 import { getBackend, invalidateBackendHealth, recordQuery, recordInsert, recordDelete, recordError } from '../backends/backend-manager.js';
 import {
     getProviderConfig,
@@ -816,6 +817,14 @@ export async function deleteVectorItems(collectionId, hashes, settings) {
  * @returns {Promise<{ hashes: number[], metadata: object[]}>} - Hashes and metadata of the results
  */
 export async function queryCollection(collectionId, searchText, topK, settings) {
+    const key = parseRegistryKey(collectionId);
+    if (key.backend || key.source) {
+        settings = { ...settings,
+            vector_backend: key.backend || settings.vector_backend,
+            source: key.source || settings.source,
+        };
+        collectionId = key.collectionId;
+    }
     const backend = await getBackend(settings);
 
     // Sources that require client-side embedding generation
@@ -956,6 +965,20 @@ function scoreResults(resultsForBoost, searchText, topK, settings, overfetchAmou
  * @returns {Promise<Record<string, { hashes: number[], metadata: object[] }>>} - Results mapped to collection IDs
  */
 export async function queryMultipleCollections(collectionIds, searchText, topK, threshold, settings) {
+    // Fully qualified registry keys may span several databases and providers.
+    // Do not hand them to one currently selected backend.
+    if (collectionIds.some(id => parseRegistryKey(id).backend)) {
+        const results = {};
+        for (const key of collectionIds) {
+            try {
+                results[key] = await queryCollection(key, searchText, topK, settings);
+            } catch (error) {
+                console.error(`VectHare: Backend-specific query failed for ${key}`, error);
+                results[key] = { hashes: [], metadata: [], error: error.message };
+            }
+        }
+        return results;
+    }
     const backend = await getBackend(settings);
 
     // Sources that require client-side embedding generation
@@ -1080,9 +1103,18 @@ export async function queryActiveCollections(collectionIds, searchText, topK, th
         return {};
     }
 
-    // Query only the active collections
-    const backend = await getBackend(settings);
-    return await backend.queryMultipleCollections(activeCollectionIds, searchText, topK, threshold, settings);
+    // Route each collection to its own declared backend/source; never query a
+    // Qdrant collection through Standard simply because it is currently selected.
+    const results = {};
+    for (const key of activeCollectionIds) {
+        try {
+            results[key] = await queryCollection(key, searchText, topK, settings);
+        } catch (error) {
+            console.error(`VectHare: Query failed for ${key}:`, error);
+            results[key] = { hashes: [], metadata: [], error: error.message };
+        }
+    }
+    return results;
 }
 
 /**
@@ -1094,7 +1126,8 @@ export async function queryActiveCollections(collectionIds, searchText, topK, th
 export async function purgeVectorIndex(collectionId, settings) {
     try {
         const backend = await getBackend(settings);
-        await backend.purgeVectorIndex(collectionId, settings);
+        const result = await backend.purgeVectorIndex(collectionId, settings);
+        if (result === false || result?.success === false) throw new Error('Backend rejected purge');
         console.log(`VectHare: Purged vector index for collection ${collectionId}`);
         return true;
     } catch (error) {
@@ -1132,14 +1165,16 @@ export async function purgeFileVectorIndex(collectionId, settings) {
 export async function purgeAllVectorIndexes(settings) {
     try {
         const backend = await getBackend(settings);
-        await backend.purgeAllVectorIndexes(settings);
+        const result = await backend.purgeAllVectorIndexes(settings);
+        if (result === false || result?.success === false) throw new Error('Backend did not confirm purge all');
         console.log('VectHare: Purged all vector indexes');
         toastr.success('All vector indexes purged', 'Purge successful');
+        return true;
     } catch (error) {
-        // VEC-33: Invalidate health cache on operation error
         invalidateBackendHealth(settings?.vector_backend || 'standard', error);
         console.error('VectHare: Failed to purge all', error);
-        toastr.error('Failed to purge all vector indexes', 'Purge failed');
+        toastr.error('Failed to purge all vector indexes; settings have been preserved', 'Purge failed');
+        return false;
     }
 }
 
