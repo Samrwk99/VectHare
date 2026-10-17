@@ -738,7 +738,7 @@ export function renderSettings(containerId, settings, callbacks) {
                         </div>
                         <div class="vecthare-card-body">
 
-                            <div class="vecthare-actions-grid">
+                            <div class="vecthare-actions-grid vecthare-main-actions">
                                 <button id="vecthare_vectorize_content" class="vecthare-action-btn vecthare-btn-primary vecthare-action-featured">
                                     <i class="fa-solid fa-plus-circle"></i>
                                     <span>Vectorize Content</span>
@@ -746,11 +746,11 @@ export function renderSettings(containerId, settings, callbacks) {
                                 <button id="vecthare_scan_chat" class="vecthare-action-btn vecthare-btn-secondary" title="Scan chat embeddings for missing, stale or mismatched vectors without modifying storage">
                                     <i class="fa-solid fa-magnifying-glass"></i><span>Scan Chat</span>
                                 </button>
+                                <button id="vecthare_future_action" class="vecthare-action-btn vecthare-btn-secondary" disabled aria-label="Reserved for a future feature" title="Reserved for a future feature">&nbsp;</button>
                                 <button id="vecthare_vectorize_all" class="vecthare-action-btn vecthare-btn-secondary">
                                     <i class="fa-solid fa-sync"></i>
                                     <span>Sync Chat</span>
                                 </button>
-                                <button id="vecthare_future_action" class="vecthare-action-btn vecthare-btn-secondary" disabled aria-label="Reserved for a future feature" title="Reserved for a future feature">&nbsp;</button>
                                 <button id="vecthare_database_browser" class="vecthare-action-btn vecthare-btn-secondary">
                                     <i class="fa-solid fa-folder-open"></i>
                                     <span>Database Browser</span>
