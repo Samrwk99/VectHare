@@ -205,8 +205,8 @@ describe('StandardBackend', () => {
     });
 
     describe('healthCheck', () => {
-        it('should return true when ST API is available', async () => {
-            fetchMock.mockResolvedValueOnce(mockFetchResponse({}));
+        it('should return true when ST API returns a valid hash list', async () => {
+            fetchMock.mockResolvedValueOnce(mockFetchResponse([]));
 
             const result = await backend.healthCheck();
 
@@ -214,12 +214,12 @@ describe('StandardBackend', () => {
             expect(fetchMock).toHaveBeenCalledWith('/api/vector/list', expect.any(Object));
         });
 
-        it('should return true even on 500 status (collection not found)', async () => {
+        it('should return false on 500 status (server error)', async () => {
             fetchMock.mockResolvedValueOnce(mockFetchResponse({}, { ok: false, status: 500 }));
 
             const result = await backend.healthCheck();
 
-            expect(result).toBe(true);
+            expect(result).toBe(false);
         });
 
         it('should return false on network error', async () => {
@@ -240,19 +240,28 @@ describe('StandardBackend', () => {
             expect(result).toEqual([12345, 67890]);
         });
 
-        it('should return empty array on 500 status', async () => {
-            fetchMock.mockResolvedValueOnce(mockFetchError(500, 'Collection not found'));
+        it('should return [] on HTTP 200 for an empty collection', async () => {
+            fetchMock.mockResolvedValueOnce(mockFetchResponse([]));
+            expect(await backend.getSavedHashes('test-collection', defaultSettings)).toEqual([]);
+        });
 
-            const result = await backend.getSavedHashes('test-collection', defaultSettings);
+        it('should throw on 500 instead of reporting an empty collection', async () => {
+            fetchMock.mockResolvedValueOnce(mockFetchError(500, 'Internal Server Error'));
+            await expect(backend.getSavedHashes('test-collection', defaultSettings))
+                .rejects.toThrow('HTTP 500');
+        });
 
-            expect(result).toEqual([]);
+        it('should reject malformed successful list responses', async () => {
+            fetchMock.mockResolvedValueOnce(mockFetchResponse({ success: true }));
+            await expect(backend.getSavedHashes('test-collection', defaultSettings))
+                .rejects.toThrow('expected an array');
         });
 
         it('should throw on other errors', async () => {
             fetchMock.mockResolvedValueOnce(mockFetchError(403, 'Forbidden'));
 
             await expect(backend.getSavedHashes('test-collection', defaultSettings))
-                .rejects.toThrow('Failed to get saved hashes');
+                .rejects.toThrow('Failed to list hashes');
         });
     });
 

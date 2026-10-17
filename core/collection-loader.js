@@ -510,7 +510,9 @@ async function probeCollection(collectionId, settings) {
             return { exists: true, count: hashes.length };
         }
     } catch (error) {
-        // Collection doesn't exist or error - that's fine
+        // A failed native listing is not evidence that the collection is empty.
+        // Let discovery abort rather than report an incorrect missing collection.
+        throw new Error(`Failed to probe collection ${collectionId}: ${error.message}`, { cause: error });
     }
     return { exists: false, count: 0 };
 }
@@ -709,8 +711,12 @@ export async function doesChatHaveVectors(settings, overrideChatId, overrideUUID
                     allMatches: [{collectionId: id, registryKey, chunkCount: hashes.length, countVerified: true, backend: settings.vector_backend || 'standard', source: settings.source || 'transformers', matchType: 'exact'}],
                 };
             }
-        } catch (e) {
-            // Query failed, continue to next format
+        } catch (error) {
+            // Native /api/vector/list reports 200 + [] for missing/empty indexes.
+            // Never suppress HTTP 500 (or network failures) as "no vectors".
+            // Other backends may use 404 for a missing physical collection.
+            if ((settings.vector_backend || 'standard') !== 'standard' && /\b404\b/.test(error.message)) continue;
+            throw new Error(`Unable to determine whether chat collection ${id} contains vectors: ${error.message}`, { cause: error });
         }
     }
 

@@ -105,9 +105,9 @@ export class StandardBackend extends VectorBackend {
     }
 
     async healthCheck() {
-        // Native ST API is always available if ST is running
+        // Probe the native API. Even a missing collection should return HTTP 200
+        // with an empty hash array; HTTP 500 is a server failure, not "not found".
         try {
-            // Quick test: try to list a non-existent collection (should return empty array or error)
             const response = await fetch('/api/vector/list', {
                 method: 'POST',
                 headers: getRequestHeaders(),
@@ -116,8 +116,12 @@ export class StandardBackend extends VectorBackend {
                     source: 'transformers'
                 }),
             });
-            // 200 = works (empty collection), 500 = syntax error (no collection), both are "working"
-            return response.status === 200 || response.status === 500;
+            if (!response.ok) {
+                console.warn(`[Standard] Native vector health check returned HTTP ${response.status}`);
+                return false;
+            }
+            const hashes = await response.json();
+            return Array.isArray(hashes);
         } catch (error) {
             console.error('[Standard] Health check failed:', error);
             return false;
@@ -144,18 +148,19 @@ export class StandardBackend extends VectorBackend {
         });
 
         if (!response.ok) {
-            // Collection doesn't exist or error
-            if (response.status === 500) {
-                // Likely collection doesn't exist
-                return [];
-            }
+            // SillyTavern's /api/vector/list returns 200 + [] for an empty (or
+            // newly created) index. A 500 indicates a backend/index error.
+            // Never disguise it as an empty collection: callers use the hash
+            // list for incremental sync, repair, and deletion decisions.
             const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`Failed to get saved hashes: ${response.status} ${response.statusText} - ${errorBody}`);
+            throw new Error(`[Standard] Failed to list hashes for ${collectionId}: HTTP ${response.status} ${response.statusText} - ${errorBody}`);
         }
 
         const data = await response.json();
-        // Native API returns array of hashes directly
-        return Array.isArray(data) ? data : [];
+        if (!Array.isArray(data)) {
+            throw new Error(`[Standard] Invalid hash list for ${collectionId}: native API returned ${data === null ? 'null' : typeof data}, expected an array`);
+        }
+        return data;
     }
 
     /**
