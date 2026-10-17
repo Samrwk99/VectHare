@@ -37,6 +37,7 @@ import { openTextCleaningManager } from './text-cleaning-manager.js';
 let currentContentType = 'lorebook';
 let currentSettings = {};
 let sourceData = null;
+let replacementSourceKey = null;
 
 // ============================================================================
 // MODAL CREATION
@@ -46,7 +47,8 @@ let sourceData = null;
  * Opens the content vectorizer modal
  * @param {string} initialType - Optional initial content type to select
  */
-export function openContentVectorizer(initialType = null) {
+export function openContentVectorizer(initialType = null, replaceCollectionKey = null) {
+    replacementSourceKey = replaceCollectionKey;
     currentContentType = initialType;
     currentSettings = initialType ? { ...getContentTypeDefaults(initialType) } : {};
     sourceData = null;
@@ -2269,6 +2271,7 @@ async function previewChunks() {
             strategy: currentSettings.strategy || type.defaultStrategy,
             chunkSize: currentSettings.chunkSize || type.defaults.chunkSize,
             chunkOverlap: currentSettings.chunkOverlap || type.defaults.chunkOverlap,
+            batchSize: currentSettings.batchSize || 4,
         });
 
         // Handle empty or undefined chunks
@@ -2424,10 +2427,14 @@ async function startVectorization() {
         return;
     }
 
+    if(replacementSourceKey && currentContentType==='chat' && source.type==='current') {
+        source.replaceExisting=true;
+        source.replacedCollectionKey=replacementSourceKey;
+    }
     // Confirm any replacement without deleting the original vectors first.
     // A replacement is written to a separate collection and the binding changes
     // only when the new insertion has fully succeeded.
-    if (currentContentType === 'chat' && source.type === 'current') {
+    if (currentContentType === 'chat' && source.type === 'current' && !source.replaceExisting) {
         try {
             const { doesChatHaveVectors } = await import('../core/collection-loader.js');
             const existing = await doesChatHaveVectors(currentSettings);

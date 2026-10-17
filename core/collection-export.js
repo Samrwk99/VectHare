@@ -33,6 +33,9 @@ import {
 } from './collection-loader.js';
 import { progressTracker } from '../ui/progress-tracker.js';
 import { getStringHash } from '../../../../utils.js';
+import { discoverEmbeddingModel, makeCollectionProfile, saveCollectionProfile } from './vectorization-profile.js';
+import { getBackend } from '../backends/backend-manager.js';
+import { getModelField } from './providers.js';
 
 // ============================================================================
 // CONSTANTS
@@ -58,30 +61,19 @@ const EXPORT_BATCH_SIZE = 100;
  * @returns {Promise<Array>} Chunks with vectors
  */
 async function fetchChunksWithVectors(collectionId, settings) {
-    const backendName = settings.vector_backend || 'standard';
-    const response = await fetch('/api/plugins/similharity/chunks/list', {
-        method: 'POST',
-        headers: getRequestHeaders(),
-        body: JSON.stringify({
-            backend: backendName === 'standard' ? 'vectra' : backendName,
-            collectionId: collectionId,
-            source: settings.source || 'transformers',
-            model: settings.model || '',
-            limit: 50000, // High limit to get all chunks
-            includeVectors: true, // Include the actual embedding vectors
-        }),
-    });
-
-    if (!response.ok) {
-        throw new Error(`Failed to fetch chunks: ${response.status} ${response.statusText}`);
+    // A backend may multiplex logical collections inside one physical store.
+    // Always use its own scoped listing API, never a bare plugin collection ID.
+    const backend = await getBackend(settings);
+    if (typeof backend.listChunks !== 'function') throw new Error('Backend does not support exporting complete chunks');
+    const chunks=[];
+    for(let offset=0;offset<100000;offset+=250) {
+        const result=await backend.listChunks(collectionId,settings,{offset,limit:250,includeVectors:true});
+        if(!Array.isArray(result?.items)) throw new Error('Chunk export listing failed');
+        if(result.items.some(row=>!row.text))throw new Error('Backend cannot export complete chunk text');
+        chunks.push(...result.items);
+        if(result.items.length<250) return chunks;
     }
-
-    const data = await response.json();
-    if (!data.success || !data.items) {
-        throw new Error('Invalid response from chunks API');
-    }
-
-    return data.items;
+    throw new Error('Collection export exceeds safety pagination limit; no partial export produced');
 }
 
 /**
@@ -106,7 +98,7 @@ export async function exportCollection(collectionId, settings, collectionInfo = 
     try {
         // Step 1: Get collection metadata
         progressTracker.updateProgress(1, 'Loading metadata...');
-        const collectionMeta = getCollectionMeta(collectionId) || {};
+        const collectionMeta = getCollectionMeta(`${exportSettings.vector_backend || 'standard'}:${exportSettings.source || 'transformers'}:${collectionId}`) || {};
 
         // Step 2: Get all chunks WITH vectors
         progressTracker.updateProgress(2, 'Loading chunks and vectors...');
@@ -115,34 +107,15 @@ export async function exportCollection(collectionId, settings, collectionInfo = 
         const chunks = rawChunks.map(item => {
             const meta = item.metadata || item;
             const chunk = {
-                hash: meta.hash || item.hash,
+                hash: meta.hash ?? item.hash,
                 text: meta.text || item.text || '',
                 index: meta.index ?? item.index,
                 vector: item.vector || meta.vector || null, // The actual embedding!
-                metadata: {
-                    contentType: meta.contentType,
-                    sourceName: meta.sourceName,
-                    entryName: meta.entryName,
-                    entryUid: meta.entryUid,
-                    keywords: meta.keywords || [],
-                    customWeights: meta.customWeights,
-                    disabledKeywords: meta.disabledKeywords,
-                    keywordLevel: meta.keywordLevel,
-                    keywordBaseWeight: meta.keywordBaseWeight,
-                    importance: meta.importance,
-                    conditions: meta.conditions,
-                    chunkGroup: meta.chunkGroup,
-                    summary: meta.summary,
-                    isSummaryChunk: meta.isSummaryChunk,
-                    parentHash: meta.parentHash,
-                    speaker: meta.speaker,
-                    isUser: meta.isUser,
-                    messageId: meta.messageId,
-                },
+                metadata: { ...meta, vector: undefined },
             };
 
             // Get per-chunk metadata from VectHare settings
-            const chunkMeta = getChunkMetadata(chunk.hash);
+            const chunkMeta = getChunkMetadata(chunk.hash, `${exportSettings.vector_backend || 'standard'}:${exportSettings.source || 'transformers'}:${collectionId}`);
             if (chunkMeta) {
                 chunk.chunkMeta = chunkMeta;
             }
@@ -171,7 +144,7 @@ export async function exportCollection(collectionId, settings, collectionInfo = 
             // backend is just storage location - vectors work across backends
             embedding: {
                 source: exportSettings.source || 'transformers',
-                model: exportSettings.model || '',
+                model: collectionMeta.vectorizationProfile?.embedding?.modelId || exportSettings.model || '',
                 backend: exportSettings.vector_backend || 'standard', // For reference only
                 dimension: vectorDimension,
                 hasVectors: chunksWithVectors > 0,
@@ -217,6 +190,8 @@ export async function exportCollection(collectionId, settings, collectionInfo = 
                 xmlTag: collectionMeta.xmlTag || '',
             },
 
+            vectorizationProfile: collectionMeta.vectorizationProfile || null,
+            chatChunkManifest: collectionMeta.chatChunkManifest || null,
             // Chunks (text + metadata + vectors)
             chunks: chunks,
 
@@ -258,44 +233,21 @@ export async function exportMultipleCollections(collectionIds, settings) {
 
         try {
             // Export without showing nested progress
-            const collectionMeta = getCollectionMeta(collectionId) || {};
-            const chunksResult = await getSavedHashes(collectionId, settings, true);
-
-            let chunks = [];
-            if (chunksResult && chunksResult.metadata) {
-                chunks = chunksResult.metadata.map(meta => ({
-                    hash: meta.hash,
-                    text: meta.text || '',
-                    index: meta.index,
-                    metadata: {
-                        contentType: meta.contentType,
-                        sourceName: meta.sourceName,
-                        entryName: meta.entryName,
-                        entryUid: meta.entryUid,
-                        keywords: meta.keywords || [],
-                        customWeights: meta.customWeights,
-                        disabledKeywords: meta.disabledKeywords,
-                        keywordLevel: meta.keywordLevel,
-                        keywordBaseWeight: meta.keywordBaseWeight,
-                        importance: meta.importance,
-                        conditions: meta.conditions,
-                        chunkGroup: meta.chunkGroup,
-                        summary: meta.summary,
-                        isSummaryChunk: meta.isSummaryChunk,
-                        parentHash: meta.parentHash,
-                        speaker: meta.speaker,
-                        isUser: meta.isUser,
-                        messageId: meta.messageId,
-                    },
-                }));
-
-                for (const chunk of chunks) {
-                    const chunkMeta = getChunkMetadata(chunk.hash);
-                    if (chunkMeta) {
-                        chunk.chunkMeta = chunkMeta;
-                    }
-                }
-            }
+            const collectionMeta = getCollectionMeta(`${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}`) || {};
+            const rawChunks = await fetchChunksWithVectors(collectionId, settings);
+            const chunks = rawChunks.map(item => {
+                const meta=item.metadata || item;
+                const chunk = {
+                    hash:meta.hash ?? item.hash,
+                    text:meta.text ?? item.text ?? '',
+                    index:meta.index ?? item.index,
+                    vector:item.vector || meta.vector || null,
+                    metadata:{...meta,vector:undefined},
+                };
+                const chunkMeta=getChunkMetadata(chunk.hash, `${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}`);
+                if(chunkMeta)chunk.chunkMeta=chunkMeta;
+                return chunk;
+            });
 
             exports.push({
                 collection: {
@@ -327,6 +279,8 @@ export async function exportMultipleCollections(collectionIds, settings) {
                     context: collectionMeta.context || '',
                     xmlTag: collectionMeta.xmlTag || '',
                 },
+                vectorizationProfile: collectionMeta.vectorizationProfile || null,
+                chatChunkManifest: collectionMeta.chatChunkManifest || null,
                 chunks: chunks,
                 stats: {
                     chunkCount: chunks.length,
@@ -437,8 +391,9 @@ export function validateImportData(data, currentSettings = {}) {
             if (hasVectors && currentSettings.source) {
                 // Check if current settings match export
                 const sourceMatch = col.embedding.source === currentSettings.source;
-                const modelMatch = !col.embedding.model || !currentSettings.model ||
-                    col.embedding.model === currentSettings.model;
+                const field = getModelField(currentSettings.source);
+                const activeModel = field ? currentSettings[field] : currentSettings.model;
+                const modelMatch = !!col.vectorizationProfile?.embedding?.verified && !!activeModel && col.vectorizationProfile.embedding.modelId === activeModel;
 
                 if (!sourceMatch || !modelMatch) {
                     compatible = false;
@@ -474,31 +429,14 @@ export function validateImportData(data, currentSettings = {}) {
  * @param {object} settings - VectHare settings
  */
 async function insertChunksWithVectors(collectionId, chunks, settings) {
-    const backendName = settings.vector_backend || 'standard';
-    const response = await fetch('/api/plugins/similharity/chunks/insert', {
-        method: 'POST',
-        headers: getRequestHeaders(),
-        body: JSON.stringify({
-            backend: backendName === 'standard' ? 'vectra' : backendName,
-            collectionId: collectionId,
-            source: settings.source || 'transformers',
-            model: settings.model || '',
-            items: chunks.map(c => ({
-                hash: c.hash,
-                text: c.text,
-                index: c.index,
-                vector: c.vector, // Pre-computed vector!
-                metadata: c.metadata || {},
-            })),
-        }),
-    });
-
-    if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`Failed to insert chunks: ${error}`);
+    // Route through the selected backend so Qdrant shared-collection imports
+    // acquire the mandatory content_type tenant filter and UUID point IDs.
+    // Pre-computed vectors are passed through without embedding them again.
+    const backend=await getBackend(settings);
+    for(let i=0;i<chunks.length;i+=100) {
+        await backend.insertVectorItems(collectionId,chunks.slice(i,i+100),settings);
     }
-
-    return await response.json();
+    return {success:true,count:chunks.length};
 }
 
 /**
@@ -531,10 +469,17 @@ export async function importCollection(exportData, settings, options = {}) {
     // Check if we can use pre-computed vectors
     const embeddingInfo = exportData.embedding || {};
     const chunksWithVectors = validChunks.filter(c => c.vector && Array.isArray(c.vector));
+    const actualModel=await discoverEmbeddingModel(settings);
+    const originalProfile=exportData.vectorizationProfile;
     const canUseVectors = !options.forceReembed &&
         chunksWithVectors.length === validChunks.length &&
-        embeddingInfo.source === settings.source &&
-        (!embeddingInfo.model || !settings.model || embeddingInfo.model === settings.model);
+        originalProfile?.embedding?.verified === true && actualModel.verified &&
+        originalProfile.embedding.provider === settings.source &&
+        originalProfile.embedding.modelId === actualModel.modelId &&
+        (!originalProfile.embedding.modelPath || !actualModel.modelPath || originalProfile.embedding.modelPath === actualModel.modelPath);
+    if(!canUseVectors && !options.forceReembed && chunksWithVectors.length) {
+        throw new Error('Imported vectors cannot be verified compatible with the active embedding model. Explicitly choose re-vectorization or restore the original model first.');
+    }
 
     const totalSteps = 4;
     progressTracker.show('Importing Collection', totalSteps, 'Steps');
@@ -623,13 +568,18 @@ export async function importCollection(exportData, settings, options = {}) {
             });
         }
 
-        setCollectionMeta(collectionId, importedMeta);
+        importedMeta.vectorizationProfile = canUseVectors ? originalProfile : await makeCollectionProfile(settings);
+        if(exportData.chatChunkManifest?.schemaVersion===1) importedMeta.chatChunkManifest = exportData.chatChunkManifest;
+        setCollectionMeta(`${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}`, importedMeta);
+        // Persist the validated profile + imported manifest in both ST metadata
+        // and the plugin sidecar. Otherwise a fresh install cannot verify it.
+        if(importedMeta.vectorizationProfile) await saveCollectionProfile(`${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}`, importedMeta.vectorizationProfile);
 
         // Per-chunk metadata
         for (const chunk of validChunks) {
             if (chunk.chunkMeta) {
                 const newHash = getStringHash(chunk.text);
-                saveChunkMetadata(newHash, chunk.chunkMeta);
+                saveChunkMetadata(newHash, chunk.chunkMeta, `${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}`);
             }
         }
 
@@ -731,10 +681,17 @@ async function importCollectionSilent(exportData, settings, options = {}) {
     // Check if we can use pre-computed vectors
     const embeddingInfo = exportData.embedding || {};
     const chunksWithVectors = validChunks.filter(c => c.vector && Array.isArray(c.vector));
+    const actualModel=await discoverEmbeddingModel(settings);
+    const originalProfile=exportData.vectorizationProfile;
     const canUseVectors = !options.forceReembed &&
         chunksWithVectors.length === validChunks.length &&
-        embeddingInfo.source === settings.source &&
-        (!embeddingInfo.model || !settings.model || embeddingInfo.model === settings.model);
+        originalProfile?.embedding?.verified === true && actualModel.verified &&
+        originalProfile.embedding.provider === settings.source &&
+        originalProfile.embedding.modelId === actualModel.modelId &&
+        (!originalProfile.embedding.modelPath || !actualModel.modelPath || originalProfile.embedding.modelPath === actualModel.modelPath);
+    if(!canUseVectors && !options.forceReembed && chunksWithVectors.length) {
+        throw new Error('Imported vectors cannot be verified compatible with the active embedding model. Explicitly choose re-vectorization or restore the original model first.');
+    }
 
     // Handle existing collection
     if (options.overwrite) {
@@ -792,12 +749,15 @@ async function importCollectionSilent(exportData, settings, options = {}) {
         });
     }
 
-    setCollectionMeta(collectionId, importedMeta);
+    importedMeta.vectorizationProfile = canUseVectors ? originalProfile : await makeCollectionProfile(settings);
+    if(exportData.chatChunkManifest?.schemaVersion===1) importedMeta.chatChunkManifest=exportData.chatChunkManifest;
+    setCollectionMeta(`${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}`, importedMeta);
+    if(importedMeta.vectorizationProfile) await saveCollectionProfile(`${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}`, importedMeta.vectorizationProfile);
 
     for (const chunk of validChunks) {
         if (chunk.chunkMeta) {
             const newHash = getStringHash(chunk.text);
-            saveChunkMetadata(newHash, chunk.chunkMeta);
+            saveChunkMetadata(newHash, chunk.chunkMeta, `${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}`);
         }
     }
 

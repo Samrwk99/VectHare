@@ -695,6 +695,10 @@ export function renderSettings(containerId, settings, callbacks) {
                             </label>
                             <small class="vecthare_hint">Automatically vectorize new chat messages</small>
 
+                            <div id="vecthare_collection_profile_status" class="vecthare_hint" role="status" style="margin-top:8px;">Existing collections retain their own saved vectorization profiles. Global controls are defaults for new collections.</div>
+                            <label for="vecthare_embedding_max_tokens" style="display:block;margin-top:12px"><small>Embedding input token limit override (0 = detect automatically)</small></label>
+                            <input type="number" id="vecthare_embedding_max_tokens" class="text_pole" min="0" step="1" placeholder="0 (auto)" />
+                            <small class="vecthare_hint">Use only when the server cannot report its physical batch/input limit. Never set above what the model accepts.</small>
                             <!-- Collection lock moved to Database Browser (per-collection settings) -->
 
                             <label for="vecthare_chunking_strategy" style="margin-top: 12px;">
@@ -739,10 +743,14 @@ export function renderSettings(containerId, settings, callbacks) {
                                     <i class="fa-solid fa-plus-circle"></i>
                                     <span>Vectorize Content</span>
                                 </button>
+                                <button id="vecthare_scan_chat" class="vecthare-action-btn vecthare-btn-secondary" title="Scan chat embeddings for missing, stale or mismatched vectors without modifying storage">
+                                    <i class="fa-solid fa-magnifying-glass"></i><span>Scan Chat</span>
+                                </button>
                                 <button id="vecthare_vectorize_all" class="vecthare-action-btn vecthare-btn-secondary">
                                     <i class="fa-solid fa-sync"></i>
                                     <span>Sync Chat</span>
                                 </button>
+                                <button id="vecthare_future_action" class="vecthare-action-btn vecthare-btn-secondary" disabled aria-label="Reserved for a future feature" title="Reserved for a future feature">&nbsp;</button>
                                 <button id="vecthare_database_browser" class="vecthare-action-btn vecthare-btn-secondary">
                                     <i class="fa-solid fa-folder-open"></i>
                                     <span>Database Browser</span>
@@ -1576,7 +1584,7 @@ async function showAutoSyncConfirmModal(allMatches, settings) {
             $modal.remove();
             resolve({
                 action,
-                selectedCollection: action === 'reconnect' ? allMatches[selectedIndex] : null
+                selectedCollection: (action === 'reconnect' || action === 'revectorize') ? allMatches[selectedIndex] : null
             });
         });
 
@@ -1691,7 +1699,7 @@ function bindSettingsEvents(settings, callbacks) {
                 } else if (result.action === 'revectorize') {
                     // User wants to start fresh - open vectorizer
                     $checkbox.prop('checked', false);
-                    openContentVectorizer('chat');
+                    openContentVectorizer('chat', result.selectedCollection?.registryKey || null);
                     return;
                 }
             }
@@ -2727,11 +2735,19 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
         });
 
+    $('#vecthare_embedding_max_tokens')
+        .val(settings.embedding_max_tokens || 0)
+        .on('change',function(){
+            settings.embedding_max_tokens=Math.max(0,parseInt($(this).val())||0);
+            applySettingsSnapshot(settings);
+            saveSettingsDebounced();
+        });
     // Action buttons
     $('#vecthare_vectorize_content').on('click', () => {
         openContentVectorizer();
     });
     $('#vecthare_vectorize_all').on('click', callbacks.onVectorizeAll);
+    $('#vecthare_scan_chat').on('click', callbacks.onScanRepair);
     $('#vecthare_purge').on('click', callbacks.onPurge);
     $('#vecthare_run_diagnostics').on('click', callbacks.onRunDiagnostics);
     $('#vecthare_include_production_tests')

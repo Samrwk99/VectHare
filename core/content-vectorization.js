@@ -15,7 +15,7 @@ import { chunkText } from './chunking.js';
 import { insertVectorItems, purgeVectorIndex } from './core-vector-api.js';
 import { setCollectionMeta, getDefaultDecayForType } from './collection-metadata.js';
 import { registerCollection } from './collection-loader.js';
-import { bindChatCollection, getChatBinding, resolveChatWriteTarget } from './collection-ownership.js';
+import { bindChatCollection, getChatBinding, getCollectionOwner, resolveChatWriteTarget } from './collection-ownership.js';
 import { getChatUUID, parseRegistryKey } from './collection-ids.js';
 import { getBackend } from '../backends/backend-manager.js';
 // Import from collection-ids.js - single source of truth for collection ID operations
@@ -31,6 +31,9 @@ import { cleanText, cleanMessages } from './text-cleaning.js';
 import { progressTracker } from '../ui/progress-tracker.js';
 import { extension_settings, getContext } from '../../../../extensions.js';
 import { getStringHash } from '../../../../utils.js';
+import { getCollectionProfile, makeCollectionProfile, saveCollectionProfile, applyAndVerifyProfile, saveChatChunkManifest } from './vectorization-profile.js';
+import { prepareEmbeddingItems } from './embedding-overflow.js';
+import { buildExpectedChatItems } from './chat-vectorization.js';
 
 /**
  * Main entry point for content vectorization
@@ -62,6 +65,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
             strategy: settings.strategy || type.defaultStrategy,
             chunkSize: settings.chunkSize || type.defaults.chunkSize,
             chunkOverlap: settings.chunkOverlap || type.defaults.chunkOverlap,
+            batchSize: settings.batchSize || 4,
         });
 
         if (chunks.length === 0) {
@@ -92,6 +96,14 @@ export async function vectorizeContent({ contentType, source, settings }) {
             collectionId = `vecthare_chat_upload_${safeName}_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
         } else if (isOpenChat) {
             if (source.replaceExisting) {
+                const selectedKey=source.replacedCollectionKey;
+                if(selectedKey){
+                    const parsed=parseRegistryKey(selectedKey);
+                    if(parsed.backend!==currentBackend || parsed.source!==currentSource)
+                        throw new Error('Selected replacement source uses a different vector backend or embedding provider');
+                    const owner=getCollectionOwner(selectedKey);
+                    if(owner && owner!==chatUUID)throw new Error('Selected collection belongs to another chat. Cannot disable or reassign it.');
+                }
                 // Staged replacement: new physical collection, old one retained.
                 // Only switch the chat binding after all vectors are committed.
                 collectionId = `${collectionId}_replacement_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
@@ -107,10 +119,34 @@ export async function vectorizeContent({ contentType, source, settings }) {
 
         // Use the same provider settings throughout this operation.
         const enrichedChunks = enrichChunks(chunks, contentType, source, settings, preparedContent, vecthareSettings);
-        const hashedChunks = enrichedChunks.map(chunk => ({
-            ...chunk,
-            hash: getStringHash(chunk.text),
-        }));
+        const originalChunks = enrichedChunks.map(chunk => ({...chunk, hash:getStringHash(chunk.text)}));
+        // For the connected current chat, both entry points must produce the
+        // same chunk hashes/manifests so Scan & Sync agree on the source of truth.
+        const effectiveProfileSettings = {...vecthareSettings, chunking_strategy:settings.strategy || vecthareSettings.chunking_strategy,
+            chunk_size:settings.chunkSize || vecthareSettings.chunk_size,
+            batch_size:settings.batchSize || vecthareSettings.batch_size};
+        let hashedChunks = isOpenChat && ['per_message','conversation_turns','message_batch','adaptive'].includes(settings.strategy)
+            ? await buildExpectedChatItems(getContext().chat,effectiveProfileSettings)
+            : await prepareEmbeddingItems(originalChunks,effectiveProfileSettings,getStringHash);
+        const alreadyConnected = getChatBinding(chatUUID);
+        const activeKey = alreadyConnected?.registryKey;
+        let profile;
+        if(activeKey === collectionKey && !source.replaceExisting) {
+            const check = await applyAndVerifyProfile(collectionKey,effectiveProfileSettings);
+            profile = check.profile;
+            for(const field of ['chunking_strategy','chunk_size','batch_size']) {
+                if(profile.chunking?.[field] !== undefined && effectiveProfileSettings[field] !== profile.chunking[field])
+                    throw new Error(`Collection was created with ${field}=${profile.chunking[field]}; you selected ${effectiveProfileSettings[field]}. Use safe Re-vectorize instead of mixing strategies.`);
+            }
+        } else {
+            // Existing unbound or externally created collections must not be
+            // silently adopted using today's global embedding settings.
+            if(!source.replaceExisting && extension_settings.vecthare?.vecthare_collection_registry?.includes(collectionKey) && !getCollectionProfile(collectionKey))
+                throw new Error('Existing collection has no verified settings. Connect read-only, restore original settings or Re-vectorize safely.');
+            profile = await makeCollectionProfile(effectiveProfileSettings);
+            if(!profile.embedding.verified) throw new Error(profile.embedding.reason || 'Embedding model identity unknown. Cannot create a verified collection.');
+        }
+        if(isOpenChat && chatUUID !== getChatUUID())throw new Error('Chat changed while preparing vectors');
 
         // Step 4: Insert into vector store (streaming: embed + write together)
         progressTracker.updateProgress(4, 'Processing chunks...');
@@ -152,6 +188,10 @@ export async function vectorizeContent({ contentType, source, settings }) {
             throw error;
         }
 
+        if(isOpenChat && chatUUID !== getChatUUID())throw new Error('Chat changed during vectorization; original collection preserved');
+        // Profile and manifest are saved only after acknowledged insert.
+        await saveCollectionProfile(collectionKey,profile);
+        if(isOpenChat) await saveChatChunkManifest(collectionKey,hashedChunks,chatUUID);
         // Save collection metadata
         setCollectionMeta(collectionKey, {
             contentType,
@@ -170,7 +210,14 @@ export async function vectorizeContent({ contentType, source, settings }) {
 
         // Register collection in the registry so it's discoverable
         registerCollection(collectionKey);
-        if (isOpenChat) bindChatCollection(chatUUID, collectionKey, { replace: !!source.replaceExisting, writeVerified: true });
+        if (isOpenChat) {
+            const previous=source.replacedCollectionKey || getChatBinding(chatUUID)?.registryKey;
+            bindChatCollection(chatUUID, collectionKey, { replace: !!source.replaceExisting, writeVerified: true });
+            if(source.replaceExisting && previous && previous !== collectionKey) {
+                // Backup is preserved but disabled to avoid duplicate retrieval.
+                setCollectionMeta(previous,{enabled:false,autoSync:false,replacedBy:collectionKey});
+            }
+        }
         console.log(`VectHare: Registered collection ${collectionKey}`);
 
         progressTracker.complete(true, `Vectorized ${hashedChunks.length} chunks`);

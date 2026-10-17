@@ -178,12 +178,12 @@ export async function createSceneChunk(start, end, sceneData, settings) {
 
         // Disable contained chunks
         for (const hash of containedHashes) {
-            const existing = getChunkMetadata(hash) || {};
+            const existing = getChunkMetadata(hash, `${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}`) || {};
             saveChunkMetadata(hash, {
                 ...existing,
                 disabledByScene: sceneHash,
                 disabledAt: Date.now(),
-            });
+            }, `${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}`);
         }
 
         console.log(`VectHare Scenes: Created scene chunk ${sceneHash} (${start}-${end}), disabled ${containedHashes.length} chunks`);
@@ -214,13 +214,14 @@ export async function deleteSceneChunk(sceneHash, containedHashes, settings) {
 
         // Re-enable contained chunks
         for (const hash of containedHashes) {
-            const existing = getChunkMetadata(hash);
+            const scoped = `${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}`;
+            const existing = getChunkMetadata(hash, scoped);
             if (existing && existing.disabledByScene === sceneHash) {
                 const { disabledByScene, disabledAt, ...rest } = existing;
                 if (Object.keys(rest).length > 0) {
-                    saveChunkMetadata(hash, rest);
+                    saveChunkMetadata(hash, rest, scoped);
                 } else {
-                    deleteChunkMetadata(hash);
+                    deleteChunkMetadata(hash, scoped);
                 }
             }
         }

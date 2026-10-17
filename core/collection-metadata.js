@@ -543,12 +543,12 @@ export function isCollectionAutoSyncEnabled(collectionId) {
  * @param {string} hash Chunk hash
  * @returns {object|null} Chunk metadata or null if not found
  */
-export function getChunkMetadata(hash) {
+export function getChunkMetadata(hash, collectionKey = null) {
     if (!extension_settings.vecthare) {
         return null;
     }
 
-    const key = `vecthare_chunk_meta_${hash}`;
+    const key = collectionKey ? `vecthare_chunk_meta_scoped_${encodeURIComponent(collectionKey)}_${hash}` : `vecthare_chunk_meta_${hash}`;
     return extension_settings.vecthare[key] || null;
 }
 
@@ -557,12 +557,12 @@ export function getChunkMetadata(hash) {
  * @param {string} hash Chunk hash
  * @param {object} metadata Chunk metadata
  */
-export function saveChunkMetadata(hash, metadata) {
+export function saveChunkMetadata(hash, metadata, collectionKey = null) {
     if (!extension_settings.vecthare) {
         extension_settings.vecthare = {};
     }
 
-    const key = `vecthare_chunk_meta_${hash}`;
+    const key = collectionKey ? `vecthare_chunk_meta_scoped_${encodeURIComponent(collectionKey)}_${hash}` : `vecthare_chunk_meta_${hash}`;
     extension_settings.vecthare[key] = {
         ...metadata,
         updatedAt: Date.now(),
@@ -575,12 +575,12 @@ export function saveChunkMetadata(hash, metadata) {
  * Deletes metadata for a specific chunk
  * @param {string} hash Chunk hash
  */
-export function deleteChunkMetadata(hash) {
+export function deleteChunkMetadata(hash, collectionKey = null) {
     if (!extension_settings.vecthare) {
         return;
     }
 
-    const key = `vecthare_chunk_meta_${hash}`;
+    const key = collectionKey ? `vecthare_chunk_meta_scoped_${encodeURIComponent(collectionKey)}_${hash}` : `vecthare_chunk_meta_${hash}`;
     if (extension_settings.vecthare[key]) {
         delete extension_settings.vecthare[key];
         saveSettingsDebounced();
@@ -591,15 +591,18 @@ export function deleteChunkMetadata(hash) {
  * Gets all chunk metadata entries
  * @returns {object} Map of hash -> metadata
  */
-export function getAllChunkMetadata() {
+export function getAllChunkMetadata(collectionKey = null) {
     if (!extension_settings.vecthare) {
         return {};
     }
 
     const result = {};
-    const prefix = 'vecthare_chunk_meta_';
+    const prefix = collectionKey
+        ? `vecthare_chunk_meta_scoped_${encodeURIComponent(collectionKey)}_`
+        : 'vecthare_chunk_meta_';
 
     for (const key in extension_settings.vecthare) {
+        if (!collectionKey && key.startsWith('vecthare_chunk_meta_scoped_')) continue;
         if (key.startsWith(prefix)) {
             const hash = key.replace(prefix, '');
             result[hash] = extension_settings.vecthare[key];
@@ -1120,7 +1123,7 @@ export async function shouldCollectionActivate(collectionId, context) {
         const chatAllowed = hasChatLocks && currentChatId && chatLocks.some(id => String(id) === String(currentChatId));
         const characterAllowed = hasCharacterLocks && currentCharacterId && characterLocks.some(id => String(id) === String(currentCharacterId));
 
-        if ((hasChatLocks || hasCharacterLocks) && !chatAllowed && !characterAllowed) {
+        if ((hasChatLocks && !chatAllowed) || (hasCharacterLocks && !characterAllowed)) {
             console.log(`[VectHare Activation Filter] Collection ${collectionId}: ✗ LOCKED_TO_OTHER_CONTEXT`);
             recordDecision('skipped', 'Collection is locked to another chat/character');
             return false;

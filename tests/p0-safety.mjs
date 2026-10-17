@@ -266,6 +266,12 @@ Object.assign(context,{
     registerCollection:key=>{if(!saved.vecthare.vecthare_collection_registry.includes(key))saved.vecthare.vecthare_collection_registry.push(key);},
     bindChatCollection:owner.bindChatCollection,
     resolveChatWriteTarget:owner.resolveChatWriteTarget,
+    getChatBinding:owner.getChatBinding,
+    prepareEmbeddingItems:async items=>items,
+    buildExpectedChatItems:async()=>[{text:'user and assistant conversation',hash:31,metadata:{messageId:0}}],
+    makeCollectionProfile:async()=>({schemaVersion:1,embedding:{verified:true,modelId:'mock'}}),
+    applyAndVerifyProfile:async()=>({profile:{schemaVersion:1,embedding:{verified:true,modelId:'mock'}}}),
+    saveCollectionProfile:()=>{},saveChatChunkManifest:()=>{},
     parseRegistryKey:ids.parseRegistryKey,
     toastr:{error(){}},
 });

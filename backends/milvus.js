@@ -20,6 +20,7 @@
 import { getRequestHeaders } from '../../../../../script.js';
 import { VectorBackend } from './backend-interface.js';
 import { getModelField } from '../core/providers.js';
+import { getProviderSpecificParams } from './provider-params.js';
 import { VECTOR_LIST_LIMIT } from '../core/constants.js';
 
 const BACKEND_TYPE = 'milvus';
@@ -189,6 +190,7 @@ export class MilvusBackend extends VectorBackend {
                 collectionId: 'vecthare_main', // Always use main collection
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
+                ...getProviderSpecificParams(settings),
                 limit: VECTOR_LIST_LIMIT,
                 filters: { type, sourceId }, // Filter by tenant
             }),
@@ -235,6 +237,7 @@ export class MilvusBackend extends VectorBackend {
                 })),
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
+                ...getProviderSpecificParams(settings),
                 filters: { type, sourceId }, // Pass multitenancy info
             }),
         });
@@ -259,6 +262,7 @@ export class MilvusBackend extends VectorBackend {
                 hashes: hashes,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
+                ...getProviderSpecificParams(settings),
                 filters: { type, sourceId },
             }),
         });
@@ -283,6 +287,7 @@ export class MilvusBackend extends VectorBackend {
                 threshold: 0.0,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
+                ...getProviderSpecificParams(settings),
                 filters: { type, sourceId },
             }),
         });
@@ -324,6 +329,7 @@ export class MilvusBackend extends VectorBackend {
                         threshold: threshold,
                         source: settings.source || 'transformers',
                         model: getModelFromSettings(settings),
+                ...getProviderSpecificParams(settings),
                         filters: { type, sourceId },
                     }),
                 });
@@ -365,6 +371,7 @@ export class MilvusBackend extends VectorBackend {
                 collectionId: 'vecthare_main',
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
+                ...getProviderSpecificParams(settings),
                 filters: { type, sourceId }, // Purge specific tenant
             }),
         });
@@ -391,6 +398,7 @@ export class MilvusBackend extends VectorBackend {
                 collectionId: 'vecthare_main',
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
+                ...getProviderSpecificParams(settings),
                 // No filters = purge everything
             }),
         });
@@ -416,6 +424,7 @@ export class MilvusBackend extends VectorBackend {
             collectionId: 'vecthare_main',
             source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
+                ...getProviderSpecificParams(settings),
         }), {
             headers: getRequestHeaders(),
         });
@@ -444,6 +453,7 @@ export class MilvusBackend extends VectorBackend {
                 collectionId: 'vecthare_main',
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
+                ...getProviderSpecificParams(settings),
                 offset: options.offset || 0,
                 limit: options.limit || 100,
                 includeVectors: options.includeVectors || false,
@@ -474,6 +484,7 @@ export class MilvusBackend extends VectorBackend {
                 text: newText,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
+                ...getProviderSpecificParams(settings),
                 filters: { type, sourceId },
             }),
         });
@@ -501,6 +512,7 @@ export class MilvusBackend extends VectorBackend {
                 metadata: metadata,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
+                ...getProviderSpecificParams(settings),
                 filters: { type, sourceId },
             }),
         });
@@ -527,6 +539,7 @@ export class MilvusBackend extends VectorBackend {
                 collectionId: 'vecthare_main',
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
+                ...getProviderSpecificParams(settings),
                 filters: { type, sourceId },
             }),
         });
@@ -582,6 +595,7 @@ export class MilvusBackend extends VectorBackend {
             threshold: 0.0,
             source: settings.source || 'transformers',
             model: getModelFromSettings(settings),
+                ...getProviderSpecificParams(settings),
             filters: { type, sourceId },
             // Hybrid-specific parameters
             hybrid: true,

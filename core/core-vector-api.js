@@ -30,6 +30,7 @@ import { oai_settings } from '../../../../openai.js';
 import { isWebLlmSupported } from '../../../shared.js';
 import { getWebLlmProvider } from '../providers/webllm.js';
 import { parseRegistryKey } from './collection-ids.js';
+import { assertQueryModelCompatible } from './vectorization-profile.js';
 import { getBackend, invalidateBackendHealth, recordQuery, recordInsert, recordDelete, recordError } from '../backends/backend-manager.js';
 import {
     getProviderConfig,
@@ -825,6 +826,8 @@ export async function queryCollection(collectionId, searchText, topK, settings) 
         };
         collectionId = key.collectionId;
     }
+    const registryIdentity = `${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}`;
+    await assertQueryModelCompatible(registryIdentity, settings);
     const backend = await getBackend(settings);
 
     // Sources that require client-side embedding generation

@@ -114,8 +114,12 @@ function normalizeKeywords(keywords) {
     }).filter(Boolean);
 }
 
+function currentChunkScope() {
+    return `${currentSettings?.vector_backend || 'standard'}:${currentSettings?.source || 'transformers'}:${currentCollectionId}`;
+}
+
 function getChunkData(chunk) {
-    const stored = getChunkMetadata(chunk.hash) || {};
+    const stored = getChunkMetadata(chunk.hash, currentChunkScope()) || {};
 
     // User overrides take priority, then fall back to DB-stored keywords
     const dbKeywords = chunk.metadata?.keywords || chunk.keywords || [];
@@ -152,7 +156,7 @@ function updateChunkData(hash, updates) {
         allChunks.forEach(chunk => {
             if (chunk.hash === hash) {
                 // merge pending changes into the chunk for fresh data if chunks end up with same hash somehow.
-                const stored = getChunkMetadata(hash) || {};
+                const stored = getChunkMetadata(hash, currentChunkScope()) || {};
                 const pending = pendingChanges.get(hash) || {};
                 chunk.data = { ...chunk.data, ...pending };
             }
@@ -204,8 +208,8 @@ async function saveAllChanges() {
             delete toSave._newSummaries;
             delete toSave._deletedSummaries;
             delete toSave.text; // Don't save text to metadata here
-            const existing = getChunkMetadata(hash) || {};
-            saveChunkMetadata(hash, { ...existing, ...toSave });
+            const existing = getChunkMetadata(hash, currentChunkScope()) || {};
+            saveChunkMetadata(hash, { ...existing, ...toSave }, currentChunkScope());
 
             // Only call updateChunkMetadata if there are non-metadata changes
             // (metadata-only updates should skip the API call)
@@ -1772,10 +1776,10 @@ function bindDetailEvents() {
             }], currentSettings);
 
             // Update metadata (use string keys for metadata storage)
-            const oldMeta = getChunkMetadata(String(chunk.hash));
+            const oldMeta = getChunkMetadata(String(chunk.hash), currentChunkScope());
             if (oldMeta) {
-                deleteChunkMetadata(String(chunk.hash));
-                saveChunkMetadata(String(newHash), { ...oldMeta });
+                deleteChunkMetadata(String(chunk.hash), currentChunkScope());
+                saveChunkMetadata(String(newHash), { ...oldMeta }, currentChunkScope());
             }
 
             // Update local state
@@ -1797,8 +1801,8 @@ function bindDetailEvents() {
     // Enabled toggle - save immediately (no pending changes, direct write)
     $('#vecthare_detail_enabled').on('change', function() {
         const enabled = $(this).is(':checked');
-        const existing = getChunkMetadata(chunk.hash) || {};
-        saveChunkMetadata(chunk.hash, { ...existing, disabled: !enabled, enabled });
+        const existing = getChunkMetadata(chunk.hash, currentChunkScope()) || {};
+        saveChunkMetadata(chunk.hash, { ...existing, disabled: !enabled, enabled }, currentChunkScope());
         chunk.data.enabled = enabled;
         renderChunkList();
     });
@@ -2032,10 +2036,10 @@ function openTextEditor(chunk) {
             }], currentSettings);
 
             // Update metadata (use string keys for metadata storage)
-            const oldMeta = getChunkMetadata(String(chunk.hash));
+            const oldMeta = getChunkMetadata(String(chunk.hash), currentChunkScope());
             if (oldMeta) {
-                deleteChunkMetadata(String(chunk.hash));
-                saveChunkMetadata(String(newHash), { ...oldMeta });
+                deleteChunkMetadata(String(chunk.hash), currentChunkScope());
+                saveChunkMetadata(String(newHash), { ...oldMeta }, currentChunkScope());
             }
 
             // Update local state - update hash but keep same uniqueId for selection
@@ -2236,7 +2240,7 @@ async function deleteChunk(chunk) {
 
     try {
         await deleteVectorItems(currentCollectionId, [chunk.hash], currentSettings);
-        deleteChunkMetadata(chunk.hash);
+        deleteChunkMetadata(chunk.hash, currentChunkScope());
 
         // Remove from local state by uniqueId
         const idx = allChunks.findIndex(c => c.uniqueId === chunk.uniqueId);

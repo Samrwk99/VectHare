@@ -10,6 +10,10 @@
  * ============================================================================
  */
 
+import {scanCurrentChat, repairCurrentChat, reconcileDeletedMessages} from './core/chat-repair.js';
+import { getCollectionProfile, verifyAndRestoreLegacyProfile } from './core/vectorization-profile.js';
+import { openContentVectorizer } from './ui/content-vectorizer.js';
+import { getChatBinding } from './core/collection-ownership.js';
 import {
     eventSource,
     event_types,
@@ -177,8 +181,71 @@ window['vecthare_rearrangeChat'] = vecthare_rearrangeChat;
  */
 async function onVectorizeAllClick() {
     await vectorizeAll(settings, getBatchSize());
+    refreshActiveChatProfile();
 }
 
+let lastChatScan = null;
+function refreshActiveChatProfile() {
+    const binding=getChatBinding();
+    const profile=binding?.registryKey ? getCollectionProfile(binding.registryKey) : null;
+    const state=profile ? `Connected: ${binding.registryKey} | Embedding: ${profile.embedding?.modelId || 'Unverified'} (${profile.embedding?.verified?'verified':'unverified'}) | Strategy: ${profile.chunking?.chunking_strategy || 'unknown'}; global settings only apply to new collections.` : binding ? 'This connected legacy collection has no saved vectorization profile; writing remains blocked until verified or re-vectorized.' : 'No writable collection is connected. Global settings apply to newly created collections.';
+    $('#vecthare_collection_profile_status').text(state);
+}
+function setScanButton(label, disabled=false) {
+    const button = $('#vecthare_scan_chat');
+    button.find('span').text(label);
+    button.prop('disabled',disabled);
+}
+async function onScanRepairClick() {
+    const currentSettings=extension_settings.vecthare || settings;
+    try {
+        if(lastChatScan?.issues?.length) {
+            const problems=lastChatScan.issues;
+            if(!confirm(`Repair ${problems.length} chat embedding issue(s)? Replacements are verified before outdated vectors are removed.`))return;
+            setScanButton('Repairing...',true);
+            const after=await repairCurrentChat(currentSettings,lastChatScan);
+            lastChatScan=after.issues.length?after:null;
+            setScanButton(after.issues.length?`Repair (${after.issues.length} Issues)`:'All Clear');
+            if(after.issues.length)toastr.warning(`${after.issues.length} issues remain after repair`, 'VectHare');
+            else toastr.success('Chat embeddings verified after repair','VectHare');
+            return;
+        }
+        setScanButton('Scanning...',true);
+        const scan=await scanCurrentChat(currentSettings);
+        lastChatScan=scan.issues.length?scan:null;
+        setScanButton(scan.issues.length?`Repair (${scan.issues.length} Issues)`:'All Clear');
+        if(scan.issues.length) {
+            const counts=Object.groupBy ? Object.groupBy(scan.issues,issue=>issue.type) : null;
+            const summary=counts?Object.entries(counts).map(([kind,items])=>`${kind}: ${items.length}`).join(', '):`${scan.issues.length} issues`;
+            toastr.warning(`Scan found ${summary}. Click Repair to reconcile.`, 'VectHare', {timeOut:9000});
+        } else toastr.success('All scanned vectors match the current chat', 'VectHare');
+    } catch(error) {
+        lastChatScan=null;
+        setScanButton('Retry Scan');
+        if(/(no verified vectorization profile|embedding identity is unverified|lacks a verifiable chunk manifest)/i.test(error.message)) {
+            const binding=getChatBinding();
+            if(binding) {
+                const choice=prompt(`This older collection cannot be safely scanned or resumed: ${error.message}\n\n` +
+                    'Options:\nRESTORE — First set the original embedding provider, model and chunking strategy in Settings, then verify against stored vector samples.\n' +
+                    'RE-VECTORIZE — Build a new collection and keep this one as a disabled backup.\n' +
+                    'CANCEL — Keep the collection read-only.\n\nType RESTORE or RE-VECTORIZE:','CANCEL');
+                if(choice?.trim().toUpperCase()==='RE-VECTORIZE') {
+                    openContentVectorizer('chat',binding.registryKey);return;
+                }
+                if(choice?.trim().toUpperCase()==='RESTORE') {
+                    try {
+                        await verifyAndRestoreLegacyProfile(binding.registryKey,currentSettings);
+                        toastr.success('Stored vectors match the selected embedding model. Profile restored; scan again to inspect chat chunks.','VectHare');
+                        setScanButton('Scan Chat');refreshActiveChatProfile();return;
+                    } catch(verificationError) {toastr.error(`Original settings could not be verified: ${verificationError.message}`,'VectHare',{timeOut:12000});return;}
+                }
+                return;
+            }
+        }
+        toastr.error(`Scan/repair could not finish: ${error.message}`,'VectHare',{timeOut:12000});
+        console.error('VectHare: Chat repair error',error);
+    }
+}
 /**
  * Action: Full purge - wipes ALL vector data and settings
  */
@@ -269,12 +336,14 @@ jQuery(async () => {
     // Render UI
     renderSettings('extensions_settings2', settings, {
         onVectorizeAll: onVectorizeAllClick,
+        onScanRepair: onScanRepairClick,
         onPurge: onPurgeClick,
         onRunDiagnostics: onRunDiagnosticsClick
     });
 
     // Initialize auto-sync checkbox state for current chat (if any)
     refreshAutoSyncCheckbox(settings);
+    refreshActiveChatProfile();
 
     // Initialize visualizer
     initializeVisualizer();
@@ -319,13 +388,19 @@ jQuery(async () => {
     })();
 
     // Register event handlers
-    eventSource.on(event_types.MESSAGE_DELETED, onChatEvent);
-    eventSource.on(event_types.MESSAGE_EDITED, onChatEvent);
+    eventSource.on(event_types.MESSAGE_DELETED, (...args) => {
+        lastChatScan=null;
+        setScanButton('Scan Chat');
+        onChatEvent(...args);
+        // Let SillyTavern finish updating the chat array before reconciliation.
+        setTimeout(() => reconcileDeletedMessages(extension_settings.vecthare || settings), 350);
+    });
+    eventSource.on(event_types.MESSAGE_EDITED, (...args) => { lastChatScan=null;setScanButton('Scan Chat');onChatEvent(...args); });
     // Run vector sync tasks on message events
     // Note: Semantic WI injection happens in the generate_interceptor (rearrangeChat), not here
     eventSource.on(event_types.MESSAGE_SENT, onChatEvent);
     eventSource.on(event_types.MESSAGE_RECEIVED, onChatEvent);
-    eventSource.on(event_types.MESSAGE_SWIPED, onChatEvent);
+    eventSource.on(event_types.MESSAGE_SWIPED, (...args) => { lastChatScan=null;setScanButton('Scan Chat');onChatEvent(...args); });
     // Chat deletion must not automatically erase stored memories. Collections
     // and their ownership record remain available for explicit recovery/deletion.
     eventSource.on(event_types.CHAT_DELETED, chatId => {
@@ -348,6 +423,7 @@ jQuery(async () => {
     eventSource.on(event_types.CHAT_CHANGED, () => {
         console.log('VectHare: Chat changed, refreshing UI state');
         refreshAutoSyncCheckbox(settings);
+        lastChatScan=null;setScanButton('Scan Chat');refreshActiveChatProfile();
     });
 
     console.log('VectHare: ✅ Initialized successfully');

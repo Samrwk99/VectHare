@@ -12,7 +12,10 @@
 import { getCurrentChatId, is_send_press, setExtensionPrompt, substituteParams, chat_metadata, extension_prompts } from '../../../../../script.js';
 import { getContext } from '../../../../extensions.js';
 import { getStringHash as calculateHash, waitUntilCondition, onlyUnique } from '../../../../utils.js';
-import { isUnitStrategy } from './chunking.js';
+import { isUnitStrategy, chunkText } from './chunking.js';
+import { applyAndVerifyProfile, saveCollectionProfile, patchChatChunkManifest, getChatChunkManifest } from './vectorization-profile.js';
+import { prepareEmbeddingItems } from './embedding-overflow.js';
+import { bindChatCollection } from './collection-ownership.js';
 import { extractChatKeywords, extractBM25Keywords } from './keyword-boost.js';
 import { cleanText } from './text-cleaning.js';
 import {
@@ -36,7 +39,7 @@ import {
 } from './collection-metadata.js';
 import { progressTracker } from '../ui/progress-tracker.js';
 import { buildSearchContext, filterChunksByConditions, processChunkLinks } from './conditional-activation.js';
-import { getChunkMetadata, getCollectionMeta } from './collection-metadata.js';
+import { getChunkMetadata, getCollectionMeta, setCollectionMeta } from './collection-metadata.js';
 import { processChunkGroups, mergeVirtualLinks } from './chunk-groups.js';
 import { createDebugData, setLastSearchDebug, addTrace, recordChunkFate } from '../ui/search-debug.js';
 import { getSemanticWorldInfoEntries } from './world-info-integration.js';
@@ -52,6 +55,12 @@ import {
     parseCollectionId,
     parseRegistryKey,
 } from './collection-ids.js';
+
+function scopedChunkKey(chunk, settings) {
+    if(!chunk?.collectionId)return null;
+    const parsed=parseRegistryKey(chunk.collectionId);
+    return parsed.backend ? chunk.collectionId : `${settings?.vector_backend||'standard'}:${settings?.source||'transformers'}:${chunk.collectionId}`;
+}
 
 // Hash cache for performance
 const hashCache = new LRUCache(HASH_CACHE_SIZE);
@@ -146,7 +155,7 @@ function prepareItemsForInsertion(items) {
  * @param {string} keywordLevel Keyword extraction level: 'off', 'minimal', 'balanced', 'aggressive'
  * @returns {object[]} Grouped message items ready for chunking
  */
-function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel = 'balanced') {
+export function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel = 'balanced') {
     if (!messages.length) return [];
 
     // Helper to extract keywords based on level
@@ -216,6 +225,12 @@ function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel
             return grouped;
         }
 
+        case 'adaptive': {
+            // Adaptive is a character-budget strategy, never silently per-message.
+            // Used with a deterministic metadata mapping to all source messages.
+            throw new Error('Adaptive chat syncing requires a complete re-vectorization using the Content Vectorizer; refusing to silently fall back to Per Message.');
+        }
+        case 'per_scene': return [];
         case 'per_message':
         default:
             // Current behavior - each message is its own item
@@ -268,7 +283,7 @@ async function applyChunkConditions(chunks, chat, settings) {
 
     // Check if any chunks have conditions (from chunk metadata)
     const chunksWithConditions = filtered.map(chunk => {
-        const chunkMeta = getChunkMetadata(chunk.hash);
+        const chunkMeta = getChunkMetadata(chunk.hash, scopedChunkKey(chunk, typeof settings !== 'undefined' ? settings : null));
         if (chunkMeta?.conditions?.enabled) {
             return { ...chunk, conditions: chunkMeta.conditions };
         }
@@ -388,158 +403,98 @@ async function rerankWithBananaBread(query, chunks, settings) {
  * @param {number} batchSize Number of messages to process per call
  * @returns {Promise<object>} Progress info
  */
-export async function synchronizeChat(settings, batchSize = 5) {
-    // Build proper collection ID using chat UUID first
-    const binding = getChatBinding();
-    if (!binding) return { remaining: -1, messagesProcessed: 0, chunksCreated: 0 };
-    const target = resolveChatWriteTarget(settings, getChatUUID());
-    const collectionId = target.collectionId;
-    console.log(`VectHare: Resolved writable collection: "${target.registryKey}"`);
-    console.log(`🔍 VectHare DEBUG: settings.vector_backend = "${settings.vector_backend}"`);
-    console.log(`🔍 VectHare DEBUG: settings.source = "${settings.source}"`);
-    if (!collectionId) {
-        return { remaining: -1, messagesProcessed: 0, chunksCreated: 0 };
+/** Deterministic representation shared by incremental sync and the repair scanner. */
+export async function buildExpectedChatItems(chat, settings) {
+    if (!Array.isArray(chat)) throw new Error('Chat contents unavailable');
+    const messages=[];
+    for(let i=0;i<chat.length;i++) {
+        const msg=chat[i];
+        if(msg.is_system)continue;
+        const text=cleanText(String(substituteParams(getTextWithoutAttachments(msg))));
+        messages.push({text,hash:getStringHash(text),index:i,is_user:!!msg.is_user});
     }
+    const keywordLevel=settings.keyword_extraction_level || 'balanced';
+    let grouped;
+    if(settings.chunking_strategy==='adaptive') {
+        const segments=messages.map(m=>({index:m.index,start:0,end:0,label:`[${m.is_user?'User':'Character'}]: ${m.text}`}));
+        let cursor=0;
+        for(const part of segments){part.start=cursor;cursor+=part.label.length;part.end=cursor;cursor+=2;}
+        const combined=segments.map(x=>x.label).join('\n\n');
+        const chunks=await chunkText(combined,{strategy:'adaptive',chunkSize:settings.chunk_size||500,chunkOverlap:settings.chunk_overlap||0});
+        let scanFrom=0;
+        grouped=chunks.map(c=>{
+            const location=combined.indexOf(c.text,scanFrom);
+            const start=location>=0?location:scanFrom;
+            const end=start+c.text.length;
+            scanFrom=start+Math.max(1,c.text.length-Number(settings.chunk_overlap||0));
+            const ids=segments.filter(m=>m.start<end && m.end>start).map(m=>m.index);
+            return {text:c.text,hash:getStringHash(c.text),index:ids[0]||0,keywords:keywordLevel==='off'?[]:extractBM25Keywords(c.text,{level:keywordLevel}),metadata:{...c.metadata,strategy:'adaptive',messageIds:ids,startIndex:ids[0],endIndex:ids.at(-1)}};
+        });
+    } else grouped=groupMessagesByStrategy(messages,settings.chunking_strategy||'per_message',settings.batch_size||4,keywordLevel);
+    return prepareEmbeddingItems(prepareItemsForInsertion(grouped),settings,getStringHash);
+}
 
-    // Check per-collection autoSync setting instead of global enabled_chats
-    const { isCollectionAutoSyncEnabled } = await import('./collection-metadata.js');
-    if (!isCollectionAutoSyncEnabled(target.registryKey)) {
-        return { remaining: -1, messagesProcessed: 0, chunksCreated: 0 };
+export async function synchronizeChat(settings, batchSize = 5, {manual=false} = {}) {
+    const chatUUID=getChatUUID();
+    if(!chatUUID || !getCurrentChatId())return {remaining:-1,messagesProcessed:0,chunksCreated:0};
+    const collectionIdCandidate=getChatCollectionId(chatUUID);
+    const target=resolveChatWriteTarget(settings,chatUUID,collectionIdCandidate);
+    if(!manual){
+        const {isCollectionAutoSyncEnabled}=await import('./collection-metadata.js');
+        if(!isCollectionAutoSyncEnabled(target.registryKey))return {remaining:-1,messagesProcessed:0,chunksCreated:0};
     }
-
-    // Per Scene strategy: don't auto-vectorize on message events
-    // Scenes are vectorized when user marks scene end (via createSceneChunk)
-    if (settings.chunking_strategy === 'per_scene') {
-        return { remaining: 0, messagesProcessed: 0, chunksCreated: 0 };
-    }
-
+    if(settings.chunking_strategy==='per_scene')return {remaining:0,messagesProcessed:0,chunksCreated:0};
+    let verified=await applyAndVerifyProfile(target.registryKey,settings,{allowNew:target.newCollection});
+    const effective=verified.settings;
+    if(!verified.profile.embedding.verified) throw new Error(verified.profile.embedding.reason || 'Embedding model identity unknown; refusing to write without verification');
+    try { await waitUntilCondition(()=>!syncBlocked && !is_send_press,1000); }
+    catch {return {remaining:-1,messagesProcessed:0,chunksCreated:0};}
+    const startChatId=getCurrentChatId();
     try {
-        await waitUntilCondition(() => !syncBlocked && !is_send_press, 1000);
-    } catch {
-        syncBlocked = false; // VEC-30: Reset flag on timeout
-        return { remaining: -1, messagesProcessed: 0, chunksCreated: 0 };
-    }
-
-    try {
-        syncBlocked = true;
-        const context = getContext();
-
-        if (!getCurrentChatId() || !Array.isArray(context.chat)) {
-            return { remaining: -1, messagesProcessed: 0, chunksCreated: 0 };
+        syncBlocked=true;
+        const context=getContext();
+        // Freeze both identity and message content for the entire write batch.
+        // ST can mutate chat messages in place during swipes/edits.
+        if(!Array.isArray(context.chat))throw new Error('Current chat is unavailable');
+        const chatSignature=()=>JSON.stringify(context.chat.map(m=>[m.mes,m.swipe_id,m.is_user,m.is_system,m.extra?.fileLength]));
+        const signatureAtStart=chatSignature();
+        const chatSnapshot=structuredClone(context.chat);
+        const expected=await buildExpectedChatItems(chatSnapshot,effective);
+        if(startChatId!==getCurrentChatId() || getChatUUID()!==chatUUID || chatSignature()!==signatureAtStart)throw new Error('Chat changed during vectorization');
+        if(target.newCollection && getCollectionRegistry().includes(target.registryKey))
+            throw new Error('A previously registered collection already uses this identity. Connect or re-vectorize safely instead.');
+        let savedHashes;
+        try {savedHashes=await getSavedHashes(target.collectionId,effective);} catch(error){
+            // A new Qdrant physical collection does not exist until first insert.
+            // Only a verified 404 counts as missing; server/network errors fail closed.
+            if(target.newCollection && /\b404\b/.test(error.message))savedHashes=[];
+            else throw error;
         }
-
-        // NOTE: Registration happens AFTER first successful insert to prevent ghosts
-        let isRegistered = false;
-
-        // Step 1: What's already vectorized? (source of truth = DB)
-        const existingHashes = new Set(await getSavedHashes(collectionId, settings));
-
-        // Step 2: Build list of messages NOT in DB
-        const strategy = settings.chunking_strategy || 'per_message';
-        const strategyBatchSize = settings.batch_size || 4;
-
-        // Collect all non-system messages with their data
-        // PERF: Use index from loop instead of indexOf() to avoid O(n²)
-        const allMessages = [];
-        for (let i = 0; i < context.chat.length; i++) {
-            const msg = context.chat[i];
-            if (msg.is_system) continue;
-            // Apply text cleaning to remove HTML tags, metadata blocks, etc.
-            const rawText = String(substituteParams(msg.mes));
-            const text = cleanText(rawText);
-            allMessages.push({
-                text,
-                hash: getStringHash(substituteParams(getTextWithoutAttachments(msg))),
-                index: i,
-                is_user: msg.is_user
-            });
-        }
-
-        // Group messages according to strategy
-        const keywordLevel = settings.keyword_extraction_level || 'balanced';
-        const groupedItems = groupMessagesByStrategy(allMessages, strategy, strategyBatchSize, keywordLevel);
-
-        // Filter out already vectorized items (by their grouped hash)
-        const queue = new Queue();
-        for (const item of groupedItems) {
-            if (!existingHashes.has(item.hash)) {
-                queue.enqueue(item);
-            }
-        }
-
-        if (queue.isEmpty()) {
-            return { remaining: 0, messagesProcessed: 0, chunksCreated: 0 };
-        }
-
-        // Step 3: Process batch
-        let itemsProcessed = 0;
-        let chunksCreated = 0;
-        let itemsFailed = 0;
-        const label = strategy === 'per_message' ? 'Message' : 'Group';
-
-        while (!queue.isEmpty() && itemsProcessed < batchSize) {
-            const item = queue.dequeue();
-
+        const saved=new Set(savedHashes.map(String));
+        // On first creation, pre-existing DB data may not be adopted without a profile.
+        if(target.newCollection && saved.size)throw new Error('A collection with this ID already exists. Connect explicitly or create a replacement.');
+        const needed=expected.filter(chunk=>!saved.has(String(chunk.hash)));
+        const items=needed.slice(0,Math.max(1,batchSize));
+        const succeeded=[]; const errors=[];
+        for(const chunk of items){
+            if(startChatId!==getCurrentChatId() || getChatUUID()!==chatUUID || chatSignature()!==signatureAtStart)throw new Error('Chat edited or changed before insertion');
             try {
-                // Prepare item for insertion (add source metadata)
-                const chunks = prepareItemsForInsertion([item]);
-
-                // Insert chunks (insertVectorItems handles duplicates at DB level)
-                if (chunks.length > 0) {
-                    await insertVectorItems(collectionId, chunks, settings, (embedded, total) => {
-                        // Update progress tracker with embedding progress
-                        console.log(`[Chat Vectorization] Embedding progress callback: ${embedded}/${total}`);
-                        progressTracker.updateEmbeddingProgress(embedded, total);
-
-                        // Determine phase based on progress (0-50% = Embedding, 50-100% = Writing)
-                        const progressPercent = (embedded / total) * 100;
-                        const phase = progressPercent <= 50 ? 'Embedding' : 'Writing to database';
-                        progressTracker.updateCurrentItem(`${label} ${itemsProcessed}/${batchSize} - ${phase}: ${embedded}/${total} chunks`);
-                    });
-                    chunksCreated += chunks.length;
-
-                    // Register on first successful insert (prevents ghost collections)
-                    if (!isRegistered) {
-                        // Construct proper registry key: backend:source:collectionId
-                        const backend = settings.vector_backend || 'standard';
-                        const source = settings.source || 'transformers';
-                        const registryKey = target.registryKey;
-                        console.log(`🔍 VectHare DEBUG: Registering collection with key: "${registryKey}"`);
-                        console.log(`🔍 VectHare DEBUG: Components: backend="${backend}", source="${source}", collectionId="${collectionId}"`);
-                        registerCollection(registryKey);
-                        isRegistered = true;
-                        console.log(`VectHare: Registered collection ${registryKey} after first successful insert`);
-                    }
+                await insertVectorItems(target.collectionId,[chunk],effective);
+                succeeded.push(chunk);
+                if(target.newCollection && succeeded.length===1){
+                    await saveCollectionProfile(target.registryKey,verified.profile);
+                    bindChatCollection(chatUUID,target.registryKey,{writeVerified:true});
+                    registerCollection(target.registryKey);
                 }
-            } catch (itemError) {
-                // Log error but continue processing other items
-                console.warn(`VectHare: Failed to process item (hash: ${item.hash}, index: ${item.index}):`, itemError.message);
-                itemsFailed++;
-                // Don't rethrow - continue with next item
-            }
-
-            itemsProcessed++;
-            progressTracker.updateCurrentItem(`${label} ${itemsProcessed}/${batchSize}${itemsFailed > 0 ? ` (${itemsFailed} failed)` : ''}`);
+            } catch(e) { errors.push(`${chunk.hash}: ${e.message}`); }
         }
-
-        progressTracker.updateCurrentItem(null);
-
-        if (itemsFailed > 0) {
-            console.warn(`VectHare: Sync completed with ${itemsFailed} failed items out of ${itemsProcessed}`);
+        if(succeeded.length){
+            await patchChatChunkManifest(target.registryKey,succeeded,chatUUID);
+            setCollectionMeta(target.registryKey,{lastSuccessfulSyncAt:new Date().toISOString()});
         }
-
-        return {
-            remaining: queue.size,
-            messagesProcessed: itemsProcessed,
-            chunksCreated,
-            itemsFailed
-        };
-    } catch (error) {
-        console.error('VectHare: Sync failed', error);
-        throw error;
-    } finally {
-        syncBlocked = false;
-    }
+        if(errors.length)throw new Error(`Chat sync failed for ${errors.length} chunks: ${errors.slice(0,3).join('; ')}`);
+        return {remaining:needed.length-items.length,messagesProcessed:items.length,chunksCreated:succeeded.length,itemsFailed:0};
+    } finally {syncBlocked=false;}
 }
 
 // ============================================================================
@@ -1171,7 +1126,7 @@ async function applyGroupsAndLinksStage(chunks, activeCollections, settings, deb
         // PERF: Build chunk metadata map ONCE and reuse for both virtual and explicit links
         const chunkMetadataMap = new Map();
         for (const chunk of processedChunks) {
-            const meta = getChunkMetadata(chunk.hash) || {};
+            const meta = getChunkMetadata(chunk.hash, scopedChunkKey(chunk, typeof settings !== 'undefined' ? settings : null)) || {};
             chunkMetadataMap.set(String(chunk.hash), meta);
         }
 
@@ -1233,7 +1188,7 @@ async function applyGroupsAndLinksStage(chunks, activeCollections, settings, deb
         // PERF: Build metadata map once for chunks with links only
         const chunkMetadataMap = new Map();
         for (const chunk of processedChunks) {
-            const meta = getChunkMetadata(chunk.hash) || {};
+            const meta = getChunkMetadata(chunk.hash, scopedChunkKey(chunk, typeof settings !== 'undefined' ? settings : null)) || {};
             if (meta.links && meta.links.length > 0) {
                 chunkMetadataMap.set(String(chunk.hash), meta);
             }
@@ -1387,7 +1342,7 @@ function buildNestedInjectionText(chunks, settings) {
 
         // Build chunk texts with per-chunk wrapping
         const chunkTexts = collChunks.map(chunk => {
-            const chunkMeta = getChunkMetadata(chunk.hash) || {};
+            const chunkMeta = getChunkMetadata(chunk.hash, scopedChunkKey(chunk, typeof settings !== 'undefined' ? settings : null)) || {};
             const chunkContext = chunkMeta.context ? substituteParams(chunkMeta.context) : '';
             const chunkXmlTag = chunkMeta.xmlTag || '';
             const text = chunk.text || '(text not available)';
@@ -1449,7 +1404,7 @@ function buildNestedInjectionText(chunks, settings) {
  * @returns {{position: number, depth: number}} Resolved position and depth
  */
 function resolveChunkInjectionPosition(chunk, settings) {
-    const chunkMeta = getChunkMetadata(chunk.hash) || {};
+    const chunkMeta = getChunkMetadata(chunk.hash, scopedChunkKey(chunk, typeof settings !== 'undefined' ? settings : null)) || {};
     const collMeta = getCollectionMeta(chunk.collectionId) || {};
 
     // Cascade: chunk → collection → global
@@ -1744,7 +1699,7 @@ export async function rearrangeChat(chat, settings, type) {
         // === STAGE 4.1: Filter disabled chunks ===
         const beforeDisabledFilter = chunks.length;
         chunks = chunks.filter(chunk => {
-            const meta = getChunkMetadata(chunk.hash);
+            const meta = getChunkMetadata(chunk.hash, scopedChunkKey(chunk, typeof settings !== 'undefined' ? settings : null));
             if (meta?.disabled === true || meta?.enabled === false) {
                 recordChunkFate(debugData, chunk.hash, 'disabled_filter', 'dropped',
                                 'Chunk is disabled', { hash: chunk.hash });
@@ -1985,9 +1940,7 @@ export async function rearrangeChat(chat, settings, type) {
  */
 export async function vectorizeAll(settings, batchSize) {
     try {
-        if (!settings.enabled_chats) {
-            return;
-        }
+        // Manual Sync is intentionally independent of Auto-Sync.
 
         const chatId = getCurrentChatId();
         if (!chatId) {
@@ -2026,7 +1979,7 @@ export async function vectorizeAll(settings, batchSize) {
                 throw new Error('Message generation in progress');
             }
 
-            const result = await synchronizeChat(settings, batchSize);
+            const result = await synchronizeChat(settings, batchSize, {manual:true});
 
             // Handle disabled/blocked state
             if (result.remaining === -1) {
@@ -2035,6 +1988,8 @@ export async function vectorizeAll(settings, batchSize) {
                 return;
             }
 
+            if(result.itemsFailed)throw new Error(`${result.itemsFailed} chunks failed`);
+            if(result.remaining > 0 && result.chunksCreated === 0)throw new Error('No progress during vectorization');
             finished = result.remaining <= 0;
             iteration++;
 
