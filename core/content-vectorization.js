@@ -31,8 +31,11 @@ import { cleanText, cleanMessages } from './text-cleaning.js';
 import { progressTracker } from '../ui/progress-tracker.js';
 import { extension_settings, getContext } from '../../../../extensions.js';
 import { getStringHash } from '../../../../utils.js';
-import { getCollectionProfile, makeCollectionProfile, saveCollectionProfile, applyAndVerifyProfile, saveChatChunkManifest } from './vectorization-profile.js';
+import { getCollectionProfile, makeCollectionProfile, saveCollectionProfile, applyAndVerifyProfile, saveChatChunkManifest, patchChatChunkManifest, getChatChunkManifest } from './vectorization-profile.js';
 import { prepareEmbeddingItems } from './embedding-overflow.js';
+import { inspectCollectionChunks, expectedEmbeddedText, chunkMatchesExpected } from './chunk-integrity.js';
+import { beginSyncCheckpoint, updateSyncCheckpoint, acknowledgeSyncChunk, finalizeSyncCheckpoint } from './sync-checkpoints.js';
+import { createOperationControl, detachOperationControl, hasActiveVectorWrite, OperationStoppedError } from '../ui/operation-controls.js';
 import { buildExpectedChatItems } from './chat-vectorization.js';
 
 /**
@@ -43,7 +46,15 @@ import { buildExpectedChatItems } from './chat-vectorization.js';
  * @param {object} params.settings - Type-specific settings
  * @returns {Promise<{success: boolean, chunkCount: number, collectionId: string}>}
  */
+let contentVectorizationActive=false;
 export async function vectorizeContent({ contentType, source, settings }) {
+    // Freeze source/settings for this run; modal edits must not change its inputs.
+    source=structuredClone(source);settings=structuredClone(settings);
+    const openedChatUUID=contentType==='chat'&&source.type==='current'?getChatUUID():null;
+    const chatSignature=()=>JSON.stringify((getContext()?.chat||[]).map(m=>[m.mes,m.swipe_id,m.is_user,m.is_system,m.extra?.fileLength]));
+    const originalChatSignature=openedChatUUID?chatSignature():null;
+    const assertOriginalChat=()=>{if(openedChatUUID && (openedChatUUID!==getChatUUID() || chatSignature()!==originalChatSignature))throw new Error('Chat changed during vectorisation. Completed chunks remain safe; reopen this chat and scan before continuing.');};
+    if(contentVectorizationActive || hasActiveVectorWrite())throw new Error('Another vector-writing operation is running. Use Live Status to control it.');
     const type = getContentType(contentType);
     if (!type) {
         throw new Error(`Unknown content type: ${contentType}`);
@@ -56,10 +67,18 @@ export async function vectorizeContent({ contentType, source, settings }) {
     }
 
     const sourceName = source.name || source.filename || source.id || contentType;
+    contentVectorizationActive=true;
     progressTracker.show(`Vectorizing ${type.label || contentType}`, 4, 'Steps');
     progressTracker.updateCurrentItem(sourceName);
-
+    const control=createOperationControl(progressTracker.activityId,{pausable:true,stoppable:true,writeOperation:true});
+    const originalUUID=contentType==='chat'&&source.type==='current'?getChatUUID():null;
+    progressTracker.registerRetry(async()=>{
+        if(originalUUID && getChatUUID()!==originalUUID)throw new Error('Open the original chat before retrying');
+        await vectorizeContent({contentType,source,settings});
+    });
+    let journalKey=null,journalChat=null;
     try {
+        await control.checkpoint();
         // Step 1: Resolve source
         progressTracker.updateProgress(1, 'Loading content...');
         const rawContent = await resolveSource(contentType, source);
@@ -67,6 +86,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
         // Step 2: Prepare and chunk
         progressTracker.updateProgress(2, 'Chunking content...');
         const preparedContent = await prepareContent(contentType, rawContent, settings);
+        await control.checkpoint();
         const chunks = await chunkText(preparedContent.text || preparedContent, {
             strategy: settings.strategy || type.defaultStrategy,
             chunkSize: settings.chunkSize || type.defaults.chunkSize,
@@ -121,7 +141,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
                 }
             }
         }
-        const collectionKey = `${currentBackend}:${currentSource}:${collectionId}`;
+        let collectionKey = `${currentBackend}:${currentSource}:${collectionId}`;
 
         // Use the same provider settings throughout this operation.
         const enrichedChunks = enrichChunks(chunks, contentType, source, settings, preparedContent, vecthareSettings);
@@ -134,10 +154,29 @@ export async function vectorizeContent({ contentType, source, settings }) {
         let hashedChunks = isOpenChat && ['per_message','conversation_turns','message_batch','adaptive'].includes(settings.strategy)
             ? await buildExpectedChatItems(getContext().chat,effectiveProfileSettings)
             : await prepareEmbeddingItems(originalChunks,effectiveProfileSettings,getStringHash);
+        // Resumable staged replacements: identify source by exact planned hashes
+        // and configuration, not just by a filename or the open character.
+        // No original text, credentials or embeddings are placed in the journal.
+        const pending=extension_settings.vecthare.pendingVectorizations ||= {};
+        const sourceFingerprint=JSON.stringify([contentType,source.type,sourceName,chatUUID,
+            source.replacedCollectionKey||null,settings.strategy,settings.chunkSize,settings.batchSize,
+            currentBackend,currentSource,hashedChunks.map(c=>String(c.hash))]);
+        const pendingKey=String(getStringHash(sourceFingerprint));
+        let prior=pending[pendingKey];
+        if(!prior){try{prior=JSON.parse(globalThis.localStorage?.getItem(`vecthare:pending-content:v1:${pendingKey}`)||'null');}catch{}}
+        if(prior && prior.fingerprint===sourceFingerprint && prior.registryKey &&
+           (source.replaceExisting || source.type==='file')) {
+            const parsed=parseRegistryKey(prior.registryKey);
+            if(parsed.backend!==currentBackend||parsed.source!==currentSource)
+                throw new Error('An interrupted collection belongs to a different backend');
+            collectionKey=prior.registryKey;collectionId=parsed.collectionId;
+        }
+        await control.checkpoint();
+        assertOriginalChat();
         const alreadyConnected = getChatBinding(chatUUID);
         const activeKey = alreadyConnected?.registryKey;
         let profile;
-        if(activeKey === collectionKey && !source.replaceExisting) {
+        if((getCollectionProfile(collectionKey) && !source.replaceExisting) || (prior?.registryKey===collectionKey && getCollectionProfile(collectionKey))) {
             const check = await applyAndVerifyProfile(collectionKey,effectiveProfileSettings);
             profile = check.profile;
             for(const field of ['chunking_strategy','chunk_size','batch_size']) {
@@ -157,47 +196,85 @@ export async function vectorizeContent({ contentType, source, settings }) {
         // Step 4: Insert into vector store (streaming: embed + write together)
         progressTracker.updateProgress(4, 'Processing chunks...');
 
-        // Ensure backend is initialized and healthy before attempting inserts.
-        // Some backends (LanceDB/Qdrant) require initialization which may fail
-        // if attempted lazily during insert; pre-initializing reduces first-run failures.
-        try {
-            await getBackend(vecthareSettings);
-        } catch (e) {
-            console.warn('VectHare: Backend initialization failed before insert, will still attempt insert:', e.message);
-            try {
-                progressTracker.addError(`Backend init failed: ${e.message}`);
-            } catch (_) {}
-            try {
-                toastr.error('Backend initialization failed: ' + e.message, 'VectHare');
-            } catch (_) {}
+        // Persist the collection's original profile and recovery intent before
+        // the first write. A process crash after an acknowledged insert cannot
+        // make this collection an unidentifiable/unverifiable orphan.
+        const firstWrite=!getCollectionProfile(collectionKey);
+        if(firstWrite)await saveCollectionProfile(collectionKey,profile);
+        if(isOpenChat && !source.replaceExisting && !getChatChunkManifest(collectionKey))
+            await saveChatChunkManifest(collectionKey,[],chatUUID);
+        if(source.replaceExisting || source.type==='file'){
+            pending[pendingKey]={fingerprint:sourceFingerprint,registryKey:collectionKey,createdAt:Date.now()};
+            try{globalThis.localStorage?.setItem(`vecthare:pending-content:v1:${pendingKey}`,JSON.stringify(pending[pendingKey]));}catch{}
+            // This calls saveSettingsDebounced through the recovery journal below.
         }
-
-        try {
-            await insertVectorItems(collectionId, hashedChunks, vecthareSettings, (embedded, total) => {
-            // Update progress with streaming count
-            console.log(`[Content Vectorization] Processing progress callback: ${embedded}/${total}`);
-            progressTracker.updateEmbeddingProgress(embedded, total);
-
-            // Streaming approach: embedding and writing happen together
-            progressTracker.updateCurrentItem(`Processing: ${embedded}/${total} chunks (${total - embedded} remaining)`);
-            });
-        } catch (error) {
-            // Surface insert errors to the UI so users see why vectorization may have failed
-            console.error('VectHare: insertVectorItems failed', error);
-            try {
-                progressTracker.addError(error.message || String(error));
-            } catch (_) {}
-            try {
-                toastr.error('Failed to write embeddings: ' + (error.message || String(error)), 'VectHare');
-            } catch (_) {}
-            // Re-throw so outer handler records completion state and any callers can react
-            throw error;
+        journalKey=collectionKey;
+        journalChat=chatUUID||`content:${pendingKey}`;
+        const backend=await getBackend(effectiveProfileSettings);
+        let stored=[];
+        try{stored=await inspectCollectionChunks(backend,collectionId,effectiveProfileSettings);}
+        catch(e){
+            if(/\b404\b/.test(e.message) && (firstWrite || prior?.registryKey===collectionKey || source.replaceExisting))stored=[];
+            else if(/\b404\b/.test(e.message) && !getChatChunkManifest(collectionKey))stored=[];
+            else throw e;
         }
-
-        if(isOpenChat && chatUUID !== getChatUUID())throw new Error('Chat changed during vectorization; original collection preserved');
-        // Profile and manifest are saved only after acknowledged insert.
-        await saveCollectionProfile(collectionKey,profile);
-        if(isOpenChat) await saveChatChunkManifest(collectionKey,hashedChunks,chatUUID);
+        const rowMap=new Map();
+        for(const row of stored){
+            if(rowMap.has(String(row.hash)))throw new Error('Duplicate stored hash; use Scan/Repair before continuing');
+            rowMap.set(String(row.hash),row);
+        }
+        const matches=(storedItem,item)=>{
+            if(!storedItem)return false;
+            if(isOpenChat)return chunkMatchesExpected(storedItem,item);
+            const text=String(storedItem.text??'');
+            return text===String(item.text) || text===expectedEmbeddedText(item);
+        };
+        const confirmed=hashedChunks.filter(item=>matches(rowMap.get(String(item.hash)),item));
+        const needed=hashedChunks.filter(item=>!matches(rowMap.get(String(item.hash)),item));
+        beginSyncCheckpoint(journalKey,journalChat,hashedChunks.length,confirmed.length);
+        if(isOpenChat && confirmed.length){
+            const known=new Set((getChatChunkManifest(collectionKey)?.entries||[]).map(e=>String(e.hash)));
+            const recovered=confirmed.filter(item=>!known.has(String(item.hash)));
+            if(recovered.length)await patchChatChunkManifest(collectionKey,recovered,chatUUID);
+        }
+        progressTracker.updateVerifiedChunks(confirmed.length,hashedChunks.length,`${confirmed.length} chunks already verified`);
+        let written=0;
+        for(const chunk of needed){
+            await control.checkpoint();
+            assertOriginalChat();
+            updateSyncCheckpoint(journalKey,journalChat,{phase:'running',activeHash:String(chunk.hash)});
+            await insertVectorItems(collectionId,[chunk],effectiveProfileSettings);
+            let storedItem=typeof backend.getChunk==='function'?await backend.getChunk(collectionId,chunk.hash,effectiveProfileSettings):null;
+            if(!storedItem) {
+                const rows=await inspectCollectionChunks(backend,collectionId,effectiveProfileSettings);
+                storedItem=rows.find(row=>String(row.hash)===String(chunk.hash));
+            }
+            if(!matches(storedItem,chunk))throw new Error(`Inserted chunk ${chunk.hash} could not be verified; retry will inspect it before re-embedding`);
+            if(isOpenChat)await patchChatChunkManifest(collectionKey,[chunk],chatUUID);
+            written++;
+            const count=confirmed.length+written;
+            acknowledgeSyncChunk(journalKey,journalChat,chunk.hash,count);
+            progressTracker.updateVerifiedChunks(count,hashedChunks.length,`Verified ${count}/${hashedChunks.length} chunks`);
+        }
+        await control.checkpoint();
+        assertOriginalChat();
+        // Explicitly recheck every chunk before committing a replacement.
+        const finalRows=await inspectCollectionChunks(backend,collectionId,effectiveProfileSettings);
+        const finalMap=new Map(finalRows.map(row=>[String(row.hash),row]));
+        if(hashedChunks.some(item=>!matches(finalMap.get(String(item.hash)),item)))
+            throw new Error('Final database verification failed; original collection remains active');
+        if(isOpenChat && !source.replaceExisting){
+            const wanted=new Set(hashedChunks.map(item=>String(item.hash)));
+            const obsolete=finalRows.filter(row=>!wanted.has(String(row.hash))).map(row=>row.hash);
+            if(obsolete.length){
+                const {deleteVectorItems}=await import('./core-vector-api.js');
+                await deleteVectorItems(collectionId,obsolete,effectiveProfileSettings);
+                const after=await inspectCollectionChunks(backend,collectionId,effectiveProfileSettings);
+                if(after.some(row=>obsolete.map(String).includes(String(row.hash))))throw new Error('Obsolete chat chunks were not fully deleted');
+                await patchChatChunkManifest(collectionKey,[],chatUUID,obsolete);
+            }
+        }
+        finalizeSyncCheckpoint(journalKey,journalChat,'completed','All chunks verified');
         // Save collection metadata
         setCollectionMeta(collectionKey, {
             contentType,
@@ -224,9 +301,13 @@ export async function vectorizeContent({ contentType, source, settings }) {
                 setCollectionMeta(previous,{enabled:false,autoSync:false,replacedBy:collectionKey});
             }
         }
+        // The replacement connection is now committed; only now discard the
+        // recoverable staging pointer. Earlier failure leaves it available.
+        delete pending[pendingKey];
+        try{globalThis.localStorage?.removeItem(`vecthare:pending-content:v1:${pendingKey}`);}catch{}
         console.log(`VectHare: Registered collection ${collectionKey}`);
 
-        progressTracker.complete(true, `Vectorized ${hashedChunks.length} chunks`);
+        progressTracker.complete(true, `Verified ${hashedChunks.length} chunks (${written} newly written)`);
 
         return {
             success: true,
@@ -234,10 +315,11 @@ export async function vectorizeContent({ contentType, source, settings }) {
             collectionId,
         };
     } catch (error) {
+        if(journalKey)finalizeSyncCheckpoint(journalKey,journalChat,error instanceof OperationStoppedError?'stopped':'interrupted',error.message);
         progressTracker.addError(error.message);
-        progressTracker.complete(false, 'Vectorization failed');
+        progressTracker.complete(error instanceof OperationStoppedError?'stopped':false,error instanceof OperationStoppedError?'Stopped safely; verified chunks preserved':'Vectorization failed');
         throw error;
-    }
+    }finally{detachOperationControl(control.activityId);contentVectorizationActive=false;}
 }
 
 /**

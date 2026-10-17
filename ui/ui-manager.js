@@ -17,6 +17,7 @@ import { getWebLlmProvider as getSharedWebLlmProvider } from '../providers/webll
 import { openVisualizer } from './chunk-visualizer.js';
 import { openDatabaseBrowser } from './database-browser.js';
 import { openContentVectorizer } from './content-vectorizer.js';
+import { initializeLiveStatus, openLiveStatus } from './live-status.js';
 import { openSearchDebugModal, getLastSearchDebug } from './search-debug.js';
 import { openTextCleaningManager } from './text-cleaning-manager.js';
 import { resetBackendHealth } from '../backends/backend-manager.js';
@@ -746,7 +747,7 @@ export function renderSettings(containerId, settings, callbacks) {
                                 <button id="vecthare_scan_chat" class="vecthare-action-btn vecthare-btn-secondary" title="Scan chat embeddings for missing, stale or mismatched vectors without modifying storage">
                                     <i class="fa-solid fa-magnifying-glass"></i><span>Scan Chat</span>
                                 </button>
-                                <button id="vecthare_future_action" class="vecthare-action-btn vecthare-btn-secondary" disabled aria-label="Reserved for a future feature" title="Reserved for a future feature">&nbsp;</button>
+                                <button id="vecthare_live_status_button" class="vecthare-action-btn vecthare-btn-secondary" title="Live progress, current chat and connected collection"><i class="fa-solid fa-chart-line"></i><span>Live Status</span></button>
                                 <button id="vecthare_vectorize_all" class="vecthare-action-btn vecthare-btn-secondary">
                                     <i class="fa-solid fa-sync"></i>
                                     <span>Sync Chat</span>
@@ -773,6 +774,10 @@ export function renderSettings(containerId, settings, callbacks) {
                                 </button>
                                 ${getHealthIndicatorHtml()}
                             </div>
+                            <button type="button" id="vecthare_inline_status" class="vecthare-inline-status" aria-label="Open live status">
+                                <span class="vecthare-inline-status-row"><span class="vecthare-inline-status-dot"></span><span id="vecthare_inline_status_text">Ready · No active operation</span><strong id="vecthare_inline_status_count">View status</strong></span>
+                                <span class="vecthare-inline-progress-track"><span id="vecthare_inline_status_fill"></span></span>
+                            </button>
 
                             <label class="checkbox_label" for="vecthare_include_production_tests" style="margin-top: 20px;">
                                 <input type="checkbox" id="vecthare_include_production_tests" />
@@ -962,6 +967,7 @@ export function renderSettings(containerId, settings, callbacks) {
 
     // Initialize health dashboard
     initializeHealthDashboard();
+    initializeLiveStatus();
 
     console.log('VectHare UI: Settings rendered');
 }
@@ -2748,6 +2754,7 @@ function bindSettingsEvents(settings, callbacks) {
     });
     $('#vecthare_vectorize_all').on('click', callbacks.onVectorizeAll);
     $('#vecthare_scan_chat').on('click', callbacks.onScanRepair);
+    $('#vecthare_live_status_button, #vecthare_inline_status').on('click', openLiveStatus);
     $('#vecthare_purge').on('click', callbacks.onPurge);
     $('#vecthare_run_diagnostics').on('click', callbacks.onRunDiagnostics);
     $('#vecthare_include_production_tests')

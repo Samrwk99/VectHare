@@ -11,6 +11,9 @@
  */
 
 import {scanCurrentChat, repairCurrentChat, reconcileDeletedMessages} from './core/chat-repair.js';
+import {startActivity, updateActivity, finishActivity, registerActivityRetry} from './ui/activity-status.js';
+import {createOperationControl, detachOperationControl, hasActiveVectorWrite, OperationStoppedError} from './ui/operation-controls.js';
+import { clearAllRecovery } from './core/sync-checkpoints.js';
 import { getCollectionProfile, verifyAndRestoreLegacyProfile } from './core/vectorization-profile.js';
 import { openContentVectorizer } from './ui/content-vectorizer.js';
 import { getChatBinding } from './core/collection-ownership.js';
@@ -183,6 +186,9 @@ async function onVectorizeAllClick() {
     await vectorizeAll(settings, getBatchSize());
     refreshActiveChatProfile();
 }
+// Only a user interaction in Live Status can resume an interrupted chat.
+window.vecthareResumeFromStatus = onVectorizeAllClick;
+window.vecthareOpenStagedRecovery = (oldKey) => openContentVectorizer('chat',oldKey);
 
 let lastChatScan = null;
 function refreshActiveChatProfile() {
@@ -197,29 +203,47 @@ function setScanButton(label, disabled=false) {
     button.prop('disabled',disabled);
 }
 async function onScanRepairClick() {
+    if(hasActiveVectorWrite()){toastr.info('Wait for the active vector operation to finish or pause/stop it before scanning.','VectHare');return;}
     const currentSettings=extension_settings.vecthare || settings;
+    const repairing=Boolean(lastChatScan?.issues?.length);
+    const activityId=startActivity(repairing?'Repair Chat Embeddings':'Scan Chat Embeddings',
+        {category:repairing?'repair':'scan',detail:repairing?'Preparing verified replacements':'Comparing chat and stored vectors'});
+    let activityFinished=false;
+    const originalChat=getChatUUID();
+    const control=createOperationControl(activityId,{pausable:repairing,stoppable:true,writeOperation:repairing});
+    registerActivityRetry(activityId,async()=>{
+        if(originalChat!==getChatUUID())throw new Error('Return to the original chat before retrying');
+        lastChatScan=null;await onScanRepairClick();
+    });
     try {
         if(lastChatScan?.issues?.length) {
             const problems=lastChatScan.issues;
-            if(!confirm(`Repair ${problems.length} chat embedding issue(s)? Replacements are verified before outdated vectors are removed.`))return;
+            if(!confirm(`Repair ${problems.length} chat embedding issue(s)? Replacements are verified before outdated vectors are removed.`)) {
+                finishActivity(activityId,true,'Repair cancelled; no data changed'); activityFinished=true; return;
+            }
             setScanButton('Repairing...',true);
-            const after=await repairCurrentChat(currentSettings,lastChatScan);
+            updateActivity(activityId,{total:problems.length+1,detail:'Repairing and checking stored embeddings'});
+            const after=await repairCurrentChat(currentSettings,lastChatScan, {control,onProgress: ({detail,completed,total}) => updateActivity(activityId,{detail,completed,total})});
             lastChatScan=after.issues.length?after:null;
             setScanButton(after.issues.length?`Repair (${after.issues.length} Issues)`:'All Clear');
+            finishActivity(activityId,after.issues.length===0,after.issues.length?`${after.issues.length} issues still need attention`:'All repairs verified');activityFinished=true;
             if(after.issues.length)toastr.warning(`${after.issues.length} issues remain after repair`, 'VectHare');
             else toastr.success('Chat embeddings verified after repair','VectHare');
             return;
         }
         setScanButton('Scanning...',true);
-        const scan=await scanCurrentChat(currentSettings);
+        const scan=await scanCurrentChat(currentSettings,{control,onProgress:({detail,completed,total})=>updateActivity(activityId,{detail,completed,total})});
         lastChatScan=scan.issues.length?scan:null;
         setScanButton(scan.issues.length?`Repair (${scan.issues.length} Issues)`:'All Clear');
+        finishActivity(activityId,true,scan.issues.length?`${scan.issues.length} issue(s) found; repair available`:'All scanned vectors match the chat');activityFinished=true;
         if(scan.issues.length) {
             const counts=Object.groupBy ? Object.groupBy(scan.issues,issue=>issue.type) : null;
             const summary=counts?Object.entries(counts).map(([kind,items])=>`${kind}: ${items.length}`).join(', '):`${scan.issues.length} issues`;
             toastr.warning(`Scan found ${summary}. Click Repair to reconcile.`, 'VectHare', {timeOut:9000});
         } else toastr.success('All scanned vectors match the current chat', 'VectHare');
     } catch(error) {
+        if(!activityFinished) {finishActivity(activityId,error instanceof OperationStoppedError?'stopped':false,error.message || 'Scan/repair failed');activityFinished=true;}
+        if(error instanceof OperationStoppedError){lastChatScan=null;setScanButton('Scan Chat');return;}
         lastChatScan=null;
         setScanButton('Retry Scan');
         if(/(no verified vectorization profile|embedding identity is unverified|lacks a verifiable chunk manifest)/i.test(error.message)) {
@@ -244,7 +268,7 @@ async function onScanRepairClick() {
         }
         toastr.error(`Scan/repair could not finish: ${error.message}`,'VectHare',{timeOut:12000});
         console.error('VectHare: Chat repair error',error);
-    }
+    }finally{detachOperationControl(activityId);}
 }
 /**
  * Action: Full purge - wipes ALL vector data and settings
@@ -260,6 +284,7 @@ async function onPurgeClick() {
         return;
     }
 
+    const purgeActivity=startActivity('Purge All Vectors',{category:'purge',total:3,unit:'steps',detail:'Requesting server deletion'});
     try {
         const { getRequestHeaders } = await import('../../../../script.js');
 
@@ -276,6 +301,10 @@ async function onPurgeClick() {
             throw new Error(`Server reported purge failure: ${JSON.stringify(result)}`);
         }
 
+        // Only after confirmed backend purge: erase obsolete resume pointers.
+        clearAllRecovery();
+        updateActivity(purgeActivity,{completed:1,detail:'Backend confirmed deletion'});
+
         // 2. Clear extension_settings.vecthare
         for (const key in extension_settings.vecthare) {
             if (key !== 'enabled') {
@@ -283,13 +312,18 @@ async function onPurgeClick() {
             }
         }
 
+        updateActivity(purgeActivity,{completed:2,detail:'Extension settings cleared'});
+
         // 3. Save settings
         const { saveSettingsDebounced } = await import('../../../../script.js');
         saveSettingsDebounced();
 
+        updateActivity(purgeActivity,{completed:3,detail:'Settings saved'});
+        finishActivity(purgeActivity,true,'All vector data purged');
         toastr.success('All vector data purged', 'Purge Complete');
 
     } catch (error) {
+        finishActivity(purgeActivity,false,error.message);
         console.error('VectHare: Purge failed:', error);
         toastr.error('Purge failed: ' + error.message);
     }

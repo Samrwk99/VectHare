@@ -13,23 +13,58 @@ import { getChatUUID } from './collection-ids.js';
 import { bindChatCollection } from './collection-ownership.js';
 
 const VERSION = 1;
-const COPY_FIELDS = ['chunking_strategy','batch_size','chunk_size','chunk_overlap','keyword_extraction_level','cleaning_preset','text_cleaning_enabled','cleaning_rules','substitution_policy','source','vector_backend','qdrant_multitenancy'];
+const COPY_FIELDS = ['embedding_max_tokens','chunking_strategy','batch_size','chunk_size','chunk_overlap','keyword_extraction_level','cleaning_preset','text_cleaning_enabled','cleaning_rules','substitution_policy','source','vector_backend','qdrant_multitenancy'];
 function copySafe(obj) {
     const result = {};
     for (const key of COPY_FIELDS) if (obj?.[key] !== undefined) result[key] = structuredClone(obj[key]);
     return result;
 }
+const NATIVE_PROFILE_PREFIX='vecthare:native-profile:v1:';
+/** Native Standard may not have the Similharity sidecar. Keep a synchronous
+ * non-text backup of its identity and manifest references for crash recovery.
+ * The original vector text stays in the database/extension settings, not here.
+ */
+function recoverNativeProfile(key) {
+    if(!key?.startsWith('standard:'))return;
+    try{
+        const raw=globalThis.localStorage?.getItem(NATIVE_PROFILE_PREFIX+encodeURIComponent(key));
+        const data=raw?JSON.parse(raw):null;
+        if(data?.key!==key || data?.profile?.schemaVersion!==VERSION)return;
+        const meta=getCollectionMeta(key)||{};
+        if(!meta.vectorizationProfile || !meta.chatChunkManifest){
+            setCollectionMeta(key,{
+                ...(!meta.vectorizationProfile?{vectorizationProfile:data.profile}:{}),
+                ...(!meta.chatChunkManifest && data.manifest?.schemaVersion===VERSION?{chatChunkManifest:data.manifest}:{})
+            });
+        }
+    }catch(error){console.warn('[VectHare] Could not restore native profile backup:',error.message);}
+}
+function saveNativeProfile(key){
+    if(!key?.startsWith('standard:'))return;
+    const profile=getCollectionMeta(key)?.vectorizationProfile;
+    if(!profile || profile.schemaVersion!==VERSION)return;
+    const manifest=getCollectionMeta(key)?.chatChunkManifest;
+    const safeManifest=manifest?.schemaVersion===VERSION ? {
+        schemaVersion:VERSION,chatUUID:manifest.chatUUID,updatedAt:manifest.updatedAt,
+        entries:(manifest.entries||[]).map(e=>({hash:e.hash,messageIds:e.messageIds||[],messageHashes:e.messageHashes||[]}))
+    }:null;
+    try {globalThis.localStorage?.setItem(NATIVE_PROFILE_PREFIX+encodeURIComponent(key),JSON.stringify({key,profile,manifest:safeManifest}));}
+    catch(error){console.warn('[VectHare] Native profile immediate backup unavailable:',error.message);}
+}
 export function getCollectionProfile(key) {
-    const profile = getCollectionMeta(key)?.vectorizationProfile;
+    let profile=getCollectionMeta(key)?.vectorizationProfile;
+    if(!profile){recoverNativeProfile(key);profile=getCollectionMeta(key)?.vectorizationProfile;}
     return profile?.schemaVersion === VERSION ? structuredClone(profile) : null;
 }
 export function getChatChunkManifest(key) {
-    const manifest = getCollectionMeta(key)?.chatChunkManifest;
+    let manifest=getCollectionMeta(key)?.chatChunkManifest;
+    if(!manifest){recoverNativeProfile(key);manifest=getCollectionMeta(key)?.chatChunkManifest;}
     return manifest?.schemaVersion === VERSION ? structuredClone(manifest) : null;
 }
 async function writeRemoteProfile(key) {
     const profile=getCollectionProfile(key);
     if(!profile)return;
+    saveNativeProfile(key);
     try {
         const response=await fetch('/api/plugins/similharity/collection/profile/set',{
             method:'POST',headers:getRequestHeaders(),body:JSON.stringify({key,profile,manifest:getChatChunkManifest(key)}),
@@ -91,12 +126,27 @@ export async function discoverEmbeddingModel(settings) {
 }
 export async function makeCollectionProfile(settings, override={}) {
     const model = await discoverEmbeddingModel(settings);
-    return {schemaVersion:VERSION,createdAt:new Date().toISOString(), embedding:{provider:settings.source||'transformers',modelId:model.modelId,modelPath:model.modelPath||null,verified:model.verified,discovery:model.discovery||null,reason:model.reason||null}, chunking:copySafe({...settings,...override}), limits:model.limits||null, status:model.verified?'verified':'unverified'};
+    return {schemaVersion:VERSION,createdAt:new Date().toISOString(), embedding:{provider:settings.source||'transformers',modelId:model.modelId,configuredModel:(getModelField(settings.source)?settings[getModelField(settings.source)]:null)||null,modelPath:model.modelPath||null,verified:model.verified,discovery:model.discovery||null,reason:model.reason||null}, chunking:copySafe({...settings,...override}), limits:model.limits||null, status:model.verified?'verified':'unverified'};
 }
 export async function saveCollectionProfile(key, profile) {
     if (!profile || profile.schemaVersion !== VERSION) throw new Error('Invalid collection profile');
     setCollectionMeta(key, {vectorizationProfile:profile});
     await writeRemoteProfile(key);
+}
+/** Restore a chat collection's non-secret embedding/chunking configuration without
+ * mutating global preferences or another collection. Connection URLs and API
+ * credentials remain operational settings; incompatible live servers fail closed.
+ */
+export function settingsForSavedCollection(key, currentSettings) {
+    const profile=getCollectionProfile(key);
+    if(!profile)return currentSettings;
+    const provider=profile.embedding?.provider;
+    if(!provider || !profile.embedding.verified)throw new Error('Saved embedding identity is unverified; refusing to resume');
+    const parsed=parseRegistryKey(key);
+    const modelField=getModelField(provider);
+    return {...currentSettings,...profile.chunking,source:provider,
+        vector_backend:parsed.backend||profile.chunking?.vector_backend||currentSettings.vector_backend,
+        ...(modelField && profile.embedding.configuredModel ? {[modelField]:profile.embedding.configuredModel} : {})};
 }
 /** Existing profile controls how we chunk new messages; only operational URL may change. */
 export async function applyAndVerifyProfile(key, currentSettings, {allowNew=false}={}) {

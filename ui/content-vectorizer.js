@@ -2489,6 +2489,11 @@ async function startVectorization() {
         closeContentVectorizer();
 
     } catch (e) {
+        if(e?.name==='OperationStoppedError'){
+            toastr.info('Vectorization stopped safely; completed chunks preserved. Reopen the same source to resume.','VectHare');
+            btn.prop('disabled',false).html('<i class="fa-solid fa-bolt"></i> Vectorize');
+            return;
+        }
         console.error('VectHare: Vectorization failed:', e);
 
         // Check for dimension mismatch error and provide helpful guidance

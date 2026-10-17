@@ -182,6 +182,7 @@ meta.setCollectionMeta(target,{description:'must survive failure'});
 let deletes = 0, permit = false;
 Object.assign(context,{
     parseRegistryKey: ids.parseRegistryKey,
+    clearRecoveryForCollection:()=>{},
     purgeVectorIndex: async () => permit,
     unregisterCollection: key => {deletes++; const i=saved.vecthare.vecthare_collection_registry.indexOf(key); if(i>=0) saved.vecthare.vecthare_collection_registry.splice(i,1);},
     deleteCollectionMeta: meta.deleteCollectionMeta,
@@ -246,9 +247,12 @@ const vectorizeStart = cv.indexOf('export async function vectorizeContent(');
 assert.ok(vectorizeStart !== -1 && vectorizeEnd > vectorizeStart);
 let shouldFailInsert=false;
 const inserted=[];
-const progressTracker={show(){},updateCurrentItem(){},updateProgress(){},updateChunks(){},updateEmbeddingProgress(){},complete(){},addError(){}};
+const progressTracker={activityId:'p0-cv',show(){},updateCurrentItem(){},updateProgress(){},updateChunks(){},updateEmbeddingProgress(){},updateVerifiedChunks(){},registerRetry(){},complete(){},addError(){}};
+const cvRows=new Map(),cvProfiles=new Map(),cvManifests=new Map(),cvPending=new Map();
+const getCVRows=id=>{if(!cvRows.has(id))cvRows.set(id,[]);return cvRows.get(id);};
 Object.assign(context,{
-    extension_settings:saved, getChatUUID:()=>metadata.integrity,
+    extension_settings:saved, structuredClone, localStorage:{getItem:k=>cvPending.get(k)||null,setItem:(k,v)=>cvPending.set(k,v),removeItem:k=>cvPending.delete(k)},
+    getChatUUID:()=>metadata.integrity,
     getContext:()=>state,
     getContentType:()=>({label:'Chat',defaultStrategy:'conversation_turns',defaults:{chunkSize:400,chunkOverlap:50}}),
     progressTracker,
@@ -258,8 +262,8 @@ Object.assign(context,{
     generateCollectionId:()=>`vecthare_chat_alice_${metadata.integrity}`,
     getStringHash:text=>text.length,
     enrichChunks:chunks=>chunks,
-    getBackend:async()=>({}),
-    insertVectorItems:async id=>{inserted.push(id); if(shouldFailInsert)throw new Error('mock insertion failure');},
+    getBackend:async()=>({listChunks:async(id,_s,{offset,limit})=>({items:getCVRows(id).slice(offset,offset+limit)}),getChunk:async(id,hash)=>getCVRows(id).find(x=>String(x.hash)===String(hash))||null}),
+    insertVectorItems:async (id,items)=>{if(shouldFailInsert)throw new Error('mock insertion failure');inserted.push(id);for(const item of items){const rows=getCVRows(id);const pos=rows.findIndex(x=>String(x.hash)===String(item.hash));if(pos>=0)rows.splice(pos,1);rows.push(item);}},
     setCollectionMeta:meta.setCollectionMeta,
     getDefaultDecayForType:()=>({enabled:false}),
     hasFeature:()=>false,
@@ -269,12 +273,21 @@ Object.assign(context,{
     getChatBinding:owner.getChatBinding,
     prepareEmbeddingItems:async items=>items,
     buildExpectedChatItems:async()=>[{text:'user and assistant conversation',hash:31,metadata:{messageId:0}}],
-    makeCollectionProfile:async()=>({schemaVersion:1,embedding:{verified:true,modelId:'mock'}}),
-    applyAndVerifyProfile:async()=>({profile:{schemaVersion:1,embedding:{verified:true,modelId:'mock'}}}),
-    saveCollectionProfile:()=>{},saveChatChunkManifest:()=>{},
+    makeCollectionProfile:async()=>({schemaVersion:1,embedding:{verified:true,modelId:'mock'},chunking:{chunking_strategy:'conversation_turns',chunk_size:400}}),
+    applyAndVerifyProfile:async key=>({profile:cvProfiles.get(key)}),
+    getCollectionProfile:key=>cvProfiles.get(key)||null,
+    saveCollectionProfile:async(key,profile)=>{cvProfiles.set(key,profile)},
+    getChatChunkManifest:key=>cvManifests.get(key)||null,
+    saveChatChunkManifest:async(key,items,uuid)=>cvManifests.set(key,{chatUUID:uuid,entries:items}),
+    patchChatChunkManifest:async(key,items,uuid,removed=[])=>{let old=cvManifests.get(key)?.entries||[];old=old.filter(x=>!removed.map(String).includes(String(x.hash)));for(const item of items){old=old.filter(x=>String(x.hash)!==String(item.hash));old.push(item);}cvManifests.set(key,{chatUUID:uuid,entries:old})},
+    inspectCollectionChunks:async(backend,id,s)=>{const rows=[];for(let offset=0;offset<100000;offset+=200){const part=await backend.listChunks(id,s,{offset,limit:200});rows.push(...part.items);if(part.items.length<200)break;}return rows},
+    expectedEmbeddedText:item=>item.text,chunkMatchesExpected:(row,item)=>!!row && row.text===item.text && JSON.stringify(row.metadata?.messageIds||[row.metadata?.messageId])===JSON.stringify(item.metadata?.messageIds||[item.metadata?.messageId]),
+    beginSyncCheckpoint:()=>{},updateSyncCheckpoint:()=>{},acknowledgeSyncChunk:()=>{},finalizeSyncCheckpoint:()=>{},
+    hasActiveVectorWrite:()=>false,createOperationControl:()=>({activityId:'p0-cv',checkpoint:async()=>{}}),detachOperationControl:()=>{},OperationStoppedError:class OperationStoppedError extends Error{},
     parseRegistryKey:ids.parseRegistryKey,
     toastr:{error(){}},
 });
+context.contentVectorizationActive=false;
 const vectorize=vm.runInContext('('+cv.slice(vectorizeStart,vectorizeEnd).replace('export async function','async function').trim()+')',context);
 saved.vecthare.vector_backend='qdrant'; saved.vecthare.source='llamacpp';
 const sourceSettings={strategy:'conversation_turns',chunkSize:400};

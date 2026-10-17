@@ -10,6 +10,8 @@
  * ============================================================================
  */
 
+import { startActivity, updateActivity, finishActivity, registerActivityRetry } from './activity-status.js';
+
 /**
  * Progress Tracker - Manages progress panel UI
  */
@@ -20,6 +22,7 @@ export class ProgressTracker {
         this.currentOperation = null;
         this.timeIntervalId = null;
         this.isComplete = false;
+        this.activityId = null;
         // PERF: Cache DOM element references to avoid repeated getElementById calls
         this.elements = null;
         this.stats = {
@@ -38,6 +41,19 @@ export class ProgressTracker {
         };
     }
 
+    /** Detailed operation stats from the original floating tracker, shared with Live Status. */
+    activityMetrics() {
+        const stats=this.stats;
+        const elapsedMs=stats.startTime ? Math.max(0,Date.now()-stats.startTime) : 0;
+        let speed = 0;
+        if (stats.lastBatchTime > 0 && stats.lastBatchSize > 0) speed=stats.lastBatchSize/(stats.lastBatchTime/1000);
+        else if (stats.embeddedChunks > 0 && elapsedMs > 0) speed=stats.embeddedChunks/(elapsedMs/1000);
+        return {processedItems:stats.processedItems,totalItems:stats.totalItems,totalChunks:stats.totalChunks,
+            embeddedChunks:stats.embeddedChunks,totalChunksToEmbed:stats.totalChunksToEmbed,
+            currentBatch:stats.currentBatch,totalBatches:stats.totalBatches,
+            speedPerSecond:Math.round(speed*10)/10};
+    }
+
     /**
      * Show progress panel
      * @param {string} operation - Operation name (e.g., "Vectorizing Chat", "Purging Index")
@@ -45,6 +61,8 @@ export class ProgressTracker {
      * @param {string} itemLabel - Label for items (e.g., "Messages", "Steps", "Entries")
      */
     show(operation, totalItems = 0, itemLabel = 'Progress') {
+        if (this.activityId) finishActivity(this.activityId, false, 'Interrupted by another operation');
+        this.activityId = startActivity(operation, {total:totalItems, unit:itemLabel});
         this.currentOperation = operation;
         this.isComplete = false;
         this.stats = {
@@ -74,9 +92,10 @@ export class ProgressTracker {
         // Start/restart time updater
         this.startTimeUpdater();
 
-        this.updateDisplay();
+        // Keep updating the tracker even when CSS hides the floating panel on mobile.
         this.panel.style.display = 'block';
         this.isVisible = true;
+        this.updateDisplay();
     }
 
     /**
@@ -87,7 +106,7 @@ export class ProgressTracker {
             this.panel.style.display = 'none';
         }
         this.isVisible = false;
-        this.currentOperation = null;
+        // Hiding the old floating panel does not stop the operation.
     }
 
     /**
@@ -97,7 +116,19 @@ export class ProgressTracker {
      */
     updateProgress(processedItems, status = '') {
         this.stats.processedItems = processedItems;
+        if (this.activityId) updateActivity(this.activityId, {completed: processedItems, total:this.stats.totalItems, detail:status || this.generateStatusMessage(), metrics: this.activityMetrics()});
         this.updateDisplay(status);
+    }
+
+    /** Verified database chunks (not merely submitted messages). */
+    updateVerifiedChunks(verified,total,detail='') {
+        this.stats.embeddedChunks=verified;
+        this.stats.totalChunksToEmbed=total;
+        this.stats.processedItems=verified;
+        this.stats.totalItems=total;
+        this.stats.totalChunks=total;
+        if(this.activityId)updateActivity(this.activityId,{completed:verified,total,unit:'chunks',detail,metrics:this.activityMetrics()});
+        this.updateDisplay(detail);
     }
 
     /**
@@ -108,6 +139,7 @@ export class ProgressTracker {
     updateBatch(currentBatch, totalBatches) {
         this.stats.currentBatch = currentBatch;
         this.stats.totalBatches = totalBatches;
+        if (this.activityId) updateActivity(this.activityId, {detail:`Batch ${currentBatch}/${totalBatches}`, metrics:this.activityMetrics()});
         this.updateDisplay();
     }
 
@@ -117,6 +149,7 @@ export class ProgressTracker {
      */
     updateChunks(totalChunks) {
         this.stats.totalChunks = totalChunks;
+        if (this.activityId) updateActivity(this.activityId, {detail:`${totalChunks} chunks prepared`, metrics:this.activityMetrics()});
         this.updateDisplay();
     }
 
@@ -142,6 +175,7 @@ export class ProgressTracker {
         
         this.stats.embeddedChunks = embeddedChunks;
         this.stats.totalChunksToEmbed = totalChunksToEmbed;
+        if (this.activityId) updateActivity(this.activityId, {completed:embeddedChunks, total:totalChunksToEmbed, detail:`Embedding ${embeddedChunks}/${totalChunksToEmbed} chunks`, unit:'chunks', metrics:this.activityMetrics()});
         this.updateDisplay();
     }
 
@@ -157,6 +191,7 @@ export class ProgressTracker {
      * @param {string} text - Current item description
      */
     updateCurrentItem(text) {
+        if (this.activityId && text) updateActivity(this.activityId, {detail:text});
         // PERF: Use cached element references
         const el = this.elements?.current;
         const textEl = this.elements?.currentText;
@@ -179,6 +214,7 @@ export class ProgressTracker {
             message: error,
             timestamp: Date.now(),
         });
+        if (this.activityId) updateActivity(this.activityId, {error, metrics:this.activityMetrics()});
         this.updateDisplay();
     }
 
@@ -187,8 +223,15 @@ export class ProgressTracker {
      * @param {boolean} success - Whether operation succeeded
      * @param {string} message - Completion message
      */
+    registerRetry(callback){if(this.activityId)registerActivityRetry(this.activityId,callback);}
+
     complete(success, message = '') {
         this.isComplete = true;
+        if (this.activityId) {
+            updateActivity(this.activityId, {metrics:this.activityMetrics()});
+            finishActivity(this.activityId, success, message || (success ? 'Finished' : 'Failed'));
+            this.activityId = null;
+        }
 
         // Stop the time updater
         if (this.timeIntervalId) {
@@ -199,7 +242,7 @@ export class ProgressTracker {
         const duration = Date.now() - this.stats.startTime;
         const seconds = (duration / 1000).toFixed(1);
 
-        const completionMessage = success
+        const completionMessage = success==='stopped' ? `⏹ ${message || 'Stopped; verified progress preserved'} (${seconds}s)` : success
             ? `✅ ${message || 'Operation completed successfully'} (${seconds}s)`
             : `❌ ${message || 'Operation failed'} (${seconds}s)`;
 
@@ -387,7 +430,7 @@ export class ProgressTracker {
             const progressPercent = (this.stats.embeddedChunks / this.stats.totalChunksToEmbed) * 100;
             if (progressPercent < 100) {
                 return 'Processing chunks...';
-9            } else {
+            } else {
                 return 'Finalizing...';
             }
         } else if (this.stats.processedItems >= this.stats.totalItems) {
@@ -407,7 +450,7 @@ export class ProgressTracker {
         const errorsList = this.elements?.errorsList;
         if (errorsList) {
             errorsList.innerHTML = this.stats.errors
-                .map(err => `<div class="vecthare-progress-error-item">${err.message}</div>`)
+                .map(err => { const row = document.createElement('div'); row.textContent = err.message; row.className = 'vecthare-progress-error-item'; return row.outerHTML; })
                 .join('');
         }
     }

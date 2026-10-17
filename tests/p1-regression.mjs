@@ -20,6 +20,8 @@ const settings={source:'llamacpp',vector_backend:'qdrant',qdrant_multitenancy:fa
     use_alt_endpoint:true,alt_endpoint_url:'http://127.0.0.1:9977',chunking_strategy:'conversation_turns',batch_size:4,
     chunk_size:600,keyword_extraction_level:'balanced',secret:'private-secret'};
 const meta=new Map();
+const nativeStorage=new Map();
+const localStorage={getItem:k=>nativeStorage.get(k)||null,setItem:(k,v)=>nativeStorage.set(k,v),removeItem:k=>nativeStorage.delete(k)};
 const mockFetch=async(url,options={})=>{
     const body=options.body?JSON.parse(options.body):{};fetches.push({url,body});
     if(String(url).endsWith('/profile/set'))return {ok:true,json:async()=>({success:true})};
@@ -31,14 +33,36 @@ const mockFetch=async(url,options={})=>{
 const providerParams=s=>({apiUrl:s.alt_endpoint_url});
 const ctx=moduleInVM('core/vectorization-profile.js',{
     extension_settings:{vecthare:{}},saveSettingsDebounced(){},getRequestHeaders:()=>({'Content-Type':'application/json'}),
-    getProviderSpecificParams:providerParams,getModelField:()=>null,getCollectionMeta:k=>meta.get(k)||{},
-    setCollectionMeta:(k,o)=>meta.set(k,{...(meta.get(k)||{}),...o}),fetch:mockFetch,
+    getProviderSpecificParams:providerParams,parseRegistryKey:k=>{const [backend,source,...id]=k.split(':');return {backend,source,collectionId:id.join(':')}},getModelField:source=>source==='ollama'?'ollama_model':null,getCollectionMeta:k=>meta.get(k)||{},
+    setCollectionMeta:(k,o)=>meta.set(k,{...(meta.get(k)||{}),...o}),fetch:mockFetch,localStorage,
 });
 await test('collection profile captures actual configured llama.cpp model, no credentials',async()=>{
     const p=await ctx.makeCollectionProfile(settings);
     assert.equal(p.embedding.modelId,'model-A');assert.equal(p.chunking.chunking_strategy,'conversation_turns');
     assert.ok(!JSON.stringify(p).includes('private-secret'));assert.ok(!JSON.stringify(p).includes('127.0.0.1'));
     await ctx.saveCollectionProfile('qdrant:llamacpp:alice',p);
+});
+await test('two collections retain independent embedding models and chunking profiles',async()=>{
+    const second={...settings,source:'ollama',ollama_model:'nomic-embed-text',chunking_strategy:'per_message',batch_size:2};
+    const profile=await ctx.makeCollectionProfile(second);
+    await ctx.saveCollectionProfile('qdrant:ollama:chat-b',profile);
+    const one=ctx.settingsForSavedCollection('qdrant:llamacpp:alice',{...settings,source:'ollama',chunking_strategy:'per_message'});
+    const two=ctx.settingsForSavedCollection('qdrant:ollama:chat-b',{...settings,source:'llamacpp',chunking_strategy:'conversation_turns'});
+    assert.equal(one.source,'llamacpp');assert.equal(one.chunking_strategy,'conversation_turns');
+    assert.equal(two.source,'ollama');assert.equal(two.chunking_strategy,'per_message');
+    assert.equal(two.ollama_model,'nomic-embed-text');
+    assert.ok(!JSON.stringify(profile).includes('private-secret'));
+});
+await test('native Standard keeps a synchronous profile and reference-only crash backup',async()=>{
+    const key='standard:transformers:chat-native';
+    const profile=await ctx.makeCollectionProfile({...settings,source:'transformers',chunking_strategy:'per_message'});
+    await ctx.saveCollectionProfile(key,profile);
+    await ctx.saveChatChunkManifest(key,[{hash:123,text:'Private message text',metadata:{messageIds:[1],messageHashes:['saved']}}],'chat-native');
+    const backup=nativeStorage.get('vecthare:native-profile:v1:'+encodeURIComponent(key));
+    assert.ok(backup);assert.ok(!backup.includes('Private message text'));
+    meta.delete(key); // model a sudden shutdown before ST settings were flushed
+    assert.equal(ctx.getCollectionProfile(key).embedding.provider,'transformers');
+    assert.equal(ctx.getChatChunkManifest(key).entries[0].hash,123);
 });
 await test('changing URL and chunk defaults cannot silently overwrite saved strategy',async()=>{
     const other={...settings,alt_endpoint_url:'http://127.0.0.1:4096',chunking_strategy:'per_message'};
@@ -89,8 +113,8 @@ await test('exclusive locks require chat AND character matching',async()=>{
     const source=fs.readFileSync(path.join(root,'core/collection-metadata.js'),'utf8');
     assert.match(source,/\(hasChatLocks && !chatAllowed\) \|\| \(hasCharacterLocks && !characterAllowed\)/);
 });
-await test('UI has requested scan button and blank disabled button',async()=>{
+await test('UI retains scan button and exposes the new Live Status action',async()=>{
     const source=fs.readFileSync(path.join(root,'ui/ui-manager.js'),'utf8');
-    assert.match(source,/id="vecthare_scan_chat"/);assert.match(source,/id="vecthare_future_action"[^>]*disabled/);
+    assert.match(source,/id="vecthare_scan_chat"/);assert.match(source,/id="vecthare_live_status_button"/);
 });
 console.log(`\n${passes} P1 targeted tests passed`);

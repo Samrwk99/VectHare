@@ -25,6 +25,7 @@ import {
     getCollectionMeta,
 } from './collection-metadata.js';
 import { purgeVectorIndex } from './core-vector-api.js';
+import { clearRecoveryForCollection } from './sync-checkpoints.js';
 import { getChatBinding, getCollectionOwner, forgetDeletedCollection } from './collection-ownership.js';
 // Import from collection-ids.js - single source of truth for collection ID operations
 import {
@@ -163,7 +164,7 @@ export async function deleteCollection(collectionId, settings, registryKey = nul
     }
 
     const success = vectorsDeleted && registryDeleted && metadataDeleted;
-    if (success) forgetDeletedCollection(actualKey);
+    if (success){forgetDeletedCollection(actualKey);clearRecoveryForCollection(actualKey);}
 
     if (success) {
         console.log(`VectHare: ✓ Fully deleted collection ${collectionId}`);

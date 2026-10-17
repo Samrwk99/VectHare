@@ -8,7 +8,8 @@ const key='qdrant:llamacpp:chat', id='chat';
 let chat=[{mes:'one'},{mes:'two'}], rows=[], expected=[], manifest, chatId=id, failWrites=false;
 let ops=[], reads=0;
 const settings={source:'llamacpp',vector_backend:'qdrant'};
-const env={console,Date,Math,JSON,Number,String,Array,Set,Map,structuredClone,
+const env={console,Date,Math,JSON,Number,String,Array,Set,Map,structuredClone,hasActiveVectorWrite:()=>false,
+ startActivity:()=> 'repair-1',updateActivity:()=>{},finishActivity:()=>{},createOperationControl:()=>({checkpoint:async()=>{}}),detachOperationControl:()=>{},OperationStoppedError:class OperationStoppedError extends Error{},
  getChatUUID:()=>chatId,getContext:()=>({chat}),getChatBinding:()=>({registryKey:key}),
  resolveChatWriteTarget:()=>({registryKey:key,collectionId:'chat'}),
  applyAndVerifyProfile:async()=>({settings,profile:{verified:true}}),
@@ -20,6 +21,7 @@ const env={console,Date,Math,JSON,Number,String,Array,Set,Map,structuredClone,
  deleteVectorItems:async(_id,hashes)=>{ops.push('delete');rows=rows.filter(r=>!hashes.map(String).includes(String(r.hash)));},
 };
 const ctx=vm.createContext(env);
+vm.runInContext(fs.readFileSync(new URL('../core/chunk-integrity.js',import.meta.url),'utf8').replace(/^export /gm,''),ctx);
 vm.runInContext(source,ctx,{filename:'core/chat-repair.js'});
 function item(hash,text,ids=[0,1]){return{hash,text,metadata:{messageIds:ids,messageHashes:ids.map(String)}}}
 function reset(){ops=[];reads=0;chatId=id;chat=[{mes:'one'},{mes:'two'}];expected=[item(1,'Hello')];rows=[item(1,'Hello')];manifest={schemaVersion:1,chatUUID:id,entries:[{hash:1,messageIds:[0,1]}]};}
