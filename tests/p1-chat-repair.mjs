@@ -9,13 +9,14 @@ let chat=[{mes:'one'},{mes:'two'}], rows=[], expected=[], manifest, chatId=id, f
 let ops=[], reads=0;
 const settings={source:'llamacpp',vector_backend:'qdrant'};
 const env={console,Date,Math,JSON,Number,String,Array,Set,Map,structuredClone,hasActiveVectorWrite:()=>false,
- startActivity:()=> 'repair-1',updateActivity:()=>{},finishActivity:()=>{},createOperationControl:()=>({checkpoint:async()=>{}}),detachOperationControl:()=>{},OperationStoppedError:class OperationStoppedError extends Error{},
- getChatUUID:()=>chatId,getContext:()=>({chat}),getChatBinding:()=>({registryKey:key}),
+ startActivity:()=> 'repair-1',updateActivity:()=>{},finishActivity:()=>{},createOperationControl:()=>({checkpoint:async()=>{},bindSharedOperation:()=>{}}),detachOperationControl:()=>{},OperationStoppedError:class OperationStoppedError extends Error{},SharedOperationStoppedError:class SharedOperationStoppedError extends Error{},
+ acquireSharedOperation:async()=>({id:'mock'}),finishSharedOperation:async()=>{},
+ getChatUUID:()=>chatId,getCurrentChatId:()=>chatId,getContext:()=>({chat}),getChatBinding:()=>({registryKey:key}),
  resolveChatWriteTarget:()=>({registryKey:key,collectionId:'chat'}),
  applyAndVerifyProfile:async()=>({settings,profile:{verified:true}}),
  getChatChunkManifest:()=>manifest,
  saveChatChunkManifest:async(k,items,uuid)=>{manifest={schemaVersion:1,chatUUID:uuid,entries:items.map(i=>({hash:i.hash,messageIds:i.metadata.messageIds??[i.metadata.messageId]}))};ops.push('manifest');},
- getBackend:async()=>({listChunks:async(_id,_s,opts)=>{reads++;return{items:rows.slice(opts.offset,opts.offset+opts.limit)}}}),
+ getBackend:async()=>({listChunks:async(_id,_s,opts)=>{reads++;return{items:rows.slice((opts.offset??0),(opts.offset??0)+(opts.limit??opts.pageSize??200)),pageMode:'cursor',hasMore:false,cursor:null}}}),
  buildExpectedChatItems:async()=>expected,
  insertVectorItems:async(_id,items)=>{ops.push('insert');if(failWrites)throw Error('embed failure');rows.push(...items.map(i=>({...i})));},
  deleteVectorItems:async(_id,hashes)=>{ops.push('delete');rows=rows.filter(r=>!hashes.map(String).includes(String(r.hash)));},

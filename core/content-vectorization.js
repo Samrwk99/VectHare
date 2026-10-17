@@ -1,3 +1,4 @@
+import { claimQdrantIdentity } from './physical-identity.js';
 /**
  * ============================================================================
  * VECTHARE CONTENT VECTORIZATION
@@ -27,16 +28,32 @@ import {
     COLLECTION_PREFIXES,
 } from './collection-ids.js';
 import { extractLorebookKeywords, extractTextKeywords, extractChatKeywords, extractBM25Keywords, EXTRACTION_LEVELS, DEFAULT_EXTRACTION_LEVEL, DEFAULT_BASE_WEIGHT } from './keyword-boost.js';
-import { cleanText, cleanMessages } from './text-cleaning.js';
+import { cleanText, cleanMessages, captureCleaningSnapshot } from './text-cleaning.js';
+import { assignOccurrenceIds } from './chunk-identity.js';
 import { progressTracker } from '../ui/progress-tracker.js';
 import { extension_settings, getContext } from '../../../../extensions.js';
 import { getStringHash } from '../../../../utils.js';
+import { getCurrentChatId } from '../../../../../script.js';
+import { modelIsolationDecision } from './model-isolation-consent.js';
+import { getModelField } from './providers.js';
 import { getCollectionProfile, makeCollectionProfile, saveCollectionProfile, applyAndVerifyProfile, saveChatChunkManifest, patchChatChunkManifest, getChatChunkManifest } from './vectorization-profile.js';
 import { prepareEmbeddingItems } from './embedding-overflow.js';
 import { inspectCollectionChunks, expectedEmbeddedText, chunkMatchesExpected } from './chunk-integrity.js';
 import { beginSyncCheckpoint, updateSyncCheckpoint, acknowledgeSyncChunk, finalizeSyncCheckpoint } from './sync-checkpoints.js';
 import { createOperationControl, detachOperationControl, hasActiveVectorWrite, OperationStoppedError } from '../ui/operation-controls.js';
+import {acquireSharedOperation,finishSharedOperation,SharedOperationStoppedError} from '../ui/shared-operations.js';
 import { buildExpectedChatItems } from './chat-vectorization.js';
+
+/**
+ * Build exactly the final embedding/split plan for non-current-chat sources,
+ * without creating a collection. Shared by preview and the real write path.
+ * The embedding input budget is resolved from the same provider configuration.
+ */
+export async function buildContentEmbeddingPlan(chunks, contentType, source, settings, preparedContent, effectiveSettings) {
+    const enriched = enrichChunks(chunks, contentType, source, settings, preparedContent, effectiveSettings);
+    const identified = enriched.map(chunk => ({...chunk, hash:getStringHash(chunk.text)}));
+    return assignOccurrenceIds(await prepareEmbeddingItems(identified,effectiveSettings,getStringHash),getStringHash);
+}
 
 /**
  * Main entry point for content vectorization
@@ -50,10 +67,29 @@ let contentVectorizationActive=false;
 export async function vectorizeContent({ contentType, source, settings }) {
     // Freeze source/settings for this run; modal edits must not change its inputs.
     source=structuredClone(source);settings=structuredClone(settings);
+    // Existing connected collections keep their historical cleaning recipe.
+    const initialBinding=contentType==='chat'&&source.type==='current'&&!source.replaceExisting?getChatBinding(getChatUUID()):null;
+    const initialProfile=initialBinding?getCollectionProfile(initialBinding.registryKey):null;
+    settings.cleaning_snapshot=initialProfile?.recipe?.cleaning ?? captureCleaningSnapshot(settings.cleaningPreset);
+    // Consent is required before creating a different embedding space, not
+    // merely before changing the visible global model selector. It cannot
+    // override dimension/model verification or permit in-place mixing.
+    if (!initialProfile || source.replaceExisting) {
+        const globalSettings=extension_settings.vecthare||{};
+        const provider=globalSettings.source||'transformers';
+        const modelField=getModelField(provider);
+        const configuredModel=String((modelField && globalSettings[modelField]) || globalSettings.model || '');
+        const profiles=(globalSettings.vecthare_collection_registry||[])
+            .map(key=>getCollectionProfile(key)).filter(Boolean);
+        const risk=modelIsolationDecision(provider,configuredModel,profiles);
+        if (risk.requiresConfirmation && source.modelRiskAccepted !== risk.token)
+            throw new Error('DIFFERENT_EMBEDDING_MODEL_CONFIRMATION_REQUIRED: Other collections use a different embedding model or provider. Explicitly confirm isolated new-collection vectorization; existing collections must remain untouched. Incompatible Qdrant dimensions will still be blocked.');
+    }
     const openedChatUUID=contentType==='chat'&&source.type==='current'?getChatUUID():null;
+    const openedChatFile=openedChatUUID?getCurrentChatId():null;
     const chatSignature=()=>JSON.stringify((getContext()?.chat||[]).map(m=>[m.mes,m.swipe_id,m.is_user,m.is_system,m.extra?.fileLength]));
     const originalChatSignature=openedChatUUID?chatSignature():null;
-    const assertOriginalChat=()=>{if(openedChatUUID && (openedChatUUID!==getChatUUID() || chatSignature()!==originalChatSignature))throw new Error('Chat changed during vectorisation. Completed chunks remain safe; reopen this chat and scan before continuing.');};
+    const assertOriginalChat=()=>{if(openedChatUUID && (openedChatUUID!==getChatUUID() || openedChatFile!==getCurrentChatId() || chatSignature()!==originalChatSignature))throw new Error('Chat or branch changed during vectorisation. Completed chunks remain safe; reopen the original chat and scan before continuing.');};
     if(contentVectorizationActive || hasActiveVectorWrite())throw new Error('Another vector-writing operation is running. Use Live Status to control it.');
     const type = getContentType(contentType);
     if (!type) {
@@ -71,6 +107,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
     progressTracker.show(`Vectorizing ${type.label || contentType}`, 4, 'Steps');
     progressTracker.updateCurrentItem(sourceName);
     const control=createOperationControl(progressTracker.activityId,{pausable:true,stoppable:true,writeOperation:true});
+    let shared=null,sharedOutcome='failed';
     const originalUUID=contentType==='chat'&&source.type==='current'?getChatUUID():null;
     progressTracker.registerRetry(async()=>{
         if(originalUUID && getChatUUID()!==originalUUID)throw new Error('Open the original chat before retrying');
@@ -78,6 +115,8 @@ export async function vectorizeContent({ contentType, source, settings }) {
     });
     let journalKey=null,journalChat=null;
     try {
+        shared=await acquireSharedOperation(`Vectorizing ${type.label || contentType}`,{activityId:progressTracker.activityId,category:'content-write',resourceKey:sourceName});
+        control.bindSharedOperation(shared);
         await control.checkpoint();
         // Step 1: Resolve source
         progressTracker.updateProgress(1, 'Loading content...');
@@ -90,7 +129,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
         const chunks = await chunkText(preparedContent.text || preparedContent, {
             strategy: settings.strategy || type.defaultStrategy,
             chunkSize: settings.chunkSize || type.defaults.chunkSize,
-            chunkOverlap: settings.chunkOverlap || type.defaults.chunkOverlap,
+            chunkOverlap: settings.chunkOverlap ?? type.defaults.chunkOverlap,
             batchSize: settings.batchSize || 4,
             conversationTurnOrder: settings.conversationTurnOrder || 'user_character',
         });
@@ -145,17 +184,22 @@ export async function vectorizeContent({ contentType, source, settings }) {
         let collectionKey = `${currentBackend}:${currentSource}:${collectionId}`;
 
         // Use the same provider settings throughout this operation.
-        const enrichedChunks = enrichChunks(chunks, contentType, source, settings, preparedContent, vecthareSettings);
-        const originalChunks = enrichedChunks.map(chunk => ({...chunk, hash:getStringHash(chunk.text)}));
+        // Use the same pure planner as the non-chat preview; for a connected
+        // open chat the canonical expected-message constructor takes priority.
         // For the connected current chat, both entry points must produce the
         // same chunk hashes/manifests so Scan & Sync agree on the source of truth.
         const effectiveProfileSettings = {...vecthareSettings, chunking_strategy:settings.strategy || vecthareSettings.chunking_strategy,
             chunk_size:settings.chunkSize || vecthareSettings.chunk_size,
             batch_size:settings.batchSize || vecthareSettings.batch_size,
-            conversation_turn_order:settings.conversationTurnOrder || 'user_character'};
+            conversation_turn_order:settings.conversationTurnOrder || 'user_character',cleaning_snapshot:settings.cleaning_snapshot};
         let hashedChunks = isOpenChat && ['per_message','conversation_turns','message_batch','adaptive'].includes(settings.strategy)
             ? await buildExpectedChatItems(getContext().chat,effectiveProfileSettings)
-            : await prepareEmbeddingItems(originalChunks,effectiveProfileSettings,getStringHash);
+            : await buildContentEmbeddingPlan(chunks,contentType,source,settings,preparedContent,effectiveProfileSettings);
+        if (!hashedChunks.length) {
+            // Some source content can disappear during cleaning and embedding
+            // preparation. Do not persist a profile, manifest or empty binding.
+            throw new Error('No vectorisable chunks remain after preprocessing; no collection was created');
+        }
         // Resumable staged replacements: identify source by exact planned hashes
         // and configuration, not just by a filename or the open character.
         // No original text, credentials or embeddings are placed in the journal.
@@ -167,7 +211,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
         let prior=pending[pendingKey];
         if(!prior){try{prior=JSON.parse(globalThis.localStorage?.getItem(`vecthare:pending-content:v1:${pendingKey}`)||'null');}catch{}}
         if(prior && prior.fingerprint===sourceFingerprint && prior.registryKey &&
-           (source.replaceExisting || source.type==='file')) {
+           (source.replaceExisting || source.type==='file' || (isOpenChat && prior.fingerprint===sourceFingerprint))) {
             const parsed=parseRegistryKey(prior.registryKey);
             if(parsed.backend!==currentBackend||parsed.source!==currentSource)
                 throw new Error('An interrupted collection belongs to a different backend');
@@ -188,12 +232,12 @@ export async function vectorizeContent({ contentType, source, settings }) {
         } else {
             // Existing unbound or externally created collections must not be
             // silently adopted using today's global embedding settings.
-            if(!source.replaceExisting && extension_settings.vecthare?.vecthare_collection_registry?.includes(collectionKey) && !getCollectionProfile(collectionKey))
+            if(!source.replaceExisting && prior?.registryKey!==collectionKey && extension_settings.vecthare?.vecthare_collection_registry?.includes(collectionKey) && !getCollectionProfile(collectionKey))
                 throw new Error('Existing collection has no verified settings. Connect read-only, restore original settings or Re-vectorize safely.');
             profile = await makeCollectionProfile(effectiveProfileSettings);
             if(!profile.embedding.verified) throw new Error(profile.embedding.reason || 'Embedding model identity unknown. Cannot create a verified collection.');
         }
-        if(isOpenChat && chatUUID !== getChatUUID())throw new Error('Chat changed while preparing vectors');
+        if (isOpenChat) assertOriginalChat();
 
         // Step 4: Insert into vector store (streaming: embed + write together)
         progressTracker.updateProgress(4, 'Processing chunks...');
@@ -202,10 +246,16 @@ export async function vectorizeContent({ contentType, source, settings }) {
         // the first write. A process crash after an acknowledged insert cannot
         // make this collection an unidentifiable/unverifiable orphan.
         const firstWrite=!getCollectionProfile(collectionKey);
+        if(firstWrite && currentBackend === 'qdrant') {
+            const candidateBackend = await getBackend(effectiveProfileSettings);
+            const before = await candidateBackend.listChunks(collectionId,effectiveProfileSettings,{offset:0,limit:1});
+            if(!Array.isArray(before?.items) || before.items.length) throw new Error('Qdrant collection name already exists; refusing to reuse it without verified ownership');
+            claimQdrantIdentity(collectionKey,effectiveProfileSettings);
+        }
         if(firstWrite)await saveCollectionProfile(collectionKey,profile);
         if(isOpenChat && !source.replaceExisting && !getChatChunkManifest(collectionKey))
             await saveChatChunkManifest(collectionKey,[],chatUUID);
-        if(source.replaceExisting || source.type==='file'){
+        if(source.replaceExisting || source.type==='file' || isOpenChat){
             pending[pendingKey]={fingerprint:sourceFingerprint,registryKey:collectionKey,createdAt:Date.now()};
             try{globalThis.localStorage?.setItem(`vecthare:pending-content:v1:${pendingKey}`,JSON.stringify(pending[pendingKey]));}catch{}
             // This calls saveSettingsDebounced through the recovery journal below.
@@ -309,6 +359,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
         try{globalThis.localStorage?.removeItem(`vecthare:pending-content:v1:${pendingKey}`);}catch{}
         console.log(`VectHare: Registered collection ${collectionKey}`);
 
+        sharedOutcome='completed';
         progressTracker.complete(true, `Verified ${hashedChunks.length} chunks (${written} newly written)`);
 
         return {
@@ -317,11 +368,15 @@ export async function vectorizeContent({ contentType, source, settings }) {
             collectionId,
         };
     } catch (error) {
-        if(journalKey)finalizeSyncCheckpoint(journalKey,journalChat,error instanceof OperationStoppedError?'stopped':'interrupted',error.message);
+        sharedOutcome=error instanceof OperationStoppedError||error instanceof SharedOperationStoppedError?'stopped':'failed';
+        if(journalKey)finalizeSyncCheckpoint(journalKey,journalChat,sharedOutcome==='stopped'?'stopped':'interrupted',error.message);
         progressTracker.addError(error.message);
-        progressTracker.complete(error instanceof OperationStoppedError?'stopped':false,error instanceof OperationStoppedError?'Stopped safely; verified chunks preserved':'Vectorization failed');
+        progressTracker.complete(sharedOutcome==='stopped'?'stopped':false,sharedOutcome==='stopped'?'Stopped safely; verified chunks preserved':'Vectorization failed');
         throw error;
-    }finally{detachOperationControl(control.activityId);contentVectorizationActive=false;}
+    }finally{
+        if(shared)try{await finishSharedOperation(shared,sharedOutcome);}catch(e){console.error('VectHare: failed to finalize shared content job',e);}
+        detachOperationControl(control.activityId);contentVectorizationActive=false;
+    }
 }
 
 /**
@@ -539,7 +594,7 @@ function prepareLorebookContent(rawContent, settings) {
     // Filter to entries that have content, and apply text cleaning
     const validEntries = entries
         .filter(e => e && e.content)
-        .map(e => ({ ...e, content: cleanText(e.content) }));
+        .map(e => ({ ...e, content: cleanText(e.content, settings.cleaning_snapshot) }));
 
     if (settings.strategy === 'per_entry') {
         // Each entry becomes its own chunk - return array of content strings
@@ -584,7 +639,7 @@ function prepareCharacterContent(rawContent, settings) {
         const fields = {};
         for (const [fieldId, enabled] of Object.entries(selectedFields)) {
             if (enabled && FIELD_MAP[fieldId] && character[FIELD_MAP[fieldId].key]) {
-                fields[FIELD_MAP[fieldId].label] = cleanText(character[FIELD_MAP[fieldId].key]);
+                fields[FIELD_MAP[fieldId].label] = cleanText(character[FIELD_MAP[fieldId].key], settings.cleaning_snapshot);
             }
         }
         return { text: fields, type: 'fields', character: character };
@@ -596,7 +651,7 @@ function prepareCharacterContent(rawContent, settings) {
         .map(([fieldId]) => {
             const field = FIELD_MAP[fieldId];
             if (field && character[field.key]) {
-                return `## ${field.label}\n${cleanText(character[field.key])}`;
+                return `## ${field.label}\n${cleanText(character[field.key], settings.cleaning_snapshot)}`;
             }
             return null;
         })
@@ -614,14 +669,14 @@ function prepareChatContent(rawContent, settings) {
     const messages = rawContent.messages || rawContent.content;
 
     if (!Array.isArray(messages)) {
-        return { text: cleanText(String(messages)), type: 'text' };
+        return { text: cleanText(String(messages), settings.cleaning_snapshot), type: 'text' };
     }
 
     // Filter out system messages and empty messages
     const validMessages = messages.map((m, index) => ({...m, index})).filter(m => m.mes && !m.is_system);
 
     // Apply text cleaning to messages
-    const cleanedMessages = cleanMessages(validMessages);
+    const cleanedMessages = cleanMessages(validMessages, settings.cleaning_snapshot);
 
     // Normalize messages to have consistent properties for chunking.js
     const normalizedMessages = cleanedMessages.map((m, idx) => ({
@@ -678,7 +733,7 @@ function prepareUrlContent(rawContent, settings) {
     // Basic text cleaning for web content
     if (typeof text === 'string') {
         // Apply user's cleaning patterns first
-        text = cleanText(text);
+        text = cleanText(text, settings.cleaning_snapshot);
         // Remove excessive whitespace
         text = text.replace(/\n{3,}/g, '\n\n');
         // Remove common web artifacts
@@ -700,7 +755,7 @@ function prepareDocumentContent(rawContent, settings) {
     // Basic text cleaning
     if (typeof text === 'string') {
         // Apply user's cleaning patterns first
-        text = cleanText(text);
+        text = cleanText(text, settings.cleaning_snapshot);
         // Remove excessive whitespace
         text = text.replace(/\n{3,}/g, '\n\n');
         // Trim
@@ -719,7 +774,7 @@ function prepareWikiContent(rawContent, settings) {
     // Wiki content is already formatted with headers from scraper
     if (typeof text === 'string') {
         // Apply user's cleaning patterns first
-        text = cleanText(text);
+        text = cleanText(text, settings.cleaning_snapshot);
         // Remove excessive whitespace
         text = text.replace(/\n{3,}/g, '\n\n');
         // Trim
@@ -730,7 +785,7 @@ function prepareWikiContent(rawContent, settings) {
     if (settings.strategy === 'per_page' && rawContent.pages) {
         return {
             text: rawContent.pages.map(p => ({
-                text: cleanText(`# ${p.title}\n\n${p.content}`),
+                text: cleanText(`# ${p.title}\n\n${p.content}`, settings.cleaning_snapshot),
                 metadata: {
                     pageTitle: p.title,
                 },
@@ -759,7 +814,7 @@ function prepareYouTubeContent(rawContent, settings) {
     // Clean up transcript text
     if (typeof text === 'string') {
         // Apply user's cleaning patterns first
-        text = cleanText(text);
+        text = cleanText(text, settings.cleaning_snapshot);
         // Remove excessive whitespace
         text = text.replace(/\n{3,}/g, '\n\n');
         // Trim
@@ -855,7 +910,7 @@ function generateCollectionId(contentType, source, settings) {
 function enrichChunks(chunks, contentType, source, settings, preparedContent, vecthareSettings) {
     // Get keyword extraction settings
     const keywordLevel = settings.keywordLevel || 'balanced';
-    const keywordBaseWeight = settings.keywordBaseWeight || 1.5;
+    const keywordBaseWeight = settings.keywordBaseWeight ?? 1.5;
 
     return chunks.map((chunk, index) => {
         const chunkText = typeof chunk === 'string' ? chunk : chunk.text;

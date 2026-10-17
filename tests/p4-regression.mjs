@@ -105,17 +105,16 @@ await test('long Ollama text splits losslessly with a supported exact tokenizer'
   assert.equal(result.map(p=>p.text).join(''),item.text);
   assert.ok(result.every(p=>p.metadata.parentHash===99));
 });
-await test('Ollama without tokenizer uses conservative splitting; server enforces truncate:false',async()=>{
+await test('Ollama without tokenizer safely refuses unverifiable overflow splitting',async()=>{
   tokenizeAvailable=false;
   const input={hash:1,text:'a lengthy input requiring multiple chunks and a functional tokenizer',metadata:{}};
-  const split=await overflow.prepareEmbeddingItems([input],{source:'ollama',embedding_max_tokens:40,ollama_model:'embed'},String);
-  assert.ok(split.length>1);
-  assert.equal(split.map(row=>row.text).join(''),input.text);
+  await assert.rejects(overflow.prepareEmbeddingItems([input],{source:'ollama',embedding_max_tokens:40,ollama_model:'embed'},String),/no verified embedding-model tokenizer/);
 });
-await test('other providers are not split by speculative character/token estimates',async()=>{
+await test('non-plugin tokenizer providers reject provably oversize inputs instead of guessing splits',async()=>{
   const orig=[{hash:1,text:'very long content'}];
-  const items=await overflow.prepareEmbeddingItems(orig,{source:'openai',embedding_max_tokens:4},String);
-  assert.equal(items,orig);
+  await assert.rejects(overflow.prepareEmbeddingItems(orig,{source:'openai',embedding_max_tokens:4},String),/exceeds the configured safe limit/);
+  const safe=[{hash:2,text:'ok'}];
+  assert.equal(await overflow.prepareEmbeddingItems(safe,{source:'openai',embedding_max_tokens:24},String),safe);
 });
 await test('Database Browser has opt-in maintenance UI and never hijacks Live Status',()=>{
   const db=code('ui/database-browser.js');

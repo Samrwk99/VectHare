@@ -1,3 +1,4 @@
+import { saveVectHareSettingsDebounced as saveSettingsDebounced } from '../core/settings-durability.js';
 /**
  * ============================================================================
  * VECTHARE TEXT CLEANING MANAGER
@@ -10,7 +11,7 @@
  * ============================================================================
  */
 
-import { saveSettingsDebounced } from '../../../../../script.js';
+
 import {
     BUILTIN_PATTERNS,
     CLEANING_PRESETS,

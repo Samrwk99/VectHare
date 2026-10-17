@@ -1,3 +1,5 @@
+import { escapeUntrustedHtml } from '../utils/safe-html.js';
+import { saveVectHareSettingsDebounced as saveSettingsDebounced } from '../core/settings-durability.js';
 /**
  * ============================================================================
  * VECTHARE UI MANAGER
@@ -10,7 +12,7 @@
  * ============================================================================
  */
 
-import { saveSettingsDebounced, getCurrentChatId, eventSource, event_types } from '../../../../../script.js';
+import { getCurrentChatId, eventSource, event_types } from '../../../../../script.js';
 import { extension_settings, openThirdPartyExtensionMenu } from '../../../../extensions.js';
 import { writeSecret, SECRET_KEYS, secret_state, readSecretState } from '../../../../secrets.js';
 import { getWebLlmProvider as getSharedWebLlmProvider } from '../providers/webllm.js';
@@ -28,15 +30,20 @@ import { getModelField } from '../core/providers.js';
 import { getChunkingStrategies } from '../core/content-types.js';
 import { getChatUUID } from '../core/collection-ids.js';
 import { bindChatCollection, getChatBinding } from '../core/collection-ownership.js';
+import { getCollectionConfiguration } from '../core/vectorization-profile.js';
+import { applyEditedSettings } from '../core/settings-delta.js';
+import { flushVectHareSettings, getSettingsDurabilityStatus, inspectSettingsRecovery } from '../core/settings-durability.js';
 
 /**
  * Applies the current settings snapshot without overwriting collection metadata
  * and registry updates written by other UI/code paths while the panel was open.
  * @param {object} settingsSnapshot
  */
+const settingsEditorBaselines=new WeakMap();
 function applySettingsSnapshot(settingsSnapshot) {
-    const { collections, vecthare_collection_registry, chatCollectionBindings, ...safeSettings } = settingsSnapshot;
-    Object.assign(extension_settings.vecthare, safeSettings);
+    let baseline=settingsEditorBaselines.get(settingsSnapshot);
+    if(!baseline){baseline=structuredClone(settingsSnapshot);settingsEditorBaselines.set(settingsSnapshot,baseline);}
+    applyEditedSettings(settingsSnapshot,extension_settings.vecthare,baseline);
 }
 
 /**
@@ -50,6 +57,9 @@ function applySettingsSnapshot(settingsSnapshot) {
  */
 export function renderSettings(containerId, settings, callbacks) {
     console.log('VectHare UI: Rendering settings...');
+    // This editor is for NEW-collection defaults. It must not overwrite
+    // collection metadata or settings updated by another UI while it is open.
+    settingsEditorBaselines.set(settings,structuredClone(settings));
 
     const html = `
         <div id="vecthare_settings">
@@ -72,15 +82,21 @@ export function renderSettings(containerId, settings, callbacks) {
                             <p class="vecthare-card-subtitle">Configure embedding provider and vectorization parameters</p>
                         </div>
                         <div class="vecthare-card-body">
+                            <div class="vecthare-settings-persistence" role="status" aria-live="polite" style="margin-bottom:12px">
+                                <small id="vecthare_settings_integrity_status">Settings persistence: checking…</small>
+                                <button id="vecthare_save_verified_settings" class="menu_button" type="button">Verify &amp; save settings now</button>
+                                <button id="vecthare_inspect_settings_recovery" class="menu_button" type="button">Inspect recovery copies</button>
+                                <small class="vecthare-hint">Original embedding recipes are collection-specific. A recovery-copy conflict blocks verified profile changes; credentials are never copied to the recovery snapshot.</small>
+                            </div>
 
                             <label for="vecthare_vector_backend">
                                 <small>Vector Backend</small>
                             </label>
                             <select id="vecthare_vector_backend" class="vecthare-select">
                                 <option value="standard">Standard (ST's Vectra - file-based)</option>
-                                <option value="lancedb">LanceDB (disk-based, scalable)</option>
+                                <option value="lancedb" disabled title="Requires a compatible Similharity backend not included in this release">LanceDB (unavailable — plugin unsupported)</option>
                                 <option value="qdrant">Qdrant (production vector search)</option>
-                                <option value="milvus">Milvus (popular open source engine)</option>
+                                <option value="milvus" disabled title="Requires a compatible Similharity backend not included in this release">Milvus (unavailable — plugin unsupported)</option>
                             </select>
                             <small class="vecthare-help-text" style="display: block; margin-top: -8px; margin-bottom: 16px; opacity: 0.7; font-size: 0.85em; line-height: 1.5;">
                                 • Standard: ST's built-in Vectra (best for <100k vectors)<br>
@@ -487,7 +503,7 @@ export function renderSettings(containerId, settings, callbacks) {
                                     <input id="vecthare_hybrid_search_enabled" type="checkbox" />
                                     <span><small><b>Enable Hybrid Search</b></small></span>
                                 </label>
-                                <small class="vecthare_hint">Combines vector similarity with full-text (BM25) search using rank fusion</small>
+                                <small class="vecthare_hint">Native hybrid may independently retrieve text matches; client-side fallback only BM25-reranks vector candidates (not a complete keyword search).</small>
 
                                 <div id="vecthare_hybrid_params" style="display: none; margin-top: 12px;">
                                     <label style="margin-top: 8px;">
@@ -551,6 +567,10 @@ export function renderSettings(containerId, settings, callbacks) {
                             <small class="vecthare_hint">Recent messages to check for duplicates (0 = check all, lower = allow older content to resurface)</small>
 
                             <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
+                                <label for="vecthare_memory_max_injections"><small>Maximum memory injections (0 = Top-K only)</small></label>
+                                <input id="vecthare_memory_max_injections" type="number" class="vecthare-input" min="0" max="10000" step="1" style="width:95px;" />
+                                <label for="vecthare_memory_token_budget"><small>Total generation memory tokens (0 = unlimited)</small></label>
+                                <input id="vecthare_memory_token_budget" type="number" class="vecthare-input" min="0" max="1000000" step="1" style="width:110px;" />
                                 <label for="vecthare_topk" style="margin:0; white-space:nowrap;"><small>Top K</small></label>
                                 <input id="vecthare_topk" type="number" class="vecthare-input" min="1" style="width:90px;" />
                                 <small class="vecthare_hint" style="margin-left:8px;">Number of results to retrieve per collection</small>
@@ -733,6 +753,11 @@ export function renderSettings(containerId, settings, callbacks) {
                             <small class="vecthare_hint">Automatically vectorize new chat messages</small>
 
                             <div id="vecthare_collection_profile_status" class="vecthare_hint" role="status" style="margin-top:8px;">Existing collections retain their own saved vectorization profiles. Global controls are defaults for new collections.</div>
+                            <details id="vecthare_current_profile_details" style="margin-top:8px;">
+                                <summary>View Current Chat's Saved Configuration (read-only)</summary>
+                                <pre id="vecthare_current_profile_values" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow-y:auto;"></pre>
+                            </details>
+                            <div class="vecthare_hint" style="margin-top:8px"><strong>Defaults for NEW collections</strong> — editing the controls below never changes an existing collection's embedded recipe.</div>
                             <label for="vecthare_embedding_max_tokens" style="display:block;margin-top:12px"><small>Embedding input token limit (0 = detect; set manually if the provider does not expose an embedding-safe limit)</small></label>
                             <input type="number" id="vecthare_embedding_max_tokens" class="text_pole" min="0" step="1" placeholder="0 (auto)" />
                             <small class="vecthare_hint">Use only when the server cannot report its physical batch/input limit. Never set above what the model accepts.</small>
@@ -1001,6 +1026,41 @@ export function renderSettings(containerId, settings, callbacks) {
     } catch (e) {
         console.warn('VectHare: debug check failed', e);
     }
+
+    // Visible independent persistence status, separate from the debounced
+    // host settings save. Verification failures must not be presented as saved.
+    const durability=getSettingsDurabilityStatus();
+    $('#vecthare_settings_integrity_status').text(`Settings persistence: ${durability.phase}${durability.error?` — ${durability.error}`:''}`);
+    $('#vecthare_save_verified_settings').on('click',async function(){
+        const $button=$(this).prop('disabled',true);
+        try{
+            await flushVectHareSettings();
+            if(typeof toastr!=='undefined')toastr.success('Non-secret VectHare settings recovery copy saved and read back.','VectHare');
+        }catch(error){
+            if(typeof toastr!=='undefined')toastr.error(`Settings verification failed: ${error.message}`,'VectHare');
+        }finally{$button.prop('disabled',false);}
+    });
+
+    // Inspection is read-only: never silently restore a possibly stale model
+    // recipe, collection ownership map, or provider configuration.
+    $('#vecthare_inspect_settings_recovery').on('click',async function(){
+        const button=$(this).prop('disabled',true);
+        try{
+            const evidence=await inspectSettingsRecovery();
+            const report=JSON.stringify(evidence,null,2);
+            const blob=new Blob([report],{type:'application/json'});
+            const href=URL.createObjectURL(blob);
+            const link=document.createElement('a');
+            link.href=href;link.download='vecthare-settings-recovery-comparison.json';
+            document.body.appendChild(link);link.click();link.remove();
+            setTimeout(()=>URL.revokeObjectURL(href),1000);
+            if(typeof toastr!=='undefined')toastr.info(
+                `${evidence.differingPaths.length} non-secret settings paths differ. No settings were changed. Review both copies before recovery.`,
+                'VectHare');
+        }catch(error){
+            if(typeof toastr!=='undefined')toastr.error(`Unable to inspect recovery copies: ${error.message}`,'VectHare');
+        }finally{button.prop('disabled',false);}
+    });
 
     // Bind all events
     bindSettingsEvents(settings, callbacks);
@@ -1810,6 +1870,33 @@ function bindSettingsEvents(settings, callbacks) {
     });
     updateStrategyUI(settings.chunking_strategy || 'per_message');
 
+    const showCurrentCollectionProfile = () => {
+        const binding=getChatBinding();
+        const config=binding?.registryKey?getCollectionConfiguration(binding.registryKey):null;
+        const recipe=config?.originalRecipe;
+        $('#vecthare_collection_profile_status').text(recipe
+            ? `Current chat: ${binding.registryKey} • ${config.originalProfile?.embedding?.provider||'unknown'}/`+
+              `${config.originalProfile?.embedding?.modelId||'unknown'} • ${recipe.settings.chunking_strategy||'unknown'} • `+
+              `Cleaning: ${recipe.cleaning?.selectedPreset||'custom'}. Controls here are defaults for NEW collections.`
+            : binding ? 'This chat has an older/unverified collection. Settings above are NEW collection defaults; do not use them to resume its embeddings.'
+                      : 'No writable collection connected. Controls above are defaults for NEW collections.');
+        const stored=config ? {
+            identity:binding.registryKey,
+            originalEmbedding:{provider:config.originalProfile?.embedding?.provider,
+                modelId:config.originalProfile?.embedding?.modelId,
+                verified:config.originalProfile?.embedding?.verified},
+            chunking:recipe?.settings?.chunking_strategy,
+            turnOrder:recipe?.settings?.conversation_turn_order,
+            cleaningPreset:recipe?.cleaning?.selectedPreset,
+            algorithmVersions:recipe?.algorithmVersions,
+            retrievalPreferences:config.preferences,
+            savedLastUsedDraft:config.lastUsedDraft,
+        } : {status:'No verified collection connected; these controls edit new-collection defaults.'};
+        $('#vecthare_current_profile_values').text(JSON.stringify(stored,null,2));
+    };
+    showCurrentCollectionProfile();
+    eventSource.on(event_types.CHAT_CHANGED,showCurrentCollectionProfile);
+
     $('#vecthare_conversation_turn_order')
         .val(settings.conversation_turn_order === 'character_user' ? 'character_user' : 'user_character')
         .on('change', function() {
@@ -2091,7 +2178,7 @@ function bindSettingsEvents(settings, callbacks) {
 
     // BM25 b parameter
     $('#vecthare_bm25_b')
-        .val(settings.bm25_b || 0.75)
+        .val(settings.bm25_b ?? 0.75)
         .on('input', function() {
             const value = parseFloat($(this).val());
             const safeValue = isNaN(value) ? 0.75 : value;
@@ -2100,7 +2187,7 @@ function bindSettingsEvents(settings, callbacks) {
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
-    $('#vecthare_bm25_b_value').text((settings.bm25_b || 0.75).toFixed(2));
+    $('#vecthare_bm25_b_value').text((settings.bm25_b ?? 0.75).toFixed(2));
 
     // ========== Hybrid Search Settings ==========
 
@@ -2186,7 +2273,7 @@ function bindSettingsEvents(settings, callbacks) {
 
     // Query depth (how many recent messages to include in search query)
     $('#vecthare_query_depth')
-        .val(settings.query || 2)
+        .val(settings.query ?? 2)
         .on('input', function() {
             const value = parseInt($(this).val());
             const safeValue = isNaN(value) ? 2 : value;
@@ -2195,9 +2282,25 @@ function bindSettingsEvents(settings, callbacks) {
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
-    $('#vecthare_query_depth_value').text(settings.query || 2);
+    $('#vecthare_query_depth_value').text(settings.query ?? 2);
 
     // Top K - number of results retrieved per collection (top-K)
+    // Independent global memory-injection count and generation-token limits.
+    for (const [field, setting, upper] of [
+        ['#vecthare_memory_max_injections','memory_max_injections',10000],
+        ['#vecthare_memory_token_budget','memory_token_budget',1000000],
+    ]) {
+        $(field).val(settings[setting] ?? 0).off('change.vecthareBudget').on('change.vecthareBudget',function(){
+            const number=Number($(this).val());
+            if (!Number.isSafeInteger(number) || number<0 || number>upper) {
+                $(this).val(settings[setting] ?? 0);
+                toastr.warning('Enter a non-negative whole number within the supported range.');
+                return;
+            }
+            settings[setting]=number;
+            saveSettingsDebounced();
+        });
+    }
     $('#vecthare_topk')
         .val((settings.top_k ?? settings.insert) || 3)
         .on('input', function() {
@@ -2849,7 +2952,7 @@ function bindSettingsEvents(settings, callbacks) {
         });
 
     $('#vecthare_embedding_max_tokens')
-        .val(settings.embedding_max_tokens || 0)
+        .val(settings.embedding_max_tokens ?? 0)
         .on('change',function(){
             settings.embedding_max_tokens=Math.max(0,parseInt($(this).val())||0);
             applySettingsSnapshot(settings);
@@ -3021,7 +3124,7 @@ async function initializeCottonTalesIntegration(settings) {
                 $result.css('background', 'rgba(239,68,68,0.2)').html(`
                     <div style="color: #ef4444;">
                         <i class="fa-solid fa-times-circle"></i>
-                        <b>Error:</b> ${testResult.error}
+                        <b>Error:</b> ${$('<div>').text(String(testResult.error)).html()}
                     </div>
                 `);
             } else if (testResult.isEmotionClassifier) {
@@ -3032,8 +3135,8 @@ async function initializeCottonTalesIntegration(settings) {
                         <b>Looks like an emotion classifier!</b>
                     </div>
                     <div style="margin-top: 4px; font-size: 0.9em;">
-                        <b>Confidence:</b> <span style="color: ${confidenceColor}">${testResult.confidence}</span><br>
-                        <b>Sample labels:</b> ${testResult.sampleLabels.join(', ')}
+                        <b>Confidence:</b> <span style="color: ${confidenceColor}">${escapeUntrustedHtml(testResult.confidence)}</span><br>
+                        <b>Sample labels:</b> ${(testResult.sampleLabels||[]).map(label=>$('<div>').text(String(label)).html()).join(', ')}
                     </div>
                 `);
             } else {
@@ -3043,7 +3146,7 @@ async function initializeCottonTalesIntegration(settings) {
                         <b>May not be an emotion classifier</b>
                     </div>
                     <div style="margin-top: 4px; font-size: 0.9em;">
-                        Labels don't look like emotions: ${testResult.sampleLabels.join(', ')}<br>
+                        Labels don't look like emotions: ${(testResult.sampleLabels||[]).map(label=>$('<div>').text(String(label)).html()).join(', ')}<br>
                         Consider using a different model.
                     </div>
                 `);
@@ -3052,7 +3155,7 @@ async function initializeCottonTalesIntegration(settings) {
             $result.show().css('background', 'rgba(239,68,68,0.2)').html(`
                 <div style="color: #ef4444;">
                     <i class="fa-solid fa-times-circle"></i>
-                    <b>Test failed:</b> ${error.message}
+                    <b>Test failed:</b> ${escapeUntrustedHtml(error.message)}
                 </div>
             `);
         } finally {
@@ -3127,14 +3230,14 @@ function renderDiagnosticsContent(results, filter = 'all') {
             return '<div class="diagnostic-item-empty">No items match current filter</div>';
         }
         return filteredChecks.map(check => `
-            <div class="diagnostic-item ${check.status}" data-fix-action="${check.fixAction || ''}" data-status="${check.status}">
+            <div class="diagnostic-item ${['pass','warning','fail','skipped'].includes(check.status) ? check.status : 'skipped'}" data-fix-action="${escapeUntrustedHtml(check.fixAction || '')}" data-status="${escapeUntrustedHtml(check.status)}">
                 <div class="diagnostic-main">
-                    <span class="diagnostic-icon">${statusIcons[check.status]}</span>
-                    <span class="diagnostic-label">${check.name}</span>
-                    <span class="diagnostic-message">${check.message}</span>
+                    <span class="diagnostic-icon">${statusIcons[check.status] || statusIcons.skipped}</span>
+                    <span class="diagnostic-label">${escapeUntrustedHtml(check.name)}</span>
+                    <span class="diagnostic-message">${escapeUntrustedHtml(check.message)}</span>
                 </div>
                 ${check.fixable ? `
-                    <button class="diagnostic-fix-btn" data-fix-action="${check.fixAction}">
+                    <button class="diagnostic-fix-btn" data-fix-action="${escapeUntrustedHtml(check.fixAction)}">
                         <i class="fa-solid fa-wrench"></i>
                         Fix
                     </button>
@@ -3147,9 +3250,9 @@ function renderDiagnosticsContent(results, filter = 'all') {
         <!-- Version Info -->
         <div class="vecthare-diagnostics-version" style="padding: 10px 15px; background: var(--black30alpha); border-radius: 8px; margin-bottom: 15px; font-size: 0.9em; color: var(--grey70);">
             <i class="fa-solid fa-info-circle"></i>
-            <strong>Extension:</strong> v${results.version?.extension || 'Unknown'}
+            <strong>Extension:</strong> v${escapeUntrustedHtml(results.version?.extension || 'Unknown')}
             <span style="margin: 0 10px;">•</span>
-            <strong>Plugin:</strong> v${results.version?.plugin || 'Not installed'}
+            <strong>Plugin:</strong> v${escapeUntrustedHtml(results.version?.plugin || 'Not installed')}
         </div>
 
         <!-- Summary Stats Bar (Clickable Filters) -->
@@ -3173,7 +3276,7 @@ function renderDiagnosticsContent(results, filter = 'all') {
 
         ${filter !== 'all' ? `
             <div class="vecthare-diag-filter-notice">
-                <span>Showing only: <strong>${filter}</strong></span>
+                <span>Showing only: <strong>${escapeUntrustedHtml(filter)}</strong></span>
                 <button class="vecthare-diag-clear-filter" data-filter="all">
                     <i class="fa-solid fa-times"></i> Show All
                 </button>
@@ -3194,13 +3297,13 @@ function renderDiagnosticsContent(results, filter = 'all') {
             if (filter !== 'all' && filteredCount === 0) return '';
 
             return `
-                <div class="diagnostic-category" data-category="${category}">
+                <div class="diagnostic-category" data-category="${escapeUntrustedHtml(category)}">
                     <div class="diagnostic-category-header" data-collapsed="false">
                         <h4 class="diagnostic-category-title">
                             <span class="diagnostic-category-collapse-icon">
                                 <i class="fa-solid fa-chevron-down"></i>
                             </span>
-                            ${categoryTitles[category] || `<i class="fa-solid fa-folder"></i> ${category}`}
+                            ${categoryTitles[category] || `<i class="fa-solid fa-folder"></i> ${escapeUntrustedHtml(category)}`}
                         </h4>
                         <div class="diagnostic-category-stats">
                             <span class="diag-cat-stat pass" title="Passed">${catPass}</span>
@@ -3376,8 +3479,8 @@ ${isFiltered ? `🔍 Filter: ${filterNames[filter]} (${filteredCount} of ${total
   Embedding Source:  ${source}
   Model:             ${model}${providerUrl !== 'n/a' ? `\n  Provider URL:      ${providerUrl}` : ''}${qdrantUrl ? `\n  Qdrant URL:        ${qdrantUrl}` : ''}
   Chunk Size:        ${settings.chunk_size || 500} chars (adaptive only)
-  Score Threshold:   ${settings.score_threshold || 0.5}
-  Query Depth:       ${settings.query || 3}
+  Score Threshold:   ${settings.score_threshold ?? 0.5}
+  Query Depth:       ${settings.query ?? 3}
   Chat Auto-Sync:    ${settings.enabled_chats ? 'enabled' : 'disabled'}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -3491,11 +3594,13 @@ function handleFixAll(checks) {
             fixedCount++;
 
             // Update UI for this item
-            $(`.diagnostic-item[data-fix-action="${check.fixAction}"]`)
+            const matchingRows = $('.diagnostic-item').filter((_, element) =>
+                element.dataset.fixAction === String(check.fixAction));
+            matchingRows
                 .removeClass('fail warning')
                 .addClass('pass')
                 .find('.diagnostic-icon').html(statusIcons.pass);
-            $(`.diagnostic-item[data-fix-action="${check.fixAction}"] .diagnostic-fix-btn`).fadeOut(200);
+            matchingRows.find('.diagnostic-fix-btn').fadeOut(200);
         } catch (e) {
             console.warn(`Failed to fix: ${check.fixAction}`, e);
         }

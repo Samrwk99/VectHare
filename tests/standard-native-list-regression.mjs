@@ -36,6 +36,8 @@ async function createBackend(fetchImpl) {
         'provider-params.js': { getProviderSpecificParams: () => ({}) },
         'embedding-overflow.js': { assertEmbeddingQueryFits: async () => {} },
         'constants.js': { VECTOR_LIST_LIMIT: 10000 },
+        'shared-operations.js': {withSharedWriteHeaders:x=>x,runExclusiveNativeMutation:(_l,_r,fn)=>fn()},
+        'settings-durability.js': {saveVectHareSettingsDebounced(){}},
     };
     await module.link(spec => {
         const dependency = imports[path.basename(spec)];
@@ -139,6 +141,39 @@ await check('Chat-discovery direct fallback does not swallow native 500', async 
         console: { log() {} }, Error,
     });
     await assert.rejects(probe({ vector_backend: 'standard' }), /Unable to determine whether chat collection chat-1.*500/);
+});
+
+await check('Plugin HTTP 200 with malformed content must fail, not become an empty collection', async () => {
+    const {backend,settings}=await createBackend(async url=>url.includes('/chunks/list') ?
+        response(200,{success:true,items:'not-an-array',total:0}) : response(200, []));
+    backend.pluginAvailable=true;
+    await assert.rejects(backend.listChunks('chat-1',settings),/malformed or failed success data/);
+});
+
+await check('Plugin HTTP 500 must not activate fallback to native listing', async () => {
+    let nativeCalls=0;
+    const {backend,settings}=await createBackend(async url=>{
+        if(url.includes('/chunks/list'))return response(500,{error:'backend unavailable'});
+        nativeCalls++;return response(200,[]);
+    });
+    backend.pluginAvailable=true;
+    await assert.rejects(backend.listChunks('chat-1',settings),/HTTP 500/);
+    assert.equal(nativeCalls,0);
+});
+
+await check('Plugin HTTP 404 capability fallback may use native listing', async () => {
+    const {backend,settings}=await createBackend(async url=>url.includes('/chunks/list')?
+        response(404,{error:'unsupported route'}):response(200,[11]));
+    backend.pluginAvailable=true;
+    const result=await backend.listChunks('chat-1',settings);
+    assert.equal(result.total,1);
+});
+
+await check('Plugin success with valid items remains usable', async () => {
+    const {backend,settings}=await createBackend(async()=>response(200,{success:true,items:[{hash:'x'}],total:1}));
+    backend.pluginAvailable=true;
+    const result=await backend.listChunks('chat-1',settings);
+    assert.equal(result.items[0].hash,'x');
 });
 
 console.log(`\n${count} Standard native list regression checks passed`);

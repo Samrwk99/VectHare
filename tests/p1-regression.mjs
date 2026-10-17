@@ -15,6 +15,7 @@ function moduleInVM(filename,env){
     return context;
 }
 const fetches=[];
+const savedProfiles=new Map();
 let activeModel='model-A', capabilityLimit=9;
 const settings={source:'llamacpp',vector_backend:'qdrant',qdrant_multitenancy:false,
     use_alt_endpoint:true,alt_endpoint_url:'http://127.0.0.1:9977',chunking_strategy:'conversation_turns',batch_size:4,
@@ -24,15 +25,17 @@ const nativeStorage=new Map();
 const localStorage={getItem:k=>nativeStorage.get(k)||null,setItem:(k,v)=>nativeStorage.set(k,v),removeItem:k=>nativeStorage.delete(k)};
 const mockFetch=async(url,options={})=>{
     const body=options.body?JSON.parse(options.body):{};fetches.push({url,body});
-    if(String(url).endsWith('/profile/set'))return {ok:true,json:async()=>({success:true})};
-    if(String(url).endsWith('/profile/get'))return {ok:false,status:404};
+    if(String(url).endsWith('/profile/set')){savedProfiles.set(body.key,body);return {ok:true,json:async()=>({success:true})};}
+    if(String(url).endsWith('/profile/get'))return savedProfiles.has(body.key)?{ok:true,json:async()=>savedProfiles.get(body.key)}:{ok:false,status:404};
     if(String(url).endsWith('/capabilities'))return {ok:true,json:async()=>({success:true,modelId:activeModel,modelPath:'/models/test.gguf',limits:{maxTokens:capabilityLimit}})};
     if(String(url).endsWith('/tokenize'))return {ok:true,json:async()=>({success:true,count:body.text.trim().split(/\s+/).length})};
     throw Error('unexpected request '+url);
 };
 const providerParams=s=>({apiUrl:s.alt_endpoint_url});
 const ctx=moduleInVM('core/vectorization-profile.js',{
-    extension_settings:{vecthare:{}},saveSettingsDebounced(){},getRequestHeaders:()=>({'Content-Type':'application/json'}),
+ hasManifestStorage:()=>false,readManifest:async()=>null,replaceManifest:async()=>{},patchManifest:async()=>{},
+    CHUNK_IDENTITY_VERSION:2,captureCleaningSnapshot:()=>({selectedPreset:"none",customPatterns:[],enabledBuiltins:[]}),
+    withSharedWriteHeaders:x=>x,runExclusiveNativeMutation:(_l,_r,fn)=>fn(), extension_settings:{vecthare:{}},saveSettingsDebounced(){},flushVectHareSettings:async()=>{},getRequestHeaders:()=>({'Content-Type':'application/json'}),
     getProviderSpecificParams:providerParams,parseRegistryKey:k=>{const [backend,source,...id]=k.split(':');return {backend,source,collectionId:id.join(':')}},getModelField:source=>source==='ollama'?'ollama_model':null,getCollectionMeta:k=>meta.get(k)||{},
     setCollectionMeta:(k,o)=>meta.set(k,{...(meta.get(k)||{}),...o}),fetch:mockFetch,localStorage,
 });
@@ -92,6 +95,7 @@ await test('short conversation pair is never split',async()=>{
 });
 await test('overflow splits and preserves parent, message IDs, and section ordering',async()=>{
     capabilityLimit=12;
+    settings.model='smaller-limit'; // new model identity invalidates cached capabilities
     const text='[User]: hello\n\n[Character]: one two three four five six seven eight nine ten eleven twelve thirteen';
     const out=await splitter.prepareEmbeddingItems([{text,hash:501,metadata:{strategy:'conversation_turns',messageIds:[4,5]}}],settings,x=>x.length);
     assert.ok(out.length>1);
@@ -105,6 +109,7 @@ await test('single-message overflow can split without creating an unrelated mess
 });
 await test('actual capability can be increased without requiring profile migration',async()=>{
     capabilityLimit=4096;
+    settings.model='expanded-limit'; // query a new model capacity, not stale cached value
     const p=ctx.getCollectionProfile('qdrant:llamacpp:alice');
     assert.equal(p.embedding.modelId,'model-A');
     assert.equal((await splitter.getEmbeddingBudget(settings))>1000,true);

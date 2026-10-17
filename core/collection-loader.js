@@ -1,3 +1,4 @@
+import { saveVectHareSettingsDebounced as saveSettingsDebounced } from './settings-durability.js';
 /**
  * ============================================================================
  * VECTHARE COLLECTION LOADER
@@ -11,7 +12,7 @@
 
 import { extension_settings } from '../../../../extensions.js';
 import { getContext } from '../../../../extensions.js';
-import { characters, substituteParams, getRequestHeaders, saveSettingsDebounced } from '../../../../../script.js';
+import { characters, substituteParams, getRequestHeaders } from '../../../../../script.js';
 import { getSavedHashes, queryCollection } from './core-vector-api.js';
 import { getStringHash } from '../../../../utils.js';
 import {
@@ -26,6 +27,9 @@ import {
 } from './collection-metadata.js';
 import { purgeVectorIndex } from './core-vector-api.js';
 import { clearRecoveryForCollection } from './sync-checkpoints.js';
+import { forgetQdrantIdentity } from './physical-identity.js';
+import { getBackend } from '../backends/backend-manager.js';
+import { retireChatChunkManifest } from './vectorization-profile.js';
 import { getChatBinding, getCollectionOwner, forgetDeletedCollection } from './collection-ownership.js';
 // Import from collection-ids.js - single source of truth for collection ID operations
 import {
@@ -134,11 +138,34 @@ export async function deleteCollection(collectionId, settings, registryKey = nul
     } catch (error) {
         errors.push(`Vectors: ${error.message}`);
     }
+    if (vectorsDeleted) {
+        try {
+            const backend = await getBackend(settings);
+            if (typeof backend.listChunks !== 'function') throw new Error('Backend does not expose a verifiable chunk listing');
+            const listing = await backend.listChunks(parsedKey.collectionId, settings, {offset:0,limit:1});
+            if (!Array.isArray(listing?.items)) throw new Error('Backend returned an unverified deletion response');
+            if (listing.items.length) throw new Error('Vectors still exist after purge');
+        } catch(error) {
+            // Some APIs return a genuine 404 when a deleted physical index no
+            // longer exists. Other errors must preserve metadata for recovery.
+            if (!/\b404\b/.test(error.message)) {
+                vectorsDeleted = false;
+                errors.push(`Verification: ${error.message}`);
+            }
+        }
+    }
     if (!vectorsDeleted) {
         console.error(`VectHare: Retaining registry and metadata after unsuccessful vector deletion: ${actualKey}`);
         return { success: false, errors, vectorsDeleted: false, registryDeleted: false, metadataDeleted: false };
     }
 
+    // Purge the independent browser manifest before discarding recovery keys.
+    // A failure retains the registry so the partial deletion can be retried.
+    try {await retireChatChunkManifest(actualKey);}
+    catch(error){
+        errors.push(`Manifest cleanup: ${error.message}`);
+        return {success:false,errors,vectorsDeleted:true,registryDeleted:false,metadataDeleted:false};
+    }
     // Step 2: Unregister from registry (try both formats)
     try {
         const keyToUnregister = registryKey || collectionId;
@@ -164,7 +191,7 @@ export async function deleteCollection(collectionId, settings, registryKey = nul
     }
 
     const success = vectorsDeleted && registryDeleted && metadataDeleted;
-    if (success){forgetDeletedCollection(actualKey);clearRecoveryForCollection(actualKey);}
+    if (success){forgetDeletedCollection(actualKey);clearRecoveryForCollection(actualKey);forgetQdrantIdentity(actualKey,settings);}
 
     if (success) {
         console.log(`VectHare: ✓ Fully deleted collection ${collectionId}`);

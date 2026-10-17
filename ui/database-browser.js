@@ -1,3 +1,10 @@
+import { openPurgeDialog } from './purge-dialog.js';
+import { getChatBinding } from '../core/collection-ownership.js';
+import { getCollectionConfiguration, saveCollectionDraft, describeRecipeEdit, reconcileCollectionProfile } from '../core/vectorization-profile.js';
+import { settingsForCollectionQuery } from '../core/vectorization-profile.js';
+import { getBackend } from '../backends/backend-manager.js';
+import { countCollectionKeywords } from '../core/keyword-inventory.js';
+import { confirmLegacyQdrantServer, qdrantDestination } from '../core/physical-identity.js';
 /**
  * ============================================================================
  * VECTHARE DATABASE BROWSER
@@ -307,6 +314,14 @@ function createBrowserModal() {
                         <div class="vecthare-browser-stats">
                             <span id="vecthare_browser_stats_text">No collections</span>
                             <div class="vecthare-browser-actions">
+                                <button id="vecthare_browser_purge_data" class="vecthare-btn-sm vecthare-btn-danger"
+                                        title="Delete VectHare data only; preserve all settings">
+                                    Purge All Data (keep settings)
+                                </button>
+                                <button id="vecthare_confirm_qdrant_server" class="vecthare-btn-sm"
+                                        title="One-time explicit server confirmation for legacy Qdrant collection metadata">
+                                    Verify Legacy Qdrant Server
+                                </button>
                                 <button id="vecthare_import_collection" class="vecthare-btn-sm" title="Import collection from file">
                                     📥 Import
                                 </button>
@@ -495,6 +510,28 @@ function bindBrowserEvents() {
     e.stopPropagation();
     browserState.filters.searchQuery = $(this).val().toLowerCase();
     renderCollections();
+  });
+
+  // Browser purge is always data-only; reset settings is offered ONLY by Actions → Purge.
+  $("#vecthare_browser_purge_data").on("click", async function(e) {
+    e.preventDefault();e.stopPropagation();
+    const button=$(this).prop('disabled',true);
+    try {
+      const outcome=await openPurgeDialog(browserState.settings,{allowReset:false});
+      if(outcome){toastr.success(`Deleted ${outcome.completed.length} VectHare collection(s); settings preserved.`,'VectHare');await refreshCollections();}
+    }catch(error){toastr.error(`Data purge failed: ${error.message}`,'VectHare',{timeOut:15000});}
+    finally{button.prop('disabled',false);}
+  });
+  $("#vecthare_confirm_qdrant_server").on("click", function(e) {
+    e.preventDefault();e.stopPropagation();
+    try {
+      const destination=qdrantDestination(browserState.settings);
+      if(!destination)throw new Error('Select Qdrant first');
+      if(!confirm(`Confirm that these existing legacy Qdrant collection records REALLY belong to the configured server?\n\n${destination}\n\nThis establishes an irreversible safety association; it does NOT migrate vectors. Only confirm after verifying the correct Qdrant server.`))return;
+      const count=confirmLegacyQdrantServer(browserState.settings);
+      toastr.success(`Verified destination for ${count} legacy collection records.`,'VectHare');
+      refreshCollections();
+    }catch(error){toastr.error(error.message,'VectHare');}
   });
 
   // Resync button - clears registry and rescans from disk
@@ -862,7 +899,7 @@ function renderCollectionCard(collection) {
   const uniqueKey = collection.registryKey || collection.id;
 
   return `
-        <div class="vecthare-collection-card" data-collection-key="${uniqueKey}" data-status="${collection.enabled ? "active" : "paused"}">
+        <div class="vecthare-collection-card" data-collection-key="${escapeHtml(String(uniqueKey))}" data-status="${collection.enabled ? "active" : "paused"}">
             <div class="vecthare-collection-header">
                 <span class="vecthare-collection-title">
                     ${typeIcon} ${collection.name}
@@ -885,18 +922,18 @@ function renderCollectionCard(collection) {
 
             <div class="vecthare-collection-actions">
                 <button class="vecthare-btn-sm vecthare-action-toggle"
-                        data-collection-key="${uniqueKey}"
+                        data-collection-key="${escapeHtml(String(uniqueKey))}"
                         data-enabled="${collection.enabled}">
                     ${collection.enabled ? icons.pause(16) + " Pause" : icons.play(16) + " Enable"}
                 </button>
                 <button class="vecthare-btn-sm vecthare-action-rename"
-                        data-collection-key="${uniqueKey}"
+                        data-collection-key="${escapeHtml(String(uniqueKey))}"
                         data-current-name="${collection.name.replace(/"/g, "&quot;")}"
                         title="Rename this collection">
                     ${icons.pencil(16)} Rename
                 </button>
                 <button class="vecthare-btn-sm vecthare-action-activation ${activationSummary.mode !== "auto" || decaySummary.isCustom ? "vecthare-has-settings" : ""}"
-                        data-collection-key="${uniqueKey}"
+                        data-collection-key="${escapeHtml(String(uniqueKey))}"
                         title="Configure activation, triggers, conditions, and temporal decay">
                     ${icons.settings(16)} Settings
                 </button>
@@ -904,7 +941,7 @@ function renderCollectionCard(collection) {
                   hasMultipleModels
                     ? `
                 <button class="vecthare-btn-sm vecthare-action-switch-model"
-                        data-collection-key="${uniqueKey}"
+                        data-collection-key="${escapeHtml(String(uniqueKey))}"
                         title="Switch embedding model (${collection.models.length} available)">
                     <i class="fa-solid fa-code-branch"></i> Model
                 </button>
@@ -912,16 +949,16 @@ function renderCollectionCard(collection) {
                     : ""
                 }
                 <button class="vecthare-btn-sm vecthare-action-open-folder"
-                        data-collection-key="${uniqueKey}"
-                        data-backend="${collection.backend}"
-                        data-source="${collection.source || "transformers"}"
+                        data-collection-key="${escapeHtml(String(uniqueKey))}"
+                        data-backend="${escapeHtml(String(collection.backend))}"
+                        data-source="${escapeHtml(String(collection.source || "transformers"))}"
                         title="Open in file explorer">
                     ${icons.folderOpen(16)} Open Folder
                 </button>
                 <button class="vecthare-btn-sm vecthare-action-visualize"
-                        data-collection-key="${uniqueKey}"
-                        data-backend="${collection.backend}"
-                        data-source="${collection.source || "transformers"}"
+                        data-collection-key="${escapeHtml(String(uniqueKey))}"
+                        data-backend="${escapeHtml(String(collection.backend))}"
+                        data-source="${escapeHtml(String(collection.source || "transformers"))}"
                         title="View and edit chunks in this collection">
                     ${icons.eye(16)} View Chunks
                 </button>
@@ -932,19 +969,19 @@ function renderCollectionCard(collection) {
                     </button>
                     <div class="vecthare-export-options">
                         <button class="vecthare-btn-sm vecthare-btn-json vecthare-action-export"
-                                data-collection-key="${uniqueKey}"
+                                data-collection-key="${escapeHtml(String(uniqueKey))}"
                                 data-collection-id="${collection.id}"
-                                data-backend="${collection.backend}"
-                                data-source="${collection.source || "transformers"}"
+                                data-backend="${escapeHtml(String(collection.backend))}"
+                                data-source="${escapeHtml(String(collection.source || "transformers"))}"
                                 data-model="${collection.model || ""}"
                                 title="Export as JSON (includes vectors)">
                             ${icons.fileExport(16)} JSON
                         </button>
                         <button class="vecthare-btn-sm vecthare-btn-png vecthare-action-export-png"
-                                data-collection-key="${uniqueKey}"
+                                data-collection-key="${escapeHtml(String(uniqueKey))}"
                                 data-collection-id="${collection.id}"
-                                data-backend="${collection.backend}"
-                                data-source="${collection.source || "transformers"}"
+                                data-backend="${escapeHtml(String(collection.backend))}"
+                                data-source="${escapeHtml(String(collection.source || "transformers"))}"
                                 data-model="${collection.model || ""}"
                                 title="Export as PNG (shareable image)">
                             ${icons.image(16)} PNG
@@ -952,7 +989,7 @@ function renderCollectionCard(collection) {
                     </div>
                 </div>
                 <button class="vecthare-btn-sm vecthare-btn-danger vecthare-action-delete"
-                        data-collection-key="${uniqueKey}">
+                        data-collection-key="${escapeHtml(String(uniqueKey))}">
                     ${icons.trash(16)} Delete
                 </button>
             </div>
@@ -1044,6 +1081,13 @@ function formatBytes(bytes) {
  * @param {string} text Text to escape
  * @returns {string} Escaped text
  */
+/** Preserve meaningful zero; reject NaN, blanks and invalid ranges. */
+function finiteInRange(raw, fallback, min, max) {
+  if (raw === '' || raw == null) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= min && n <= max ? n : fallback;
+}
+
 function escapeHtml(text) {
   if (!text) return "";
   const div = document.createElement("div");
@@ -1538,13 +1582,13 @@ function openModelSwitcher(collection) {
             <div id="vecthare_model_switcher_modal" class="vecthare-modal">
                 <div class="vecthare-modal-content vecthare-model-switcher-content popup">
                     <div class="vecthare-modal-header">
-                        <h3><i class="fa-solid fa-code-branch"></i> Switch Embedding Model</h3>
+                        <h3><i class="fa-solid fa-code-branch"></i> View Existing Model Partition</h3>
                         <button class="vecthare-btn-icon" id="vecthare_model_switcher_close">✕</button>
                     </div>
                     <div class="vecthare-modal-body">
                         <p class="vecthare-model-switcher-desc">
-                            Select which embedding model to use for this collection.
-                            Each model may have different vectors from different embedding providers.
+                            Select an already-existing model partition to display. This does NOT change the original embedding recipe,
+                            authorize writes with a different model, or re-vectorize any data.
                         </p>
                         <div id="vecthare_model_list" class="vecthare-model-list"></div>
                     </div>
@@ -1577,18 +1621,18 @@ function openModelSwitcher(collection) {
 
       return `
             <div class="vecthare-model-item ${isActive ? "vecthare-model-active" : ""}"
-                 data-model-path="${model.path}">
+                 data-model-path="${escapeHtml(String(model.path ?? ""))}">
                 <div class="vecthare-model-item-info">
                     <span class="vecthare-model-name">
                         ${isActive ? '<i class="fa-solid fa-check"></i>' : '<i class="fa-solid fa-cube"></i>'}
-                        ${modelName}
+                        ${escapeHtml(String(modelName))}
                     </span>
-                    <span class="vecthare-model-chunks">${model.chunkCount} ${chunkLabel}</span>
+                    <span class="vecthare-model-chunks">${escapeHtml(String(model.chunkCount))} ${chunkLabel}</span>
                 </div>
                 ${
                   isActive
                     ? '<span class="vecthare-model-badge-current">Current</span>'
-                    : '<button class="vecthare-btn-sm vecthare-model-select-btn">Set as Primary</button>'
+                    : '<button class="vecthare-btn-sm vecthare-model-select-btn">View Partition</button>'
                 }
             </div>
         `;
@@ -1604,25 +1648,26 @@ function openModelSwitcher(collection) {
       e.stopPropagation();
       const modelPath = $(this)
         .closest(".vecthare-model-item")
-        .data("model-path");
+        .attr("data-model-path");
       const coll = $("#vecthare_model_switcher_modal").data("collection");
-
-      // Update collection
-      coll.model = modelPath;
-      const modelInfo = coll.models.find((m) => m.path === modelPath);
-      if (modelInfo) {
-        coll.chunkCount = modelInfo.chunkCount;
+      // Only the exact already-inventoried physical partition can be viewed.
+      // Do not let a tampered DOM element set an arbitrary preferred model.
+      const modelInfo = coll?.models?.find(m => String(m.path ?? '') === modelPath);
+      if (!modelInfo) {
+        toastr.error('Model partition is not in this collection inventory; no setting was changed.');
+        return;
       }
+      coll.model = modelInfo.path;
+      coll.chunkCount = modelInfo.chunkCount;
 
       // Persist
       setCollectionMeta(coll.registryKey || coll.id, {
-        preferredModel: modelPath,
+        preferredModel: modelInfo.path,
       });
 
-      toastr.success(
-        `Set primary model: ${modelPath || "(default)"}`,
-        "VectHare",
-      );
+      // Toast libraries may render message HTML. Never pass untrusted model
+      // names/paths to a formatted toast; the selected row already shows it.
+      toastr.success('Viewing selected existing model partition.', 'VectHare');
       closeModelSwitcher();
       renderCollections();
     });
@@ -1809,6 +1854,55 @@ function createActivationEditorModal() {
                     <div class="vecthare-activation-collection-name">
                         Collection: <strong id="vecthare_activation_collection_name"></strong>
                     </div>
+
+                    <!-- P1.0: immutable recipe and independent last-used draft. -->
+                    <section class="vecthare-activation-section" id="vecthare_recipe_section">
+                        <h4>Original embedding recipe (read only)</h4>
+                        <div id="vecthare_original_recipe" style="white-space:pre-wrap;word-break:break-word"></div>
+                        <small>Existing vectors always use the original recipe. Changing the draft below does not modify vectors or enable writes.</small>
+                        <h4>Settings for a future replacement (draft)</h4>
+                        <label>Embedding provider <select class="text_pole" id="vecthare_recipe_draft_source">
+                          <option value="transformers">Transformers</option><option value="llamacpp">llama.cpp</option>
+                          <option value="ollama">Ollama</option><option value="vllm">vLLM</option>
+                          <option value="openrouter">OpenRouter</option><option value="nanogpt">NanoGPT</option>
+                          <option value="custom">Custom API</option><option value="electronhub">ElectronHub</option>
+                          <option value="koboldcpp">KoboldCPP</option><option value="bananabread">BananaBread</option>
+                          <option value="openai">OpenAI</option><option value="cohere">Cohere</option>
+                          <option value="togetherai">Together AI</option><option value="extras">Extras API</option>
+                          <option value="webllm">WebLLM</option><option value="palm">Google PaLM</option>
+                          <option value="vertexai">VertexAI</option><option value="mistral">Mistral</option>
+                          <option value="nomicai">Nomic AI</option>
+                        </select></label>
+                        <label>Embedding model <input type="text" class="text_pole" id="vecthare_recipe_draft_model" placeholder="Model identifier"></label>
+                        <label>Chunking strategy <select id="vecthare_recipe_draft_strategy" class="text_pole">
+                          <option value="per_message">Per Message</option>
+                          <option value="conversation_turns">Conversation Turns</option>
+                          <option value="message_batch">Message Batch</option>
+                          <option value="adaptive">Adaptive</option>
+                          <option value="per_scene">Per Scene (marker driven)</option>
+                        </select></label>
+                        <label>Conversation order <select id="vecthare_recipe_draft_turns" class="text_pole">
+                          <option value="user_character">User → Character</option>
+                          <option value="character_user">Character → User</option>
+                        </select></label>
+                        <label>Cleaning preset <select id="vecthare_recipe_draft_cleaning" class="text_pole">
+                          <option value="none">None</option><option value="html_formatting">HTML Formatting</option>
+                          <option value="metadata_blocks">Metadata Blocks</option><option value="ai_reasoning">AI Reasoning</option>
+                          <option value="comprehensive">Comprehensive</option><option value="nuclear">Remove HTML</option>
+                          <option value="custom">Custom</option>
+                        </select></label>
+                        <label>Chunk size <input type="number" min="1" step="1" class="text_pole" id="vecthare_recipe_draft_size"></label>
+                        <label>Chunk overlap <input type="number" min="0" step="1" class="text_pole" id="vecthare_recipe_draft_overlap"></label>
+                        <label>Message batch size <input type="number" min="1" step="1" class="text_pole" id="vecthare_recipe_draft_batch"></label>
+                        <label>Keyword extraction <select class="text_pole" id="vecthare_recipe_draft_keywords">
+                          <option value="off">Off</option><option value="minimal">Minimal</option>
+                          <option value="balanced">Balanced</option><option value="aggressive">Aggressive</option>
+                        </select></label>
+                        <label>Embedding input limit (0 = provider detected) <input type="number" min="0" step="1" class="text_pole" id="vecthare_recipe_draft_limit"></label>
+                        <div id="vecthare_recipe_edit_warning" role="status"></div>
+                        <button id="vecthare_recipe_reconcile" class="menu_button" type="button" title="Retry and verify durable collection profile persistence">Verify / Repair Saved Profile</button>
+                        <button id="vecthare_recipe_staged_rebuild" class="menu_button" type="button" title="Build new verified vectors while keeping the old collection untouched">Staged Re-vectorize Current Chat</button>
+                    </section>
 
                     <!-- Always Active Toggle -->
                     <div class="vecthare-activation-section vecthare-always-active">
@@ -2124,6 +2218,35 @@ function bindActivationEditorEvents() {
     },
   );
 
+  $("#vecthare_recipe_reconcile").on("click", async function (event) {
+    event.preventDefault();
+    event.stopPropagation();
+    const key=activationEditorState?.collectionId;
+    if (!key) return;
+    const button=$(this).prop("disabled",true).text("Verifying saved profile...");
+    try {
+      await reconcileCollectionProfile(key);
+      toastr.success("Saved collection profile verified and reconciled.", "VectHare");
+    } catch(error) {
+      toastr.error(`Profile could not be verified: ${error.message}`, "VectHare");
+    } finally {
+      button.prop("disabled",false).text("Verify / Repair Saved Profile");
+    }
+  });
+
+  $("#vecthare_recipe_staged_rebuild").on("click", async function(event) {
+    event.preventDefault();event.stopPropagation();
+    const key=activationEditorState?.collectionId;
+    if (!key || getChatBinding()?.registryKey!==key) {
+      toastr.warning('Open the original chat and connect its collection before requesting a staged replacement. Other source types must be rebuilt from their original material.', 'VectHare');
+      return;
+    }
+    if (!confirm('Staged re-vectorization creates a NEW collection using the explicitly selected embedding settings. The existing vectors remain untouched as a backup. Do you want to open the Content Vectorizer?'))return;
+    closeActivationEditor();closeDatabaseBrowser();
+    const {openContentVectorizer}=await import('./content-vectorizer.js');
+    openContentVectorizer('chat',key);
+  });
+
   $("#vecthare_activation_save").on("click", function (e) {
     e.preventDefault();
     e.stopPropagation();
@@ -2287,6 +2410,28 @@ function renderActivationEditor() {
   $(".vecthare-nostalgia-ceiling").toggle(isNostalgia);
   updateTemporalWeightingHints(isNostalgia);
 
+  // Collection profile, editable retrieval preferences and proposed recipe are separate.
+  const config=getCollectionConfiguration(state.collectionId);
+  const saved=config.originalProfile;
+  const original=saved?.recipe;
+  const chosen=config.lastUsedDraft||{};
+  $("#vecthare_original_recipe").text(original
+    ? `${saved.embedding?.provider||'unknown'} / ${saved.embedding?.modelId||'unknown'}\n`+
+      `${original.settings?.chunking_strategy||'unknown'} • ${original.settings?.conversation_turn_order||'user_character'}\n`+
+      `Cleaning: ${original.cleaning?.selectedPreset||'custom'} • Recipe v${original.version}`
+    : 'Unverified legacy collection: automatic writes remain blocked. Re-vectorize safely to establish a recipe.');
+  $("#vecthare_recipe_draft_source").val(chosen.source??saved?.embedding?.provider??'transformers');
+  $("#vecthare_recipe_draft_model").val(chosen.model??saved?.embedding?.modelId??'');
+  $("#vecthare_recipe_draft_strategy").val(chosen.chunking_strategy??original?.settings?.chunking_strategy??'per_message');
+  $("#vecthare_recipe_draft_turns").val(chosen.conversation_turn_order??original?.settings?.conversation_turn_order??'user_character');
+  $("#vecthare_recipe_draft_cleaning").val(chosen.cleaning_preset??original?.cleaning?.selectedPreset??'none');
+  $("#vecthare_recipe_draft_size").val(chosen.chunk_size??original?.settings?.chunk_size??600);
+  $("#vecthare_recipe_draft_overlap").val(chosen.chunk_overlap??original?.settings?.chunk_overlap??0);
+  $("#vecthare_recipe_draft_batch").val(chosen.batch_size??original?.settings?.batch_size??4);
+  $("#vecthare_recipe_draft_keywords").val(chosen.keyword_extraction_level??original?.settings?.keyword_extraction_level??'off');
+  $("#vecthare_recipe_draft_limit").val(chosen.embedding_max_tokens??original?.settings?.embedding_max_tokens??0);
+  $("#vecthare_recipe_edit_warning").text('Draft changes will never alter existing embeddings. Save to remember these settings for a staged replacement.');
+
   // Prompt Context
   $("#vecthare_collection_context").val(state.context || "");
   $("#vecthare_collection_xml_tag").val(state.xmlTag || "");
@@ -2375,9 +2520,9 @@ function saveActivation() {
     type: $('input[name="vecthare_decay_type"]:checked').val() || "decay",
     mode: $('input[name="vecthare_decay_mode"]:checked').val() || "exponential",
     halfLife: parseInt($("#vecthare_decay_halflife").val()) || 50,
-    linearRate: parseFloat($("#vecthare_decay_rate").val()) || 0.01,
-    minRelevance: parseFloat($("#vecthare_decay_min").val()) || 0.3,
-    maxBoost: parseFloat($("#vecthare_decay_max_boost").val()) || 1.2,
+    linearRate: finiteInRange($("#vecthare_decay_rate").val(), 0.01, 0, 1),
+    minRelevance: finiteInRange($("#vecthare_decay_min").val(), 0.3, 0, 1),
+    maxBoost: finiteInRange($("#vecthare_decay_max_boost").val(), 1.2, 0, 100),
     sceneAware: $("#vecthare_decay_scene_aware").prop("checked"),
   };
 
@@ -2391,8 +2536,33 @@ function saveActivation() {
   const position = positionRaw === "" ? null : parseInt(positionRaw);
   const depth =
     position === 1
-      ? parseInt($("#vecthare_collection_depth").val()) || 2
+      ? finiteInRange($("#vecthare_collection_depth").val(), 2, 0, 1000)
       : null;
+
+  // Draft settings never overwrite the historical vectorization profile.
+  const proposed={
+    source:$("#vecthare_recipe_draft_source").val(),
+    chunk_size:Number($("#vecthare_recipe_draft_size").val()),
+    chunk_overlap:Number($("#vecthare_recipe_draft_overlap").val()),
+    batch_size:Number($("#vecthare_recipe_draft_batch").val()),
+    keyword_extraction_level:$("#vecthare_recipe_draft_keywords").val(),
+    embedding_max_tokens:Number($("#vecthare_recipe_draft_limit").val()),
+    model:$("#vecthare_recipe_draft_model").val().trim(),
+    chunking_strategy:$("#vecthare_recipe_draft_strategy").val(),
+    conversation_turn_order:$("#vecthare_recipe_draft_turns").val(),
+    cleaning_preset:$("#vecthare_recipe_draft_cleaning").val(),
+  };
+  if(!Number.isInteger(proposed.chunk_size)||proposed.chunk_size<=0||
+     !Number.isInteger(proposed.chunk_overlap)||proposed.chunk_overlap<0||proposed.chunk_overlap>=proposed.chunk_size||
+     !Number.isInteger(proposed.batch_size)||proposed.batch_size<=0||
+     !Number.isInteger(proposed.embedding_max_tokens)||proposed.embedding_max_tokens<0){
+    toastr.error('Invalid draft chunk or token-limit values. No settings were saved.', 'VectHare');
+    return;
+  }
+  const impact=describeRecipeEdit(state.collectionId,proposed);
+  saveCollectionDraft(state.collectionId,proposed);
+  if(impact.severity==='revectorize')toastr.warning('Embedding recipe draft saved only. Use staged Re-vectorize before using the new model, cleaning, or chunking settings.', 'VectHare');
+  else if(impact.severity==='unverified')toastr.warning('Legacy collection original recipe unverified; writing is blocked until safely re-vectorized.', 'VectHare');
 
   // Update metadata (all in one call)
   setCollectionMeta(state.collectionId, {
@@ -2402,7 +2572,7 @@ function saveActivation() {
     exclusiveScope: $("#vecthare_exclusive_scope").val() || "lorebook",
     triggers: triggers,
     triggerMatchMode: $("#vecthare_trigger_match_mode").val(),
-    triggerScanDepth: parseInt($("#vecthare_trigger_scan_depth").val()) || 5,
+    triggerScanDepth: finiteInRange($("#vecthare_trigger_scan_depth").val(), 5, 0, 100000),
     triggerCaseSensitive: $("#vecthare_trigger_case_sensitive").prop("checked"),
     temporalDecay: temporalDecay,
     context: contextPrompt,
@@ -2572,8 +2742,8 @@ function renderConditionSettings(rule, index) {
       const expressionsStatus = getExpressionsExtensionStatus();
       return `
                 <div class="vecthare-emotion-condition-wrapper">
-                    <div class="vecthare-conditions-notice vecthare-notice-${expressionsStatus.level} vecthare-emotion-notice">
-                        ${expressionsStatus.message}
+                    <div class="vecthare-conditions-notice vecthare-notice-${["ok", "warning", "error", "info", "success"].includes(expressionsStatus.level) ? expressionsStatus.level : "warning"} vecthare-emotion-notice">
+                        ${escapeHtml(String(expressionsStatus.message))}
                     </div>
                     <div class="vecthare-emotion-controls">
                         <select multiple data-field="values" data-rule-index="${index}" class="vecthare-multi-select">
@@ -2982,38 +3152,20 @@ async function scanKeywords() {
       collectionsToScan = collectionsToScan.filter(c => c.enabled);
     }
 
+    // Resolve each collection's saved backend and tenancy, rather than reading
+    // the current UI backend or scanning an unfiltered shared Qdrant store.
+    // A failed/incomplete collection must not produce deceptively partial tags.
     const keywordCounts = new Map();
-
     for (const collection of collectionsToScan) {
-      try {
-        const response = await fetch("/api/plugins/similharity/chunks/list", {
-          method: "POST",
-          headers: getRequestHeaders(),
-          body: JSON.stringify({
-            backend: collection.backend || "vectra",
-            collectionId: collection.id,
-            source: collection.source || "transformers",
-            model: collection.model || "",
-            limit: 500,
-          }),
-        });
-
-        if (!response.ok) continue;
-
-        const data = await response.json();
-        const items = data.items || [];
-
-        for (const item of items) {
-          const keywords = item.metadata?.keywords || item.keywords || [];
-          for (const kw of keywords) {
-            const text = (typeof kw === 'object' ? kw.text : kw)?.toLowerCase();
-            if (text) {
-              keywordCounts.set(text, (keywordCounts.get(text) || 0) + 1);
-            }
-          }
-        }
-      } catch (err) {
-        console.warn(`VectHare: Failed to scan keywords from ${collection.id}:`, err);
+      const key = collection.registryKey || collection.id;
+      if (!getCollectionConfiguration(key).originalProfile) {
+        throw new Error(`Keyword scan requires a verified collection profile: ${key}. Use database discovery/recovery; no other collection was silently substituted.`);
+      }
+      const effective = settingsForCollectionQuery(key, browserState.settings);
+      const backend = await getBackend(effective);
+      const counts = await countCollectionKeywords(backend, key, effective);
+      for (const [word, count] of counts) {
+        keywordCounts.set(word, (keywordCounts.get(word) || 0) + count);
       }
     }
 
@@ -3171,7 +3323,7 @@ async function performSearch() {
   }
 
   const topK = parseInt($("#vecthare_search_topk").val()) || 5;
-  const threshold = parseFloat($("#vecthare_search_threshold").val()) || 0.3;
+  const threshold = finiteInRange($("#vecthare_search_threshold").val(), 0.3, 0, 1);
   const enabledOnly = $("#vecthare_search_enabled_only").is(":checked");
 
   // Get collection IDs to search
@@ -3223,7 +3375,7 @@ async function performSearch() {
     console.error("VectHare: Search failed", error);
     $("#vecthare_search_results").html(`
             <div class="vecthare-search-error">
-                ${icons.x(24)} Search failed: ${error.message}
+                ${icons.x(24)} Search failed: ${escapeHtml(String(error.message))}
             </div>
         `);
   } finally {
@@ -3332,7 +3484,7 @@ function renderSearchResults(results, query, originalResults = null) {
       }
 
       html += `
-                <div class="vecthare-search-result" data-collection="${collectionId}" data-hash="${collectionResults.hashes[i]}">
+                <div class="vecthare-search-result" data-collection="${escapeHtml(String(collectionId))}" data-hash="${escapeHtml(String(collectionResults.hashes[i]))}">
                     ${scoreDisplay}
                     <div class="vecthare-search-result-content">
                         <div class="vecthare-search-result-text">${escapeHtml(preview)}</div>
@@ -3341,9 +3493,9 @@ function renderSearchResults(results, query, originalResults = null) {
                 </div>
 
                 <button class="vecthare-btn-sm vecthare-action-visualize"
-                        data-collection-key="${uniqueKey}"
-                        data-backend="${collection.backend}"
-                        data-source="${collection.source || "transformers"}"
+                        data-collection-key="${escapeHtml(String(uniqueKey))}"
+                        data-backend="${escapeHtml(String(collection.backend))}"
+                        data-source="${escapeHtml(String(collection.source || "transformers"))}"
                         title="View and edit chunks in this collection">
                     ${icons.eye(16)} View Chunks
                 </button>

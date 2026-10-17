@@ -1,14 +1,16 @@
 /** Cooperative controls: never interrupt a database write in progress. */
 import { setActivityPhase } from './activity-status.js';
+import { checkpointSharedOperation } from './shared-operations.js';
 const controllers=new Map();
 export class OperationStoppedError extends Error {
     constructor(){super('Operation stopped safely; verified chunks preserved');this.name='OperationStoppedError';}
 }
 export function hasActiveVectorWrite(){return [...controllers.values()].some(control=>control.writeOperation);}
 export function createOperationControl(activityId,{retry=null,pausable=true,stoppable=true,writeOperation=false}={}) {
-    let state='running',release=null;
+    let state='running',release=null,shared=null;
     const controller={
         activityId,writeOperation,
+        bindSharedOperation(operation){shared=operation;},
         get state(){return state;},
         get actions(){return state==='running'?[
             ...(pausable?['pause']:[]),...(stoppable?['stop']:[])]:
@@ -19,6 +21,7 @@ export function createOperationControl(activityId,{retry=null,pausable=true,stop
             if(state==='pausing'){state='paused';setActivityPhase(activityId,'paused');}
             while(state==='paused')await new Promise(resolve=>{release=resolve;});
             if(state==='stopping'||state==='stopped')throw new OperationStoppedError();
+            await checkpointSharedOperation(shared);
         },
         request(action){
             if(action==='pause' && pausable && state==='running') {state='pausing';setActivityPhase(activityId,'pausing');return true;}

@@ -445,17 +445,10 @@ describe('StandardBackend', () => {
     });
 
     describe('purgeAllVectorIndexes', () => {
-        it('should purge all collections successfully', async () => {
-            fetchMock.mockResolvedValueOnce(mockFetchResponse({}));
-
-            await backend.purgeAllVectorIndexes(defaultSettings);
-
-            expect(fetchMock).toHaveBeenCalledWith(
-                '/api/vector/purge-all',
-                expect.objectContaining({
-                    method: 'POST',
-                })
-            );
+        it('blocks unsafe whole-user native purge', async () => {
+            await expect(backend.purgeAllVectorIndexes(defaultSettings))
+                .rejects.toThrow('Unsafe native Purge All');
+            expect(fetchMock).not.toHaveBeenCalled();
         });
     });
 

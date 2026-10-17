@@ -8,16 +8,18 @@ import { getChatUUID, parseRegistryKey } from '../core/collection-ids.js';
 import { getChatBinding } from '../core/collection-ownership.js';
 import { getCollectionProfile, getChatChunkManifest } from '../core/vectorization-profile.js';
 import { getCollectionRegistry } from '../core/collection-loader.js';
-import { isCollectionEnabled, isCollectionAutoSyncEnabled, setCollectionAutoSync } from '../core/collection-metadata.js';
+import { isCollectionEnabled, isCollectionAutoSyncEnabled, setCollectionAutoSync, getCollectionMeta } from '../core/collection-metadata.js';
 import { getBackend } from '../backends/backend-manager.js';
 import {getCurrentSyncCheckpoint,getPendingContentForChat} from '../core/sync-checkpoints.js';
 import {operationActions,requestOperationAction} from './operation-controls.js';
 import { subscribeActivity, getActivitySnapshot, activityPercent, canRetryActivity, retryActivity } from './activity-status.js';
+import { initializeSharedOperations,subscribeSharedOperations,getSharedOperations,cancelSharedOperation,recoverSharedOperation,sharedOperationForActivity } from './shared-operations.js';
 
 let initialized = false;
 let displayTimer = null;
 let databaseTimer = null;
 let unsubscribe = null;
+let unsubscribeShared = null;
 let databaseRefreshToken = 0;
 let databaseBusy = false;
 let lastStatsCollectionKey = undefined;
@@ -60,16 +62,19 @@ function renderProgressCard(container, op) {
     if(details.length){const stats=document.createElement('div');stats.className='vecthare-live-metrics';stats.textContent=details.join(' · ');card.append(stats);}
     if(op.errors?.length){const errors=document.createElement('div');errors.className='vecthare-live-errors';
         errors.textContent=`${op.errors.length} error(s): ${op.errors.slice(-3).join(' · ')}`;card.append(errors);}
-    const actions=operationActions(op.id);
-    if(op.category==='autosync' && op.resourceKey && ['running','paused','pausing'].includes(op.phase))actions.unshift('disable-auto-sync');
-    if(op.phase==='failed'&&canRetryActivity(op.id))actions.push('retry');
+    const ownedHandle=op.remote?null:sharedOperationForActivity(op.id);
+    const actions=op.remote || op.phase==='queued' ? (['running','queued','paused','pausing'].includes(op.phase)?['stop']:[]) : operationActions(op.id);
+    if(op.remote && op.phase==='interrupted')actions.push('recover');
+    if(!op.remote && op.category==='autosync' && op.resourceKey && ['running','paused','pausing'].includes(op.phase))actions.unshift('disable-auto-sync');
+    if(!op.remote && op.phase==='failed'&&canRetryActivity(op.id))actions.push('retry');
     if(actions.length){
         const toolbar=document.createElement('div');toolbar.className='vecthare-live-controls';
         for(const action of actions){
             const button=document.createElement('button');button.type='button';
             button.className='vecthare-btn-secondary';
-            button.textContent=action==='disable-auto-sync'?'Pause Auto-Sync':action==='pause'?'Pause':action==='resume'?'Resume':action==='stop'?'Stop safely':'Retry';
-            button.dataset.liveAction=action;button.dataset.activityId=op.id;
+            button.textContent=action==='disable-auto-sync'?'Pause Auto-Sync':action==='pause'?'Pause':action==='resume'?'Resume':action==='stop'?'Stop safely':action==='recover'?(op.recoveryPrepared?'Release after reconciliation':'Fence interrupted job'):'Retry';
+            button.dataset.liveAction=action;button.dataset.activityId=op.phase==='queued' && ownedHandle?ownedHandle.id:op.id;
+            if(op.remote || (op.phase==='queued' && ownedHandle))button.dataset.sharedOperation='true';
             toolbar.append(button);
         }
         card.append(toolbar);
@@ -77,6 +82,16 @@ function renderProgressCard(container, op) {
     container.append(card);
 }
 function renderOperations(snapshot) {
+    const remoteAll=getSharedOperations();
+    const owned=new Set(snapshot.operations.map(op=>sharedOperationForActivity(op.id)?.id).filter(Boolean));
+    const local=snapshot.operations.map(op=>{
+        const shared=remoteAll.find(item=>item.id===sharedOperationForActivity(op.id)?.id);
+        return shared ? {...op,phase:shared.phase,
+            detail:shared.phase==='queued'?'Waiting for the current backend job to finish':
+                shared.cancelRequested?'Remote cancellation requested; stopping at a safe checkpoint':op.detail} : op;
+    });
+    const remote=remoteAll.filter(op=>!owned.has(op.id)).map(op=>({...op,remote:true}));
+    snapshot={...snapshot,operations:[...local,...remote].sort((a,b)=>(b.startedAt||b.requestedAt||0)-(a.startedAt||a.requestedAt||0))};
     const current=snapshot.operations[0];
     const dock=$id('vecthare_status_dock');
     const inline=$id('vecthare_inline_status');
@@ -94,7 +109,7 @@ function renderOperations(snapshot) {
     }
     if(inline){
         const primary=current||snapshot.latest;
-        const state=current?(current.phase==='paused'?'Paused':current.phase==='pausing'?'Pausing':current.phase==='stopping'?'Stopping':'In progress'):primary?.phase==='failed'?'Last operation failed':primary?.phase==='stopped'?'Last operation stopped':primary?'Last operation completed':'Ready';
+        const state=current?(current.phase==='paused'?'Paused':current.phase==='pausing'?'Pausing':current.phase==='stopping'?'Stopping':current.phase==='queued'?'Queued':current.phase==='interrupted'?'Interrupted':'In progress'):primary?.phase==='failed'?'Last operation failed':primary?.phase==='stopped'?'Last operation stopped':primary?'Last operation completed':'Ready';
         setText('vecthare_inline_status_text',`${state}${primary?` · ${primary.label}`:' · No active operation'}`);
         const pct=current?activityPercent(current):null;
         setText('vecthare_inline_status_count',pct===null?(current?'Working…':'View status'):`${pct}%`);
@@ -116,14 +131,20 @@ function renderOperations(snapshot) {
 }
 function chatIdentity() {
     const chatUUID=getChatUUID();
-    const binding=chatUUID?getChatBinding(chatUUID):null;
-    return {chatUUID,binding,collectionKey:binding?.registryKey||null};
+    try {
+        const binding=chatUUID?getChatBinding(chatUUID):null;
+        return {chatUUID,binding,collectionKey:binding?.registryKey||null,identityError:null};
+    } catch(error) {
+        // The status panel must remain available to view/cancel remote jobs
+        // even when a legacy branch has conflicting collection ownership.
+        return {chatUUID,binding:null,collectionKey:null,identityError:String(error?.message||error)};
+    }
 }
 function renderChatSummary() {
     if(!isOpen())return;
     const settings=extension_settings.vecthare||{};
     const chat=getContext()?.chat;
-    const {chatUUID,binding,collectionKey}=chatIdentity();
+    const {chatUUID,binding,collectionKey,identityError}=chatIdentity();
     if(collectionKey!==lastStatsCollectionKey){
         lastStatsCollectionKey=collectionKey;
         databaseRefreshToken++;
@@ -151,7 +172,7 @@ function renderChatSummary() {
     setText('vecthare_live_provider',profile?.embedding?.provider||settings.source||'transformers');
     setText('vecthare_live_chat',Array.isArray(chat)?`${chat.length} messages in current chat`:'No chat open');
     setText('vecthare_live_collection',collectionKey||'Not connected');
-    setText('vecthare_live_connection',!binding?'Not connected':binding.writeVerified?'Verified writable connection':'Read-only / unverified');
+    setText('vecthare_live_connection',identityError?`Identity blocked: ${identityError}`:!binding?'Not connected':binding.writeVerified?'Verified writable connection':'Read-only / unverified');
     const autosyncOn=Boolean(collectionKey&&isCollectionAutoSyncEnabled(collectionKey));
     setText('vecthare_live_autosync',autosyncOn?'Enabled':'Disabled');
     const autoButton=$id('vecthare_live_autosync_toggle');
@@ -160,11 +181,14 @@ function renderChatSummary() {
     const embedding=profile?.embedding;
     setText('vecthare_live_model',embedding?`${embedding.modelId||'Unknown'} · ${embedding.verified?'verified':'unverified'}`:'No saved model profile');
     setText('vecthare_live_strategy',profile?.chunking?.chunking_strategy||'Unknown / not recorded');
+    const compactManifest=collectionKey?getCollectionMeta(collectionKey)?.chatChunkManifest:null;
     const entries=manifest?.entries;
     const tracked=new Set(Array.isArray(entries)?entries.flatMap(e=>e.messageIds||[]).filter(n=>Number.isInteger(n)&&n>=0):[]);
     setText('vecthare_live_coverage',Array.isArray(entries)&&manifest.chatUUID===chatUUID?
         `${tracked.size} / ${Array.isArray(chat)?chat.length:'?'} messages tracked · ${entries.length} chunk records`:
-        'Unverified — no current-chat manifest');
+        compactManifest?.storage==='indexeddb-v1' ?
+            `${compactManifest.entryCount??'?'} chunks saved · full manifest loads on next verified operation` :
+            'Unverified — no current-chat manifest');
     setText('vecthare_live_collection_total',`${registry.length} registered collections`);
     setText('vecthare_live_coverage_note','Manifest coverage is recorded locally; it is not proof that every vector exists. Use Scan Chat for verification.');
 }
@@ -278,7 +302,23 @@ export function initializeLiveStatus() {
                 const key=getActivitySnapshot().operations.find(op=>op.id===activityId)?.resourceKey;
                 if(key){setCollectionAutoSync(key,false);requestOperationAction(activityId,'stop');renderChatSummary();}
             }else if(liveAction==='retry'){button.disabled=true;try{await retryActivity(activityId);}catch(error){console.error('[VectHare] Retry failed',error);const note=document.createElement('small');note.className='vecthare-live-errors';note.textContent=`Retry failed: ${error.message||error}`;button.parentElement.append(note);button.disabled=false;}}
-            else requestOperationAction(activityId,liveAction);
+            else if(button.dataset.sharedOperation==='true' && liveAction==='recover') {
+                const op=getSharedOperations().find(item=>item.id===activityId);
+                const phrase=op?.recoveryPrepared?'RECONCILED AND RELEASE':'FENCE INTERRUPTED JOB';
+                const warning=op?.recoveryPrepared
+                    ? 'Release queued operations ONLY after checking the affected collection and reconciling any unfinished writes. This does not repair vectors automatically.'
+                    : 'Fence this stalled job. Active writes or uncertain native requests block recovery. Subsequent work will remain queued until you explicitly confirm reconciliation.';
+                const entered=window.prompt(`${warning}\n\nType exactly: ${phrase}`, '');
+                if(entered===phrase){
+                    button.disabled=true;
+                    try{await recoverSharedOperation(activityId,phrase);}
+                    catch(err){console.warn('[VectHare] Recovery refused:',err);window.alert(`VectHare refused recovery: ${err.message}`);}
+                    finally{button.disabled=false;}
+                }
+            }
+            else if(button.dataset.sharedOperation==='true' && liveAction==='stop') {
+                button.disabled=true;try{await cancelSharedOperation(activityId);}catch(err){console.warn('[VectHare] Remote cancellation failed:',err);button.disabled=false;}
+            }else requestOperationAction(activityId,liveAction);
         }
         if(e.target.closest('#vecthare_live_autosync_toggle')){
             const key=e.target.closest('#vecthare_live_autosync_toggle').dataset.autosyncKey;
@@ -304,4 +344,7 @@ export function initializeLiveStatus() {
     document.addEventListener('keydown',e=>{if(e.key==='Escape'&&isOpen())closeLiveStatus();});
     if(unsubscribe)unsubscribe();
     unsubscribe=subscribeActivity(renderOperations);
+    initializeSharedOperations();
+    if(unsubscribeShared)unsubscribeShared();
+    unsubscribeShared=subscribeSharedOperations(()=>renderOperations(getActivitySnapshot()));
 }

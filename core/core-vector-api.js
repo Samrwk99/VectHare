@@ -1,3 +1,4 @@
+import { withSharedWriteHeaders } from '../ui/shared-operations.js';
 /**
  * ============================================================================
  * CORE VECTOR API CLIENT
@@ -30,7 +31,7 @@ import { oai_settings } from '../../../../openai.js';
 import { isWebLlmSupported } from '../../../shared.js';
 import { getWebLlmProvider } from '../providers/webllm.js';
 import { parseRegistryKey } from './collection-ids.js';
-import { assertQueryModelCompatible } from './vectorization-profile.js';
+import { assertQueryModelCompatible, settingsForCollectionQuery } from './vectorization-profile.js';
 import { getBackend, invalidateBackendHealth, recordQuery, recordInsert, recordDelete, recordError } from '../backends/backend-manager.js';
 import {
     getProviderConfig,
@@ -229,7 +230,7 @@ export function getVectorsRequestBody(args = {}, settings) {
             break;
         case 'llamacpp':
             body.apiUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : textgenerationwebui_settings.server_urls[textgen_types.LLAMACPP];
-            console.log(`VectHare DEBUG llamacpp (core-vector-api): use_alt_endpoint=${settings.use_alt_endpoint}, alt_endpoint_url="${settings.alt_endpoint_url}", ST_url="${textgenerationwebui_settings.server_urls[textgen_types.LLAMACPP]}", final apiUrl="${body.apiUrl}"`);
+            console.debug('VectHare DEBUG llamacpp: embedding endpoint selected (URL redacted)');
             break;
         case 'vllm':
             body.apiKey = settings.vllm_api_key || '';
@@ -610,7 +611,7 @@ export async function getSavedHashes(collectionId, settings, includeMetadata = f
         const backendName = settings.vector_backend || 'standard';
         const response = await fetch('/api/plugins/similharity/chunks/list', {
             method: 'POST',
-            headers: getRequestHeaders(),
+            headers: withSharedWriteHeaders(getRequestHeaders()),
             body: JSON.stringify({
                 backend: backendName === 'standard' ? 'vectra' : backendName,
                 collectionId: collectionId,
@@ -845,6 +846,7 @@ export async function queryCollection(collectionId, searchText, topK, settings) 
         collectionId = key.collectionId;
     }
     const registryIdentity = `${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}`;
+    settings=settingsForCollectionQuery(registryIdentity, settings);
     await assertQueryModelCompatible(registryIdentity, settings);
     const backend = await getBackend(settings);
 
@@ -904,8 +906,8 @@ export async function queryCollection(collectionId, searchText, topK, settings) 
 
     // Convert to format expected by keyword boost
     const resultsForBoost = rawResults.metadata.map((meta, idx) => ({
-        hash: meta.hash || rawResults.hashes[idx],
-        score: meta.score || 0,
+        hash: meta.hash ?? rawResults.hashes[idx],
+        score: meta.score ?? 0,
         metadata: meta,
         text: meta.text || ''
     }));
@@ -918,7 +920,7 @@ export async function queryCollection(collectionId, searchText, topK, settings) 
         metadata: finalResults.map(r => ({
             ...r.metadata,
             score: r.score,
-            originalScore: r.originalScore || r.vectorScore,
+            originalScore: r.originalScore ?? r.vectorScore,
             keywordBoost: r.keywordBoost,
             bm25Score: r.bm25Score,
             normalizedBM25: r.normalizedBM25,
@@ -951,7 +953,7 @@ function scoreResults(resultsForBoost, searchText, topK, settings, overfetchAmou
         // Use BM25 scoring only
         const bm25Results = applyBM25Scoring(resultsForBoost, searchText, {
             k1: settings.bm25_k1 || 1.5,
-            b: settings.bm25_b || 0.75,
+            b: settings.bm25_b ?? 0.75,
             alpha: 0.5,
             beta: 0.5
         });
@@ -963,7 +965,7 @@ function scoreResults(resultsForBoost, searchText, topK, settings, overfetchAmou
         const keywordBoosted = applyKeywordBoosts(resultsForBoost, searchText, keywordBoostLimit);
         const hybridResults = applyBM25Scoring(keywordBoosted, searchText, {
             k1: settings.bm25_k1 || 1.5,
-            b: settings.bm25_b || 0.75,
+            b: settings.bm25_b ?? 0.75,
             alpha: 0.6,
             beta: 0.4
         });
@@ -998,6 +1000,8 @@ export async function queryMultipleCollections(collectionIds, searchText, topK, 
                 results[key] = { hashes: [], metadata: [], error: error.message };
             }
         }
+        const failures=Object.entries(results).filter(([,result])=>result?.error);
+        if (failures.length) throw new Error(`Multi-collection retrieval degraded: ${failures.map(([key,result])=>key+': '+result.error).join('; ')}`);
         return results;
     }
     const backend = await getBackend(settings);
@@ -1038,9 +1042,11 @@ export async function queryMultipleCollections(collectionIds, searchText, topK, 
                 console.warn(`[VectHare] Hybrid search failed for ${collectionId}:`, error.message);
                 // VEC-18: Record error
                 recordError(settings?.vector_backend || 'standard', error);
-                processedResults[collectionId] = { hashes: [], metadata: [] };
+                processedResults[collectionId] = { hashes: [], metadata: [], error: error.message };
             }
         }
+        const failures=Object.entries(processedResults).filter(([,result])=>result?.error);
+        if (failures.length) throw new Error(`Hybrid retrieval degraded: ${failures.map(([key,result])=>key+': '+result.error).join('; ')}`);
         return processedResults;
     }
 
@@ -1071,8 +1077,8 @@ export async function queryMultipleCollections(collectionIds, searchText, topK, 
 
         // Convert to format expected by scoring functions
         const resultsForBoost = collectionResults.metadata.map((meta, idx) => ({
-            hash: meta.hash || collectionResults.hashes[idx],
-            score: meta.score || 0,
+            hash: meta.hash ?? collectionResults.hashes[idx],
+            score: meta.score ?? 0,
             metadata: meta,
             text: meta.text || ''
         }));
@@ -1085,7 +1091,7 @@ export async function queryMultipleCollections(collectionIds, searchText, topK, 
             metadata: finalResults.map(r => ({
                 ...r.metadata,
                 score: r.score,
-                originalScore: r.originalScore || r.vectorScore,
+                originalScore: r.originalScore ?? r.vectorScore,
                 keywordBoost: r.keywordBoost,
                 bm25Score: r.bm25Score,
                 normalizedBM25: r.normalizedBM25,
@@ -1183,20 +1189,8 @@ export async function purgeFileVectorIndex(collectionId, settings) {
  * @param {object} settings VectHare settings object
  * @returns {Promise<void>}
  */
-export async function purgeAllVectorIndexes(settings) {
-    try {
-        const backend = await getBackend(settings);
-        const result = await backend.purgeAllVectorIndexes(settings);
-        if (result === false || result?.success === false) throw new Error('Backend did not confirm purge all');
-        console.log('VectHare: Purged all vector indexes');
-        toastr.success('All vector indexes purged', 'Purge successful');
-        return true;
-    } catch (error) {
-        invalidateBackendHealth(settings?.vector_backend || 'standard', error);
-        console.error('VectHare: Failed to purge all', error);
-        toastr.error('Failed to purge all vector indexes; settings have been preserved', 'Purge failed');
-        return false;
-    }
+export async function purgeAllVectorIndexes() {
+    throw new Error('Unsafe backend-wide purge disabled: use scoped VectHare purge with verified backend inventory and user confirmation.');
 }
 
 /**

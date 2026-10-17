@@ -1,3 +1,4 @@
+import { saveVectHareSettingsDebounced as saveSettingsDebounced } from './settings-durability.js';
 /**
  * VectHare Collection Metadata Manager
  *
@@ -10,8 +11,18 @@
  */
 
 import { extension_settings } from '../../../../extensions.js';
-import { saveSettingsDebounced, getCurrentChatId } from '../../../../../script.js';
-import { parseRegistryKey, getChatUUID } from './collection-ids.js';
+import { getCurrentChatId } from '../../../../../script.js';
+import { parseRegistryKey, parseCollectionId, getChatUUID } from './collection-ids.js';
+import { assertQdrantIdentity } from './physical-identity.js';
+
+/** Resolve lorebook classification from collection provenance, not names containing 'lorebook'. */
+export function isLorebookCollection(id) {
+    const meta=getCollectionMeta(id);
+    if (meta?.collectionType === 'lorebook' || meta?.type === 'lorebook') return true;
+    if (meta?.collectionType && meta.collectionType !== 'unknown') return false;
+    const parsed=parseRegistryKey(id);
+    return parseCollectionId(parsed.collectionId || id).type === 'lorebook';
+}
 
 // ============================================================================
 // COLLECTION METADATA CRUD
@@ -263,6 +274,10 @@ export function getCollectionMeta(collectionId) {
     }
 
     const key = resolveStoredCollectionKey(collectionId);
+    if(parseRegistryKey(key).backend === 'qdrant'){
+        try{assertQdrantIdentity(key,{...extension_settings.vecthare,vector_backend:'qdrant'});}
+        catch(error){return {...defaultCollectionMeta,enabled:false,storageUnverified:true,storageError:error.message};}
+    }
     const stored = key ? extension_settings.vecthare.collections[key] : null;
 
     if (!stored) {
@@ -292,6 +307,7 @@ export function setCollectionMeta(collectionId, data) {
     const resolved = resolveStoredCollectionKey(collectionId);
     const qualified = !!parseRegistryKey(collectionId).backend;
     const key = qualified ? collectionId : (resolved || collectionId);
+    if(parseRegistryKey(key).backend === 'qdrant') assertQdrantIdentity(key,{...extension_settings.vecthare,vector_backend:'qdrant'},{allowNew:true});
     const existing = extension_settings.vecthare.collections[key] ||
         (qualified && resolved && !parseRegistryKey(resolved).backend ? extension_settings.vecthare.collections[resolved] : {}) || {};
     if (qualified && resolved && resolved !== key && !parseRegistryKey(resolved).backend) {
@@ -317,6 +333,7 @@ export function deleteCollectionMeta(collectionId) {
 
     const key = resolveStoredCollectionKey(collectionId);
     if (key) {
+        if(parseRegistryKey(key).backend === 'qdrant') assertQdrantIdentity(key,{...extension_settings.vecthare,vector_backend:'qdrant'});
         delete extension_settings.vecthare.collections[key];
         saveSettingsDebounced();
         console.log(`VectHare: Deleted metadata for collection ${key}`);
@@ -519,7 +536,7 @@ export function applyChatCollectionPolicy(collectionIds, chatId, options = {}) {
     }
 
     const isSelected = (id) => policy.selectedCollections.some(selected => collectionKeysMatch(selected, id));
-    const inScope = (id) => !options.lorebooksOnly || String(id).includes('lorebook') || normalizeCollectionKey(id).includes('lorebook');
+    const inScope = (id) => !options.lorebooksOnly || isLorebookCollection(id);
 
     if (mode === 'only_selected') {
         return collectionIds.filter(id => !inScope(id) || isSelected(id));
@@ -1259,8 +1276,7 @@ export async function filterActiveCollections(collectionIds, context) {
         finalActiveIds = activeIds.filter(id => {
             if (exclusiveActiveIds.includes(id)) return true;
             if (suppressAll) return false;
-            const normalized = normalizeCollectionKey(id);
-            return !String(id).includes('lorebook') && !normalized.includes('lorebook');
+            return !isLorebookCollection(id);
         });
 
         console.log(`[VectHare Activation Filter] Exclusive collection(s) active, suppressed ${activeIds.length - finalActiveIds.length} peer collection(s)`);
@@ -1438,8 +1454,11 @@ export function setCollectionDecaySettings(collectionId, decaySettings) {
  * @returns {boolean} Whether collection has custom decay configuration
  */
 export function hasCustomDecaySettings(collectionId) {
-    const meta = getCollectionMeta(collectionId);
-    return meta.temporalDecay !== undefined && meta.temporalDecay !== null;
+    // getCollectionMeta() always merges defaultTemporalDecay, so testing that
+    // object would incorrectly claim every collection has an explicit override.
+    const key = resolveStoredCollectionKey(collectionId);
+    const stored = key ? extension_settings.vecthare?.collections?.[key] : null;
+    return stored?.temporalDecay !== undefined && stored?.temporalDecay !== null;
 }
 
 /**

@@ -1,3 +1,6 @@
+import { saveVectHareSettingsDebounced as saveSettingsDebounced } from './core/settings-durability.js';
+import { getChatUUID } from './core/collection-ids.js';
+import { initialiseSettingsDurability, flushVectHareSettings, getSettingsDurabilityStatus } from './core/settings-durability.js';
 /**
  * ============================================================================
  * VECTHARE - ADVANCED RAG SYSTEM
@@ -12,13 +15,17 @@
 
 import {scanCurrentChat, repairCurrentChat, reconcileDeletedMessages} from './core/chat-repair.js';
 import {startActivity, updateActivity, finishActivity, registerActivityRetry} from './ui/activity-status.js';
+import {acquireSharedOperation,finishSharedOperation,SharedOperationStoppedError} from './ui/shared-operations.js';
 import {createOperationControl, detachOperationControl, hasActiveVectorWrite, OperationStoppedError} from './ui/operation-controls.js';
 import { clearAllRecovery } from './core/sync-checkpoints.js';
+import { openPurgeDialog } from './ui/purge-dialog.js';
 import { getCollectionProfile, verifyAndRestoreLegacyProfile } from './core/vectorization-profile.js';
 import { openContentVectorizer } from './ui/content-vectorizer.js';
-import { getChatBinding } from './core/collection-ownership.js';
+import { getChatBinding, reconcileActiveChatRename } from './core/collection-ownership.js';
+import { recordCurrentChatIdentity, repairCurrentLegacyBranchIdentity, confirmReopenedLegacyBranchIdentity, observeChatIdentityTransition } from './core/chat-identity-ledger.js';
 import {
     eventSource,
+    getCurrentChatId,
     event_types,
     extension_prompt_types,
 } from '../../../../script.js';
@@ -139,6 +146,10 @@ const defaultSettings = {
     // Advanced features
     temporal_decay: getDefaultDecaySettings(),
 
+    // P2 #57: 0 disables an additional limit; Top-K still applies.
+    memory_max_injections: 0,
+    memory_token_budget: 0,
+
     // Global defaults for new collections
     default_decay_enabled: false,    // Whether new collections have temporal weighting enabled
     default_decay_type: 'decay',     // 'decay' or 'nostalgia' for new collections
@@ -178,8 +189,18 @@ const moduleWorker = new ModuleWorkerWrapper(() => synchronizeChat(settings, get
 // Batch size based on provider
 const getBatchSize = () => ['transformers', 'ollama'].includes(settings.source) ? 1 : 5;
 
-// Chat event handler (debounced)
-const onChatEvent = debounce(async () => await moduleWorker.update(), debounce_timeout.relaxed);
+// Capture the originating chat BEFORE scheduling the delayed Auto-Sync work.
+// A branch/chat switch during debounce must never convert an event from A
+// into an unrequested write to B, even when both chats use the same character.
+const debouncedChatUpdate = debounce(async (sourceUUID, sourceChatFile) => {
+    if (!sourceUUID || !sourceChatFile ||
+        getChatUUID() !== sourceUUID || getCurrentChatId() !== sourceChatFile) {
+        console.warn('VectHare: discarding a stale chat event after a chat/branch switch');
+        return;
+    }
+    await moduleWorker.update();
+}, debounce_timeout.relaxed);
+const onChatEvent = () => debouncedChatUpdate(getChatUUID(), getCurrentChatId());
 
 /**
  * Generation interceptor - searches and injects relevant messages
@@ -201,10 +222,49 @@ async function onVectorizeAllClick() {
 // Only a user interaction in Live Status can resume an interrupted chat.
 window.vecthareResumeFromStatus = onVectorizeAllClick;
 window.vecthareOpenStagedRecovery = (oldKey) => openContentVectorizer('chat',oldKey);
+// Explicit opt-in legacy-branch identity repair. Never copies a parent's vectors.
+window.vecthareRepairLegacyBranchIdentity = async () => {
+    let shared=null, outcome='failed';
+    try {
+        // Same-server tabs must not simultaneously rewrite the same legacy
+        // chat's identity metadata. Acquire the user's durable write slot.
+        const originalFile=getCurrentChatId();
+        shared=await acquireSharedOperation('Repair Legacy Chat Identity',
+            {category:'identity-repair',resourceKey:`chat:${originalFile}`,queue:false});
+        if(getCurrentChatId()!==originalFile)throw new Error('Chat switched while acquiring identity-repair lock');
+        const result=await repairCurrentLegacyBranchIdentity({confirm:async()=>window.confirm(
+            'VectHare detected an ambiguous legacy branch identity. Give THIS chat an independent VectHare identity?\n\nNo existing vectors will move or be deleted, and automatic vectorisation will remain off. You must switch away and reopen the chat before starting a new collection.')});
+        if(result?.repaired){toastr.info(result.reason,'VectHare: Legacy Branch');refreshActiveChatProfile();}
+        outcome='completed';
+    }catch(error){toastr.error(error.message,'VectHare: Branch Repair');}
+    finally{if(shared)await finishSharedOperation(shared,outcome).catch(e=>console.warn('VectHare identity repair requires lease reconciliation:',e));}
+};
 
 let lastChatScan = null;
 function refreshActiveChatProfile() {
-    const binding=getChatBinding();
+    const identity=recordCurrentChatIdentity();
+    const statusEl=document.getElementById('vecthare_active_profile_status');
+    if(!identity.verified){
+        if(statusEl) {
+            statusEl.replaceChildren();
+            statusEl.appendChild(document.createTextNode(`VectHare write access blocked: ${identity.reason} `));
+            if(/collision|are required/i.test(identity.reason)) {
+                const button=document.createElement('button');
+                button.type='button';button.textContent='Repair This Legacy Chat Identity';
+                button.addEventListener('click',()=>void window.vecthareRepairLegacyBranchIdentity());
+                statusEl.appendChild(button);
+            }
+        }
+        return;
+    }
+    let binding;
+    try { binding=getChatBinding(); }
+    catch(error) {
+        const el=document.getElementById('vecthare_active_profile_status');
+        if (el) el.textContent=`VectHare write access blocked: ${error.message}`;
+        console.warn('VectHare: unsafe chat/branch binding:',error);
+        return;
+    }
     const profile=binding?.registryKey ? getCollectionProfile(binding.registryKey) : null;
     const state=profile ? `Connected: ${binding.registryKey} | Embedding: ${profile.embedding?.modelId || 'Unverified'} (${profile.embedding?.verified?'verified':'unverified'}) | Strategy: ${profile.chunking?.chunking_strategy || 'unknown'}; global settings only apply to new collections.` : binding ? 'This connected legacy collection has no saved vectorization profile; writing remains blocked until verified or re-vectorized.' : 'No writable collection is connected. Global settings apply to newly created collections.';
     $('#vecthare_collection_profile_status').text(state);
@@ -220,7 +280,7 @@ async function onScanRepairClick() {
     const repairing=Boolean(lastChatScan?.issues?.length);
     const activityId=startActivity(repairing?'Repair Chat Embeddings':'Scan Chat Embeddings',
         {category:repairing?'repair':'scan',detail:repairing?'Preparing verified replacements':'Comparing chat and stored vectors'});
-    let activityFinished=false;
+    let activityFinished=false, shared=null,sharedOutcome='failed';
     const originalChat=getChatUUID();
     const control=createOperationControl(activityId,{pausable:repairing,stoppable:true,writeOperation:repairing});
     registerActivityRetry(activityId,async()=>{
@@ -228,16 +288,18 @@ async function onScanRepairClick() {
         lastChatScan=null;await onScanRepairClick();
     });
     try {
+        if(repairing){shared=await acquireSharedOperation('Repair Chat Embeddings',{activityId,category:'repair',resourceKey:originalChat||''});control.bindSharedOperation(shared);}
         if(lastChatScan?.issues?.length) {
             const problems=lastChatScan.issues;
             if(!confirm(`Repair ${problems.length} chat embedding issue(s)? Replacements are verified before outdated vectors are removed.`)) {
-                finishActivity(activityId,true,'Repair cancelled; no data changed'); activityFinished=true; return;
+                sharedOutcome='completed';finishActivity(activityId,true,'Repair cancelled; no data changed'); activityFinished=true; return;
             }
             setScanButton('Repairing...',true);
             updateActivity(activityId,{total:problems.length+1,detail:'Repairing and checking stored embeddings'});
             const after=await repairCurrentChat(currentSettings,lastChatScan, {control,onProgress: ({detail,completed,total}) => updateActivity(activityId,{detail,completed,total})});
             lastChatScan=after.issues.length?after:null;
             setScanButton(after.issues.length?`Repair (${after.issues.length} Issues)`:'All Clear');
+            sharedOutcome=after.issues.length?'failed':'completed';
             finishActivity(activityId,after.issues.length===0,after.issues.length?`${after.issues.length} issues still need attention`:'All repairs verified');activityFinished=true;
             if(after.issues.length)toastr.warning(`${after.issues.length} issues remain after repair`, 'VectHare');
             else toastr.success('Chat embeddings verified after repair','VectHare');
@@ -254,8 +316,8 @@ async function onScanRepairClick() {
             toastr.warning(`Scan found ${summary}. Click Repair to reconcile.`, 'VectHare', {timeOut:9000});
         } else toastr.success('All scanned vectors match the current chat', 'VectHare');
     } catch(error) {
-        if(!activityFinished) {finishActivity(activityId,error instanceof OperationStoppedError?'stopped':false,error.message || 'Scan/repair failed');activityFinished=true;}
-        if(error instanceof OperationStoppedError){lastChatScan=null;setScanButton('Scan Chat');return;}
+        if(!activityFinished) {finishActivity(activityId,error instanceof OperationStoppedError || error instanceof SharedOperationStoppedError?'stopped':false,error.message || 'Scan/repair failed');activityFinished=true;}
+        if(error instanceof OperationStoppedError || error instanceof SharedOperationStoppedError){lastChatScan=null;setScanButton('Scan Chat');return;}
         lastChatScan=null;
         setScanButton('Retry Scan');
         if(/(no verified vectorization profile|embedding identity is unverified|lacks a verifiable chunk manifest)/i.test(error.message)) {
@@ -280,64 +342,30 @@ async function onScanRepairClick() {
         }
         toastr.error(`Scan/repair could not finish: ${error.message}`,'VectHare',{timeOut:12000});
         console.error('VectHare: Chat repair error',error);
-    }finally{detachOperationControl(activityId);}
+    }finally{
+        if(shared)try{await finishSharedOperation(shared,sharedOutcome);}catch(e){console.warn('VectHare: repair job needs recovery:',e);}
+        detachOperationControl(activityId);
+    }
 }
 /**
  * Action: Full purge - wipes ALL vector data and settings
  */
 async function onPurgeClick() {
-    const confirmed = confirm(
-        'WARNING: This will delete ALL vector data and reset VectHare settings.\n\n' +
-        'This cannot be undone. Continue?'
-    );
-
-    if (!confirmed) {
-        toastr.info('Purge cancelled');
-        return;
-    }
-
-    const purgeActivity=startActivity('Purge All Vectors',{category:'purge',total:3,unit:'steps',detail:'Requesting server deletion'});
+    const purgeActivity=startActivity('Purge VectHare Data',{category:'purge',total:1,unit:'operation',detail:'Preparing scoped deletion inventory'});
     try {
-        const { getRequestHeaders } = await import('../../../../script.js');
-
-        // 1. Delete entire vectors folder
-        const response = await fetch('/api/plugins/similharity/purge-all', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-        });
-        if (!response.ok) {
-            throw new Error(`Server did not purge vectors (${response.status}): ${await response.text()}`);
+        const result=await openPurgeDialog(settings,{allowReset:true});
+        if(!result){finishActivity(purgeActivity,true,'Cancelled without deleting data');return;}
+        if(result.resetSettings){
+            settings={...defaultSettings,enabled:extension_settings.vecthare.enabled};
+            toastr.success(`Verified deletion of ${result.completed.length} collection(s). Settings were reset. Reload SillyTavern to refresh all controls.`,'VectHare');
+        }else{
+            toastr.success(`Verified deletion of ${result.completed.length} VectHare collection(s). Provider and other settings preserved.`,'VectHare');
         }
-        const result = await response.clone().json().catch(() => null);
-        if (result?.success === false || result?.error) {
-            throw new Error(`Server reported purge failure: ${JSON.stringify(result)}`);
-        }
-
-        // Only after confirmed backend purge: erase obsolete resume pointers.
-        clearAllRecovery();
-        updateActivity(purgeActivity,{completed:1,detail:'Backend confirmed deletion'});
-
-        // 2. Clear extension_settings.vecthare
-        for (const key in extension_settings.vecthare) {
-            if (key !== 'enabled') {
-                delete extension_settings.vecthare[key];
-            }
-        }
-
-        updateActivity(purgeActivity,{completed:2,detail:'Extension settings cleared'});
-
-        // 3. Save settings
-        const { saveSettingsDebounced } = await import('../../../../script.js');
-        saveSettingsDebounced();
-
-        updateActivity(purgeActivity,{completed:3,detail:'Settings saved'});
-        finishActivity(purgeActivity,true,'All vector data purged');
-        toastr.success('All vector data purged', 'Purge Complete');
-
-    } catch (error) {
+        finishActivity(purgeActivity,true,'Verified scoped deletion complete');
+    }catch(error){
         finishActivity(purgeActivity,false,error.message);
-        console.error('VectHare: Purge failed:', error);
-        toastr.error('Purge failed: ' + error.message);
+        toastr.error(`Purge aborted or incomplete: ${error.message}`,'VectHare',{timeOut:15000});
+        console.error('VectHare: Purge failed:',error);
     }
 }
 
@@ -354,24 +382,25 @@ function onRunDiagnosticsClick() {
 jQuery(async () => {
     console.log('VectHare: Initializing...');
 
-    // Load saved settings
-    if (!extension_settings.vecthare) {
-        extension_settings.vecthare = defaultSettings;
+    // One live settings object throughout the extension. The previous copy-on-
+    // startup model split `settings.collections` from collection metadata in
+    // extension_settings, permitting UI/runtime values to diverge after edits.
+    if (!extension_settings.vecthare) extension_settings.vecthare = {};
+    settings = extension_settings.vecthare;
+    for (const [key,defaultValue] of Object.entries(defaultSettings)) {
+        if(settings[key]===undefined)settings[key]=structuredClone(defaultValue);
     }
+    if(!settings.temporal_decay || typeof settings.temporal_decay!=='object' || Array.isArray(settings.temporal_decay))
+        settings.temporal_decay=structuredClone(defaultSettings.temporal_decay||{});
+    for(const [key,defaultValue] of Object.entries(defaultSettings.temporal_decay||{})){
+        if(settings.temporal_decay[key]===undefined)settings.temporal_decay[key]=structuredClone(defaultValue);
+    }
+    // Collection metadata MUST remain the actual shared registry object, never
+    // a shallow clone that can become stale while a modal is open.
 
-    // Merge saved settings with defaults
-    settings = {
-        ...defaultSettings,
-        ...extension_settings.vecthare,
-        temporal_decay: {
-            ...defaultSettings.temporal_decay,
-            ...extension_settings.vecthare.temporal_decay
-        },
-        collections: {
-            ...defaultSettings.collections,
-            ...extension_settings.vecthare.collections
-        }
-    };
+    // Check the authoritative recovery copy without silently replacing local
+    // settings; any host/server mismatch must be resolved explicitly.
+    initialiseSettingsDurability().catch(error=>console.warn('[VectHare] Settings recovery copy unavailable:',error.message));
 
     // Migrate old scattered enabled keys to new collections structure
     const migrationResult = migrateOldEnabledKeys();
@@ -433,13 +462,41 @@ jQuery(async () => {
         }
     })();
 
+    // Register identity independently of any database collection.
+    // New chats/branches remain entirely unvectorised until user initiation.
+    recordCurrentChatIdentity();
     // Register event handlers
     eventSource.on(event_types.MESSAGE_DELETED, (...args) => {
         lastChatScan=null;
         setScanButton('Scan Chat');
         onChatEvent(...args);
-        // Let SillyTavern finish updating the chat array before reconciliation.
-        setTimeout(() => reconcileDeletedMessages(extension_settings.vecthare || settings), 350);
+        // Capture BOTH immutable identity and source chat file at event time.
+        // A delayed callback must never retarget a newly opened branch/chat.
+        const sourceChatId = getCurrentChatId();
+        const sourceChatUUID = getChatUUID();
+        // Queue by both identities; a branch switch is not a licence to
+        // repair a different chat. Only queue an already connected collection.
+        let hasVerifiedBinding = false;
+        try { hasVerifiedBinding = !!(sourceChatId && sourceChatUUID && getChatBinding(sourceChatUUID)); }
+        catch(error) { console.warn('VectHare: deletion source identity ambiguous; no automatic repair:', error); }
+        if (hasVerifiedBinding) {
+            extension_settings.vecthare.pendingDeletionReconciliations ||= {};
+            extension_settings.vecthare.pendingDeletionReconciliations[sourceChatUUID] =
+                {sourceChatId,sourceChatUUID,requestedAt:Date.now()};
+            saveSettingsDebounced();
+        }
+        setTimeout(async () => {
+            if (getCurrentChatId() !== sourceChatId || getChatUUID() !== sourceChatUUID) {
+                console.warn('VectHare: chat switched before delete reconciliation; source remains for explicit Scan/Repair');
+                return;
+            }
+            const complete=await reconcileDeletedMessages(extension_settings.vecthare || settings,
+                {sourceChatId,sourceChatUUID});
+            if(complete===true) {
+                delete extension_settings.vecthare.pendingDeletionReconciliations?.[sourceChatUUID];
+                saveSettingsDebounced();
+            }
+        }, 350);
     });
     eventSource.on(event_types.MESSAGE_EDITED, (...args) => { lastChatScan=null;setScanButton('Scan Chat');onChatEvent(...args); });
     // Run vector sync tasks on message events
@@ -447,6 +504,26 @@ jQuery(async () => {
     eventSource.on(event_types.MESSAGE_SENT, onChatEvent);
     eventSource.on(event_types.MESSAGE_RECEIVED, onChatEvent);
     eventSource.on(event_types.MESSAGE_SWIPED, (...args) => { lastChatScan=null;setScanButton('Scan Chat');onChatEvent(...args); });
+    // 1.19 emits the rename after a successful server-side move. Only the
+    // active original UUID/file pair can update its binding; copied branches
+    // and identically named chats may not adopt the collection.
+    if (event_types.CHAT_RENAMED) eventSource.on(event_types.CHAT_RENAMED, event => {
+        if (reconcileActiveChatRename(event)) {
+            // A deletion pending when the SAME chat is renamed must follow
+            // its verified new filename; otherwise it becomes stranded until
+            // manually repaired. Never retarget a different UUID/branch.
+            const uuid=getChatUUID();
+            const oldFile=String(event?.oldFileName||'').replace(/\.jsonl$/i,'');
+            const pending=extension_settings.vecthare?.pendingDeletionReconciliations?.[uuid];
+            if(pending?.sourceChatUUID===uuid && pending.sourceChatId===oldFile){
+                pending.sourceChatId=getCurrentChatId();
+                saveSettingsDebounced();
+            }
+            console.info('VectHare: verified chat rename updated its identity and any existing collection binding');
+            refreshActiveChatProfile();
+        }
+    });
+
     // Chat deletion must not automatically erase stored memories. Collections
     // and their ownership record remain available for explicit recovery/deletion.
     eventSource.on(event_types.CHAT_DELETED, chatId => {
@@ -467,9 +544,24 @@ jQuery(async () => {
 
     // When chat changes, refresh UI state to match settings
     eventSource.on(event_types.CHAT_CHANGED, () => {
+        observeChatIdentityTransition();
+        const identity=confirmReopenedLegacyBranchIdentity();
+        if(!identity.verified)console.warn('[VectHare] Unsafe branch identity, writes blocked:',identity.reason);
         console.log('VectHare: Chat changed, refreshing UI state');
         refreshAutoSyncCheckbox(settings);
         lastChatScan=null;setScanButton('Scan Chat');refreshActiveChatProfile();
+        const sourceChatUUID=getChatUUID(), sourceChatId=getCurrentChatId();
+        const pending=extension_settings.vecthare?.pendingDeletionReconciliations?.[sourceChatUUID];
+        if(pending && pending.sourceChatId===sourceChatId) {
+            setTimeout(async()=>{
+                if(getChatUUID()!==sourceChatUUID || getCurrentChatId()!==sourceChatId)return;
+                const complete=await reconcileDeletedMessages(extension_settings.vecthare||settings,pending);
+                if(complete===true){
+                    delete extension_settings.vecthare.pendingDeletionReconciliations[sourceChatUUID];
+                    saveSettingsDebounced();
+                }
+            },350);
+        }
     });
 
     console.log('VectHare: ✅ Initialized successfully');

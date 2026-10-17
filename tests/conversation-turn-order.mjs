@@ -91,8 +91,9 @@ console.log(`\n${checks} Conversation Turns regression checks passed`);
 const profileSource=fs.readFileSync(new URL('../core/vectorization-profile.js',import.meta.url),'utf8');
 const profiles=new Map();
 const profileCtx=vm.createContext({
+ captureCleaningSnapshot:()=>({selectedPreset:"none",customPatterns:[],enabledBuiltins:[]}),CHUNK_IDENTITY_VERSION:2,
  console,Date,Math,JSON,Number,String,Array,Set,Map,URL,structuredClone,
- extension_settings:{vecthare:{}},saveSettingsDebounced(){},
+ extension_settings:{vecthare:{}},saveSettingsDebounced(){},flushVectHareSettings:async()=>{},
  getRequestHeaders:()=>({'Content-Type':'application/json'}),
  getProviderSpecificParams:()=>({apiUrl:''}),getModelField:()=>null,
  parseRegistryKey:key=>{const [backend,source,...rest]=key.split(':');return {backend,source,collectionId:rest.join(':')};},

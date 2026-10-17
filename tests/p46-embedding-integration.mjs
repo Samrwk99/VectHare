@@ -56,20 +56,23 @@ const overflow=await load('core/embedding-overflow.js',{'provider-params.js':{ge
  if(url.endsWith('/tokenize')&&tokenizeAvailable)return{ok:true,json:async()=>({count:body.text.length})};
  return{ok:false,status:422,text:async()=> 'Unavailable'};
 }});
-await test('vLLM uses endpoint-discovered token budget and splits oversized chat chunk losslessly',async()=>{
- const settings={source:'vllm',vllm_model:'embed',use_alt_endpoint:true,alt_endpoint_url:'http://myserver:8000'};
+await test('vLLM with manually verified embedding limit splits oversized chat chunk losslessly',async()=>{
+ const settings={source:'vllm',vllm_model:'embed',use_alt_endpoint:true,alt_endpoint_url:'http://myserver:8000',embedding_max_tokens:35};
  const item={hash:42,text:'This is an overlong conversation for embedding. Here is some more detail to overflow!',metadata:{strategy:'per_message',messageId:4}};
  publishedLimit=35;
  const out=await overflow.prepareEmbeddingItems([item],settings,x=>x.length);
  assert.ok(out.length>1);assert.equal(out.map(i=>i.text).join(''),item.text);
  assert.ok(out.every(i=>i.metadata.parentHash===42));
 });
-await test('OpenRouter manual token limit splits with conservative fallback when tokenizer absent',async()=>{
+await test('reported model context is not treated as verified embedding input limit',async()=>{
+ publishedLimit=65536;
+ await assert.rejects(overflow.getEmbeddingBudget({source:'vllm',vllm_model:'unverified-context',use_alt_endpoint:true,alt_endpoint_url:'http://model-context.invalid'}),/no verifiable embedding input limit/i);
+});
+await test('OpenRouter manual token limit refuses unsafe tokenizer-free splitting',async()=>{
  const settings={source:'openrouter',openrouter_model:'embed-x',embedding_max_tokens:48};
  tokenizeAvailable=false;
  const item={hash:7,text:'An embedding description that clearly exceeds the selected input token budget.',metadata:{strategy:'per_message'}};
- const out=await overflow.prepareEmbeddingItems([item],settings,String);
- assert.ok(out.length>1);assert.equal(out.map(i=>i.text).join(''),item.text);
+ await assert.rejects(overflow.prepareEmbeddingItems([item],settings,String),/no verified embedding-model tokenizer/);
 });
 await test('Oversized embedding query fails loudly rather than silently truncating',async()=>{
  const settings={source:'custom',custom_model:'embed-remote',alt_endpoint_url:'https://example.com/api/v1',embedding_max_tokens:24};

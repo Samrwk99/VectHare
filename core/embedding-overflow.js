@@ -6,7 +6,8 @@ const headers = () => getRequestHeaders();
 // re-tokenizing all its unchanged chunks on every iteration.
 const tokenCache=new Map();
 const endpointModels=new Map();
-const tokenizersUnavailable=new Set();
+const tokenizersUnavailable=new Map();
+const TOKENIZER_RETRY_MS=120000;
 const capabilityCache=new Map();
 const CACHE_TTL_MS=120000;
 const MAX_TOKEN_CACHE=5000;
@@ -37,8 +38,9 @@ export async function getEmbeddingBudget(settings) {
     const manual=Number.isSafeInteger(configured)&&configured>0?configured:null;
     if (!NETWORK_PROVIDERS.has(settings.source)) return manual ? Math.max(1,Math.floor(manual*.85)) : null;
     const key=endpointKey(settings);
-    let capabilities=null;
-    {
+    let capabilities=capabilityCache.get(key) || null;
+    if (capabilities && Date.now()-capabilities.time >= CACHE_TTL_MS) { capabilityCache.delete(key); capabilities=null; }
+    if (!capabilities) {
         try {capabilities={data:await proxy('capabilities',settings),time:Date.now()};capabilityCache.set(key,capabilities);}
         catch(error){if(!manual || (settings.source==='custom' && settings.custom_endpoint_mode==='exact'))throw new Error(`${settings.source}: embedding input limit or exact-endpoint support could not be verified. Configure "Embedding input token limit override" explicitly, check endpoint connectivity, and install the matching Similharity plugin. ${error.message}`);}
     }
@@ -50,42 +52,58 @@ export async function getEmbeddingBudget(settings) {
     }
     if(data){
         const fingerprint=`${data.modelId||''}:${data.modelPath||''}`;
-        if(endpointModels.has(key)&&endpointModels.get(key)!==fingerprint)tokenCache.clear();
+        if(endpointModels.has(key)&&endpointModels.get(key)!==fingerprint){
+            tokenCache.clear();
+            tokenizersUnavailable.delete(key);
+        }
         endpointModels.set(key,fingerprint);
     }
     const serverMax=Number(data?.limits?.maxTokens);
-    const contextMax=Number(data?.limits?.reportedContextTokens);
-    const published=Number.isSafeInteger(serverMax)&&serverMax>0?serverMax:Number.isSafeInteger(contextMax)&&contextMax>0?contextMax:null;
-    const raw=manual&&published?Math.min(manual,published):manual||published;
+    // Only a backend-advertised embedding-specific maximum is verified. A
+    // reported architecture/text context is informational, not permission to
+    // send that many tokens to the embedding endpoint.
+    const verifiedMax=Number.isSafeInteger(serverMax)&&serverMax>0?serverMax:null;
+    const raw=manual&&verifiedMax?Math.min(manual,verifiedMax):manual||verifiedMax;
     if(!raw){
         // Do not submit chunks to a server which might silently truncate them.
         throw new Error(`${settings.source}: no verifiable embedding input limit is exposed. Set an explicit Embedding input token limit override for this model (and ensure it is supported by the endpoint).`);
     }
     return Math.max(1,Math.floor(raw*(settings.source==='llamacpp'?.94:.85)));
 }
-export async function countEmbeddingTokens(text,settings) {
-    if (!NETWORK_PROVIDERS.has(settings.source)) return null;
+/** Measure the embedding model input. A byte-based fallback is *not* an
+ * exact tokenizer; never use it to authorise lossless automatic splitting.
+ * The fallback is conservative for ordinary byte-level tokenizers but cannot
+ * prove a universal endpoint limit for arbitrary third-party models.
+ */
+async function embeddingTokenMeasurement(text,settings){
+    if (!NETWORK_PROVIDERS.has(settings.source))return {count:null,exact:false};
     const key=`${endpointKey(settings)}\n${text}`;
     const cached=tokenCache.get(key);
-    if(cached && Date.now()-cached.time<CACHE_TTL_MS)return cached.count;
-    const unavailable=tokenizersUnavailable.has(endpointKey(settings));
-    let count;
+    if(cached&&Date.now()-cached.time<CACHE_TTL_MS)return cached;
+    const providerKey=endpointKey(settings);
+    const unavailableAt=tokenizersUnavailable.get(providerKey);
+    const unavailable=unavailableAt!=null&&Date.now()-unavailableAt<TOKENIZER_RETRY_MS;
+    if(unavailableAt!=null&&!unavailable)tokenizersUnavailable.delete(providerKey);
+    let measure=null;
     if(!unavailable){
-        try {
+        try{
             const result=await proxy('tokenize',settings,text);
-            if(!Number.isSafeInteger(result.count)||result.count<0)throw new Error('Invalid tokenizer response');
-            count=result.count;
+            if(result?.success===false||!Number.isSafeInteger(result?.count)||result.count<0)
+                throw new Error('Embedding tokenizer did not return a verified token count');
+            measure={count:result.count,exact:true};
         }catch(error){
-            // llama.cpp has an exact tokenizer API. Failure here must be visible,
-            // rather than silently falling back and pretending to be exact.
             if(settings.source==='llamacpp')throw error;
-            tokenizersUnavailable.add(endpointKey(settings));
+            tokenizersUnavailable.set(providerKey,Date.now());
         }
     }
-    if(count==null)count=conservativeBytes(text);
+    measure ||= {count:conservativeBytes(text),exact:false};
+    const value={...measure,time:Date.now()};
     if(tokenCache.size>=MAX_TOKEN_CACHE)tokenCache.clear();
-    tokenCache.set(key,{time:Date.now(),count});
-    return count;
+    tokenCache.set(key,value);
+    return value;
+}
+export async function countEmbeddingTokens(text,settings){
+    return (await embeddingTokenMeasurement(text,settings)).count;
 }
 function units(text) {
     return text.match(/[^.!?\n]+[.!?]*(?:\n+|\s+|$)|\S+/g)?.filter(Boolean) || [text];
@@ -118,17 +136,34 @@ async function splitText(text, maxTokens, count) {
  */
 export async function prepareEmbeddingItems(items, settings, hashFn) {
     const budget = await getEmbeddingBudget(settings);
-    if (!budget) return items; // Provider has no reliable limit: no speculative split.
+    if (!budget) return items; // Host-managed providers may have no published embedding limit.
+    // No model-specific tokenizer is available through this plugin for these
+    // providers. Reject provably oversized inputs against a manual limit;
+    // never silently guess a chunking plan that changes source identity.
+    if (!NETWORK_PROVIDERS.has(settings.source)) {
+        for(const item of items){
+            const keywordText=(item.keywords||[]).map(k=>k.text||k).join(' ');
+            const finalText=String(item.text??'')+(keywordText?` [KEYWORDS: ${keywordText}]`:'');
+            if(conservativeBytes(finalText)>budget)
+                throw new Error(`${settings.source}: embedding input exceeds the configured safe limit; no verified tokenizer/splitting path is available. Use a supported tokenizer endpoint or prepare smaller source chunks.`);
+        }
+        return items;
+    }
     const count = text => countEmbeddingTokens(text,settings);
-    if (!NETWORK_PROVIDERS.has(settings.source)) return items;
     const result=[];
     for(const item of items){
         const keywordText = (item.keywords||[]).map(k=>k.text||k).join(' ');
         const suffix = keywordText ? ` [KEYWORDS: ${keywordText}]` : '';
         const finalText = String(item.text||'')+suffix;
-        if((await count(finalText))<=budget){result.push(item);continue;}
+        const measured=await embeddingTokenMeasurement(finalText,settings);
+        if(measured.count<=budget){result.push(item);continue;}
+        if(!measured.exact){
+            throw new Error(`${settings.source}: the final embedding input exceeds its conservative ${budget}-token budget, but no verified embedding-model tokenizer is available. Automatic splitting is unsafe; use smaller prepared chunks or a verified tokenizer endpoint.`);
+        }
         // Re-append keywords only when they can fit; if they do not fit alone,
         // this needs an explicit settings change, never silently discard keywords.
+        if(!(await embeddingTokenMeasurement(suffix,settings)).exact)
+            throw new Error('Embedding tokenizer became unavailable during overflow planning; refusing an unverified split');
         if(await count(suffix)>budget/2) throw new Error(`Keywords alone consume too much of the ${budget}-token embedding budget`);
         const textBudget=budget-(await count(suffix))-8;
         if(textBudget<=0)throw new Error('Insufficient input budget after keywords');
@@ -153,7 +188,9 @@ export async function prepareEmbeddingItems(items, settings, hashFn) {
         pieces ||= await splitText(text,textBudget,count);
         for(let i=0;i<pieces.length;i++){
             const part=pieces[i];
-            if(await count(part+suffix)>budget)throw new Error('A split segment still exceeds the embedding limit');
+            const verify=await embeddingTokenMeasurement(part+suffix,settings);
+            if(!verify.exact || verify.count>budget)
+                throw new Error('A split segment could not be verified against the exact embedding tokenizer limit');
             result.push({...item,text:part,hash:hashFn(`${item.hash}:${i}:${part}`),metadata:{...item.metadata,parentHash:item.hash,splitIndex:i,splitTotal:pieces.length,overflow:true}});
         }
     }
@@ -163,9 +200,10 @@ export async function prepareEmbeddingItems(items, settings, hashFn) {
 /** Retrieval queries must not be silently truncated either. Query splitting
  * changes retrieval semantics, so reject oversize queries explicitly instead. */
 export async function assertEmbeddingQueryFits(text, settings) {
-    if (!NETWORK_PROVIDERS.has(settings?.source) || typeof text !== 'string') return;
+    if (typeof text !== 'string' || !settings) return;
     const budget=await getEmbeddingBudget(settings);
-    if(!budget)return;
-    const tokens=await countEmbeddingTokens(text,settings);
+    if(!budget)return; // No verified input limit for this host-managed provider.
+    const tokens=NETWORK_PROVIDERS.has(settings.source)
+        ? await countEmbeddingTokens(text,settings) : conservativeBytes(text);
     if(tokens>budget)throw new Error(`Embedding search query exceeds ${settings.source} safe limit (${tokens} measured/conservatively estimated > ${budget} allowed). Shorten the query or increase the server's verified input limit; no text was silently truncated.`);
 }

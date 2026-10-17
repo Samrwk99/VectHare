@@ -28,7 +28,7 @@ const ctx=vm.createContext({
     getCollectionRegistry:()=>['qdrant:llamacpp:chat-a'],
     getChatChunkManifest:()=>({schemaVersion:1,chatUUID:'chat-a',entries:manifest.map(x=>({...x}))}),
     buildExpectedChatItems:async()=>expected,
-    getBackend:async()=>({listChunks:async(_id,_s,{offset,limit})=>({items:db.slice(offset,offset+limit)}),getChunk:async(_id,hash)=>db.find(x=>String(x.hash)===String(hash))||null}),
+    getBackend:async()=>({listChunks:async(_id,_s,{cursor,pageSize})=>({items:db.slice(cursor??0,(cursor??0)+(pageSize??200)),cursor:null,hasMore:false,pageMode:"cursor"}),getChunk:async(_id,hash)=>db.find(x=>String(x.hash)===String(hash))||null}),
     patchChatChunkManifest:async(_k,items,_uuid,removed=[])=>{
         for(const hash of removed){const i=manifest.findIndex(x=>String(x.hash)===String(hash));if(i>=0)manifest.splice(i,1);}
         for(const chunk of items){const i=manifest.findIndex(x=>String(x.hash)===String(chunk.hash));if(i>=0)manifest.splice(i,1);manifest.push(chunk);}
@@ -41,7 +41,8 @@ const ctx=vm.createContext({
     deleteVectorItems:async(_id,hashes)=>{for(const hash of hashes){const i=db.findIndex(x=>String(x.hash)===String(hash));if(i>=0)db.splice(i,1);}},
     setCollectionMeta:()=>{},startActivity:()=> 'auto',updateActivity:()=>{},finishActivity:()=>{},
     createOperationControl:()=>({checkpoint:async()=>{}}),detachOperationControl:()=>{},hasActiveVectorWrite:()=>false,
-    OperationStoppedError:class OperationStoppedError extends Error{},
+    OperationStoppedError:class OperationStoppedError extends Error{},SharedOperationStoppedError:class SharedOperationStoppedError extends Error{},
+    acquireSharedOperation:async()=>({id:'mock'}),finishSharedOperation:async()=>{},
 });
 ctx.globalThis=ctx;
 for(const filename of ['core/sync-checkpoints.js','core/chunk-integrity.js']){
@@ -97,7 +98,7 @@ await test('checkpoint journal is immediately persisted without chat contents',a
     for(const value of local.values())assert.ok(!value.includes('Pair 1'));
 });
 // Dedicated controller test with actual activity state and pause/resume gates.
-const actx=vm.createContext({Map,Set,Date,Math,Number,console,Error});
+const actx=vm.createContext({Map,Set,Date,Math,Number,console,Error,checkpointSharedOperation:async()=>{}});
 vm.runInContext(read('ui/activity-status.js').replace(/^export /gm,''),actx);
 actx.setActivityPhase=actx.setActivityPhase;
 vm.runInContext(read('ui/operation-controls.js').replace(/^import .*?;\s*$/gm,'').replace(/^export /gm,''),actx);

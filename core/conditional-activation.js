@@ -393,8 +393,8 @@ export function processChunkLinks(chunks, chunkMetadataMap, softBoost = 0.15) {
  * @returns {boolean} Whether condition is met
  */
 function evaluateScoreThresholdCondition(rule, context) {
-    const settings = rule.settings || { threshold: parseFloat(rule.value) || 0.5 };
-    const threshold = settings.threshold || 0.5;
+    const settings = rule.settings || { threshold: Number.isFinite(Number(rule.value)) && rule.value != null && rule.value !== '' ? Number(rule.value) : 0.5 };
+    const threshold = Number.isFinite(Number(settings.threshold)) ? Number(settings.threshold) : 0.5;
     const chunkScore = context.currentChunkScore || 0;
 
     const passes = chunkScore >= threshold;
@@ -416,10 +416,10 @@ function evaluateScoreThresholdCondition(rule, context) {
  */
 function evaluateRecencyCondition(rule, context) {
     const settings = rule.settings || {
-        messagesAgo: parseInt(rule.value) || 50,
+        messagesAgo: Number.isFinite(Number(rule.value)) && rule.value != null && rule.value !== '' ? Number(rule.value) : 50,
         operator: 'gte' // 'gte' = older than X messages ago, 'lte' = newer than X
     };
-    const targetAge = settings.messagesAgo || 50;
+    const targetAge = Number.isFinite(Number(settings.messagesAgo)) ? Number(settings.messagesAgo) : 50;
     const operator = settings.operator || 'gte';
 
     // Calculate how many messages ago this chunk's source is
@@ -664,10 +664,10 @@ function evaluateCharacterPresentCondition(rule, context) {
  * @returns {boolean} Whether condition is met
  */
 function evaluateRandomChanceCondition(rule, context) {
-    const settings = rule.settings || { probability: parseInt(rule.value) || 50 };
-    const chance = settings.probability || 50;
+    const settings = rule.settings || { probability: Number.isFinite(Number(rule.value)) && rule.value != null && rule.value !== '' ? Number(rule.value) : 50 };
+    const chance = Number.isFinite(Number(settings.probability)) ? Math.min(100,Math.max(0,Number(settings.probability))) : 50;
     const roll = Math.random() * 100;
-    return roll <= chance;
+    return roll < chance;
 }
 
 /**

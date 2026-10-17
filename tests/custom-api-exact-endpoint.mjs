@@ -51,14 +51,14 @@ await check('Exact mode capability request carries routing mode',async()=>{
 });
 await check('Old plugin without exact-mode support is rejected even if manual limit is set',async()=>{
   oldPlugin=true;
+  settings.custom_model='old-plugin'; // capability cache is correctly keyed by model
   await assert.rejects(overflow.getEmbeddingBudget(settings),/requires the matching Similharity plugin/i);
+  settings.custom_model='remote-model';
   oldPlugin=false;
 });
-await check('Unsupported exact tokenizer falls back to conservative splitting, not wrong endpoint',async()=>{
+await check('Unsupported exact tokenizer refuses unsafe splitting, never rewrites endpoint',async()=>{
   const text='This message is deliberately longer than the configured exact endpoint budget.'.repeat(3);
-  const parts=await overflow.prepareEmbeddingItems([{hash:1,text,metadata:{strategy:'per_message'}}],settings,s=>s.length);
-  assert.ok(parts.length>1);
-  assert.equal(parts.map(x=>x.text).join(''),text);
+  await assert.rejects(overflow.prepareEmbeddingItems([{hash:1,text,metadata:{strategy:'per_message'}}],settings,s=>s.length),/no verified embedding-model tokenizer/);
   assert.ok(requestLog.some(x=>x.url.endsWith('/tokenize')&&x.body.customEndpointMode==='exact'));
 });
 const source=path=>fs.readFileSync(new URL(path,root),'utf8');

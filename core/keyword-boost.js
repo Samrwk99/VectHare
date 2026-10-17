@@ -1067,8 +1067,10 @@ export function applyKeywordBoost(results, query, options = {}) {
  * @returns {number} Amount to actually fetch
  */
 export function getOverfetchAmount(topK) {
-    // Fetch 2x the requested amount (min 10, max 100)
-    return Math.min(100, Math.max(10, topK * 2));
+    // Fetch 2x the requested amount. Iterative post-filter retrieval may
+    // explicitly request more than 100 candidates; do not silently cap it
+    // at 100 and mistake a truncated page for exhaustion.
+    return Math.min(65536, Math.max(10, topK * 2));
 }
 
 /**

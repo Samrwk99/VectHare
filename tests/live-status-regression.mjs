@@ -48,7 +48,7 @@ check('Scan/Repair, Auto-Sync and purge feed central progress system',()=>{
     const index=fs.readFileSync(`${root}/index.js`,'utf8');
     const sync=fs.readFileSync(`${root}/core/chat-vectorization.js`,'utf8');
     assert.match(index,/startActivity\(repairing\?'Repair Chat Embeddings':'Scan Chat Embeddings'/);
-    assert.match(index,/startActivity\('Purge All Vectors'/);
+    assert.match(index,/startActivity\('Purge VectHare Data'/);
     assert.match(sync,/startActivity\('Auto-Sync Chat'/);
 });
 check('Android floating panel is hidden; dialog and compact inline bar remain accessible',()=>{

@@ -30,8 +30,10 @@ await test('Precomputed import uses backend-scoped write, preserving supplied ve
   assert.equal(actions[0].operation,'insert');assert.equal(actions[0].id,'alice');
   assert.equal(actions[0].qdrant_multitenancy,true);assert.equal(actions[0].items[0].vector.length,2);
 });
-await test('Both import paths retain collection vectorization profiles and sidecars',async()=>{
+await test('Both import paths share profile-preserving staged import logic',async()=>{
   const matches=src.match(/await saveCollectionProfile\(/g)||[];
-  assert.equal(matches.length,2);
+  assert.equal(matches.length,1);
+  assert.match(src,/async function importCollection\(/);
+  assert.match(src,/async function importMultipleCollections\(/);
 });
 console.log(`\n${passes} P1 import/export regression checks passed`);

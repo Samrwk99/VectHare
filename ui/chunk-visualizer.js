@@ -917,7 +917,7 @@ function renderGroupList() {
             : (group.mandatory ? 'Exclusive (Mandatory)' : 'Exclusive');
 
         return `
-            <div class="vecthare-group-item ${isSelected ? 'selected' : ''}" data-group-id="${group.id}">
+            <div class="vecthare-group-item ${isSelected ? 'selected' : ''}" data-group-id="${escapeHtml(String(group.id))}">
                 <div class="vecthare-group-item-header">
                     <i class="fa-solid ${modeIcon}"></i>
                     <span class="vecthare-group-name">${escapeHtml(group.name)}</span>
@@ -990,7 +990,7 @@ function renderGroupDetailPanel() {
                      style="${group.mode !== 'inclusive' || group.linkType !== 'soft' ? 'display:none' : ''}">
                     <label>Score Boost</label>
                     <input type="number" id="vecthare_group_boost" class="vecthare-group-input"
-                           value="${group.boost || 0.15}" min="0" max="1" step="0.05">
+                           value="${group.boost ?? 0.15}" min="0" max="1" step="0.05">
                 </div>
 
                 <div class="vecthare-group-setting-row vecthare-exclusive-settings" style="${group.mode !== 'exclusive' ? 'display:none' : ''}">
@@ -1011,7 +1011,7 @@ function renderGroupDetailPanel() {
                 <div class="vecthare-group-members-list" id="vecthare_group_members">
                     ${memberChunks.length === 0 ? '<div class="vecthare-empty-hint">No members yet. Click "Add" to add chunks.</div>' : ''}
                     ${memberChunks.map(({ hash, chunk }) => `
-                        <div class="vecthare-group-member" data-hash="${hash}">
+                        <div class="vecthare-group-member" data-hash="${escapeHtml(String(hash))}">
                             <div class="vecthare-group-member-info">
                                 ${chunk
                                     ? `<span class="vecthare-member-preview">${escapeHtml((chunk.data?.text || '').substring(0, 60))}...</span>
@@ -1020,7 +1020,7 @@ function renderGroupDetailPanel() {
                                        <span class="vecthare-member-hash">#${String(hash).substring(0, 8)}</span>`
                                 }
                             </div>
-                            <button class="vecthare-member-remove" data-hash="${hash}" title="Remove from group">
+                            <button class="vecthare-member-remove" data-hash="${escapeHtml(String(hash))}" title="Remove from group">
                                 <i class="fa-solid fa-times"></i>
                             </button>
                         </div>
@@ -1064,7 +1064,7 @@ function openAddMemberDialog() {
                     </div>
                     <div class="vecthare-member-list" id="vecthare_available_members">
                         ${availableChunks.slice(0, 50).map(c => `
-                            <div class="vecthare-member-option" data-hash="${c.hash}">
+                            <div class="vecthare-member-option" data-hash="${escapeHtml(String(c.hash))}">
                                 <span class="vecthare-member-preview">${escapeHtml((c.data?.text || '').substring(0, 80))}...</span>
                                 <span class="vecthare-member-hash">#${String(c.hash).substring(0, 8)}</span>
                             </div>
@@ -1096,7 +1096,7 @@ function openAddMemberDialog() {
 
         $('#vecthare_available_members').html(
             filtered.slice(0, 50).map(c => `
-                <div class="vecthare-member-option" data-hash="${c.hash}">
+                <div class="vecthare-member-option" data-hash="${escapeHtml(String(c.hash))}">
                     <span class="vecthare-member-preview">${escapeHtml((c.data?.text || '').substring(0, 80))}...</span>
                     <span class="vecthare-member-hash">#${String(c.hash).substring(0, 8)}</span>
                 </div>
@@ -1240,7 +1240,7 @@ function bindGroupDetailEvents() {
 
     // Boost change
     $('#vecthare_group_boost').off('input').on('input', function() {
-        updateGroupSetting('boost', parseFloat($(this).val()) || 0.15);
+        updateGroupSetting('boost', (Number.isFinite(parseFloat($(this).val())) ? parseFloat($(this).val()) : 0.15));
     });
 
     // Mandatory toggle
@@ -1306,7 +1306,7 @@ function renderChunkItem(chunk, listIndex) {
 
     // Build info badges
     const infoBadges = [];
-    infoBadges.push(`<span class="vecthare-chunk-item-badge msg">Msg ${msgId}</span>`);
+    infoBadges.push(`<span class="vecthare-chunk-item-badge msg">Msg ${escapeHtml(String(msgId))}</span>`);
     if (totalChunks > 1) {
         infoBadges.push(`<span class="vecthare-chunk-item-badge chunk-part">${chunkIdx + 1}/${totalChunks}</span>`);
     }
@@ -1320,7 +1320,7 @@ function renderChunkItem(chunk, listIndex) {
 
     return `
         <div class="vecthare-chunk-item ${isSelected ? 'selected' : ''} ${!data.enabled ? 'disabled' : ''}"
-             data-uid="${chunk.uniqueId}" data-list-index="${listIndex}">
+             data-uid="${escapeHtml(String(chunk.uniqueId))}" data-list-index="${listIndex}">
             <div class="vecthare-chunk-item-content">
                 <div class="vecthare-chunk-item-header">
                     <span class="vecthare-chunk-item-index">${displayNumber}.</span>
@@ -1413,7 +1413,7 @@ function renderDetailPanel() {
             </span>
             <span class="vecthare-info-divider">•</span>
             <span class="vecthare-info-item vecthare-info-hash" title="Click to copy hash" id="vecthare_copy_hash">
-                <span class="vecthare-info-value">${chunk.hash}</span>
+                <span class="vecthare-info-value">${escapeHtml(String(chunk.hash))}</span>
             </span>
         </div>
 
@@ -1842,7 +1842,7 @@ function bindDetailEvents() {
 
     // Injection depth slider
     $('#vecthare_chunk_depth').on('input', function() {
-        const depth = parseInt($(this).val()) || 2;
+        const depth = (Number.isFinite(parseInt($(this).val(), 10)) ? parseInt($(this).val(), 10) : 2);
         $('#vecthare_chunk_depth_value').text(depth);
         chunk.data.depth = depth;
         updateChunkData(chunk.hash, { depth: chunk.data.depth });

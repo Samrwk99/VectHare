@@ -1,12 +1,15 @@
+import { saveVectHareSettingsDebounced as saveSettingsDebounced } from './settings-durability.js';
 /**
  * Persistent, independent write ownership of chat vector collections.
  * Reading a collection (including an activation lock) never grants write access.
  * A full backend:source:collectionId key is required for new bindings.
  */
 import { extension_settings, getContext } from '../../../../extensions.js';
-import { saveSettingsDebounced, getCurrentChatId } from '../../../../../script.js';
+import { getCurrentChatId } from '../../../../../script.js';
 import { getChatUUID, parseRegistryKey } from './collection-ids.js';
 import { getCollectionMeta } from './collection-metadata.js';
+import { assertQdrantIdentity } from './physical-identity.js';
+import { assertCurrentChatIdentity,currentChatScope,recordVerifiedChatRename } from './chat-identity-ledger.js';
 
 function store() {
     extension_settings.vecthare ||= {};
@@ -15,7 +18,47 @@ function store() {
 }
 
 export function getChatBinding(chatId = getChatUUID()) {
-    return chatId ? store()[chatId] || null : null;
+    const binding = chatId ? store()[chatId] || null : null;
+    // SillyTavern legacy branching can copy a parent's integrity UUID. Do not
+    // allow a copied identity to adopt its parent's writable binding.
+    if(binding && chatId===getChatUUID())assertCurrentChatIdentity();
+    if(binding?.sourceScope && currentChatScope() && binding.sourceScope!==currentChatScope())
+        throw new Error('Chat/branch owner character or group differs from the saved collection. Write binding refused.');
+    if (binding?.sourceChatId && chatId === getChatUUID() &&
+        binding.sourceChatId !== getCurrentChatId()) {
+        throw new Error('Chat/branch identity collision: this chat shares an integrity ID with a different chat file. Collection access is blocked until its identity is safely reconciled.');
+    }
+    return binding;
+}
+
+/**
+ * SillyTavern 1.19 emits CHAT_RENAMED after it has saved the new file and
+ * reloaded the active chat. A confirmed same-UUID rename is not a new branch:
+ * update only the recorded filename, preserving the existing collection.
+ * Never infer identity from two same-named chats or a filename alone.
+ */
+export function reconcileActiveChatRename(event) {
+    const oldFile = String(event?.oldFileName || '').replace(/\.jsonl$/i, '');
+    const newFile = String(event?.newFileName || '').replace(/\.jsonl$/i, '');
+    const uuid = getChatUUID();
+    if (!oldFile || !newFile || !uuid || getCurrentChatId() !== newFile) return false;
+    // A chat can have an identity ledger entry without ever having been
+    // vectorised. Its verified rename must advance that ledger even when no
+    // writable collection or binding exists; otherwise a future first Sync
+    // mistakes this chat for a copied-UUID branch.
+    // Do not create an empty binding (or vector collection) just to rename it.
+    const binding = extension_settings.vecthare?.chatCollectionBindings?.[uuid] || null;
+    // When a writable binding exists, both sources of provenance must agree
+    // BEFORE either is changed. A branch must not relabel another chat's
+    // collection by presenting a mismatched filename.
+    if (binding && binding.sourceChatId !== oldFile) return false;
+    if (!recordVerifiedChatRename(uuid, oldFile, newFile)) return false;
+    if (binding) {
+        binding.sourceChatId = newFile;
+        binding.renamedAt = new Date().toISOString();
+        saveSettingsDebounced();
+    }
+    return true;
 }
 
 export function getCollectionOwner(registryKey) {
@@ -46,10 +89,12 @@ function assertLockAllowsWrite(registryKey, chatId) {
 /** Explicit binding; caller must verify legacy collection compatibility before calling. */
 export function bindChatCollection(chatId, registryKey, { replace = false, writeVerified = false } = {}) {
     if (!chatId || !registryKey) throw new Error('Chat identity and collection are required for write binding');
+    if(chatId===getChatUUID())assertCurrentChatIdentity();
     const parsed = parseRegistryKey(registryKey);
     if (!parsed.backend || !parsed.source || !parsed.collectionId) {
         throw new Error('A complete backend:source:collection identity is required');
     }
+    if(parsed.backend === 'qdrant') assertQdrantIdentity(registryKey,{...extension_settings.vecthare,vector_backend:'qdrant'});
     assertLockAllowsWrite(registryKey, chatId);
     const bindings = store();
     const otherOwner = getCollectionOwner(registryKey);
@@ -60,8 +105,10 @@ export function bindChatCollection(chatId, registryKey, { replace = false, write
         throw new Error('Chat already owns another collection. Explicit replacement is required.');
     }
     // Never downgrade a verified binding merely because it is re-selected in the UI.
+    if (bindings[chatId]?.sourceChatId && bindings[chatId].sourceChatId !== getCurrentChatId())
+        throw new Error('Chat/branch file identity changed; refusing to reuse an existing collection write binding. Explicit recovery or rebind is required.');
     const alreadyVerified = bindings[chatId]?.registryKey === registryKey && bindings[chatId]?.writeVerified === true;
-    bindings[chatId] = { registryKey, boundAt: new Date().toISOString(), writeVerified: writeVerified || alreadyVerified };
+    bindings[chatId] = { registryKey, sourceChatId:getCurrentChatId(), sourceScope:currentChatScope(), boundAt: new Date().toISOString(), writeVerified: writeVerified || alreadyVerified };
     saveSettingsDebounced();
     return bindings[chatId];
 }
@@ -69,7 +116,10 @@ export function bindChatCollection(chatId, registryKey, { replace = false, write
 /** Never infer ownership from character name or fuzzy matching. */
 export function resolveChatWriteTarget(settings, chatId = getChatUUID(), generatedCollectionId = null) {
     if (!chatId) throw new Error('Chat identity unavailable; cannot select safe vector write target');
+    if(chatId===getChatUUID())assertCurrentChatIdentity();
     const binding = getChatBinding(chatId);
+    if (binding && binding.sourceChatId && binding.sourceChatId !== getCurrentChatId())
+        throw new Error('Chat/branch identity collision: the connected collection belongs to a different chat file. Writes blocked.');
     if (!binding) {
         if (!generatedCollectionId) throw new Error('No writable collection connected to this chat');
         // A generated ID is allowed for initial creation only; existing unbound collections
@@ -84,6 +134,7 @@ export function resolveChatWriteTarget(settings, chatId = getChatUUID(), generat
     if (binding.writeVerified !== true) {
         throw new Error('Collection is connected read-only: original embedding and chunking configuration is not verified. Re-vectorize safely before writing.');
     }
+    if(parsed.backend === 'qdrant') assertQdrantIdentity(binding.registryKey,settings);
     assertLockAllowsWrite(binding.registryKey, chatId);
     return { collectionId: parsed.collectionId, registryKey: binding.registryKey, newCollection: false };
 }

@@ -1,3 +1,5 @@
+import { withSharedWriteHeaders,runExclusiveNativeMutation } from '../ui/shared-operations.js';
+import { saveVectHareSettingsDebounced as saveSettingsDebounced } from '../core/settings-durability.js';
 import { assertEmbeddingQueryFits } from '../core/embedding-overflow.js';
 /**
  * ============================================================================
@@ -13,7 +15,7 @@ import { assertEmbeddingQueryFits } from '../core/embedding-overflow.js';
  * ============================================================================
  */
 
-import { getRequestHeaders, saveSettingsDebounced } from '../../../../../script.js';
+import { getRequestHeaders } from '../../../../../script.js';
 import { extension_settings } from '../../../../extensions.js';
 import { VectorBackend } from './backend-interface.js';
 import { getModelField } from '../core/providers.js';
@@ -92,7 +94,7 @@ export class StandardBackend extends VectorBackend {
             if (this.pluginAvailable) {
                 await fetch('/api/plugins/similharity/backend/init/vectra', {
                     method: 'POST',
-                    headers: getRequestHeaders(),
+                    headers: withSharedWriteHeaders(getRequestHeaders()),
                 });
                 console.log('VectHare: Standard backend initialized (plugin available)');
             } else {
@@ -111,7 +113,7 @@ export class StandardBackend extends VectorBackend {
         try {
             const response = await fetch('/api/vector/list', {
                 method: 'POST',
-                headers: getRequestHeaders(),
+                headers: withSharedWriteHeaders(getRequestHeaders()),
                 body: JSON.stringify({
                     collectionId: '__vecthare_health_check__',
                     source: 'transformers'
@@ -139,7 +141,7 @@ export class StandardBackend extends VectorBackend {
 
         const response = await fetch('/api/vector/list', {
             method: 'POST',
-            headers: getRequestHeaders(),
+            headers: withSharedWriteHeaders(getRequestHeaders()),
             body: JSON.stringify({
                 collectionId: collectionId,
                 source: settings.source || 'transformers',
@@ -169,6 +171,13 @@ export class StandardBackend extends VectorBackend {
      * Uses plugin API if available (for metadata support), falls back to native ST API
      */
     async insertVectorItems(collectionId, items, settings) {
+        // Plugin routes are fenced by their own middleware. Native HTTP routes
+        // are not, so a shared lease must encompass the entire native write.
+        if(this.pluginAvailable)return this._insertVectorItems(collectionId, items, settings);
+        return runExclusiveNativeMutation('Standard: insertVectorItems',collectionId,()=>this._insertVectorItems(collectionId, items, settings));
+    }
+
+    async _insertVectorItems(collectionId, items, settings) {
         if (items.length === 0) return;
 
         const providerParams = getProviderSpecificParams(settings, false);
@@ -264,7 +273,7 @@ export class StandardBackend extends VectorBackend {
 
             const response = await fetch(endpoint, {
                 method: 'POST',
-                headers: getRequestHeaders(),
+                headers: withSharedWriteHeaders(getRequestHeaders()),
                 body: JSON.stringify(payload),
             });
 
@@ -296,9 +305,13 @@ export class StandardBackend extends VectorBackend {
      * Uses native ST API
      */
     async deleteVectorItems(collectionId, hashes, settings) {
+        return runExclusiveNativeMutation('Standard: deleteVectorItems',collectionId,()=>this._deleteVectorItems(collectionId, hashes, settings));
+    }
+
+    async _deleteVectorItems(collectionId, hashes, settings) {
         const response = await fetch('/api/vector/delete', {
             method: 'POST',
-            headers: getRequestHeaders(),
+            headers: withSharedWriteHeaders(getRequestHeaders()),
             body: JSON.stringify({
                 collectionId: collectionId,
                 hashes: hashes,
@@ -339,7 +352,7 @@ export class StandardBackend extends VectorBackend {
 
         const response = await fetch('/api/vector/query', {
             method: 'POST',
-            headers: getRequestHeaders(),
+            headers: withSharedWriteHeaders(getRequestHeaders()),
             body: JSON.stringify(requestBody),
         });
 
@@ -394,7 +407,7 @@ export class StandardBackend extends VectorBackend {
 
         const response = await fetch('/api/vector/query-multi', {
             method: 'POST',
-            headers: getRequestHeaders(),
+            headers: withSharedWriteHeaders(getRequestHeaders()),
             body: JSON.stringify(requestBody),
         });
 
@@ -438,9 +451,13 @@ export class StandardBackend extends VectorBackend {
      * Uses native ST API
      */
     async purgeVectorIndex(collectionId, settings) {
+        return runExclusiveNativeMutation('Standard: purgeVectorIndex',collectionId,()=>this._purgeVectorIndex(collectionId, settings));
+    }
+
+    async _purgeVectorIndex(collectionId, settings) {
         const response = await fetch('/api/vector/purge', {
             method: 'POST',
-            headers: getRequestHeaders(),
+            headers: withSharedWriteHeaders(getRequestHeaders()),
             body: JSON.stringify({
                 collectionId: collectionId,
             }),
@@ -461,18 +478,10 @@ export class StandardBackend extends VectorBackend {
      * Purge all vector indexes
      * Uses native ST API
      */
-    async purgeAllVectorIndexes(settings) {
-        const response = await fetch('/api/vector/purge-all', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-        });
-
-        if (!response.ok) {
-            const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`Failed to purge all: ${response.status} ${response.statusText} - ${errorBody}`);
-        }
-        extension_settings.vecthare.nativeStandardChunks = {};
-        saveSettingsDebounced();
+    async purgeAllVectorIndexes() {
+        // Whole-user native purge also deletes unrelated SillyTavern vectors.
+        // Only the scoped, verified VectHare purge flow is permitted.
+        throw new Error('Unsafe native Purge All is disabled. Use the VectHare scoped Purge dialog instead.');
     }
 
     // ========================================================================
@@ -488,7 +497,7 @@ export class StandardBackend extends VectorBackend {
             try {
                 const response = await fetch('/api/plugins/similharity/chunks/list', {
                     method: 'POST',
-                    headers: getRequestHeaders(),
+                    headers: withSharedWriteHeaders(getRequestHeaders()),
                     body: JSON.stringify({
                         backend: 'vectra',
                         collectionId: collectionId,
@@ -501,10 +510,17 @@ export class StandardBackend extends VectorBackend {
                 });
 
                 if (response.ok) {
-                    return await response.json();
+                    const result=await response.json();
+                    if(!result || result.success === false || !Array.isArray(result.items) ||
+                       (result.total != null && (!Number.isSafeInteger(result.total) || result.total<0)))
+                        throw new Error('Similharity chunk listing returned malformed or failed success data');
+                    return result;
                 }
+                if (response.status !== 404 && response.status !== 501)
+                    throw new Error(`Similharity chunk listing failed (HTTP ${response.status})`);
             } catch (e) {
-                console.warn('VectHare: Plugin listChunks failed, using native fallback');
+                // Network errors and server failures must not become false-empty.
+                throw new Error(`Similharity chunk listing unavailable: ${e.message}`, {cause:e});
             }
         }
 
@@ -538,7 +554,7 @@ export class StandardBackend extends VectorBackend {
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
             }), {
-                headers: getRequestHeaders(),
+                headers: withSharedWriteHeaders(getRequestHeaders()),
             });
 
             if (response.ok) {
@@ -563,7 +579,7 @@ export class StandardBackend extends VectorBackend {
 
         const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}/text`, {
             method: 'PATCH',
-            headers: getRequestHeaders(),
+            headers: withSharedWriteHeaders(getRequestHeaders()),
             body: JSON.stringify({
                 backend: 'vectra',
                 collectionId: collectionId,
@@ -591,7 +607,7 @@ export class StandardBackend extends VectorBackend {
 
         const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}/metadata`, {
             method: 'PATCH',
-            headers: getRequestHeaders(),
+            headers: withSharedWriteHeaders(getRequestHeaders()),
             body: JSON.stringify({
                 backend: 'vectra',
                 collectionId: collectionId,
@@ -618,7 +634,7 @@ export class StandardBackend extends VectorBackend {
             try {
                 const response = await fetch('/api/plugins/similharity/chunks/stats', {
                     method: 'POST',
-                    headers: getRequestHeaders(),
+                    headers: withSharedWriteHeaders(getRequestHeaders()),
                     body: JSON.stringify({
                         backend: 'vectra',
                         collectionId: collectionId,
@@ -652,7 +668,7 @@ export class StandardBackend extends VectorBackend {
         if (this.pluginAvailable) {
             try {
                 const response = await fetch('/api/plugins/similharity/collections', {
-                    headers: getRequestHeaders(),
+                    headers: withSharedWriteHeaders(getRequestHeaders()),
                 });
 
                 if (response.ok) {

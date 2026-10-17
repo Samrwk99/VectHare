@@ -7,7 +7,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const saved = { vecthare: { collections: {}, chatCollectionBindings: {}, vecthare_collection_registry: [] } };
+const saved = { vecthare: { vector_backend:'qdrant',source:'llamacpp',qdrant_host:'localhost',qdrant_port:6333, collections: {}, chatCollectionBindings: {}, vecthare_collection_registry: [] } };
 const metadata = { integrity: 'chat-a' };
 const state = { chatId: 'chat-a', name2: 'Alice', characterId: 1 };
 let fetches = [];
@@ -35,7 +35,7 @@ const context = vm.createContext({
 const mods = new Map();
 const imports = {
   'extensions.js': { extension_settings: saved, getContext: () => state, modules: [], getRequestHeaders: () => ({}) },
-  'script.js': { saveSettingsDebounced() {}, getCurrentChatId: () => state.chatId, chat_metadata: metadata, getRequestHeaders: () => ({}), characters: [], substituteParams: x => x },
+  'script.js': { saveSettingsDebounced() {}, saveSettings:async()=>{}, getCurrentChatId: () => state.chatId, chat_metadata: metadata, getRequestHeaders: () => ({}), characters: [], substituteParams: x => x },
   'textgen-settings.js': { textgen_types: { LLAMACPP: 'llamacpp', OLLAMA:'ollama', VLLM:'vllm' }, textgenerationwebui_settings: { server_urls: {llamacpp:'http://127.0.0.1:8080'} } },
   'openai.js': { oai_settings: {} },
   'secrets.js': { secret_state: {} },
@@ -58,6 +58,7 @@ function moduleFor(p) {
         if (!imports[name]) throw new Error(`Unmocked import: ${full}`);
         return synthetic(full, imports[name]);
     }
+    if (full.endsWith('/ui/shared-operations.js')) return synthetic(full,{withSharedWriteHeaders:h=>h,runExclusiveNativeMutation:(_l,_r,fn)=>fn()});
     if (full.endsWith('/core/providers.js')) return synthetic(full, imports['providers.js']);
     if (full.endsWith('/core/constants.js')) return synthetic(full, imports['constants.js']);
     const m = new vm.SourceTextModule(fs.readFileSync(full, 'utf8'), { context, identifier: full });
@@ -74,10 +75,14 @@ let checks = 0;
 const check = (label, f) => { f(); checks++; process.stdout.write(`PASS ${label}\n`); };
 const meta = await load('core/collection-metadata.js');
 const owner = await load('core/collection-ownership.js');
+const physical = await load('core/physical-identity.js');
 const ids = await load('core/collection-ids.js');
 check('metadata from different backends isolated', () => {
     meta.setCollectionMeta('qdrant:llamacpp:same', {displayName:'Q'});
     meta.setCollectionMeta('standard:llamacpp:same', {displayName:'S'});
+    // P0 physical-server provenance is required for an existing Qdrant record.
+    saved.vecthare.qdrantPhysicalIdentities ||= {};
+    saved.vecthare.qdrantPhysicalIdentities['qdrant:llamacpp:same'] = 'qdrant:v1:http://localhost:6333:multitenancy=false';
     assert.equal(meta.getCollectionMeta('qdrant:llamacpp:same').displayName,'Q');
     assert.equal(meta.getCollectionMeta('standard:llamacpp:same').displayName,'S');
     assert.equal(meta.getCollectionMeta('same').displayName,null);
@@ -89,12 +94,14 @@ check('refresh does not remove locks or metadata with bare IDs', () => {
 });
 check('write binding stays on exact backend and collection', () => {
     const key='qdrant:llamacpp:alice';
+    saved.vecthare.qdrantPhysicalIdentities[key] = 'qdrant:v1:http://localhost:6333:multitenancy=false';
     owner.bindChatCollection('chat-a',key,{writeVerified:true});
     assert.equal(owner.resolveChatWriteTarget({vector_backend:'qdrant',source:'llamacpp'},'chat-a').collectionId,'alice');
     assert.throws(() => owner.resolveChatWriteTarget({vector_backend:'standard',source:'llamacpp'},'chat-a'),/switch backend/i);
 });
 check('unknown legacy embedding profile is read-only for all write paths', () => {
     const key='qdrant:llamacpp:unknown-legacy';
+    saved.vecthare.qdrantPhysicalIdentities[key] = 'qdrant:v1:http://localhost:6333:multitenancy=false';
     owner.bindChatCollection('chat-z',key);
     assert.equal(owner.getChatBinding('chat-z').registryKey,key);
     assert.throws(() => owner.resolveChatWriteTarget({vector_backend:'qdrant',source:'llamacpp'},'chat-z'),/read-only/i);
@@ -103,6 +110,7 @@ check('second chat cannot take ownership without explicit transfer', () => {
     assert.throws(() => owner.bindChatCollection('chat-b','qdrant:llamacpp:alice'),/another chat/i);
 });
 check('exclusive lock stops wrong chat write binding', () => {
+    saved.vecthare.qdrantPhysicalIdentities['qdrant:llamacpp:locked'] = 'qdrant:v1:http://localhost:6333:multitenancy=false';
     meta.setCollectionMeta('qdrant:llamacpp:locked',{lockMode:'exclusive',lockedToChatIds:['chat-b']});
     assert.throws(() => owner.bindChatCollection('chat-a','qdrant:llamacpp:locked'),/exclusively locked/i);
 });
@@ -122,6 +130,11 @@ responseMode='error';
 await assert.rejects(backend.purgeVectorIndex('alice',settings),/Failed to purge/);
 check('Qdrant error is surfaced and cannot count as purge success',()=>{});
 responseMode='ok';
+await assert.rejects(backend.purgeVectorIndex('alice',{...settings,qdrant_multitenancy:true}),/DIFFERENT Qdrant server/);
+check('switching the same collection into another tenancy mode is prohibited',()=>{});
+// Remaining request-contract checks operate on a separate, explicitly adopted
+// tenant-mode fixture rather than weakening the new physical-server guard.
+saved.vecthare.qdrantPhysicalIdentities['qdrant:llamacpp:alice']='qdrant:v1:http://localhost:6333:multitenancy=true';
 await backend.purgeVectorIndex('alice',{...settings,qdrant_multitenancy:true});
 check('Qdrant shared tenant purge uses content_type-filtered endpoint',()=>{
     assert.equal(fetches.at(-1).body.collectionId,'vecthare_multitenancy');
@@ -180,14 +193,18 @@ const finish = source.indexOf('/**\n * Clears the entire registry',begin);
 assert.ok(begin !== -1 && finish > begin);
 const target = 'qdrant:llamacpp:alice';
 saved.vecthare.vecthare_collection_registry.push(target);
+saved.vecthare.qdrantPhysicalIdentities[target]='qdrant:v1:http://localhost:6333:multitenancy=false';
 meta.setCollectionMeta(target,{description:'must survive failure'});
 let deletes = 0, permit = false;
 Object.assign(context,{
     parseRegistryKey: ids.parseRegistryKey,
     clearRecoveryForCollection:()=>{},
     purgeVectorIndex: async () => permit,
+    forgetQdrantIdentity:()=>{},
+    getBackend:async()=>({listChunks:async()=>({items:[]})}),
     unregisterCollection: key => {deletes++; const i=saved.vecthare.vecthare_collection_registry.indexOf(key); if(i>=0) saved.vecthare.vecthare_collection_registry.splice(i,1);},
     deleteCollectionMeta: meta.deleteCollectionMeta,
+    retireChatChunkManifest:async()=>{},
     forgetDeletedCollection: owner.forgetDeletedCollection,
 });
 const deleteFn=vm.runInContext('('+source.slice(begin,finish).replace('export async function','async function').trim()+')',context);
@@ -200,6 +217,7 @@ check('failed purge preserves registry, metadata, and write owner',()=>{
     assert.equal(owner.getChatBinding('chat-a').registryKey,target);
 });
 permit=true;
+saved.vecthare.qdrantPhysicalIdentities['qdrant:llamacpp:alice']='qdrant:v1:http://localhost:6333:multitenancy=false';
 deleted=await deleteFn('alice',settings,target);
 check('successful purge deletes registry, metadata and binding together',()=>{
     assert.equal(deleted.success,true);
@@ -224,13 +242,16 @@ check('Auto-sync Connect writes the selected binding rather than computed ID',()
     assert.match(manager,/bindChatCollection\(getChatUUID\(\), key\)/);
     assert.match(manager,/setCollectionAutoSync\(boundKey, enabling\)/);
 });
-check('import overwrite checks purge result on both code paths',()=>{
-    const matches=importSource.match(/if \(await purgeVectorIndex\(collectionId, settings\) !== true\)/g)||[];
-    assert.equal(matches.length,2);
+check('import overwrite stages instead of purging originals',()=>{
+    assert.doesNotMatch(importSource,/await purgeVectorIndex\(collectionId, settings\)/);
+    assert.match(importSource,/replacementCollectionId\(originalId\)/);
+    assert.match(importSource,/checkImportedChunks\(collectionId,prepared,settings\)/);
 });
-check('purge-all requires HTTP success before resetting VectHare settings',()=>{
-    const fn=index.slice(index.indexOf('async function onPurgeClick()'),index.indexOf('function onRunDiagnosticsClick()'));
-    assert.ok(fn.indexOf('if (!response.ok)')>0 && fn.indexOf('if (!response.ok)')<fn.indexOf('delete extension_settings.vecthare[key]'));
+check('purge-all uses scoped, verified inventory with explicit settings modes',()=>{
+    assert.match(index,/openPurgeDialog\(settings,\{allowReset:true\}\)/);
+    const service=fs.readFileSync(path.join(root,'core/safe-purge.js'),'utf8');
+    assert.match(service,/executeVectHarePurge/);
+    assert.doesNotMatch(index,/fetch\(['"]\/api\/plugins\/similharity\/purge-all/);
 });
 check('Resync preserves registry before and during discovery',()=>{
     const browser=fs.readFileSync(path.join(root,'ui/database-browser.js'),'utf8');
@@ -255,7 +276,9 @@ const getCVRows=id=>{if(!cvRows.has(id))cvRows.set(id,[]);return cvRows.get(id);
 Object.assign(context,{
     extension_settings:saved, structuredClone, localStorage:{getItem:k=>cvPending.get(k)||null,setItem:(k,v)=>cvPending.set(k,v),removeItem:k=>cvPending.delete(k)},
     getChatUUID:()=>metadata.integrity,
+    getCurrentChatId:()=>state.chatId,
     getContext:()=>state,
+    getModelField:()=>null,modelIsolationDecision:()=>({requiresConfirmation:false,token:""}),
     getContentType:()=>({label:'Chat',defaultStrategy:'conversation_turns',defaults:{chunkSize:400,chunkOverlap:50}}),
     progressTracker,
     resolveSource:async (_,source)=>({content:source.content||[],name:'Alice'}),
@@ -264,7 +287,9 @@ Object.assign(context,{
     generateCollectionId:()=>`vecthare_chat_alice_${metadata.integrity}`,
     getStringHash:text=>text.length,
     enrichChunks:chunks=>chunks,
+    buildContentEmbeddingPlan:async chunks=>chunks.map((chunk,i)=>({...chunk,hash:chunk.text.length,index:i})),
     getBackend:async()=>({listChunks:async(id,_s,{offset,limit})=>({items:getCVRows(id).slice(offset,offset+limit)}),getChunk:async(id,hash)=>getCVRows(id).find(x=>String(x.hash)===String(hash))||null}),
+    claimQdrantIdentity:(key)=>physical.claimQdrantIdentity(key,{...saved.vecthare,vector_backend:'qdrant',source:'llamacpp'}),
     insertVectorItems:async (id,items)=>{if(shouldFailInsert)throw new Error('mock insertion failure');inserted.push(id);for(const item of items){const rows=getCVRows(id);const pos=rows.findIndex(x=>String(x.hash)===String(item.hash));if(pos>=0)rows.splice(pos,1);rows.push(item);}},
     setCollectionMeta:meta.setCollectionMeta,
     getDefaultDecayForType:()=>({enabled:false}),
@@ -273,7 +298,8 @@ Object.assign(context,{
     bindChatCollection:owner.bindChatCollection,
     resolveChatWriteTarget:owner.resolveChatWriteTarget,
     getChatBinding:owner.getChatBinding,
-    prepareEmbeddingItems:async items=>items,
+    prepareEmbeddingItems:async items=>items,assignOccurrenceIds:items=>items,
+    captureCleaningSnapshot:()=>({selectedPreset:"none",customPatterns:[],enabledBuiltins:[]}),
     buildExpectedChatItems:async()=>[{text:'user and assistant conversation',hash:31,metadata:{messageId:0}}],
     makeCollectionProfile:async()=>({schemaVersion:1,embedding:{verified:true,modelId:'mock'},chunking:{chunking_strategy:'conversation_turns',chunk_size:400}}),
     applyAndVerifyProfile:async key=>({profile:cvProfiles.get(key)}),
@@ -285,7 +311,8 @@ Object.assign(context,{
     inspectCollectionChunks:async(backend,id,s)=>{const rows=[];for(let offset=0;offset<100000;offset+=200){const part=await backend.listChunks(id,s,{offset,limit:200});rows.push(...part.items);if(part.items.length<200)break;}return rows},
     expectedEmbeddedText:item=>item.text,chunkMatchesExpected:(row,item)=>!!row && row.text===item.text && JSON.stringify(row.metadata?.messageIds||[row.metadata?.messageId])===JSON.stringify(item.metadata?.messageIds||[item.metadata?.messageId]),
     beginSyncCheckpoint:()=>{},updateSyncCheckpoint:()=>{},acknowledgeSyncChunk:()=>{},finalizeSyncCheckpoint:()=>{},
-    hasActiveVectorWrite:()=>false,createOperationControl:()=>({activityId:'p0-cv',checkpoint:async()=>{}}),detachOperationControl:()=>{},OperationStoppedError:class OperationStoppedError extends Error{},
+    acquireSharedOperation:async()=>({id:'mock'}),finishSharedOperation:async()=>{},SharedOperationStoppedError:class SharedOperationStoppedError extends Error{},
+    hasActiveVectorWrite:()=>false,createOperationControl:()=>({activityId:'p0-cv',checkpoint:async()=>{},bindSharedOperation:()=>{}}),detachOperationControl:()=>{},OperationStoppedError:class OperationStoppedError extends Error{},
     parseRegistryKey:ids.parseRegistryKey,
     toastr:{error(){}},
 });
@@ -320,6 +347,8 @@ check('successful replacement switches binding after new vectors are written',()
     assert.equal(owner.getChatBinding('chat-a').writeVerified,true);
 });
 const oldBinding=owner.getChatBinding('chat-a').registryKey;
+// Tenant mode uses a separate explicitly labelled test collection identity.
+saved.vecthare.qdrantPhysicalIdentities['qdrant:llamacpp:alice']='qdrant:v1:http://localhost:6333:multitenancy=true';
 await backend.insertVectorItems('alice',[{hash:1,text:'hey'}],{...settings,qdrant_multitenancy:true});
 check('shared Qdrant insertion forwards tenant identity to verified plugin',()=>{
     assert.deepEqual(fetches.at(-1).body.filters,{content_type:'alice'});

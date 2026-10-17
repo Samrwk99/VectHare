@@ -39,7 +39,7 @@ export function getProviderSpecificParams(settings, isQuery = false) {
             params.apiUrl = settings.use_alt_endpoint
                 ? settings.alt_endpoint_url
                 : textgenerationwebui_settings.server_urls[textgen_types.LLAMACPP];
-            console.log(`VectHare DEBUG llamacpp: use_alt_endpoint=${settings.use_alt_endpoint}, alt_endpoint_url="${settings.alt_endpoint_url}", ST_url="${textgenerationwebui_settings.server_urls[textgen_types.LLAMACPP]}", final apiUrl="${params.apiUrl}"`);
+            console.debug('VectHare DEBUG llamacpp: endpoint selected (URL redacted)');
             break;
 
         case 'vllm':

@@ -112,7 +112,10 @@ await checkAsync('Legacy filename policy migrates only current chat to UUID with
     const m = await loadIsolated('core/collection-metadata.js', {
         'extensions.js': {extension_settings:settings},
         'script.js': { saveSettingsDebounced(){},getCurrentChatId:()=>chat.current },
-        'collection-ids.js': {getChatUUID:()=>chat.uuid,parseRegistryKey:key=>{
+        'shared-operations.js': {withSharedWriteHeaders:x=>x,runExclusiveNativeMutation:(_l,_r,fn)=>fn()},
+        'settings-durability.js': {saveVectHareSettingsDebounced(){}},
+        'physical-identity.js': {assertQdrantIdentity(){return true;}},
+        'collection-ids.js': {getChatUUID:()=>chat.uuid,parseCollectionId:key=>({type:String(key).startsWith('vecthare_lorebook_')?'lorebook':'chat'}),parseRegistryKey:key=>{
             const split=key.split(':');return split.length>=3 ? {backend:split[0],source:split[1],collectionId:split.slice(2).join(':')}:{backend:null,source:null,collectionId:key};
         }},
     });
@@ -147,6 +150,8 @@ await checkAsync('Standard native sidecar saves text+metadata after success and 
     };
     class VectorBackend {};
     const m=await loadIsolated('backends/standard.js',{
+        'shared-operations.js': {withSharedWriteHeaders:x=>x,runExclusiveNativeMutation:(_l,_r,fn)=>fn()},
+        'settings-durability.js': {saveVectHareSettingsDebounced(){}},
         'script.js': {getRequestHeaders:()=>({}),saveSettingsDebounced(){}},
         'extensions.js': {extension_settings:ext},
         'backend-interface.js': {VectorBackend},

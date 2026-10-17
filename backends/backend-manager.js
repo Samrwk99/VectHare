@@ -288,6 +288,13 @@ function evictLRUBackendIfNeeded() {
 export async function initializeBackend(backendName, settings, throwOnFail = true) {
     // Normalize backend name (vectra -> standard, etc.)
     const normalizedName = normalizeBackendName(backendName);
+    // The bundled Similharity server implements Vectra and Qdrant only.
+    // Fail visibly for saved legacy selections rather than passing requests
+    // to an unsupported route and silently falling back to another database.
+    if (normalizedName === 'lancedb' || normalizedName === 'milvus') {
+        throw new Error(`${normalizedName} is not supported by this version of Similharity. ` +
+            'Switch to Standard or Qdrant, or install a compatible backend plugin. No collection data was modified.');
+    }
     const connectionSignature = backendConnectionSignature(normalizedName, settings);
     if (backendInstances[normalizedName] &&
         backendConnectionSignatures[normalizedName] !== connectionSignature) {

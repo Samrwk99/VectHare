@@ -1,9 +1,10 @@
+import { saveVectHareSettingsDebounced as saveSettingsDebounced } from './settings-durability.js';
 /** Persisted crash-recovery journal. Database records are authoritative; this
  * journal is deliberately only progress metadata, never chat text or secrets.
  * Persist each accepted chunk synchronously where localStorage is available.
  */
 import { extension_settings } from '../../../../extensions.js';
-import { saveSettingsDebounced } from '../../../../../script.js';
+
 
 const PREFIX='vecthare:sync-checkpoint:v1:';
 const storageKey=(key,chatUUID)=>`${PREFIX}${encodeURIComponent(key)}:${encodeURIComponent(chatUUID)}`;
