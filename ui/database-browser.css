@@ -1339,3 +1339,22 @@
     align-items: flex-start;
     gap: 12px;
 }
+
+/* Collection maintenance stays scrollable inside the existing modal on Android. */
+#vecthare_tab_maintenance {
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+    min-height: 0;
+    gap: 6px;
+}
+#vecthare_tab_maintenance .vecthare-live-operation button {
+    max-width: 100%;
+    white-space: normal;
+    margin: 4px 6px 4px 0;
+}
+#vecthare_tab_maintenance input {
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+}

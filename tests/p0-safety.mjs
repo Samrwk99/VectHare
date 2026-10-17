@@ -19,6 +19,8 @@ const context = vm.createContext({
     fetch: async (url, options = {}) => {
         const body = options.body ? JSON.parse(options.body) : {};
         fetches.push({ url, body, options });
+        if (url.includes('/embedding/capabilities')) return {ok:true,json:async()=>({success:true,modelId:'mock',limits:{maxTokens:2048}})};
+        if (url.includes('/embedding/tokenize')) return {ok:true,json:async()=>({count:1})};
         if (url.includes('/qdrant/tenant-capabilities')) return tenantCapabilitiesAvailable
             ? { ok: true, json: async () => ({qdrantTenantIsolation:1,pointIds:'sha256-uuid-of-tenant-and-hash',filters:'content_type'}) }
             : { ok: false, status:404 };

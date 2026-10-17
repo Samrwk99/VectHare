@@ -34,6 +34,7 @@ async function createBackend(fetchImpl) {
         'backend-interface.js': { VectorBackend: class {} },
         'providers.js': { getModelField: () => 'embedding_model' },
         'provider-params.js': { getProviderSpecificParams: () => ({}) },
+        'embedding-overflow.js': { assertEmbeddingQueryFits: async () => {} },
         'constants.js': { VECTOR_LIST_LIMIT: 10000 },
     };
     await module.link(spec => {

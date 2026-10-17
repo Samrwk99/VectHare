@@ -1,3 +1,4 @@
+import { assertEmbeddingQueryFits } from '../core/embedding-overflow.js';
 /**
  * ============================================================================
  * QDRANT BACKEND (via Unified Plugin API)
@@ -132,7 +133,7 @@ export class QdrantBackend extends VectorBackend {
 
         const knownBackends = ['standard', 'lancedb', 'vectra', 'milvus', 'qdrant'];
         const knownSources = ['transformers', 'openai', 'cohere', 'ollama', 'llamacpp',
-            'vllm', 'koboldcpp', 'webllm', 'bananabread', 'openrouter'];
+            'vllm', 'koboldcpp', 'webllm', 'bananabread', 'openrouter', 'nanogpt', 'custom'];
 
         const parts = collectionId.split(':');
 
@@ -393,6 +394,7 @@ export class QdrantBackend extends VectorBackend {
     }
 
     async queryCollection(collectionId, searchText, topK, settings, queryVector = null) {
+        if (!queryVector) await assertEmbeddingQueryFits(searchText, settings);
         await this._requireTenantPlugin(settings);
         const strippedCollectionId = this._stripRegistryPrefix(collectionId);
         const actualCollectionId = getActualCollectionId(strippedCollectionId, settings);
@@ -452,6 +454,7 @@ export class QdrantBackend extends VectorBackend {
     }
 
     async queryMultipleCollections(collectionIds, searchText, topK, threshold, settings, queryVector = null) {
+        if (!queryVector) await assertEmbeddingQueryFits(searchText, settings);
         await this._requireTenantPlugin(settings);
         const results = {};
 
@@ -625,6 +628,7 @@ export class QdrantBackend extends VectorBackend {
      * Update chunk text (triggers re-embedding)
      */
     async updateChunkText(collectionId, hash, newText, settings) {
+        await assertEmbeddingQueryFits(newText, settings); // Edit re-embeds one vector; do not silently truncate or split it.
         await this._requireTenantPlugin(settings);
         const actualCollectionId = getActualCollectionId(this._stripRegistryPrefix(collectionId), settings);
         const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}/text`, {
@@ -728,6 +732,7 @@ export class QdrantBackend extends VectorBackend {
      * @returns {Promise<{hashes: number[], metadata: object[]}>}
      */
     async hybridQuery(collectionId, searchText, topK, settings, hybridOptions = {}) {
+        await assertEmbeddingQueryFits(searchText, settings);
         await this._requireTenantPlugin(settings);
         const {
             vectorWeight = 0.5,

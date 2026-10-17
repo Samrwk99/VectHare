@@ -1,3 +1,4 @@
+import { assertEmbeddingQueryFits } from '../core/embedding-overflow.js';
 /**
  * ============================================================================
  * MILVUS BACKEND (via Unified Plugin API)
@@ -136,7 +137,7 @@ export class MilvusBackend extends VectorBackend {
         // Strip registry key prefix if present (backend:source:collectionId)
         const knownBackends = ['standard', 'lancedb', 'vectra', 'milvus', 'qdrant'];
         const knownSources = ['transformers', 'openai', 'cohere', 'ollama', 'llamacpp',
-            'vllm', 'koboldcpp', 'webllm', 'bananabread', 'openrouter'];
+            'vllm', 'koboldcpp', 'webllm', 'bananabread', 'openrouter', 'nanogpt', 'custom'];
         
         const parts = collectionId.split(':');
         
@@ -274,6 +275,7 @@ export class MilvusBackend extends VectorBackend {
     }
 
     async queryCollection(collectionId, searchText, topK, settings) {
+        await assertEmbeddingQueryFits(searchText, settings);
         const { type, sourceId } = this._parseCollectionId(collectionId);
 
         const response = await fetch('/api/plugins/similharity/chunks/query', {
@@ -312,6 +314,7 @@ export class MilvusBackend extends VectorBackend {
     }
 
     async queryMultipleCollections(collectionIds, searchText, topK, threshold, settings) {
+        await assertEmbeddingQueryFits(searchText, settings);
         const results = {};
 
         for (const collectionId of collectionIds) {
@@ -473,6 +476,7 @@ export class MilvusBackend extends VectorBackend {
      * Update chunk text (triggers re-embedding)
      */
     async updateChunkText(collectionId, hash, newText, settings) {
+        await assertEmbeddingQueryFits(newText, settings); // Edit re-embeds one vector; do not silently truncate or split it.
         const { type, sourceId } = this._parseCollectionId(collectionId);
 
         const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}/text`, {
@@ -578,6 +582,7 @@ export class MilvusBackend extends VectorBackend {
      * @returns {Promise<{hashes: number[], metadata: object[]}>}
      */
     async hybridQuery(collectionId, searchText, topK, settings, hybridOptions = {}) {
+        await assertEmbeddingQueryFits(searchText, settings);
         const {
             vectorWeight = 0.5,
             textWeight = 0.5,

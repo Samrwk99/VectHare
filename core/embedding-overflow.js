@@ -6,44 +6,81 @@ const headers = () => getRequestHeaders();
 // re-tokenizing all its unchanged chunks on every iteration.
 const tokenCache=new Map();
 const endpointModels=new Map();
-const CACHE_TTL_MS=20000;
+const tokenizersUnavailable=new Set();
+const capabilityCache=new Map();
+const CACHE_TTL_MS=120000;
 const MAX_TOKEN_CACHE=5000;
+const NETWORK_PROVIDERS=new Set(['llamacpp','ollama','vllm','koboldcpp','bananabread','openrouter','electronhub','nanogpt','custom']);
+const MODEL_FIELDS={ollama:'ollama_model',vllm:'vllm_model',openrouter:'openrouter_model',electronhub:'electronhub_model',nanogpt:'nanogpt_model',custom:'custom_model'};
+function getModel(settings){return settings[MODEL_FIELDS[settings.source]]||settings.model||'';}
+function endpointKey(settings){const params=getProviderSpecificParams(settings);return `${settings.source}|${params.apiUrl||''}|${getModel(settings)}`;}
 async function proxy(route, settings, text) {
-    const {apiUrl} = getProviderSpecificParams(settings);
-    const response = await fetch(`/api/plugins/similharity/embedding/${route}`, {method:'POST',headers:headers(),body:JSON.stringify({source:settings.source,apiUrl,...(text == null ? {} : {text})})});
-    if (!response.ok) throw new Error(`${route} failed (${response.status}): ${await response.text()}`);
+    const {apiUrl, apiKey}=getProviderSpecificParams(settings);
+    const model=getModel(settings);
+    const response = await fetch(`/api/plugins/similharity/embedding/${route}`, {method:'POST',headers:headers(),body:JSON.stringify({source:settings.source,apiUrl,apiKey,model,...(text==null?{}:{text})})});
+    if (!response.ok) throw new Error(`${route} failed (${response.status}): ${(await response.text()).slice(0,250)}`);
     return response.json();
 }
-export async function getEmbeddingBudget(settings) {
-    if (settings.source === 'llamacpp') {
-        const capabilities = await proxy('capabilities',settings);
-        const endpoint=getProviderSpecificParams(settings).apiUrl;
-        const fingerprint=`${capabilities.modelId || ''}:${capabilities.modelPath || ''}`;
-        if(endpointModels.has(endpoint) && endpointModels.get(endpoint)!==fingerprint)tokenCache.clear();
-        endpointModels.set(endpoint,fingerprint);
-        const value = capabilities?.limits?.maxTokens;
-        // llama.cpp may not reveal its physical batch size; require an explicit cap
-        // rather than mistakenly assuming its context length is the batch budget.
-        const configured=Number(settings.embedding_max_tokens) || null;
-        return Number.isFinite(value) && value > 0 ? Math.floor(Math.min(value,configured || value) * .94) : configured ? Math.floor(configured*.94) : null;
+function conservativeBytes(text) {
+    // Deliberately an upper-bound heuristic, NOT an exact model token count.
+    // Most text tokenizers produce no more tokens than UTF-8 bytes, but models
+    // with unusual special-token expansion still require server enforcement.
+    let bytes=0;
+    for(const char of text){
+        const cp=char.codePointAt(0);
+        bytes+=cp<128?1:cp<2048?2:cp<65536?3:4;
     }
-    return Number(settings.embedding_max_tokens) || null;
+    return bytes+8;
 }
-export async function countEmbeddingTokens(text, settings) {
-    if (settings.source === 'llamacpp') {
-        const endpoint=getProviderSpecificParams(settings).apiUrl;
-        const key=`${endpoint}\n${text}`;
-        const cached=tokenCache.get(key);
-        if(cached && Date.now()-cached.time<CACHE_TTL_MS)return cached.count;
-        const result=await proxy('tokenize',settings,text);
-        if(!Number.isInteger(result.count) || result.count<0)throw new Error('Embedding tokenizer returned no valid token count');
-        if(tokenCache.size>=MAX_TOKEN_CACHE)tokenCache.clear();
-        tokenCache.set(key,{time:Date.now(),count:result.count});
-        return result.count;
+export async function getEmbeddingBudget(settings) {
+    const configured=Number(settings.embedding_max_tokens);
+    const manual=Number.isSafeInteger(configured)&&configured>0?configured:null;
+    if (!NETWORK_PROVIDERS.has(settings.source)) return manual ? Math.max(1,Math.floor(manual*.85)) : null;
+    const key=endpointKey(settings);
+    let capabilities=null;
+    {
+        try {capabilities={data:await proxy('capabilities',settings),time:Date.now()};capabilityCache.set(key,capabilities);}
+        catch(error){if(!manual)throw new Error(`${settings.source}: embedding input limit could not be detected. Configure "Embedding input token limit override" explicitly, or check endpoint connectivity. ${error.message}`);}
     }
-    // Other providers: only allow splitting when an exact supported tokenizer
-    // exists; character heuristics cannot guarantee an input fits.
-    return null;
+    const data=capabilities?.data;
+    if(data){
+        const fingerprint=`${data.modelId||''}:${data.modelPath||''}`;
+        if(endpointModels.has(key)&&endpointModels.get(key)!==fingerprint)tokenCache.clear();
+        endpointModels.set(key,fingerprint);
+    }
+    const serverMax=Number(data?.limits?.maxTokens);
+    const contextMax=Number(data?.limits?.reportedContextTokens);
+    const published=Number.isSafeInteger(serverMax)&&serverMax>0?serverMax:Number.isSafeInteger(contextMax)&&contextMax>0?contextMax:null;
+    const raw=manual&&published?Math.min(manual,published):manual||published;
+    if(!raw){
+        // Do not submit chunks to a server which might silently truncate them.
+        throw new Error(`${settings.source}: no verifiable embedding input limit is exposed. Set an explicit Embedding input token limit override for this model (and ensure it is supported by the endpoint).`);
+    }
+    return Math.max(1,Math.floor(raw*(settings.source==='llamacpp'?.94:.85)));
+}
+export async function countEmbeddingTokens(text,settings) {
+    if (!NETWORK_PROVIDERS.has(settings.source)) return null;
+    const key=`${endpointKey(settings)}\n${text}`;
+    const cached=tokenCache.get(key);
+    if(cached && Date.now()-cached.time<CACHE_TTL_MS)return cached.count;
+    const unavailable=tokenizersUnavailable.has(endpointKey(settings));
+    let count;
+    if(!unavailable){
+        try {
+            const result=await proxy('tokenize',settings,text);
+            if(!Number.isSafeInteger(result.count)||result.count<0)throw new Error('Invalid tokenizer response');
+            count=result.count;
+        }catch(error){
+            // llama.cpp has an exact tokenizer API. Failure here must be visible,
+            // rather than silently falling back and pretending to be exact.
+            if(settings.source==='llamacpp')throw error;
+            tokenizersUnavailable.add(endpointKey(settings));
+        }
+    }
+    if(count==null)count=conservativeBytes(text);
+    if(tokenCache.size>=MAX_TOKEN_CACHE)tokenCache.clear();
+    tokenCache.set(key,{time:Date.now(),count});
+    return count;
 }
 function units(text) {
     return text.match(/[^.!?\n]+[.!?]*(?:\n+|\s+|$)|\S+/g)?.filter(Boolean) || [text];
@@ -78,7 +115,7 @@ export async function prepareEmbeddingItems(items, settings, hashFn) {
     const budget = await getEmbeddingBudget(settings);
     if (!budget) return items; // Provider has no reliable limit: no speculative split.
     const count = text => countEmbeddingTokens(text,settings);
-    if (settings.source !== 'llamacpp') return items;
+    if (!NETWORK_PROVIDERS.has(settings.source)) return items;
     const result=[];
     for(const item of items){
         const keywordText = (item.keywords||[]).map(k=>k.text||k).join(' ');
@@ -111,4 +148,14 @@ export async function prepareEmbeddingItems(items, settings, hashFn) {
         }
     }
     return result;
+}
+
+/** Retrieval queries must not be silently truncated either. Query splitting
+ * changes retrieval semantics, so reject oversize queries explicitly instead. */
+export async function assertEmbeddingQueryFits(text, settings) {
+    if (!NETWORK_PROVIDERS.has(settings?.source) || typeof text !== 'string') return;
+    const budget=await getEmbeddingBudget(settings);
+    if(!budget)return;
+    const tokens=await countEmbeddingTokens(text,settings);
+    if(tokens>budget)throw new Error(`Embedding search query exceeds ${settings.source} safe limit (${tokens} measured/conservatively estimated > ${budget} allowed). Shorten the query or increase the server's verified input limit; no text was silently truncated.`);
 }

@@ -1,3 +1,4 @@
+import { assertEmbeddingQueryFits } from '../core/embedding-overflow.js';
 /**
  * ============================================================================
  * LANCEDB BACKEND (via Unified Plugin API)
@@ -42,7 +43,7 @@ export class LanceDBBackend extends VectorBackend {
 
         const knownBackends = ['standard', 'lancedb', 'vectra', 'milvus', 'qdrant'];
         const knownSources = ['transformers', 'openai', 'cohere', 'ollama', 'llamacpp',
-            'vllm', 'koboldcpp', 'webllm', 'bananabread', 'openrouter', 'togetherai', 'mistral'];
+            'vllm', 'koboldcpp', 'webllm', 'bananabread', 'openrouter', 'nanogpt', 'custom', 'togetherai', 'mistral'];
 
         const parts = collectionId.split(':');
 
@@ -179,6 +180,7 @@ export class LanceDBBackend extends VectorBackend {
     }
 
     async queryCollection(collectionId, searchText, topK, settings) {
+        await assertEmbeddingQueryFits(searchText, settings);
         const actualCollectionId = this._stripRegistryPrefix(collectionId);
         console.log(`[LanceDB] queryCollection: original=${collectionId}, stripped=${actualCollectionId}`);
         const response = await fetch('/api/plugins/similharity/chunks/query', {
@@ -216,6 +218,7 @@ export class LanceDBBackend extends VectorBackend {
     }
 
     async queryMultipleCollections(collectionIds, searchText, topK, threshold, settings) {
+        await assertEmbeddingQueryFits(searchText, settings);
         // Query each collection separately
         const results = {};
 
@@ -374,6 +377,7 @@ export class LanceDBBackend extends VectorBackend {
      * Update chunk text (triggers re-embedding)
      */
     async updateChunkText(collectionId, hash, newText, settings) {
+        await assertEmbeddingQueryFits(newText, settings); // Edit re-embeds one vector; do not silently truncate or split it.
         const actualCollectionId = this._stripRegistryPrefix(collectionId);
         const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}/text`, {
             method: 'PATCH',

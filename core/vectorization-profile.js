@@ -10,10 +10,10 @@ import { getCollectionMeta, setCollectionMeta } from './collection-metadata.js';
 import { getBackend } from '../backends/backend-manager.js';
 import { parseRegistryKey } from './collection-ids.js';
 import { getChatUUID } from './collection-ids.js';
-import { bindChatCollection } from './collection-ownership.js';
+import { bindChatCollection, getChatBinding } from './collection-ownership.js';
 
 const VERSION = 1;
-const COPY_FIELDS = ['embedding_max_tokens','chunking_strategy','batch_size','chunk_size','chunk_overlap','keyword_extraction_level','cleaning_preset','text_cleaning_enabled','cleaning_rules','substitution_policy','source','vector_backend','qdrant_multitenancy'];
+const COPY_FIELDS = ['embedding_max_tokens','alt_endpoint_url','use_alt_endpoint','chunking_strategy','batch_size','chunk_size','chunk_overlap','keyword_extraction_level','cleaning_preset','text_cleaning_enabled','cleaning_rules','substitution_policy','source','vector_backend','qdrant_multitenancy'];
 function copySafe(obj) {
     const result = {};
     for (const key of COPY_FIELDS) if (obj?.[key] !== undefined) result[key] = structuredClone(obj[key]);
@@ -105,20 +105,20 @@ export async function discoverEmbeddingModel(settings) {
     const source = settings.source || 'transformers';
     const modelField = getModelField(source);
     let model = modelField && settings[modelField] || settings.model || null;
-    if (source === 'llamacpp') {
+    if (source === 'llamacpp' || source === 'ollama') {
         const {apiUrl} = getProviderSpecificParams(settings);
-        if (!apiUrl) return {modelId:null,verified:false,reason:'No llama.cpp embedding URL configured'};
+        if (!apiUrl) return {modelId:null,verified:false,reason:`No ${source} embedding URL configured`};
         try {
             // Server-side proxy avoids browser CORS for remote/Termux embedding servers.
             const response = await fetch('/api/plugins/similharity/embedding/capabilities', {
-                method:'POST',headers:getRequestHeaders(),body:JSON.stringify({source,apiUrl}),
+                method:'POST',headers:getRequestHeaders(),body:JSON.stringify({source,apiUrl,model}),
             });
             if (!response.ok) throw new Error(`Capability discovery HTTP ${response.status}`);
             const data = await response.json();
             if (!data.success || !data.modelId) throw new Error(data.reason || 'Server did not return an unambiguous loaded model');
-            return {modelId:data.modelId,modelPath:data.modelPath || null,verified:true,discovery:'llamacpp-api',limits:data.limits || null};
+            return {modelId:data.modelId,modelPath:data.modelPath || null,verified:true,discovery:`${source}-api`,limits:data.limits || null};
         } catch (error) {
-            return {modelId:null,verified:false,reason:`Unable to verify llama.cpp model: ${error.message}`};
+            return {modelId:null,verified:false,reason:`Unable to verify ${source} model: ${error.message}`};
         }
     }
     if (source === 'transformers') model ||= 'sillytavern-transformers-default';
@@ -157,14 +157,15 @@ export async function applyAndVerifyProfile(key, currentSettings, {allowNew=fals
     }
     if (!profile.embedding?.verified || !profile.embedding.modelId) throw new Error('Collection embedding identity is unverified. Writing is blocked; use verified settings or re-vectorize safely.');
     if (profile.embedding.provider !== currentSettings.source) throw new Error(`Collection uses ${profile.embedding.provider}, active provider is ${currentSettings.source}. Switch back to the original provider.`);
-    const live = await discoverEmbeddingModel(currentSettings);
-    if (!live.verified || !live.modelId || live.modelId !== profile.embedding.modelId || (profile.embedding.modelPath && live.modelPath && live.modelPath !== profile.embedding.modelPath)) {
+    const effectiveSettings = {...currentSettings, ...profile.chunking};
+    const live = await discoverEmbeddingModel(effectiveSettings);
+    if (!live.verified || !live.modelId || live.modelId !== profile.embedding.modelId || (profile.embedding.modelPath && (profile.embedding.provider === 'ollama' ? live.modelPath !== profile.embedding.modelPath : !!live.modelPath && live.modelPath !== profile.embedding.modelPath))) {
         throw new Error(`Embedding model mismatch or unavailable: collection=${profile.embedding.modelId}, running=${live.modelId || live.reason || 'unknown'}. No vectors were written.`);
     }
     if (profile.chunking?.vector_backend !== currentSettings.vector_backend || !!profile.chunking?.qdrant_multitenancy !== !!currentSettings.qdrant_multitenancy) {
         throw new Error('Collection backend or tenancy mode differs from its saved profile. Writing blocked.');
     }
-    return {settings:{...currentSettings,...profile.chunking},profile,newProfile:false};
+    return {settings:effectiveSettings,profile,newProfile:false};
 }
 
 /** Query-time compatibility: chunking may differ but the embedding space must not. */
@@ -184,7 +185,7 @@ export async function assertQueryModelCompatible(key, settings) {
     }
     const active=found.model;
     if(!active.verified || profile.embedding.modelId!==active.modelId ||
-        (profile.embedding.modelPath && active.modelPath && profile.embedding.modelPath!==active.modelPath))
+        (profile.embedding.modelPath && (profile.embedding.provider === 'ollama' ? profile.embedding.modelPath!==active.modelPath : !!active.modelPath && profile.embedding.modelPath!==active.modelPath)))
         throw new Error(`Embedding model mismatch querying ${key}. Saved=${profile.embedding.modelId}, running=${active.modelId || active.reason || 'unknown'}`);
 }
 
@@ -240,6 +241,7 @@ export async function verifyAndRestoreLegacyProfile(registryKey, settings) {
     // and source text are actually readable. Never invent missing provenance.
     const chatUUID=getChatUUID();
     if(!chatUUID || !Array.isArray(getContext()?.chat))throw new Error('Open the exact original chat before verifying this legacy collection');
+    if(getChatBinding(chatUUID)?.registryKey!==registryKey)throw new Error('This chat must be explicitly connected read-only to the selected legacy collection before restoring its original settings');
     const complete=[];
     for(let offset=0;offset<100000;offset+=200){
         const batch=await backend.listChunks(parsed.collectionId,settings,{limit:200,offset});

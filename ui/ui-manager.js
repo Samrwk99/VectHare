@@ -188,6 +188,8 @@ export function renderSettings(containerId, settings, callbacks) {
                             <option value="extras">Extras API</option>
                             <option value="electronhub">ElectronHub</option>
                             <option value="openrouter">OpenRouter</option>
+                            <option value="nanogpt">NanoGPT</option>
+                            <option value="custom">Custom API (OpenAI-compatible)</option>
                             <option value="llamacpp">LlamaCPP</option>
                             <option value="vllm">vLLM</option>
                             <option value="koboldcpp">KoboldCPP</option>
@@ -201,6 +203,11 @@ export function renderSettings(containerId, settings, callbacks) {
                         <!-- Provider-Specific Settings -->
                         <div id="vecthare_provider_settings">
 
+                            <div class="vecthare_provider_setting" data-provider="openrouter,electronhub">
+                                <label for="vecthare_provider_override_key"><small>Alternative endpoint API key (optional)</small></label>
+                                <input id="vecthare_provider_override_key" class="vecthare-input" type="password" autocomplete="off" placeholder="If custom URL needs a different bearer token" />
+                                <small class="vecthare_hint">Used only with Alternative Endpoint; normal provider keys remain in SillyTavern secrets.</small>
+                            </div>
                             <!-- ElectronHub Model -->
                             <div class="vecthare_provider_setting" data-provider="electronhub">
                                 <label for="vecthare_electronhub_model">
@@ -211,17 +218,34 @@ export function renderSettings(containerId, settings, callbacks) {
                             </div>
 
                             <!-- Alternative Endpoint (for local providers) -->
-                            <div class="vecthare_provider_setting" data-provider="ollama,vllm,llamacpp,koboldcpp,bananabread">
+                            <div class="vecthare_provider_setting" data-provider="ollama,vllm,llamacpp,koboldcpp,bananabread,openrouter,electronhub,nanogpt,custom">
                                 <label class="checkbox_label">
                                     <input type="checkbox" id="vecthare_use_alt_endpoint" />
                                     <span>Use Alternative Endpoint</span>
                                 </label>
                                 <input type="text" id="vecthare_alt_endpoint_url" class="vecthare-input" placeholder="http://localhost:11434" />
-                                <small class="vecthare_hint">Override default API URL for this provider</small>
+                                <small class="vecthare_hint">Override default API URL for this provider; Custom API always uses this URL</small>
                             </div>
 
+                            <!-- OpenAI-compatible custom and NanoGPT embedding models -->
+                            <div class="vecthare_provider_setting" data-provider="nanogpt">
+                                <label for="vecthare_nanogpt_model"><small>NanoGPT embedding model ID</small></label>
+                                <input id="vecthare_nanogpt_model" class="vecthare-input" type="text" placeholder="Select an embedding-capable model" />
+                                <label for="vecthare_nanogpt_api_key"><small>NanoGPT API key</small></label>
+                                <input id="vecthare_nanogpt_api_key" class="vecthare-input" type="password" autocomplete="off" placeholder="Saved key (leave empty to keep existing)" />
+                                <small class="vecthare_hint">Default: https://nano-gpt.com/api/v1. NanoGPT charges for embedding requests.</small>
+                            </div>
+                            <div class="vecthare_provider_setting" data-provider="custom">
+                                <label for="vecthare_custom_model"><small>Embedding model ID</small></label>
+                                <input id="vecthare_custom_model" class="vecthare-input" type="text" placeholder="Your server's embedding model ID" />
+                                <label for="vecthare_custom_api_key"><small>API key (optional)</small></label>
+                                <input id="vecthare_custom_api_key" class="vecthare-input" type="password" autocomplete="off" placeholder="Optional bearer token" />
+                                <small class="vecthare_hint">Enable Alternative Endpoint and set a full OpenAI-compatible API base URL (usually ending /v1). Requires Similharity.</small>
+                            </div>
                             <!-- BananaBread Info & Reranking -->
                             <div class="vecthare_provider_setting" data-provider="bananabread">
+                                <label for="vecthare_bananabread_model"><small>Embedding GGUF / model ID (for collection compatibility)</small></label>
+                                <input id="vecthare_bananabread_model" class="vecthare-input" type="text" placeholder="Name of loaded embedding model" />
                                 <small class="vecthare_info">
                                     <i class="fa-solid fa-info-circle"></i>
                                     BananaBread default: http://localhost:8008. Supports MixedBread AI and Qwen3 embedding models.
@@ -271,8 +295,14 @@ export function renderSettings(containerId, settings, callbacks) {
                                 <small class="vecthare_hint">Enter the model name from your local Ollama installation</small>
                             </div>
 
+                            <div class="vecthare_provider_setting" data-provider="vllm">
+                                <label for="vecthare_vllm_api_key"><small>vLLM API key (optional)</small></label>
+                                <input id="vecthare_vllm_api_key" type="password" class="vecthare-input" autocomplete="off" placeholder="Optional bearer token" />
+                            </div>
                             <!-- KoboldCPP Info -->
                             <div class="vecthare_provider_setting" data-provider="koboldcpp">
+                                <label for="vecthare_koboldcpp_model"><small>Loaded embeddings model identifier</small></label>
+                                <input id="vecthare_koboldcpp_model" class="vecthare-input" type="text" placeholder="Embedding GGUF filename, not chat model" />
                                 <small class="vecthare_info">
                                     <i class="fa-solid fa-info-circle"></i>
                                     KoboldCPP uses the currently loaded model for embeddings. Ensure your model supports embeddings.
@@ -697,7 +727,7 @@ export function renderSettings(containerId, settings, callbacks) {
                             <small class="vecthare_hint">Automatically vectorize new chat messages</small>
 
                             <div id="vecthare_collection_profile_status" class="vecthare_hint" role="status" style="margin-top:8px;">Existing collections retain their own saved vectorization profiles. Global controls are defaults for new collections.</div>
-                            <label for="vecthare_embedding_max_tokens" style="display:block;margin-top:12px"><small>Embedding input token limit override (0 = detect automatically)</small></label>
+                            <label for="vecthare_embedding_max_tokens" style="display:block;margin-top:12px"><small>Embedding input token limit (0 = detect; set manually if the provider does not expose an embedding-safe limit)</small></label>
                             <input type="number" id="vecthare_embedding_max_tokens" class="text_pole" min="0" step="1" placeholder="0 (auto)" />
                             <small class="vecthare_hint">Use only when the server cannot report its physical batch/input limit. Never set above what the model accepts.</small>
                             <!-- Collection lock moved to Database Browser (per-collection settings) -->
@@ -1418,6 +1448,9 @@ function toggleProviderSettings(selectedProvider, settings) {
             $(this).show();
         }
     });
+
+    // Custom API always needs a visible endpoint field, even without the shared override toggle.
+    $('#vecthare_alt_endpoint_url').toggle(selectedProvider === 'custom' || !!settings.use_alt_endpoint);
 
     // Handle WebLLM-specific initialization
     if (selectedProvider === 'webllm') {
@@ -2494,6 +2527,45 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
         });
 
+    // P4 provider-specific OpenAI-compatible credentials and model names.
+    for (const source of ['nanogpt', 'custom']) {
+        $(`#vecthare_${source}_model`).val(settings[`${source}_model`] || '').on('input', function () {
+            settings[`${source}_model`] = String($(this).val());
+            applySettingsSnapshot(settings); saveSettingsDebounced();
+        });
+        $(`#vecthare_${source}_api_key`).on('change', function () {
+            const value = String($(this).val());
+            if (value) {
+                settings[`${source}_api_key`] = value;
+                applySettingsSnapshot(settings); saveSettingsDebounced();
+                $(this).val('').attr('placeholder', 'Key saved (leave empty to retain)');
+            }
+        }).attr('placeholder', settings[`${source}_api_key`] ? 'Key saved (leave empty to retain)' : 'Optional API key');
+    }
+
+    $('#vecthare_vllm_api_key').on('change',function(){
+        const value=String($(this).val());
+        if(value){settings.vllm_api_key=value;applySettingsSnapshot(settings);saveSettingsDebounced();$(this).val('');}
+    }).attr('placeholder',settings.vllm_api_key?'Key saved (leave empty to retain)':'Optional bearer token');
+
+    for (const source of ['bananabread','koboldcpp']) {
+        $(`#vecthare_${source}_model`).val(settings[`${source}_model`]||'').on('change',function(){
+            settings[`${source}_model`]=String($(this).val());
+            applySettingsSnapshot(settings);saveSettingsDebounced();
+        });
+    }
+    const syncProviderKeyField = () => {
+        const source=settings.source;
+        $('#vecthare_provider_override_key').attr('placeholder',settings[`${source}_api_key_override`]?'Key saved (leave empty to retain)':'Optional override key');
+    };
+    $('#vecthare_provider_override_key').on('change',function(){
+        const source=settings.source;
+        if(!['openrouter','electronhub'].includes(source))return;
+        const value=String($(this).val());
+        if(value){settings[`${source}_api_key_override`]=value;applySettingsSnapshot(settings);saveSettingsDebounced();$(this).val('');}
+        syncProviderKeyField();
+    });
+    syncProviderKeyField();
     // Alternative endpoint
     $('#vecthare_use_alt_endpoint')
         .prop('checked', settings.use_alt_endpoint)

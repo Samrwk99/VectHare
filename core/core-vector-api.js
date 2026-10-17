@@ -196,9 +196,21 @@ export function getVectorsRequestBody(args = {}, settings) {
             break;
         case 'electronhub':
             body.model = settings.electronhub_model;
+            if (settings.use_alt_endpoint) {body.apiUrl = settings.alt_endpoint_url;body.apiKey=settings.electronhub_api_key_override||'';}
             break;
         case 'openrouter':
             body.model = settings.openrouter_model;
+            if (settings.use_alt_endpoint) {body.apiUrl = settings.alt_endpoint_url;body.apiKey=settings.openrouter_api_key_override||'';}
+            break;
+        case 'nanogpt':
+            body.model = settings.nanogpt_model;
+            body.apiUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : 'https://nano-gpt.com/api/v1';
+            body.apiKey = settings.nanogpt_api_key || '';
+            break;
+        case 'custom':
+            body.model = settings.custom_model;
+            body.apiUrl = settings.alt_endpoint_url;
+            body.apiKey = settings.custom_api_key || '';
             break;
         case 'togetherai':
             body.model = settings.togetherai_model;
@@ -219,10 +231,12 @@ export function getVectorsRequestBody(args = {}, settings) {
             console.log(`VectHare DEBUG llamacpp (core-vector-api): use_alt_endpoint=${settings.use_alt_endpoint}, alt_endpoint_url="${settings.alt_endpoint_url}", ST_url="${textgenerationwebui_settings.server_urls[textgen_types.LLAMACPP]}", final apiUrl="${body.apiUrl}"`);
             break;
         case 'vllm':
+            body.apiKey = settings.vllm_api_key || '';
             body.apiUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : textgenerationwebui_settings.server_urls[textgen_types.VLLM];
             body.model = settings.vllm_model;
             break;
         case 'bananabread':
+            body.model=settings.bananabread_model||'';
             body.apiUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : 'http://localhost:8008';
             // Use extension settings for API key (custom keys aren't returned by ST's readSecretState)
             if (settings.bananabread_api_key) {
@@ -520,7 +534,7 @@ export function throwIfSourceInvalid(settings) {
     }
 
     // Check API key requirement
-    if (requiresApiKey(source)) {
+    if (requiresApiKey(source) && source !== 'nanogpt' && !(settings.use_alt_endpoint && ['openrouter','electronhub'].includes(source) && settings[`${source}_api_key_override`])) {
         const secretKey = getSecretKey(source);
         if (secretKey && !secret_state[secretKey]) {
             // Special case: VertexAI can use service account as fallback
@@ -531,6 +545,9 @@ export function throwIfSourceInvalid(settings) {
             }
         }
     }
+
+    if (source === 'nanogpt' && !settings.nanogpt_api_key) throw new Error('VectHare: NanoGPT API key missing');
+    if (source === 'custom' && !settings.alt_endpoint_url) throw new Error('VectHare: Custom API endpoint URL missing');
 
     // Check URL requirement
     if (requiresUrl(source)) {

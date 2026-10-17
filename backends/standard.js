@@ -1,3 +1,4 @@
+import { assertEmbeddingQueryFits } from '../core/embedding-overflow.js';
 /**
  * ============================================================================
  * STANDARD BACKEND (Vectra - ST Native + Plugin)
@@ -200,6 +201,9 @@ export class StandardBackend extends VectorBackend {
             // Try plugin API first (supports metadata) - fallback to native API if unavailable
             console.log('VectHare DEBUG: this.pluginAvailable =', this.pluginAvailable);
             let usePluginApi = this.pluginAvailable;
+            if (['nanogpt','custom','ollama'].includes(settings.source) && !usePluginApi) {
+                throw new Error(`${settings.source} requires the matching Similharity plugin for safe embedding requests (Ollama truncate:false and custom provider routing); refusing an unsafe native fallback`);
+            }
             let endpoint = usePluginApi ? '/api/plugins/similharity/chunks/insert' : '/api/vector/insert';
 
             console.log(`VectHare DEBUG: Using ${usePluginApi ? 'PLUGIN' : 'NATIVE'} API for insertion (${endpoint})`);
@@ -314,6 +318,7 @@ export class StandardBackend extends VectorBackend {
      * Uses native ST API
      */
     async queryCollection(collectionId, searchText, topK, settings, queryVector = null) {
+        if (!queryVector) await assertEmbeddingQueryFits(searchText, settings);
         const providerParams = getProviderSpecificParams(settings, true);
         const model = getModelFromSettings(settings);
 
@@ -369,6 +374,7 @@ export class StandardBackend extends VectorBackend {
      * Uses native ST API
      */
     async queryMultipleCollections(collectionIds, searchText, topK, threshold, settings, queryVector = null) {
+        if (!queryVector) await assertEmbeddingQueryFits(searchText, settings);
         const providerParams = getProviderSpecificParams(settings, true);
         const model = getModelFromSettings(settings);
 
@@ -550,6 +556,7 @@ export class StandardBackend extends VectorBackend {
      * Update chunk text (plugin-only feature)
      */
     async updateChunkText(collectionId, hash, newText, settings) {
+        await assertEmbeddingQueryFits(newText, settings); // Edit re-embeds one vector; do not silently truncate or split it.
         if (!this.pluginAvailable) {
             throw new Error('Chunk text editing requires the Similharity plugin');
         }

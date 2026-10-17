@@ -39,7 +39,7 @@ const ctx=moduleInVM('core/vectorization-profile.js',{
 await test('collection profile captures actual configured llama.cpp model, no credentials',async()=>{
     const p=await ctx.makeCollectionProfile(settings);
     assert.equal(p.embedding.modelId,'model-A');assert.equal(p.chunking.chunking_strategy,'conversation_turns');
-    assert.ok(!JSON.stringify(p).includes('private-secret'));assert.ok(!JSON.stringify(p).includes('127.0.0.1'));
+    assert.ok(!JSON.stringify(p).includes('private-secret'));assert.equal(p.chunking.alt_endpoint_url,settings.alt_endpoint_url);
     await ctx.saveCollectionProfile('qdrant:llamacpp:alice',p);
 });
 await test('two collections retain independent embedding models and chunking profiles',async()=>{
@@ -68,7 +68,7 @@ await test('changing URL and chunk defaults cannot silently overwrite saved stra
     const other={...settings,alt_endpoint_url:'http://127.0.0.1:4096',chunking_strategy:'per_message'};
     const result=await ctx.applyAndVerifyProfile('qdrant:llamacpp:alice',other);
     assert.equal(result.settings.chunking_strategy,'conversation_turns');
-    assert.equal(result.settings.alt_endpoint_url,other.alt_endpoint_url);
+    assert.equal(result.settings.alt_endpoint_url,settings.alt_endpoint_url);
 });
 await test('model mismatch blocks writes',async()=>{
     activeModel='model-B';

@@ -241,6 +241,7 @@ function createBrowserModal() {
                     <button class="vecthare-tab-btn" data-tab="search">
                         ${icons.search(16)} Search
                     </button>
+                    <button class="vecthare-tab-btn" data-tab="maintenance">Backups & Recovery</button>
                     <button class="vecthare-tab-btn" data-tab="bulk">
                         ${icons.listChecks(16)} Bulk Operations
                     </button>
@@ -248,6 +249,7 @@ function createBrowserModal() {
 
                 <!-- Tab Content -->
                 <div class="vecthare-browser-content">
+                    <div id="vecthare_tab_maintenance" class="vecthare-tab-content" style="padding:12px"></div>
                     <!-- Collections Tab -->
                     <div id="vecthare_tab_collections" class="vecthare-tab-content active">
                         <!-- Scope Filters (V1-style) -->
@@ -645,6 +647,10 @@ function switchTab(tabName) {
   $(`#vecthare_tab_${tabName}`).addClass("active");
 
   // Initialize tab-specific content
+  if (tabName === "maintenance") {
+    const area=document.getElementById('vecthare_tab_maintenance');
+    if(area)renderCollectionMaintenance(area,browserState.settings);
+  }
   if (tabName === "bulk") {
     renderBulkList();
     bindBulkEvents();

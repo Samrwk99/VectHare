@@ -43,6 +43,7 @@ export function getProviderSpecificParams(settings, isQuery = false) {
             break;
 
         case 'vllm':
+            params.apiKey = settings.vllm_api_key || '';
             params.apiUrl = settings.use_alt_endpoint
                 ? settings.alt_endpoint_url
                 : textgenerationwebui_settings.server_urls[textgen_types.VLLM];
@@ -59,6 +60,24 @@ export function getProviderSpecificParams(settings, isQuery = false) {
             }
             break;
 
+        case 'koboldcpp':
+            params.apiUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : textgenerationwebui_settings.server_urls[textgen_types.KOBOLDCPP];
+            break;
+        case 'nanogpt':
+            params.apiUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : 'https://nano-gpt.com/api/v1';
+            params.apiKey = settings.nanogpt_api_key || '';
+            break;
+        case 'custom':
+            params.apiUrl = settings.alt_endpoint_url;
+            params.apiKey = settings.custom_api_key || '';
+            break;
+        case 'openrouter':
+        case 'electronhub':
+            if (settings.use_alt_endpoint) {
+                params.apiUrl = settings.alt_endpoint_url;
+                params.apiKey = settings[`${source}_api_key_override`] || '';
+            }
+            break;
         case 'palm':
             params.api = 'makersuite';
             break;

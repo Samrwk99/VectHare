@@ -152,6 +152,7 @@ await checkAsync('Standard native sidecar saves text+metadata after success and 
         'backend-interface.js': {VectorBackend},
         'providers.js': {getModelField:()=> 'embedding_model'},
         'provider-params.js': {getProviderSpecificParams:()=>({})},
+        'embedding-overflow.js': {assertEmbeddingQueryFits:async()=>{}},
         'constants.js': {VECTOR_LIST_LIMIT:10000},
     },{fetch});
     const backend=new m.StandardBackend();

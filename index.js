@@ -70,6 +70,16 @@ const defaultSettings = {
     milvus_address: '',
     alt_endpoint_url: '',
     use_alt_endpoint: false,
+    nanogpt_model: '',
+    nanogpt_api_key: '',
+    custom_model: '',
+    custom_api_key: '',
+    vllm_api_key: '',
+    openrouter_api_key_override: '',
+    electronhub_api_key_override: '',
+    bananabread_model: '',
+    koboldcpp_model: '',
+    embedding_max_tokens: 0,
     rate_limit_calls: 5,
     rate_limit_interval: 60, // seconds
 
