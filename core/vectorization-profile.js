@@ -13,7 +13,7 @@ import { getChatUUID } from './collection-ids.js';
 import { bindChatCollection, getChatBinding } from './collection-ownership.js';
 
 const VERSION = 1;
-const COPY_FIELDS = ['embedding_max_tokens','alt_endpoint_url','use_alt_endpoint','chunking_strategy','batch_size','chunk_size','chunk_overlap','keyword_extraction_level','cleaning_preset','text_cleaning_enabled','cleaning_rules','substitution_policy','source','vector_backend','qdrant_multitenancy'];
+const COPY_FIELDS = ['embedding_max_tokens','alt_endpoint_url','use_alt_endpoint','custom_endpoint_mode','chunking_strategy','conversation_turn_order','batch_size','chunk_size','chunk_overlap','keyword_extraction_level','cleaning_preset','text_cleaning_enabled','cleaning_rules','substitution_policy','source','vector_backend','qdrant_multitenancy'];
 function copySafe(obj) {
     const result = {};
     for (const key of COPY_FIELDS) if (obj?.[key] !== undefined) result[key] = structuredClone(obj[key]);
@@ -126,7 +126,7 @@ export async function discoverEmbeddingModel(settings) {
 }
 export async function makeCollectionProfile(settings, override={}) {
     const model = await discoverEmbeddingModel(settings);
-    return {schemaVersion:VERSION,createdAt:new Date().toISOString(), embedding:{provider:settings.source||'transformers',modelId:model.modelId,configuredModel:(getModelField(settings.source)?settings[getModelField(settings.source)]:null)||null,modelPath:model.modelPath||null,verified:model.verified,discovery:model.discovery||null,reason:model.reason||null}, chunking:copySafe({...settings,...override}), limits:model.limits||null, status:model.verified?'verified':'unverified'};
+    return {schemaVersion:VERSION,createdAt:new Date().toISOString(), embedding:{provider:settings.source||'transformers',modelId:model.modelId,configuredModel:(getModelField(settings.source)?settings[getModelField(settings.source)]:null)||null,modelPath:model.modelPath||null,verified:model.verified,discovery:model.discovery||null,reason:model.reason||null}, chunking:copySafe({...settings,...override,conversation_turn_order:settings.conversation_turn_order || 'user_character'}), limits:model.limits||null, status:model.verified?'verified':'unverified'};
 }
 export async function saveCollectionProfile(key, profile) {
     if (!profile || profile.schemaVersion !== VERSION) throw new Error('Invalid collection profile');
@@ -144,7 +144,11 @@ export function settingsForSavedCollection(key, currentSettings) {
     if(!provider || !profile.embedding.verified)throw new Error('Saved embedding identity is unverified; refusing to resume');
     const parsed=parseRegistryKey(key);
     const modelField=getModelField(provider);
-    return {...currentSettings,...profile.chunking,source:provider,
+    return {...currentSettings,...profile.chunking,
+        ...(profile.chunking?.chunking_strategy === 'conversation_turns' ? {conversation_turn_order:profile.chunking.conversation_turn_order || 'user_character'} : {}),
+        source:provider,
+        // Profiles saved before Exact URL existed implicitly used Base mode.
+        ...(provider === 'custom' ? {custom_endpoint_mode:profile.chunking?.custom_endpoint_mode || 'base'} : {}),
         vector_backend:parsed.backend||profile.chunking?.vector_backend||currentSettings.vector_backend,
         ...(modelField && profile.embedding.configuredModel ? {[modelField]:profile.embedding.configuredModel} : {})};
 }
@@ -157,7 +161,9 @@ export async function applyAndVerifyProfile(key, currentSettings, {allowNew=fals
     }
     if (!profile.embedding?.verified || !profile.embedding.modelId) throw new Error('Collection embedding identity is unverified. Writing is blocked; use verified settings or re-vectorize safely.');
     if (profile.embedding.provider !== currentSettings.source) throw new Error(`Collection uses ${profile.embedding.provider}, active provider is ${currentSettings.source}. Switch back to the original provider.`);
-    const effectiveSettings = {...currentSettings, ...profile.chunking};
+    const effectiveSettings = {...currentSettings, ...profile.chunking,
+        ...(profile.chunking?.chunking_strategy === 'conversation_turns' ? {conversation_turn_order:profile.chunking.conversation_turn_order || 'user_character'} : {}),
+        ...(profile.embedding.provider === 'custom' ? {custom_endpoint_mode:profile.chunking?.custom_endpoint_mode || 'base'} : {})};
     const live = await discoverEmbeddingModel(effectiveSettings);
     if (!live.verified || !live.modelId || live.modelId !== profile.embedding.modelId || (profile.embedding.modelPath && (profile.embedding.provider === 'ollama' ? live.modelPath !== profile.embedding.modelPath : !!live.modelPath && live.modelPath !== profile.embedding.modelPath))) {
         throw new Error(`Embedding model mismatch or unavailable: collection=${profile.embedding.modelId}, running=${live.modelId || live.reason || 'unknown'}. No vectors were written.`);
@@ -175,6 +181,8 @@ export async function assertQueryModelCompatible(key, settings) {
     if(!profile) return; // Legacy collections remain readable, but cannot be written.
     if(!profile.embedding?.verified || !profile.embedding.modelId) throw new Error(`Collection ${key} has unverified embedding identity; do not issue an incompatible query.`);
     if(profile.embedding.provider !== settings.source)throw new Error(`Collection ${key} uses ${profile.embedding.provider}; query uses ${settings.source}`);
+    if(settings.source === 'custom' && (profile.chunking?.custom_endpoint_mode || 'base') !== (settings.custom_endpoint_mode || 'base'))
+        throw new Error(`Collection ${key} uses Custom API ${(profile.chunking?.custom_endpoint_mode || 'base')} URL mode. Restore that mode before querying; do not silently change embedding endpoints.`);
     const identity=getProviderSpecificParams(settings).apiUrl || '';
     const field=getModelField(settings.source);
     const cacheKey=`${settings.source}:${identity}:${field?settings[field]||'':''}`;

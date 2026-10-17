@@ -74,6 +74,7 @@ const defaultSettings = {
     nanogpt_api_key: '',
     custom_model: '',
     custom_api_key: '',
+    custom_endpoint_mode: 'base', // 'base' appends /v1/embeddings; 'exact' uses the URL verbatim.
     vllm_api_key: '',
     openrouter_api_key_override: '',
     electronhub_api_key_override: '',
@@ -101,6 +102,7 @@ const defaultSettings = {
     // Chat vectorization
     enabled_chats: false,
     chunking_strategy: 'per_message', // per_message, conversation_turns, message_batch, adaptive
+    conversation_turn_order: 'user_character', // Preferred logical pairing order for Conversation Turns
     batch_size: 4, // Messages per batch for message_batch strategy
     depth: 2,
     position: extension_prompt_types.IN_PROMPT,

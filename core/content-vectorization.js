@@ -92,6 +92,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
             chunkSize: settings.chunkSize || type.defaults.chunkSize,
             chunkOverlap: settings.chunkOverlap || type.defaults.chunkOverlap,
             batchSize: settings.batchSize || 4,
+            conversationTurnOrder: settings.conversationTurnOrder || 'user_character',
         });
 
         if (chunks.length === 0) {
@@ -150,7 +151,8 @@ export async function vectorizeContent({ contentType, source, settings }) {
         // same chunk hashes/manifests so Scan & Sync agree on the source of truth.
         const effectiveProfileSettings = {...vecthareSettings, chunking_strategy:settings.strategy || vecthareSettings.chunking_strategy,
             chunk_size:settings.chunkSize || vecthareSettings.chunk_size,
-            batch_size:settings.batchSize || vecthareSettings.batch_size};
+            batch_size:settings.batchSize || vecthareSettings.batch_size,
+            conversation_turn_order:settings.conversationTurnOrder || 'user_character'};
         let hashedChunks = isOpenChat && ['per_message','conversation_turns','message_batch','adaptive'].includes(settings.strategy)
             ? await buildExpectedChatItems(getContext().chat,effectiveProfileSettings)
             : await prepareEmbeddingItems(originalChunks,effectiveProfileSettings,getStringHash);
@@ -159,7 +161,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
         // No original text, credentials or embeddings are placed in the journal.
         const pending=extension_settings.vecthare.pendingVectorizations ||= {};
         const sourceFingerprint=JSON.stringify([contentType,source.type,sourceName,chatUUID,
-            source.replacedCollectionKey||null,settings.strategy,settings.chunkSize,settings.batchSize,
+            source.replacedCollectionKey||null,settings.strategy,settings.chunkSize,settings.batchSize,settings.conversationTurnOrder || 'user_character',
             currentBackend,currentSource,hashedChunks.map(c=>String(c.hash))]);
         const pendingKey=String(getStringHash(sourceFingerprint));
         let prior=pending[pendingKey];
@@ -179,7 +181,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
         if((getCollectionProfile(collectionKey) && !source.replaceExisting) || (prior?.registryKey===collectionKey && getCollectionProfile(collectionKey))) {
             const check = await applyAndVerifyProfile(collectionKey,effectiveProfileSettings);
             profile = check.profile;
-            for(const field of ['chunking_strategy','chunk_size','batch_size']) {
+            for(const field of ['chunking_strategy','chunk_size','batch_size','conversation_turn_order']) {
                 if(profile.chunking?.[field] !== undefined && effectiveProfileSettings[field] !== profile.chunking[field])
                     throw new Error(`Collection was created with ${field}=${profile.chunking[field]}; you selected ${effectiveProfileSettings[field]}. Use safe Re-vectorize instead of mixing strategies.`);
             }
@@ -616,7 +618,7 @@ function prepareChatContent(rawContent, settings) {
     }
 
     // Filter out system messages and empty messages
-    const validMessages = messages.filter(m => m.mes && !m.is_system);
+    const validMessages = messages.map((m, index) => ({...m, index})).filter(m => m.mes && !m.is_system);
 
     // Apply text cleaning to messages
     const cleanedMessages = cleanMessages(validMessages);
@@ -627,7 +629,7 @@ function prepareChatContent(rawContent, settings) {
         mes: m.mes,
         is_user: m.is_user,
         name: m.name,
-        index: idx,
+        index: m.index ?? idx,
         id: m.send_date || m.id || idx,
     }));
 

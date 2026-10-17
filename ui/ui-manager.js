@@ -219,12 +219,12 @@ export function renderSettings(containerId, settings, callbacks) {
 
                             <!-- Alternative Endpoint (for local providers) -->
                             <div class="vecthare_provider_setting" data-provider="ollama,vllm,llamacpp,koboldcpp,bananabread,openrouter,electronhub,nanogpt,custom">
-                                <label class="checkbox_label">
+                                <label class="checkbox_label" id="vecthare_alt_endpoint_toggle_label">
                                     <input type="checkbox" id="vecthare_use_alt_endpoint" />
                                     <span>Use Alternative Endpoint</span>
                                 </label>
                                 <input type="text" id="vecthare_alt_endpoint_url" class="vecthare-input" placeholder="http://localhost:11434" />
-                                <small class="vecthare_hint">Override default API URL for this provider; Custom API always uses this URL</small>
+                                <small class="vecthare_hint">Embedding server URL; Custom API always uses this URL. See Custom API's URL handling option below.</small>
                             </div>
 
                             <!-- OpenAI-compatible custom and NanoGPT embedding models -->
@@ -238,9 +238,15 @@ export function renderSettings(containerId, settings, callbacks) {
                             <div class="vecthare_provider_setting" data-provider="custom">
                                 <label for="vecthare_custom_model"><small>Embedding model ID</small></label>
                                 <input id="vecthare_custom_model" class="vecthare-input" type="text" placeholder="Your server's embedding model ID" />
+                                <label for="vecthare_custom_endpoint_mode"><small>Endpoint URL handling</small></label>
+                                <select id="vecthare_custom_endpoint_mode" class="vecthare-input">
+                                    <option value="base">Base URL — append /v1/embeddings automatically</option>
+                                    <option value="exact">Exact Endpoint URL — use the supplied URL unchanged</option>
+                                </select>
+                                <small class="vecthare_hint">Exact mode preserves the URL path and query string, including unusual paths. The API must still accept OpenAI-compatible embedding JSON (model + input) and return OpenAI-compatible embeddings. Requires matching Similharity.</small>
                                 <label for="vecthare_custom_api_key"><small>API key (optional)</small></label>
                                 <input id="vecthare_custom_api_key" class="vecthare-input" type="password" autocomplete="off" placeholder="Optional bearer token" />
-                                <small class="vecthare_hint">Enable Alternative Endpoint and set a full OpenAI-compatible API base URL (usually ending /v1). Requires Similharity.</small>
+                                <small class="vecthare_hint">Set the endpoint URL above. In Base mode use an API base URL (typically ending /v1); in Exact mode enter the full request URL.</small>
                             </div>
                             <!-- BananaBread Info & Reranking -->
                             <div class="vecthare_provider_setting" data-provider="bananabread">
@@ -738,6 +744,16 @@ export function renderSettings(containerId, settings, callbacks) {
                             <select id="vecthare_chunking_strategy" class="vecthare-select">
                                 <!-- Populated dynamically from content-types.js -->
                             </select>
+
+                            <!-- Only applies to Conversation Turns; persisted per collection. -->
+                            <div id="vecthare_conversation_turn_order_settings" style="display:none;margin-top:10px;">
+                                <label for="vecthare_conversation_turn_order"><small>Conversation Turns Pairing Order</small></label>
+                                <select id="vecthare_conversation_turn_order" class="vecthare-select">
+                                    <option value="user_character">User → Character</option>
+                                    <option value="character_user">Character → User</option>
+                                </select>
+                                <small class="vecthare_hint">Consecutive messages from the same speaker form one turn. Each collection keeps its original pairing order.</small>
+                            </div>
 
                             <!-- Strategy description (populated dynamically) -->
                             <div id="vecthare_strategy_info" class="vecthare_hint" style="margin-top: 4px; margin-bottom: 12px;">
@@ -1449,7 +1465,8 @@ function toggleProviderSettings(selectedProvider, settings) {
         }
     });
 
-    // Custom API always needs a visible endpoint field, even without the shared override toggle.
+    // Custom API always needs a URL; its separate Base/Exact selector controls routing.
+    $('#vecthare_alt_endpoint_toggle_label').toggle(selectedProvider !== 'custom');
     $('#vecthare_alt_endpoint_url').toggle(selectedProvider === 'custom' || !!settings.use_alt_endpoint);
 
     // Handle WebLLM-specific initialization
@@ -1782,6 +1799,7 @@ function bindSettingsEvents(settings, callbacks) {
         $('#vecthare_strategy_description').text(strategy?.description || '');
         // Show/hide batch settings
         $('#vecthare_batch_settings').toggle(strategyId === 'message_batch');
+        $('#vecthare_conversation_turn_order_settings').toggle(strategyId === 'conversation_turns');
     }
 
     strategySelect.on('change', function() {
@@ -1791,6 +1809,14 @@ function bindSettingsEvents(settings, callbacks) {
         updateStrategyUI(settings.chunking_strategy);
     });
     updateStrategyUI(settings.chunking_strategy || 'per_message');
+
+    $('#vecthare_conversation_turn_order')
+        .val(settings.conversation_turn_order === 'character_user' ? 'character_user' : 'user_character')
+        .on('change', function() {
+            settings.conversation_turn_order = $(this).val() === 'character_user' ? 'character_user' : 'user_character';
+            applySettingsSnapshot(settings);
+            saveSettingsDebounced();
+        });
 
     // Batch size (for message_batch strategy)
     $('#vecthare_batch_size')
@@ -2527,6 +2553,15 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
         });
 
+    // Custom URL routing is saved independently of the endpoint string and
+    // included in each collection's immutable vectorization profile.
+    $('#vecthare_custom_endpoint_mode')
+        .val(settings.custom_endpoint_mode || 'base')
+        .on('change', function () {
+            settings.custom_endpoint_mode = $(this).val() === 'exact' ? 'exact' : 'base';
+            applySettingsSnapshot(settings); saveSettingsDebounced();
+        });
+
     // P4 provider-specific OpenAI-compatible credentials and model names.
     for (const source of ['nanogpt', 'custom']) {
         $(`#vecthare_${source}_model`).val(settings[`${source}_model`] || '').on('input', function () {
@@ -2573,12 +2608,12 @@ function bindSettingsEvents(settings, callbacks) {
             settings.use_alt_endpoint = $(this).prop('checked');
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
-            $('#vecthare_alt_endpoint_url').toggle(settings.use_alt_endpoint);
+            $('#vecthare_alt_endpoint_url').toggle(settings.source === 'custom' || settings.use_alt_endpoint);
         });
 
     $('#vecthare_alt_endpoint_url')
         .val(settings.alt_endpoint_url)
-        .toggle(settings.use_alt_endpoint)
+        .toggle(settings.source === 'custom' || settings.use_alt_endpoint)
         .on('input', function() {
             settings.alt_endpoint_url = String($(this).val());
             applySettingsSnapshot(settings);

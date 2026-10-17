@@ -13,6 +13,7 @@ import { getCurrentChatId, is_send_press, setExtensionPrompt, substituteParams, 
 import { getContext } from '../../../../extensions.js';
 import { getStringHash as calculateHash, waitUntilCondition, onlyUnique } from '../../../../utils.js';
 import { isUnitStrategy, chunkText } from './chunking.js';
+import { groupConversationTurns, normalizeTurnOrder } from './conversation-turns.js';
 import { applyAndVerifyProfile, settingsForSavedCollection, saveChatChunkManifest, saveCollectionProfile, patchChatChunkManifest, getChatChunkManifest } from './vectorization-profile.js';
 import { prepareEmbeddingItems } from './embedding-overflow.js';
 import { bindChatCollection } from './collection-ownership.js';
@@ -160,7 +161,7 @@ function prepareItemsForInsertion(items) {
  * @param {string} keywordLevel Keyword extraction level: 'off', 'minimal', 'balanced', 'aggressive'
  * @returns {object[]} Grouped message items ready for chunking
  */
-export function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel = 'balanced') {
+export function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel = 'balanced', conversationTurnOrder = 'user_character') {
     if (!messages.length) return [];
 
     // Helper to extract keywords based on level
@@ -171,34 +172,24 @@ export function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywo
 
     switch (strategy) {
         case 'conversation_turns': {
-            // Group user + AI message pairs
-            const grouped = [];
-            for (let i = 0; i < messages.length; i += 2) {
-                const pair = [messages[i]];
-                if (i + 1 < messages.length) {
-                    pair.push(messages[i + 1]);
-                }
-                // Combine texts with speaker labels
-                const combinedText = pair.map(m => {
-                    const role = m.is_user ? 'User' : 'Character';
-                    return `[${role}]: ${m.text}`;
-                }).join('\n\n');
-
-                grouped.push({
+            const order = normalizeTurnOrder(conversationTurnOrder);
+            return groupConversationTurns(messages, order).map(pair => {
+                const combinedText = pair.map(m => `[${m.is_user ? 'User' : 'Character'}]: ${m.text}`).join('\n\n');
+                return {
                     text: combinedText,
                     hash: getStringHash(combinedText),
-                    index: messages[i].index,
+                    index: pair[0].index,
                     keywords: getKeywords(combinedText),
                     metadata: {
                         strategy: 'conversation_turns',
+                        turnOrder: order,
                         messageIds: pair.map(m => m.index),
-                        messageHashes: pair.map(m => m.hash), // Store individual hashes for injection lookup
-                        startIndex: messages[i].index,
-                        endIndex: pair[pair.length - 1].index
-                    }
-                });
-            }
-            return grouped;
+                        messageHashes: pair.map(m => m.hash),
+                        startIndex: pair[0].index,
+                        endIndex: pair[pair.length - 1].index,
+                    },
+                };
+            });
         }
 
         case 'message_batch': {
@@ -435,7 +426,7 @@ export async function buildExpectedChatItems(chat, settings) {
             const ids=segments.filter(m=>m.start<end && m.end>start).map(m=>m.index);
             return {text:c.text,hash:getStringHash(c.text),index:ids[0]||0,keywords:keywordLevel==='off'?[]:extractBM25Keywords(c.text,{level:keywordLevel}),metadata:{...c.metadata,strategy:'adaptive',messageIds:ids,startIndex:ids[0],endIndex:ids.at(-1)}};
         });
-    } else grouped=groupMessagesByStrategy(messages,settings.chunking_strategy||'per_message',settings.batch_size||4,keywordLevel);
+    } else grouped=groupMessagesByStrategy(messages,settings.chunking_strategy||'per_message',settings.batch_size||4,keywordLevel,settings.conversation_turn_order||'user_character');
     return prepareEmbeddingItems(prepareItemsForInsertion(grouped),settings,getStringHash);
 }
 

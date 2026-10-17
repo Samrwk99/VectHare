@@ -95,9 +95,10 @@ export function renderCollectionMaintenance(container,settings=extension_setting
             const provider=input('Original embedding provider',item.source);
             const model=input('Original model name (required for model-based providers)',getModelField(item.source)?settings[getModelField(item.source)]||'':'');
             const strategy=input('Original chunking strategy',settings.chunking_strategy||'conversation_turns');
+            const turnOrder=input('Conversation Turns order (user_character or character_user)',settings.conversation_turn_order||'user_character');
             const size=input('Original chunk size',settings.chunk_size||512,'number');
             const overlap=input('Original overlap',settings.chunk_overlap||0,'number');
-            form.append(provider.holder,model.holder,strategy.holder,size.holder,overlap.holder);
+            form.append(provider.holder,model.holder,strategy.holder,turnOrder.holder,size.holder,overlap.holder);
             const verify=button('Verify existing vectors and restore profile','restore');verify.dataset.collectionKey=key;
             form.append(verify);
             const newCollection=button('Safely re-vectorize into a NEW collection…','revectorize');newCollection.dataset.collectionKey=key;
@@ -117,8 +118,9 @@ export function renderCollectionMaintenance(container,settings=extension_setting
                 const selectedSource=provider.field.value.trim();
                 if(selectedSource!==item.source){setStatus(container,'Provider does not match collection identity. No profile was saved.',true);return;}
                 const candidate={...settings,source:selectedSource,vector_backend:item.backend,
-                    chunking_strategy:strategy.field.value.trim(),chunk_size:Number(size.field.value),chunk_overlap:Number(overlap.field.value)};
+                    chunking_strategy:strategy.field.value.trim(),conversation_turn_order:turnOrder.field.value.trim(),chunk_size:Number(size.field.value),chunk_overlap:Number(overlap.field.value)};
                 const field=getModelField(selectedSource);if(field)candidate[field]=model.field.value.trim();
+                if(!['user_character','character_user'].includes(candidate.conversation_turn_order)){setStatus(container,'Invalid Conversation Turns order',true);return;}
                 if(!candidate.chunking_strategy||!Number.isInteger(candidate.chunk_size)||candidate.chunk_size<1 || !Number.isInteger(candidate.chunk_overlap)||candidate.chunk_overlap<0){setStatus(container,'Invalid chunking fields',true);return;}
                 if(!confirm(`Attempt read-only compatibility checks for ${key}? No stored vectors will be changed.`))return;
                 busy=true;setStatus(container,'Comparing stored vectors with live provider…');

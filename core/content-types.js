@@ -36,7 +36,7 @@ export const CHUNKING_STRATEGIES = {
     conversation_turns: {
         id: 'conversation_turns',
         name: 'Conversation Turns',
-        description: 'Pairs user + AI messages together. Good for dialogue context.',
+        description: 'Pairs logical User/Character turns in your chosen order; consecutive messages from one speaker remain grouped.',
         needsSize: false,
         needsOverlap: false,
         needsBatchSize: false,

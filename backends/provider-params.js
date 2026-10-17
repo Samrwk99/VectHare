@@ -70,6 +70,7 @@ export function getProviderSpecificParams(settings, isQuery = false) {
         case 'custom':
             params.apiUrl = settings.alt_endpoint_url;
             params.apiKey = settings.custom_api_key || '';
+            params.customEndpointMode = settings.custom_endpoint_mode || 'base';
             break;
         case 'openrouter':
         case 'electronhub':

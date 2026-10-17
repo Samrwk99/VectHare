@@ -13,11 +13,11 @@ const MAX_TOKEN_CACHE=5000;
 const NETWORK_PROVIDERS=new Set(['llamacpp','ollama','vllm','koboldcpp','bananabread','openrouter','electronhub','nanogpt','custom']);
 const MODEL_FIELDS={ollama:'ollama_model',vllm:'vllm_model',openrouter:'openrouter_model',electronhub:'electronhub_model',nanogpt:'nanogpt_model',custom:'custom_model'};
 function getModel(settings){return settings[MODEL_FIELDS[settings.source]]||settings.model||'';}
-function endpointKey(settings){const params=getProviderSpecificParams(settings);return `${settings.source}|${params.apiUrl||''}|${getModel(settings)}`;}
+function endpointKey(settings){const params=getProviderSpecificParams(settings);return `${settings.source}|${params.apiUrl||''}|${params.customEndpointMode||'base'}|${getModel(settings)}`;}
 async function proxy(route, settings, text) {
-    const {apiUrl, apiKey}=getProviderSpecificParams(settings);
+    const {apiUrl, apiKey, customEndpointMode}=getProviderSpecificParams(settings);
     const model=getModel(settings);
-    const response = await fetch(`/api/plugins/similharity/embedding/${route}`, {method:'POST',headers:headers(),body:JSON.stringify({source:settings.source,apiUrl,apiKey,model,...(text==null?{}:{text})})});
+    const response = await fetch(`/api/plugins/similharity/embedding/${route}`, {method:'POST',headers:headers(),body:JSON.stringify({source:settings.source,apiUrl,apiKey,model,customEndpointMode,...(text==null?{}:{text})})});
     if (!response.ok) throw new Error(`${route} failed (${response.status}): ${(await response.text()).slice(0,250)}`);
     return response.json();
 }
@@ -40,9 +40,14 @@ export async function getEmbeddingBudget(settings) {
     let capabilities=null;
     {
         try {capabilities={data:await proxy('capabilities',settings),time:Date.now()};capabilityCache.set(key,capabilities);}
-        catch(error){if(!manual)throw new Error(`${settings.source}: embedding input limit could not be detected. Configure "Embedding input token limit override" explicitly, or check endpoint connectivity. ${error.message}`);}
+        catch(error){if(!manual || (settings.source==='custom' && settings.custom_endpoint_mode==='exact'))throw new Error(`${settings.source}: embedding input limit or exact-endpoint support could not be verified. Configure "Embedding input token limit override" explicitly, check endpoint connectivity, and install the matching Similharity plugin. ${error.message}`);}
     }
     const data=capabilities?.data;
+    // Older plugins ignore customEndpointMode and silently rewrite the URL.
+    // Never send an exact-endpoint request until support is confirmed.
+    if(settings.source==='custom' && settings.custom_endpoint_mode==='exact' && (data?.endpointModeSupported!==true || data?.endpointMode!=='exact')) {
+        throw new Error('Custom API Exact Endpoint requires the matching Similharity plugin with exact-endpoint support. Refusing to send to a rewritten URL.');
+    }
     if(data){
         const fingerprint=`${data.modelId||''}:${data.modelPath||''}`;
         if(endpointModels.has(key)&&endpointModels.get(key)!==fingerprint)tokenCache.clear();
@@ -129,9 +134,14 @@ export async function prepareEmbeddingItems(items, settings, hashFn) {
         if(textBudget<=0)throw new Error('Insufficient input budget after keywords');
         const text=String(item.text||'');
         let pieces;
-        const pair = item.metadata?.strategy==='conversation_turns' ? text.match(/^(\[User\]:[\s\S]*?)\n\n(\[Character\]:[\s\S]*)$/) : null;
-        if (pair) {
-            const a=pair[1],b=pair[2];
+        // Either speaker can lead. Only treat exactly two labelled messages
+        // as a repeatable pair; larger runs use linked, lossless overflow parts.
+        const labelledBoundaries = text.match(/\n\n\[(?:User|Character)\]:/g) || [];
+        const pair = item.metadata?.strategy === 'conversation_turns' && labelledBoundaries.length === 1
+            ? text.match(/^(\[(User|Character)\]:[\s\S]*?)\n\n(\[(User|Character)\]:[\s\S]*)$/)
+            : null;
+        if (pair && pair[2] !== pair[4]) {
+            const a=pair[1],b=pair[3];
             const short=(await count(a))<=(await count(b))?a:b;
             const long=short===a?b:a;
             const shortCount=await count(short);

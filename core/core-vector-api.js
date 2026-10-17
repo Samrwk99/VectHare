@@ -211,6 +211,7 @@ export function getVectorsRequestBody(args = {}, settings) {
             body.model = settings.custom_model;
             body.apiUrl = settings.alt_endpoint_url;
             body.apiKey = settings.custom_api_key || '';
+            body.customEndpointMode = settings.custom_endpoint_mode || 'base';
             break;
         case 'togetherai':
             body.model = settings.togetherai_model;
