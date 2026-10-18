@@ -60,6 +60,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
             strategy: settings.strategy || type.defaultStrategy,
             chunkSize: settings.chunkSize || type.defaults.chunkSize,
             chunkOverlap: settings.chunkOverlap || type.defaults.chunkOverlap,
+            conversationTurnOrder: settings.conversation_turn_order || 'user_character',
         });
 
         if (chunks.length === 0) {
@@ -136,6 +137,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
             createdAt: new Date().toISOString(),
             settings: {
                 strategy: settings.strategy,
+                conversation_turn_order: settings.conversation_turn_order,
                 chunkSize: settings.chunkSize,
             },
             temporalDecay: hasFeature(contentType, 'temporalDecay')

@@ -12,7 +12,7 @@
 import { getCurrentChatId, is_send_press, setExtensionPrompt, substituteParams, chat_metadata, extension_prompts } from '../../../../../script.js';
 import { getContext } from '../../../../extensions.js';
 import { getStringHash as calculateHash, waitUntilCondition, onlyUnique } from '../../../../utils.js';
-import { isUnitStrategy } from './chunking.js';
+import { isUnitStrategy, groupConversationTurns } from './chunking.js';
 import { extractChatKeywords, extractBM25Keywords } from './keyword-boost.js';
 import { cleanText } from './text-cleaning.js';
 import {
@@ -108,6 +108,8 @@ async function computeVectorizationConfigFingerprint(settings) {
             model: currentModel,
             chunking_strategy: settings.chunking_strategy,
             batch_size: settings.batch_size,
+            ...(settings.chunking_strategy === 'conversation_turns'
+                ? { conversation_turn_order: settings.conversation_turn_order || 'user_character' } : {}),
             chunk_size: settings.chunk_size,
         })));
     } catch (error) {
@@ -272,7 +274,7 @@ function prepareItemsForInsertion(items) {
  * @param {string} keywordLevel Keyword extraction level: 'off', 'minimal', 'balanced', 'aggressive'
  * @returns {object[]} Grouped message items ready for chunking
  */
-function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel = 'balanced') {
+function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel = 'balanced', conversationTurnOrder = 'user_character') {
     if (!messages.length) return [];
 
     // R22: grouped strategies hash the combined RAW text (m.raw), not the
@@ -288,13 +290,9 @@ function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel
 
     switch (strategy) {
         case 'conversation_turns': {
-            // Group user + AI message pairs
+            // Pair logical speaker turns, including consecutive messages.
             const grouped = [];
-            for (let i = 0; i < messages.length; i += 2) {
-                const pair = [messages[i]];
-                if (i + 1 < messages.length) {
-                    pair.push(messages[i + 1]);
-                }
+            for (const pair of groupConversationTurns(messages, conversationTurnOrder)) {
                 // Combine texts with speaker labels
                 const combinedText = pair.map(m => {
                     const role = m.is_user ? 'User' : 'Character';
@@ -309,13 +307,13 @@ function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel
                 grouped.push({
                     text: combinedText,
                     hash: getStringHash(combinedRaw),
-                    index: messages[i].index,
+                    index: pair[0].index,
                     keywords: getKeywords(combinedText),
                     metadata: {
                         strategy: 'conversation_turns',
                         messageIds: pair.map(m => m.index),
                         messageHashes: pair.map(m => m.hash), // Store individual hashes for injection lookup
-                        startIndex: messages[i].index,
+                        startIndex: pair[0].index,
                         endIndex: pair[pair.length - 1].index
                     }
                 });
@@ -404,7 +402,7 @@ function collectGroupedItems(chat, settings) {
         });
     }
 
-    return groupMessagesByStrategy(allMessages, strategy, strategyBatchSize, keywordLevel);
+    return groupMessagesByStrategy(allMessages, strategy, strategyBatchSize, keywordLevel, settings.conversation_turn_order);
 }
 
 /**
@@ -3095,7 +3093,7 @@ export async function checkUnfinishedVectorization(settings, collectionIdOverrid
             });
         }
 
-        const groupedItems = groupMessagesByStrategy(allMessages, strategy, strategyBatchSize, keywordLevel);
+        const groupedItems = groupMessagesByStrategy(allMessages, strategy, strategyBatchSize, keywordLevel, settings.conversation_turn_order);
         const pending = groupedItems.filter(item => !existingHashes.has(item.hash)).length;
 
         return {

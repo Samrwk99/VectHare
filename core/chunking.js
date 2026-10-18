@@ -43,6 +43,7 @@ export async function chunkText(text, options = {}) {
         chunkSize = DEFAULT_CHUNK_SIZE,
         chunkOverlap = DEFAULT_CHUNK_OVERLAP,
         batchSize = 4,
+        conversationTurnOrder = 'user_character',
     } = options;
 
     if (!text) {
@@ -57,7 +58,7 @@ export async function chunkText(text, options = {}) {
 
     // Select strategy
     const strategyFn = STRATEGIES[strategy] || STRATEGIES.adaptive;
-    const chunks = strategyFn(text, { chunkSize, chunkOverlap, batchSize });
+    const chunks = strategyFn(text, { chunkSize, chunkOverlap, batchSize, conversationTurnOrder });
 
     // Add metadata to each chunk
     return chunks.map((chunk, index) => ({
@@ -69,6 +70,41 @@ export async function chunkText(text, options = {}) {
             ...(typeof chunk === 'object' ? chunk.metadata : {}),
         },
     }));
+}
+
+/**
+ * Pair consecutive speaker turns in the selected order. Runs of messages
+ * from the same speaker are one logical turn; unmatched edge turns remain
+ * separate chunks rather than being paired in the wrong order.
+ * @param {Array} messages Chronological chat messages with .is_user
+ * @param {string} order 'user_character' or 'character_user'
+ * @returns {Array<Array>} Message groups in their original order
+ */
+export function groupConversationTurns(messages, order = 'user_character') {
+    if (!Array.isArray(messages) || messages.length === 0) return [];
+
+    const turns = [];
+    for (const message of messages) {
+        const last = turns[turns.length - 1];
+        if (last && Boolean(last[0].is_user) === Boolean(message.is_user)) {
+            last.push(message);
+        } else {
+            turns.push([message]);
+        }
+    }
+
+    const startsWithUser = order !== 'character_user';
+    const groups = [];
+    for (let i = 0; i < turns.length;) {
+        if (Boolean(turns[i][0].is_user) === startsWithUser && i + 1 < turns.length) {
+            groups.push([...turns[i], ...turns[i + 1]]);
+            i += 2;
+        } else {
+            groups.push(turns[i]);
+            i++;
+        }
+    }
+    return groups;
 }
 
 /**
@@ -119,12 +155,7 @@ const STRATEGIES = {
         }
 
         const chunks = [];
-        for (let i = 0; i < messages.length; i += 2) {
-            const pair = [messages[i]];
-            if (i + 1 < messages.length) {
-                pair.push(messages[i + 1]);
-            }
-
+        for (const pair of groupConversationTurns(messages, options.conversationTurnOrder)) {
             // Combine texts with speaker labels
             const combinedText = pair.map(m => {
                 const role = m.is_user ? 'User' : (m.name || 'Character');

@@ -86,6 +86,7 @@ const defaultSettings = {
     enabled_chats: false,
     chunking_strategy: 'per_message', // per_message, conversation_turns, message_batch, adaptive
     batch_size: 4, // Messages per batch for message_batch strategy
+    conversation_turn_order: 'user_character', // Pairing order for conversation_turns
     depth: 2,
     position: extension_prompt_types.IN_PROMPT,
     protect: 5,

@@ -49,6 +49,9 @@ let sourceData = null;
 export function openContentVectorizer(initialType = null) {
     currentContentType = initialType;
     currentSettings = initialType ? { ...getContentTypeDefaults(initialType) } : {};
+    if (initialType === 'chat') {
+        currentSettings.conversation_turn_order = extension_settings.vecthare?.conversation_turn_order || 'user_character';
+    }
     sourceData = null;
 
     createModal();
@@ -148,6 +151,16 @@ function createModal() {
                                     <!-- Populated dynamically -->
                                 </select>
                                 <span class="vecthare-cv-strategy-desc" id="vecthare_cv_strategy_desc"></span>
+                            </div>
+
+                            <!-- Conversation Turns pairing order -->
+                            <div id="vecthare_cv_turn_order_row" style="display: none; margin-top: 12px;">
+                                <label for="vecthare_cv_turn_order">Pairing Order</label>
+                                <select id="vecthare_cv_turn_order" class="vecthare-select">
+                                    <option value="user_character">User → Character</option>
+                                    <option value="character_user">Character → User</option>
+                                </select>
+                                <small class="vecthare_hint">Consecutive messages from one speaker count as a single turn.</small>
                             </div>
 
                             <!-- Size/Overlap controls - only shown for text-based strategies -->
@@ -704,6 +717,8 @@ function updateChunkingSection(type) {
     $('#vecthare_cv_overlap').val(chunkOverlap);
     $('#vecthare_cv_overlap_val').text(chunkOverlap === 0 ? 'Off' : chunkOverlap);
 
+    $('#vecthare_cv_turn_order').val(currentSettings.conversation_turn_order || 'user_character');
+
     // Show/hide size controls based on strategy type
     updateSizeControlsVisibility();
 }
@@ -723,6 +738,7 @@ function updateSizeControlsVisibility() {
     // Show/hide the entire size controls section
     const hasAnyControls = needsSize || needsOverlap;
     $('#vecthare_cv_size_controls').toggle(hasAnyControls);
+    $('#vecthare_cv_turn_order_row').toggle(strategyId === 'conversation_turns');
 
     // Show/hide individual controls
     $('#vecthare_cv_chunk_size_row').toggle(needsSize);
@@ -1100,6 +1116,9 @@ function bindEvents() {
 
         currentContentType = type;
         currentSettings = { ...getContentTypeDefaults(type) };
+        if (type === 'chat') {
+            currentSettings.conversation_turn_order = extension_settings.vecthare?.conversation_turn_order || 'user_character';
+        }
 
         // Show type-specific hint
         const typeInfo = getContentType(type);
@@ -1130,6 +1149,10 @@ function bindEvents() {
         $('#vecthare_cv_strategy_desc').text(selected?.description || '');
         currentSettings.strategy = strategy;
         updateSizeControlsVisibility();
+    });
+
+    $('#vecthare_cv_turn_order').on('change', function() {
+        currentSettings.conversation_turn_order = String($(this).val());
     });
 
     // Size sliders
@@ -2269,6 +2292,7 @@ async function previewChunks() {
             strategy: currentSettings.strategy || type.defaultStrategy,
             chunkSize: currentSettings.chunkSize || type.defaults.chunkSize,
             chunkOverlap: currentSettings.chunkOverlap || type.defaults.chunkOverlap,
+            conversationTurnOrder: currentSettings.conversation_turn_order || 'user_character',
         });
 
         // Handle empty or undefined chunks
