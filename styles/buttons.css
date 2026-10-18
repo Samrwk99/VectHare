@@ -18,57 +18,6 @@
     margin-top: 24px;
 }
 
-/* Main Actions layout: preserve the original two vertical button groups.
- * The new Scan/placeholder row sits above Sync/Database Browser.
- * Keep the right-hand group 1.5x the width of the left, including on Android.
- * Scoped to the settings Actions card, not other grids or dialogs. */
-.vecthare-actions-grid.vecthare-main-actions {
-    grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
-}
-
-.vecthare-actions-grid.vecthare-main-actions > .vecthare-action-featured,
-.vecthare-actions-grid.vecthare-main-actions > .vecthare-health-indicator {
-    grid-column: 1 / -1;
-}
-
-.vecthare-actions-grid.vecthare-main-actions > .vecthare-health-indicator {
-    justify-self: end;
-}
-
-/* Preserve the two-column arrangement even when other responsive rules
- * normally stack all action buttons into a single column. */
-@media (max-width: 768px) {
-    .vecthare-actions-grid.vecthare-main-actions {
-        gap: 8px;
-    }
-
-    .vecthare-actions-grid.vecthare-main-actions > .vecthare-action-btn:not(.vecthare-action-featured) {
-        padding: 12px 6px;
-        min-width: 0;
-        font-size: 0.9em;
-        line-height: 1.25;
-        gap: 6px;
-        text-align: center;
-        flex-wrap: wrap;
-    }
-
-    .vecthare-actions-grid.vecthare-main-actions > .vecthare-action-btn span {
-        overflow-wrap: anywhere;
-    }
-}
-
-@media (max-width: 400px) {
-    .vecthare-actions-grid.vecthare-main-actions {
-        gap: 6px;
-    }
-
-    .vecthare-actions-grid.vecthare-main-actions > .vecthare-action-btn:not(.vecthare-action-featured) {
-        padding: 10px 5px;
-        font-size: 0.85em;
-        gap: 4px;
-    }
-}
-
 .vecthare-action-btn {
     padding: 18px 24px;
     border-radius: 12px;

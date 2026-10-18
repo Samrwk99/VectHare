@@ -37,7 +37,6 @@ export const EMBEDDING_PROVIDERS = {
     // Local server providers (need URL)
     bananabread: {
         name: 'BananaBread',
-        modelField: 'bananabread_model',
         local: true,
         requiresModel: false,
         requiresApiKey: true,
@@ -63,7 +62,6 @@ export const EMBEDDING_PROVIDERS = {
     koboldcpp: {
         name: 'KoboldCpp',
         local: true,
-        modelField: 'koboldcpp_model',
         requiresModel: false,
         requiresApiKey: false,
         requiresUrl: true,
@@ -150,18 +148,6 @@ export const EMBEDDING_PROVIDERS = {
         requiresApiKey: true,
         secretKey: SECRET_KEYS.VERTEXAI,
         requiresUrl: false,
-    },
-
-    // OpenAI-compatible hosted and user-defined embedding APIs
-    nanogpt: {
-        name: 'NanoGPT', local: false, requiresModel: true,
-        modelField: 'nanogpt_model', requiresApiKey: true,
-        secretKey: 'nanogpt_api_key', requiresUrl: false,
-        defaultUrl: 'https://nano-gpt.com/api/v1',
-    },
-    custom: {
-        name: 'Custom OpenAI-compatible API', local: false, requiresModel: true,
-        modelField: 'custom_model', requiresApiKey: false, requiresUrl: true,
     },
 
     // Other

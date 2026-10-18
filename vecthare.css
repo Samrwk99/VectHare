@@ -20,7 +20,6 @@
 /* Utility styles */
 @import url('./styles/sleek-ui.css');
 @import url('./styles/progress-indicator.css');
-@import url('./styles/live-status.css');
 
 /* UI component styles */
 @import url('./ui/diagnostics.css');

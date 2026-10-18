@@ -1,4 +1,3 @@
-import { assertEmbeddingQueryFits } from '../core/embedding-overflow.js';
 /**
  * ============================================================================
  * LANCEDB BACKEND (via Unified Plugin API)
@@ -17,7 +16,6 @@ import { assertEmbeddingQueryFits } from '../core/embedding-overflow.js';
 import { getRequestHeaders } from '../../../../../script.js';
 import { VectorBackend } from './backend-interface.js';
 import { getModelField } from '../core/providers.js';
-import { getProviderSpecificParams } from './provider-params.js';
 import { VECTOR_LIST_LIMIT } from '../core/constants.js';
 
 const BACKEND_TYPE = 'lancedb';
@@ -43,7 +41,7 @@ export class LanceDBBackend extends VectorBackend {
 
         const knownBackends = ['standard', 'lancedb', 'vectra', 'milvus', 'qdrant'];
         const knownSources = ['transformers', 'openai', 'cohere', 'ollama', 'llamacpp',
-            'vllm', 'koboldcpp', 'webllm', 'bananabread', 'openrouter', 'nanogpt', 'custom', 'togetherai', 'mistral'];
+            'vllm', 'koboldcpp', 'webllm', 'bananabread', 'openrouter', 'togetherai', 'mistral'];
 
         const parts = collectionId.split(':');
 
@@ -101,7 +99,6 @@ export class LanceDBBackend extends VectorBackend {
                 collectionId: actualCollectionId,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                ...getProviderSpecificParams(settings),
                 limit: VECTOR_LIST_LIMIT, // Get all for hash comparison
             }),
         });
@@ -146,7 +143,6 @@ export class LanceDBBackend extends VectorBackend {
                 })),
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                ...getProviderSpecificParams(settings),
             }),
         });
 
@@ -169,7 +165,6 @@ export class LanceDBBackend extends VectorBackend {
                 hashes: hashes,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                ...getProviderSpecificParams(settings),
             }),
         });
 
@@ -180,7 +175,6 @@ export class LanceDBBackend extends VectorBackend {
     }
 
     async queryCollection(collectionId, searchText, topK, settings) {
-        await assertEmbeddingQueryFits(searchText, settings);
         const actualCollectionId = this._stripRegistryPrefix(collectionId);
         console.log(`[LanceDB] queryCollection: original=${collectionId}, stripped=${actualCollectionId}`);
         const response = await fetch('/api/plugins/similharity/chunks/query', {
@@ -194,7 +188,6 @@ export class LanceDBBackend extends VectorBackend {
                 threshold: 0.0,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                ...getProviderSpecificParams(settings),
             }),
         });
 
@@ -218,7 +211,6 @@ export class LanceDBBackend extends VectorBackend {
     }
 
     async queryMultipleCollections(collectionIds, searchText, topK, threshold, settings) {
-        await assertEmbeddingQueryFits(searchText, settings);
         // Query each collection separately
         const results = {};
 
@@ -236,7 +228,6 @@ export class LanceDBBackend extends VectorBackend {
                         threshold: threshold,
                         source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                ...getProviderSpecificParams(settings),
                     }),
                 });
 
@@ -276,7 +267,6 @@ export class LanceDBBackend extends VectorBackend {
                 collectionId: actualCollectionId,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                ...getProviderSpecificParams(settings),
             }),
         });
 
@@ -330,7 +320,6 @@ export class LanceDBBackend extends VectorBackend {
             collectionId: actualCollectionId,
             source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                ...getProviderSpecificParams(settings),
         }), {
             headers: getRequestHeaders(),
         });
@@ -358,7 +347,6 @@ export class LanceDBBackend extends VectorBackend {
                 collectionId: actualCollectionId,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                ...getProviderSpecificParams(settings),
                 offset: options.offset || 0,
                 limit: options.limit || 100,
                 includeVectors: options.includeVectors || false,
@@ -377,7 +365,6 @@ export class LanceDBBackend extends VectorBackend {
      * Update chunk text (triggers re-embedding)
      */
     async updateChunkText(collectionId, hash, newText, settings) {
-        await assertEmbeddingQueryFits(newText, settings); // Edit re-embeds one vector; do not silently truncate or split it.
         const actualCollectionId = this._stripRegistryPrefix(collectionId);
         const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}/text`, {
             method: 'PATCH',
@@ -388,7 +375,6 @@ export class LanceDBBackend extends VectorBackend {
                 text: newText,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                ...getProviderSpecificParams(settings),
             }),
         });
 
@@ -414,7 +400,6 @@ export class LanceDBBackend extends VectorBackend {
                 metadata: metadata,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                ...getProviderSpecificParams(settings),
             }),
         });
 
@@ -439,7 +424,6 @@ export class LanceDBBackend extends VectorBackend {
                 collectionId: actualCollectionId,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                ...getProviderSpecificParams(settings),
             }),
         });
 

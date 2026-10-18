@@ -27,7 +27,6 @@
  */
 
 import { DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP } from './constants.js';
-import { groupConversationTurns } from './conversation-turns.js';
 
 /**
  * Main entry point - chunks text using specified strategy
@@ -44,7 +43,6 @@ export async function chunkText(text, options = {}) {
         chunkSize = DEFAULT_CHUNK_SIZE,
         chunkOverlap = DEFAULT_CHUNK_OVERLAP,
         batchSize = 4,
-        conversationTurnOrder = 'user_character',
     } = options;
 
     if (!text) {
@@ -59,7 +57,7 @@ export async function chunkText(text, options = {}) {
 
     // Select strategy
     const strategyFn = STRATEGIES[strategy] || STRATEGIES.adaptive;
-    const chunks = strategyFn(text, { chunkSize, chunkOverlap, batchSize, conversationTurnOrder });
+    const chunks = strategyFn(text, { chunkSize, chunkOverlap, batchSize });
 
     // Add metadata to each chunk
     return chunks.map((chunk, index) => ({
@@ -120,20 +118,31 @@ const STRATEGIES = {
             return [];
         }
 
-        const pairs = groupConversationTurns(messages, options.conversationTurnOrder);
-        return pairs.map(pair => ({
-            text: pair.map(m => {
-                const role = m.is_user ? 'User' : 'Character';
-                return `[${role}]: ${m.text || m.mes || ''}`;
-            }).join('\n\n'),
-            metadata: {
-                strategy: 'conversation_turns',
-                turnOrder: options.conversationTurnOrder || 'user_character',
-                messageIds: pair.map(m => m.index ?? m.id),
-                startIndex: pair[0].index ?? pair[0].id,
-                endIndex: pair[pair.length - 1].index ?? pair[pair.length - 1].id,
-            },
-        }));
+        const chunks = [];
+        for (let i = 0; i < messages.length; i += 2) {
+            const pair = [messages[i]];
+            if (i + 1 < messages.length) {
+                pair.push(messages[i + 1]);
+            }
+
+            // Combine texts with speaker labels
+            const combinedText = pair.map(m => {
+                const role = m.is_user ? 'User' : (m.name || 'Character');
+                const text = m.text || m.mes || '';
+                return `[${role}]: ${text}`;
+            }).join('\n\n');
+
+            chunks.push({
+                text: combinedText,
+                metadata: {
+                    strategy: 'conversation_turns',
+                    messageIds: pair.map(m => m.index ?? m.id),
+                    startIndex: pair[0].index ?? pair[0].id,
+                    endIndex: pair[pair.length - 1].index ?? pair[pair.length - 1].id,
+                },
+            });
+        }
+        return chunks;
     },
 
     /**

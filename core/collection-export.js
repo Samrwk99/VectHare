@@ -1,4 +1,3 @@
-import { saveVectHareSettingsDebounced as saveSettingsDebounced } from './settings-durability.js';
 /**
  * ============================================================================
  * VECTHARE COLLECTION EXPORT/IMPORT
@@ -19,7 +18,7 @@ import { saveVectHareSettingsDebounced as saveSettingsDebounced } from './settin
  */
 
 import { extension_settings } from '../../../../extensions.js';
-import { getRequestHeaders } from '../../../../../script.js';
+import { getRequestHeaders, saveSettingsDebounced } from '../../../../../script.js';
 import { getSavedHashes, insertVectorItems, purgeVectorIndex } from './core-vector-api.js';
 import {
     getCollectionMeta,
@@ -34,15 +33,6 @@ import {
 } from './collection-loader.js';
 import { progressTracker } from '../ui/progress-tracker.js';
 import { getStringHash } from '../../../../utils.js';
-import { assignOccurrenceIds } from './chunk-identity.js';
-import { parseRegistryKey } from './collection-ids.js';
-import { settingsForCollectionQuery, hydrateChatChunkManifest, getChatChunkManifest, collectionPreferenceSnapshot } from './vectorization-profile.js';
-import { discoverEmbeddingModel, makeCollectionProfile, saveCollectionProfile } from './vectorization-profile.js';
-import { getBackend } from '../backends/backend-manager.js';
-import { getModelField } from './providers.js';
-import { getChatBinding, getCollectionOwner, bindChatCollection } from './collection-ownership.js';
-import { assertQdrantIdentity, claimQdrantIdentity } from './physical-identity.js';
-import {hasActiveVectorWrite,createOperationControl,detachOperationControl} from '../ui/operation-controls.js';
 
 // ============================================================================
 // CONSTANTS
@@ -68,19 +58,30 @@ const EXPORT_BATCH_SIZE = 100;
  * @returns {Promise<Array>} Chunks with vectors
  */
 async function fetchChunksWithVectors(collectionId, settings) {
-    // A backend may multiplex logical collections inside one physical store.
-    // Always use its own scoped listing API, never a bare plugin collection ID.
-    const backend = await getBackend(settings);
-    if (typeof backend.listChunks !== 'function') throw new Error('Backend does not support exporting complete chunks');
-    const chunks=[];
-    for(let offset=0;offset<100000;offset+=250) {
-        const result=await backend.listChunks(collectionId,settings,{offset,limit:250,includeVectors:true});
-        if(!Array.isArray(result?.items)) throw new Error('Chunk export listing failed');
-        if(result.items.some(row=>!row.text))throw new Error('Backend cannot export complete chunk text');
-        chunks.push(...result.items);
-        if(result.items.length<250) return chunks;
+    const backendName = settings.vector_backend || 'standard';
+    const response = await fetch('/api/plugins/similharity/chunks/list', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({
+            backend: backendName === 'standard' ? 'vectra' : backendName,
+            collectionId: collectionId,
+            source: settings.source || 'transformers',
+            model: settings.model || '',
+            limit: 50000, // High limit to get all chunks
+            includeVectors: true, // Include the actual embedding vectors
+        }),
+    });
+
+    if (!response.ok) {
+        throw new Error(`Failed to fetch chunks: ${response.status} ${response.statusText}`);
     }
-    throw new Error('Collection export exceeds safety pagination limit; no partial export produced');
+
+    const data = await response.json();
+    if (!data.success || !data.items) {
+        throw new Error('Invalid response from chunks API');
+    }
+
+    return data.items;
 }
 
 /**
@@ -94,12 +95,6 @@ export async function exportCollection(collectionId, settings, collectionInfo = 
     progressTracker.show('Exporting Collection', 3, 'Steps');
     progressTracker.updateCurrentItem(collectionId);
 
-    // Resolve the EXACT backend/provider identity before exporting vectors.
-    const parsedExport=parseRegistryKey(collectionId);
-    const logicalId=parsedExport.collectionId;
-    const exportRegistryKey=parsedExport.backend?collectionId:
-        `${collectionInfo.backend||settings.vector_backend||'standard'}:${collectionInfo.source||settings.source||'transformers'}:${collectionId}`;
-    collectionId=logicalId;
     // Use collection-specific settings if provided (for multi-backend support)
     const exportSettings = {
         ...settings,
@@ -109,15 +104,9 @@ export async function exportCollection(collectionId, settings, collectionInfo = 
     };
 
     try {
-        const ownSettings=settingsForCollectionQuery(exportRegistryKey,exportSettings);
-        Object.assign(exportSettings,ownSettings);
         // Step 1: Get collection metadata
         progressTracker.updateProgress(1, 'Loading metadata...');
-        // Export a complete verified manifest, never the lightweight settings
-        // reference. A missing sidecar is an export error, not an empty backup.
-        if(getCollectionMeta(exportRegistryKey)?.chatChunkManifest)
-            await hydrateChatChunkManifest(exportRegistryKey);
-        const collectionMeta = getCollectionMeta(exportRegistryKey) || {};
+        const collectionMeta = getCollectionMeta(collectionId) || {};
 
         // Step 2: Get all chunks WITH vectors
         progressTracker.updateProgress(2, 'Loading chunks and vectors...');
@@ -126,15 +115,34 @@ export async function exportCollection(collectionId, settings, collectionInfo = 
         const chunks = rawChunks.map(item => {
             const meta = item.metadata || item;
             const chunk = {
-                hash: meta.hash ?? item.hash,
+                hash: meta.hash || item.hash,
                 text: meta.text || item.text || '',
                 index: meta.index ?? item.index,
                 vector: item.vector || meta.vector || null, // The actual embedding!
-                metadata: { ...meta, vector: undefined },
+                metadata: {
+                    contentType: meta.contentType,
+                    sourceName: meta.sourceName,
+                    entryName: meta.entryName,
+                    entryUid: meta.entryUid,
+                    keywords: meta.keywords || [],
+                    customWeights: meta.customWeights,
+                    disabledKeywords: meta.disabledKeywords,
+                    keywordLevel: meta.keywordLevel,
+                    keywordBaseWeight: meta.keywordBaseWeight,
+                    importance: meta.importance,
+                    conditions: meta.conditions,
+                    chunkGroup: meta.chunkGroup,
+                    summary: meta.summary,
+                    isSummaryChunk: meta.isSummaryChunk,
+                    parentHash: meta.parentHash,
+                    speaker: meta.speaker,
+                    isUser: meta.isUser,
+                    messageId: meta.messageId,
+                },
             };
 
             // Get per-chunk metadata from VectHare settings
-            const chunkMeta = getChunkMetadata(chunk.hash, `${exportSettings.vector_backend || 'standard'}:${exportSettings.source || 'transformers'}:${collectionId}`);
+            const chunkMeta = getChunkMetadata(chunk.hash);
             if (chunkMeta) {
                 chunk.chunkMeta = chunkMeta;
             }
@@ -163,7 +171,7 @@ export async function exportCollection(collectionId, settings, collectionInfo = 
             // backend is just storage location - vectors work across backends
             embedding: {
                 source: exportSettings.source || 'transformers',
-                model: collectionMeta.vectorizationProfile?.embedding?.modelId || exportSettings.model || '',
+                model: exportSettings.model || '',
                 backend: exportSettings.vector_backend || 'standard', // For reference only
                 dimension: vectorDimension,
                 hasVectors: chunksWithVectors > 0,
@@ -188,7 +196,7 @@ export async function exportCollection(collectionId, settings, collectionInfo = 
                 triggers: collectionMeta.triggers || [],
                 triggerMatchMode: collectionMeta.triggerMatchMode || 'any',
                 triggerCaseSensitive: collectionMeta.triggerCaseSensitive || false,
-                triggerScanDepth: collectionMeta.triggerScanDepth ?? 5,
+                triggerScanDepth: collectionMeta.triggerScanDepth || 5,
                 conditions: collectionMeta.conditions || { enabled: false, logic: 'AND', rules: [] },
 
                 // Temporal decay
@@ -209,13 +217,6 @@ export async function exportCollection(collectionId, settings, collectionInfo = 
                 xmlTag: collectionMeta.xmlTag || '',
             },
 
-            vectorizationProfile: collectionMeta.vectorizationProfile || null,
-            chatChunkManifest: getChatChunkManifest(exportRegistryKey) || null,
-            collectionConfiguration: {
-                revision:collectionMeta.configurationRevision||0,
-                lastUsedDraft:collectionMeta.lastUsedVectorizationDraft||{},
-                preferences:collectionPreferenceSnapshot(collectionMeta),
-            },
             // Chunks (text + metadata + vectors)
             chunks: chunks,
 
@@ -256,34 +257,49 @@ export async function exportMultipleCollections(collectionIds, settings) {
         progressTracker.updateCurrentItem(collectionId);
 
         try {
-            // Every selected collection retains its own backend and embedding provider.
-            const parsed=parseRegistryKey(collectionId);
-            const registryKey=parsed.backend?collectionId:
-                `${settings.vector_backend||'standard'}:${settings.source||'transformers'}:${collectionId}`;
-            const logicalId=parsed.collectionId;
-            const ownSettings=settingsForCollectionQuery(registryKey,{...settings,
-                ...(parsed.backend?{vector_backend:parsed.backend,source:parsed.source}:{})});
-            if(getCollectionMeta(registryKey)?.chatChunkManifest)
-                await hydrateChatChunkManifest(registryKey);
-            const collectionMeta = getCollectionMeta(registryKey) || {};
-            const rawChunks = await fetchChunksWithVectors(logicalId, ownSettings);
-            const chunks = rawChunks.map(item => {
-                const meta=item.metadata || item;
-                const chunk = {
-                    hash:meta.hash ?? item.hash,
-                    text:meta.text ?? item.text ?? '',
-                    index:meta.index ?? item.index,
-                    vector:item.vector || meta.vector || null,
-                    metadata:{...meta,vector:undefined},
-                };
-                const chunkMeta=getChunkMetadata(chunk.hash, registryKey);
-                if(chunkMeta)chunk.chunkMeta=chunkMeta;
-                return chunk;
-            });
+            // Export without showing nested progress
+            const collectionMeta = getCollectionMeta(collectionId) || {};
+            const chunksResult = await getSavedHashes(collectionId, settings, true);
+
+            let chunks = [];
+            if (chunksResult && chunksResult.metadata) {
+                chunks = chunksResult.metadata.map(meta => ({
+                    hash: meta.hash,
+                    text: meta.text || '',
+                    index: meta.index,
+                    metadata: {
+                        contentType: meta.contentType,
+                        sourceName: meta.sourceName,
+                        entryName: meta.entryName,
+                        entryUid: meta.entryUid,
+                        keywords: meta.keywords || [],
+                        customWeights: meta.customWeights,
+                        disabledKeywords: meta.disabledKeywords,
+                        keywordLevel: meta.keywordLevel,
+                        keywordBaseWeight: meta.keywordBaseWeight,
+                        importance: meta.importance,
+                        conditions: meta.conditions,
+                        chunkGroup: meta.chunkGroup,
+                        summary: meta.summary,
+                        isSummaryChunk: meta.isSummaryChunk,
+                        parentHash: meta.parentHash,
+                        speaker: meta.speaker,
+                        isUser: meta.isUser,
+                        messageId: meta.messageId,
+                    },
+                }));
+
+                for (const chunk of chunks) {
+                    const chunkMeta = getChunkMetadata(chunk.hash);
+                    if (chunkMeta) {
+                        chunk.chunkMeta = chunkMeta;
+                    }
+                }
+            }
 
             exports.push({
                 collection: {
-                    id: logicalId,
+                    id: collectionId,
                     name: collectionMeta.displayName || collectionId,
                     description: collectionMeta.description || '',
                     contentType: collectionMeta.contentType || detectContentType(collectionId),
@@ -297,7 +313,7 @@ export async function exportMultipleCollections(collectionIds, settings) {
                     triggers: collectionMeta.triggers || [],
                     triggerMatchMode: collectionMeta.triggerMatchMode || 'any',
                     triggerCaseSensitive: collectionMeta.triggerCaseSensitive || false,
-                    triggerScanDepth: collectionMeta.triggerScanDepth ?? 5,
+                    triggerScanDepth: collectionMeta.triggerScanDepth || 5,
                     conditions: collectionMeta.conditions || { enabled: false, logic: 'AND', rules: [] },
                     temporalDecay: collectionMeta.temporalDecay || {
                         enabled: false,
@@ -310,13 +326,6 @@ export async function exportMultipleCollections(collectionIds, settings) {
                     groups: collectionMeta.groups || [],
                     context: collectionMeta.context || '',
                     xmlTag: collectionMeta.xmlTag || '',
-                },
-                vectorizationProfile: collectionMeta.vectorizationProfile || null,
-                chatChunkManifest: getChatChunkManifest(registryKey) || null,
-                collectionConfiguration: {
-                    revision:collectionMeta.configurationRevision||0,
-                    lastUsedDraft:collectionMeta.lastUsedVectorizationDraft||{},
-                    preferences:collectionPreferenceSnapshot(collectionMeta),
                 },
                 chunks: chunks,
                 stats: {
@@ -332,12 +341,6 @@ export async function exportMultipleCollections(collectionIds, settings) {
     }
 
     progressTracker.complete(errors.length === 0, `Exported ${exports.length}/${collectionIds.length} collections`);
-    // A multi-export file must not silently omit requested collections. Keep
-    // existing collection data untouched and report the partial failure.
-    if (errors.length) {
-        throw new Error(`Multi-collection export incomplete (${errors.length}/${collectionIds.length} failed): ` +
-            errors.map(e => `${e.collectionId}: ${e.error}`).join('; '));
-    }
 
     return {
         version: EXPORT_VERSION,
@@ -434,9 +437,8 @@ export function validateImportData(data, currentSettings = {}) {
             if (hasVectors && currentSettings.source) {
                 // Check if current settings match export
                 const sourceMatch = col.embedding.source === currentSettings.source;
-                const field = getModelField(currentSettings.source);
-                const activeModel = field ? currentSettings[field] : currentSettings.model;
-                const modelMatch = !!col.vectorizationProfile?.embedding?.verified && !!activeModel && col.vectorizationProfile.embedding.modelId === activeModel;
+                const modelMatch = !col.embedding.model || !currentSettings.model ||
+                    col.embedding.model === currentSettings.model;
 
                 if (!sourceMatch || !modelMatch) {
                     compatible = false;
@@ -472,14 +474,31 @@ export function validateImportData(data, currentSettings = {}) {
  * @param {object} settings - VectHare settings
  */
 async function insertChunksWithVectors(collectionId, chunks, settings) {
-    // Route through the selected backend so Qdrant shared-collection imports
-    // acquire the mandatory content_type tenant filter and UUID point IDs.
-    // Pre-computed vectors are passed through without embedding them again.
-    const backend=await getBackend(settings);
-    for(let i=0;i<chunks.length;i+=100) {
-        await backend.insertVectorItems(collectionId,chunks.slice(i,i+100),settings);
+    const backendName = settings.vector_backend || 'standard';
+    const response = await fetch('/api/plugins/similharity/chunks/insert', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({
+            backend: backendName === 'standard' ? 'vectra' : backendName,
+            collectionId: collectionId,
+            source: settings.source || 'transformers',
+            model: settings.model || '',
+            items: chunks.map(c => ({
+                hash: c.hash,
+                text: c.text,
+                index: c.index,
+                vector: c.vector, // Pre-computed vector!
+                metadata: c.metadata || {},
+            })),
+        }),
+    });
+
+    if (!response.ok) {
+        const error = await response.text();
+        throw new Error(`Failed to insert chunks: ${error}`);
     }
-    return {success:true,count:chunks.length};
+
+    return await response.json();
 }
 
 /**
@@ -494,170 +513,145 @@ async function insertChunksWithVectors(collectionId, chunks, settings) {
  * @param {boolean} options.forceReembed - If true, re-embed even if vectors exist
  * @returns {Promise<{ success: boolean, collectionId: string, chunkCount: number, usedVectors: boolean, errors: string[] }>}
  */
-/** A replacement NEVER deletes the original. It stages under a fresh name. */
-function replacementCollectionId(original) {
-    const id = globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
-    return `${original}_import_${id.replace(/-/g, '').slice(0,16)}`;
-}
+export async function importCollection(exportData, settings, options = {}) {
+    const sourceCollection = exportData.collection || {};
+    const collectionId = options.collectionId || sourceCollection.id;
 
-async function checkImportedChunks(collectionId, preparedChunks, settings) {
-    const backend = await getBackend(settings);
-    if (typeof backend.listChunks !== 'function') throw new Error('Backend cannot verify imported collection chunks');
-    const actual=[];
-    for(let offset=0;offset<100000;offset+=250) {
-        const result=await backend.listChunks(collectionId,settings,{offset,limit:250});
-        if(!Array.isArray(result?.items))throw new Error('Import verification returned no readable chunk list');
-        actual.push(...result.items);
-        if(result.items.length<250)break;
+    if (!collectionId) {
+        throw new Error('No collection ID specified');
     }
-    // Compare the stored content and ID, not just the count. A failed batch
-    // write or silently replaced hash must never lead to a binding switch.
-    const expected=new Map(preparedChunks.map(c=>[String(c.hash),c.text]));
-    if(expected.size!==preparedChunks.length)throw new Error('Import contains duplicate chunk identities; safe replacement cannot certify it');
-    const stored=new Map(actual.map(c=>[String(c.hash ?? c.metadata?.hash),c.text ?? c.metadata?.text]));
-    if(stored.size!==preparedChunks.length || actual.length!==preparedChunks.length)
-        throw new Error(`Import verification failed: expected ${preparedChunks.length} chunks, found ${actual.length}`);
-    for(const [hash,text] of expected)if(stored.get(hash)!==text)
-        throw new Error(`Import verification failed for chunk ${hash}; old collection remains intact`);
-}
 
-async function importCollectionSafely(exportData, settings, options={}) {
-    if(hasActiveVectorWrite())throw new Error('Another vector-writing operation is running; wait before importing.');
-    const lockId=`vecthare-import-${Date.now()}-${Math.random()}`;
-    createOperationControl(lockId,{pausable:false,stoppable:false,writeOperation:true});
+    const chunks = exportData.chunks || [];
+    const validChunks = chunks.filter(c => c.text && c.text.trim());
+
+    if (validChunks.length === 0) {
+        throw new Error('No valid chunks to import (all chunks missing text)');
+    }
+
+    // Check if we can use pre-computed vectors
+    const embeddingInfo = exportData.embedding || {};
+    const chunksWithVectors = validChunks.filter(c => c.vector && Array.isArray(c.vector));
+    const canUseVectors = !options.forceReembed &&
+        chunksWithVectors.length === validChunks.length &&
+        embeddingInfo.source === settings.source &&
+        (!embeddingInfo.model || !settings.model || embeddingInfo.model === settings.model);
+
+    const totalSteps = 4;
+    progressTracker.show('Importing Collection', totalSteps, 'Steps');
+    progressTracker.updateCurrentItem(collectionId);
+    progressTracker.updateChunks(validChunks.length);
+
+    const errors = [];
+
     try {
-    const source = exportData.collection || {};
-    const originalId = options.collectionId || source.id;
-    if (!originalId || typeof originalId !== 'string') throw new Error('No collection identity provided');
-    const chunks=(exportData.chunks||[]).filter(c=>typeof c.text==='string'&&c.text.trim());
-    if(!chunks.length)throw new Error('No valid chunks to import');
-    const backend=settings.vector_backend||'standard';
-    const provider=settings.source||'transformers';
-    const originalKey=`${backend}:${provider}:${originalId}`;
-    const collectionId=options.overwrite?replacementCollectionId(originalId):originalId;
-    const key=`${backend}:${provider}:${collectionId}`;
-    if (!options.overwrite) {
-        if(getCollectionRegistry().some(x=>x===key || x===collectionId))throw new Error('Collection already registered; use staged Replace instead of appending');
-        const destination=await getBackend(settings);
-        const listing=await destination.listChunks(collectionId,settings,{offset:0,limit:1});
-        if(!Array.isArray(listing?.items) || listing.items.length)throw new Error('Collection already exists or cannot be verified empty; use staged Replace');
-    }
-    if(options.overwrite){
-        // A newly allocated staging name must truly be empty; UUID collision,
-        // old abandoned imports, or a backend routing error cannot be allowed
-        // to overwrite an unrelated collection.
-        const destination=await getBackend(settings);
-        const listing=await destination.listChunks(collectionId,settings,{offset:0,limit:1});
-        if(!Array.isArray(listing?.items) || listing.items.length)
-            throw new Error('Replacement staging collection is not verified empty; original collection preserved');
-    }
-    if (backend === 'qdrant' && options.overwrite) assertQdrantIdentity(originalKey,settings);
-    const existingOwner=options.overwrite?getCollectionOwner(originalKey):null;
-    const actualModel=await discoverEmbeddingModel(settings);
-    const profile=exportData.vectorizationProfile;
-    const withVectors=chunks.filter(c=>Array.isArray(c.vector));
-    const useVectors=!options.forceReembed && withVectors.length===chunks.length &&
-        profile?.recipe?.version===2 && profile?.embedding?.verified===true && actualModel.verified===true &&
-        profile.embedding.provider===provider && profile.embedding.modelId===actualModel.modelId &&
-        (!profile.embedding.modelPath || !actualModel.modelPath || profile.embedding.modelPath===actualModel.modelPath);
-    if(!useVectors && !options.forceReembed && withVectors.length)throw new Error('Cannot verify imported vector model. Choose re-vectorise explicitly. Original data remains unchanged.');
-    const prepared=assignOccurrenceIds(chunks.map((c,i)=>({text:c.text,index:c.index??i,hash:c.hash??getStringHash(c.text),
-        vector:useVectors?c.vector:undefined,metadata:c.metadata||{}})),getStringHash);
-    if(new Set(prepared.map(c=>String(c.hash))).size!==prepared.length)
-        throw new Error('Ambiguous duplicate chunk hashes in import: refusing destructive or mixed writes');
-    // Before any insertion, validate the imported chunk references. Never
-    // silently attach an incompatible old manifest to newly generated IDs.
-    if (exportData.chatChunkManifest?.entries?.some(e=>
-        !prepared.some(c=>String(c.hash)===String(e.hash)))) {
-        throw new Error('Import manifest references chunks absent from imported content; repair the export first');
-    }
-    // A durable staging marker is written first so an interrupted import is
-    // visible and recoverable, but it never becomes the chat's writable target.
-    if(backend === 'qdrant') claimQdrantIdentity(key,settings);
-    setCollectionMeta(key,{enabled:false,importPending:true,displayName:`Staging: ${source.name||originalId}`,
-        importedFrom:originalKey,createdAt:new Date().toISOString()});
-    registerCollection(key);
-    try {
-        if(useVectors) await insertChunksWithVectors(collectionId,prepared,settings);
-        else await insertVectorItems(collectionId,prepared,settings);
-        await checkImportedChunks(collectionId,prepared,settings);
-        const savedProfile=useVectors?profile:await makeCollectionProfile(settings);
-        const savedMeta={
-            // A portable backup must restore every real per-collection retrieval
-            // preference. NEVER automatically activate Auto-Sync on import:
-            // ownership/binding must be verified and explicitly enabled.
-            ...structuredClone(exportData.collectionConfiguration?.preferences||{}),
-            enabled:true,autoSync:false,importPending:false,displayName:source.name||originalId,
-            description:source.description||'',scope:source.scope||'global',tags:source.tags||[],
-            color:source.color,contentType:source.contentType,importedFrom:originalKey,
-            importedAt:new Date().toISOString(),createdAt:new Date().toISOString(),
-            vectorizationProfile:savedProfile,
-            lastUsedVectorizationDraft:structuredClone(exportData.collectionConfiguration?.lastUsedDraft||{}),
-            collectionPreferences:structuredClone(exportData.collectionConfiguration?.preferences||{}),
-        };
-        if(exportData.settings)Object.assign(savedMeta,{
-            alwaysActive:exportData.settings.alwaysActive, triggers:exportData.settings.triggers,
-            triggerMatchMode:exportData.settings.triggerMatchMode,
-            triggerCaseSensitive:exportData.settings.triggerCaseSensitive,
-            triggerScanDepth:exportData.settings.triggerScanDepth,
-            conditions:exportData.settings.conditions,
-            temporalDecay:exportData.settings.temporalDecay,
-            groups:exportData.settings.groups||[],context:exportData.settings.context||'',
-            xmlTag:exportData.settings.xmlTag||'',
-        });
-        if(exportData.chatChunkManifest?.schemaVersion===1 && useVectors) {
-            // Preserve chunk provenance only when every imported identity is
-            // unambiguously retained; never attach a mismatched manifest.
-            if(exportData.chatChunkManifest.entries.every(e=>prepared.some(c=>String(c.hash)===String(e.hash))))
-                savedMeta.chatChunkManifest=structuredClone(exportData.chatChunkManifest);
-        }
-        setCollectionMeta(key,savedMeta);
-        if(savedProfile)await saveCollectionProfile(key,savedProfile);
-        // Importing a legacy/full backup must move its verified manifest into
-        // the indexed store before making the replacement visible or writable.
-        if(savedMeta.chatChunkManifest)await hydrateChatChunkManifest(key);
-        for(const chunk of chunks)if(chunk.chunkMeta)
-            saveChunkMetadata(chunk.hash??getStringHash(chunk.text),chunk.chunkMeta,key);
-        // Re-check before switching: original stays active for every failure.
-        await checkImportedChunks(collectionId,prepared,settings);
-        if(existingOwner && getChatBinding(existingOwner)?.registryKey!==originalKey)
-            throw new Error('Original chat binding changed during import');
-        if(options.overwrite){
-            const previousMeta=getCollectionMeta(originalKey);
-            setCollectionMeta(originalKey,{enabled:false,replacedBy:key});
+        // Step 1: Handle existing collection
+        progressTracker.updateProgress(1, 'Preparing collection...');
+
+        if (options.overwrite) {
             try {
-                if(existingOwner)bindChatCollection(existingOwner,key,{replace:true,writeVerified:!!savedProfile?.embedding?.verified});
-            } catch(error) {
-                // No new write binding was committed: restore previous retrieval
-                // state rather than leaving the only known copy disabled.
-                setCollectionMeta(originalKey,{enabled:previousMeta.enabled,replacedBy:previousMeta.replacedBy||null});
-                setCollectionMeta(key,{enabled:false,importPending:true});
-                throw error;
+                await purgeVectorIndex(collectionId, settings);
+                console.log(`VectHare Import: Purged existing collection ${collectionId}`);
+            } catch (e) {
+                // Collection might not exist, that's fine - log at debug level
+                console.debug(`VectHare Import: Could not purge ${collectionId} (may not exist):`, e.message);
             }
         }
-        saveSettingsDebounced();
-        return {success:true,collectionId,previousCollectionId:options.overwrite?originalId:null,
-            previousCollectionPreserved:!!options.overwrite,chunkCount:prepared.length,usedVectors:useVectors};
-    }catch(error){
-        // Staged chunks are never deleted automatically after an error. The
-        // repair/backup UI can inspect them; original binding stays intact.
-        setCollectionMeta(key,{enabled:false,importPending:true,importError:error.message});
-        throw error;
-    }
-    }finally{detachOperationControl(lockId);}
-}
 
-export async function importCollection(exportData,settings,options={}) {
-    progressTracker.show('Importing Collection',4,'Steps');
-    try {
-        progressTracker.updateProgress(1,'Validating source and staging collection');
-        const result=await importCollectionSafely(exportData,settings,options);
-        progressTracker.updateProgress(4,`Verified ${result.chunkCount} chunks; original preserved`);
-        progressTracker.complete(true,`Imported ${result.chunkCount} chunks safely`);
-        return {...result,errors:[]};
-    }catch(error){
+        // Step 2: Prepare chunks
+        progressTracker.updateProgress(2, 'Preparing chunks...');
+
+        const preparedChunks = validChunks.map((chunk, index) => ({
+            text: chunk.text,
+            index: chunk.index ?? index,
+            hash: getStringHash(chunk.text),
+            vector: canUseVectors ? chunk.vector : undefined,
+            metadata: chunk.metadata || {},
+        }));
+
+        // Step 3: Insert chunks
+        if (canUseVectors) {
+            // Direct insert with pre-computed vectors (fast!)
+            progressTracker.updateProgress(3, `Inserting ${preparedChunks.length} chunks (using existing vectors)...`);
+            try {
+                await insertChunksWithVectors(collectionId, preparedChunks, settings);
+                console.log(`VectHare Import: Inserted ${preparedChunks.length} chunks with pre-computed vectors`);
+            } catch (error) {
+                throw new Error(`Failed to insert chunks: ${error.message}`);
+            }
+        } else {
+            // Need to embed (slow)
+            progressTracker.updateProgress(3, `Embedding ${preparedChunks.length} chunks...`);
+            try {
+                await insertVectorItems(collectionId, preparedChunks, settings);
+                console.log(`VectHare Import: Embedded and inserted ${preparedChunks.length} chunks`);
+            } catch (error) {
+                throw new Error(`Failed to embed chunks: ${error.message}`);
+            }
+        }
+
+        // Step 4: Save metadata
+        progressTracker.updateProgress(4, 'Saving metadata...');
+
+        // Collection-level metadata
+        const importedMeta = {
+            enabled: true,
+            displayName: sourceCollection.name || collectionId,
+            description: sourceCollection.description || '',
+            scope: sourceCollection.scope || 'global',
+            tags: sourceCollection.tags || [],
+            color: sourceCollection.color,
+            contentType: sourceCollection.contentType,
+            createdAt: new Date().toISOString(),
+            importedFrom: exportData.exportDate,
+            importedAt: new Date().toISOString(),
+        };
+
+        // Merge with exported settings
+        if (exportData.settings) {
+            Object.assign(importedMeta, {
+                alwaysActive: exportData.settings.alwaysActive,
+                triggers: exportData.settings.triggers,
+                triggerMatchMode: exportData.settings.triggerMatchMode,
+                triggerCaseSensitive: exportData.settings.triggerCaseSensitive,
+                triggerScanDepth: exportData.settings.triggerScanDepth,
+                conditions: exportData.settings.conditions,
+                temporalDecay: exportData.settings.temporalDecay,
+                groups: exportData.settings.groups || [],
+                context: exportData.settings.context || '',
+                xmlTag: exportData.settings.xmlTag || '',
+            });
+        }
+
+        setCollectionMeta(collectionId, importedMeta);
+
+        // Per-chunk metadata
+        for (const chunk of validChunks) {
+            if (chunk.chunkMeta) {
+                const newHash = getStringHash(chunk.text);
+                saveChunkMetadata(newHash, chunk.chunkMeta);
+            }
+        }
+
+        // Register collection
+        registerCollection(collectionId);
+        saveSettingsDebounced();
+
+        const statusMsg = canUseVectors
+            ? `Imported ${preparedChunks.length} chunks (used existing vectors)`
+            : `Imported ${preparedChunks.length} chunks (re-embedded)`;
+        progressTracker.complete(true, statusMsg);
+
+        return {
+            success: true,
+            collectionId,
+            chunkCount: preparedChunks.length,
+            usedVectors: canUseVectors,
+            errors,
+        };
+
+    } catch (error) {
         progressTracker.addError(error.message);
-        progressTracker.complete(false,'Import failed; original preserved');
+        progressTracker.complete(false, 'Import failed');
         throw error;
     }
 }
@@ -718,8 +712,102 @@ export async function importMultipleCollections(multiExportData, settings, optio
 /**
  * Silent import (no progress tracker) for batch operations
  */
-async function importCollectionSilent(exportData,settings,options={}) {
-    return importCollectionSafely(exportData,settings,options);
+async function importCollectionSilent(exportData, settings, options = {}) {
+    const sourceCollection = exportData.collection || {};
+    const collectionId = options.collectionId || sourceCollection.id;
+
+    if (!collectionId) {
+        throw new Error('No collection ID specified');
+    }
+
+    const chunks = exportData.chunks || [];
+    const validChunks = chunks.filter(c => c.text && c.text.trim());
+
+    if (validChunks.length === 0) {
+        throw new Error('No valid chunks to import');
+    }
+
+    // Check if we can use pre-computed vectors
+    const embeddingInfo = exportData.embedding || {};
+    const chunksWithVectors = validChunks.filter(c => c.vector && Array.isArray(c.vector));
+    const canUseVectors = !options.forceReembed &&
+        chunksWithVectors.length === validChunks.length &&
+        embeddingInfo.source === settings.source &&
+        (!embeddingInfo.model || !settings.model || embeddingInfo.model === settings.model);
+
+    // Handle existing collection
+    if (options.overwrite) {
+        try {
+            await purgeVectorIndex(collectionId, settings);
+        } catch (e) {
+            // Collection might not exist - log at debug level
+            console.debug(`VectHare Import: Could not purge ${collectionId} (may not exist):`, e.message);
+        }
+    }
+
+    // Prepare chunks
+    const preparedChunks = validChunks.map((chunk, index) => ({
+        text: chunk.text,
+        index: chunk.index ?? index,
+        hash: getStringHash(chunk.text),
+        vector: canUseVectors ? chunk.vector : undefined,
+        metadata: chunk.metadata || {},
+    }));
+
+    // Insert
+    if (canUseVectors) {
+        await insertChunksWithVectors(collectionId, preparedChunks, settings);
+    } else {
+        await insertVectorItems(collectionId, preparedChunks, settings);
+    }
+
+    // Save metadata
+    const importedMeta = {
+        enabled: true,
+        displayName: sourceCollection.name || collectionId,
+        description: sourceCollection.description || '',
+        scope: sourceCollection.scope || 'global',
+        tags: sourceCollection.tags || [],
+        color: sourceCollection.color,
+        contentType: sourceCollection.contentType,
+        createdAt: new Date().toISOString(),
+        importedFrom: exportData.exportDate,
+        importedAt: new Date().toISOString(),
+    };
+
+    if (exportData.settings) {
+        Object.assign(importedMeta, {
+            alwaysActive: exportData.settings.alwaysActive,
+            triggers: exportData.settings.triggers,
+            triggerMatchMode: exportData.settings.triggerMatchMode,
+            triggerCaseSensitive: exportData.settings.triggerCaseSensitive,
+            triggerScanDepth: exportData.settings.triggerScanDepth,
+            conditions: exportData.settings.conditions,
+            temporalDecay: exportData.settings.temporalDecay,
+            groups: exportData.settings.groups || [],
+            context: exportData.settings.context || '',
+            xmlTag: exportData.settings.xmlTag || '',
+        });
+    }
+
+    setCollectionMeta(collectionId, importedMeta);
+
+    for (const chunk of validChunks) {
+        if (chunk.chunkMeta) {
+            const newHash = getStringHash(chunk.text);
+            saveChunkMetadata(newHash, chunk.chunkMeta);
+        }
+    }
+
+    registerCollection(collectionId);
+    saveSettingsDebounced();
+
+    return {
+        success: true,
+        collectionId,
+        chunkCount: preparedChunks.length,
+        usedVectors: canUseVectors,
+    };
 }
 
 // ============================================================================

@@ -7,5 +7,3 @@ export const characters = [];
 export const chat_metadata = {};
 export const extension_prompts = {};
 export const is_send_press = false;
-
-export async function saveSettings() {}

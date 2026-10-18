@@ -1,4 +1,3 @@
-import { claimQdrantIdentity } from './physical-identity.js';
 /**
  * ============================================================================
  * VECTHARE CONTENT VECTORIZATION
@@ -16,8 +15,6 @@ import { chunkText } from './chunking.js';
 import { insertVectorItems, purgeVectorIndex } from './core-vector-api.js';
 import { setCollectionMeta, getDefaultDecayForType } from './collection-metadata.js';
 import { registerCollection } from './collection-loader.js';
-import { bindChatCollection, getChatBinding, getCollectionOwner, resolveChatWriteTarget } from './collection-ownership.js';
-import { getChatUUID, parseRegistryKey } from './collection-ids.js';
 import { getBackend } from '../backends/backend-manager.js';
 // Import from collection-ids.js - single source of truth for collection ID operations
 import {
@@ -28,32 +25,10 @@ import {
     COLLECTION_PREFIXES,
 } from './collection-ids.js';
 import { extractLorebookKeywords, extractTextKeywords, extractChatKeywords, extractBM25Keywords, EXTRACTION_LEVELS, DEFAULT_EXTRACTION_LEVEL, DEFAULT_BASE_WEIGHT } from './keyword-boost.js';
-import { cleanText, cleanMessages, captureCleaningSnapshot } from './text-cleaning.js';
-import { assignOccurrenceIds } from './chunk-identity.js';
+import { cleanText, cleanMessages } from './text-cleaning.js';
 import { progressTracker } from '../ui/progress-tracker.js';
 import { extension_settings, getContext } from '../../../../extensions.js';
 import { getStringHash } from '../../../../utils.js';
-import { getCurrentChatId } from '../../../../../script.js';
-import { modelIsolationDecision } from './model-isolation-consent.js';
-import { getModelField } from './providers.js';
-import { getCollectionProfile, makeCollectionProfile, saveCollectionProfile, applyAndVerifyProfile, saveChatChunkManifest, patchChatChunkManifest, getChatChunkManifest } from './vectorization-profile.js';
-import { prepareEmbeddingItems } from './embedding-overflow.js';
-import { inspectCollectionChunks, expectedEmbeddedText, chunkMatchesExpected } from './chunk-integrity.js';
-import { beginSyncCheckpoint, updateSyncCheckpoint, acknowledgeSyncChunk, finalizeSyncCheckpoint } from './sync-checkpoints.js';
-import { createOperationControl, detachOperationControl, hasActiveVectorWrite, OperationStoppedError } from '../ui/operation-controls.js';
-import {acquireSharedOperation,finishSharedOperation,SharedOperationStoppedError} from '../ui/shared-operations.js';
-import { buildExpectedChatItems } from './chat-vectorization.js';
-
-/**
- * Build exactly the final embedding/split plan for non-current-chat sources,
- * without creating a collection. Shared by preview and the real write path.
- * The embedding input budget is resolved from the same provider configuration.
- */
-export async function buildContentEmbeddingPlan(chunks, contentType, source, settings, preparedContent, effectiveSettings) {
-    const enriched = enrichChunks(chunks, contentType, source, settings, preparedContent, effectiveSettings);
-    const identified = enriched.map(chunk => ({...chunk, hash:getStringHash(chunk.text)}));
-    return assignOccurrenceIds(await prepareEmbeddingItems(identified,effectiveSettings,getStringHash),getStringHash);
-}
 
 /**
  * Main entry point for content vectorization
@@ -63,61 +38,17 @@ export async function buildContentEmbeddingPlan(chunks, contentType, source, set
  * @param {object} params.settings - Type-specific settings
  * @returns {Promise<{success: boolean, chunkCount: number, collectionId: string}>}
  */
-let contentVectorizationActive=false;
 export async function vectorizeContent({ contentType, source, settings }) {
-    // Freeze source/settings for this run; modal edits must not change its inputs.
-    source=structuredClone(source);settings=structuredClone(settings);
-    // Existing connected collections keep their historical cleaning recipe.
-    const initialBinding=contentType==='chat'&&source.type==='current'&&!source.replaceExisting?getChatBinding(getChatUUID()):null;
-    const initialProfile=initialBinding?getCollectionProfile(initialBinding.registryKey):null;
-    settings.cleaning_snapshot=initialProfile?.recipe?.cleaning ?? captureCleaningSnapshot(settings.cleaningPreset);
-    // Consent is required before creating a different embedding space, not
-    // merely before changing the visible global model selector. It cannot
-    // override dimension/model verification or permit in-place mixing.
-    if (!initialProfile || source.replaceExisting) {
-        const globalSettings=extension_settings.vecthare||{};
-        const provider=globalSettings.source||'transformers';
-        const modelField=getModelField(provider);
-        const configuredModel=String((modelField && globalSettings[modelField]) || globalSettings.model || '');
-        const profiles=(globalSettings.vecthare_collection_registry||[])
-            .map(key=>getCollectionProfile(key)).filter(Boolean);
-        const risk=modelIsolationDecision(provider,configuredModel,profiles);
-        if (risk.requiresConfirmation && source.modelRiskAccepted !== risk.token)
-            throw new Error('DIFFERENT_EMBEDDING_MODEL_CONFIRMATION_REQUIRED: Other collections use a different embedding model or provider. Explicitly confirm isolated new-collection vectorization; existing collections must remain untouched. Incompatible Qdrant dimensions will still be blocked.');
-    }
-    const openedChatUUID=contentType==='chat'&&source.type==='current'?getChatUUID():null;
-    const openedChatFile=openedChatUUID?getCurrentChatId():null;
-    const chatSignature=()=>JSON.stringify((getContext()?.chat||[]).map(m=>[m.mes,m.swipe_id,m.is_user,m.is_system,m.extra?.fileLength]));
-    const originalChatSignature=openedChatUUID?chatSignature():null;
-    const assertOriginalChat=()=>{if(openedChatUUID && (openedChatUUID!==getChatUUID() || openedChatFile!==getCurrentChatId() || chatSignature()!==originalChatSignature))throw new Error('Chat or branch changed during vectorisation. Completed chunks remain safe; reopen the original chat and scan before continuing.');};
-    if(contentVectorizationActive || hasActiveVectorWrite())throw new Error('Another vector-writing operation is running. Use Live Status to control it.');
     const type = getContentType(contentType);
     if (!type) {
         throw new Error(`Unknown content type: ${contentType}`);
     }
 
-    // Per Scene is exclusively marker-driven, not a batch-vectorization strategy.
-    // Reject before any collection or vector is changed; other strategies stay intact.
-    if (contentType === 'chat' && settings?.strategy === 'per_scene') {
-        throw new Error('Per Scene is marker-driven: mark scene boundaries in chat instead of vectorizing the full chat here.');
-    }
-
     const sourceName = source.name || source.filename || source.id || contentType;
-    contentVectorizationActive=true;
     progressTracker.show(`Vectorizing ${type.label || contentType}`, 4, 'Steps');
     progressTracker.updateCurrentItem(sourceName);
-    const control=createOperationControl(progressTracker.activityId,{pausable:true,stoppable:true,writeOperation:true});
-    let shared=null,sharedOutcome='failed';
-    const originalUUID=contentType==='chat'&&source.type==='current'?getChatUUID():null;
-    progressTracker.registerRetry(async()=>{
-        if(originalUUID && getChatUUID()!==originalUUID)throw new Error('Open the original chat before retrying');
-        await vectorizeContent({contentType,source,settings});
-    });
-    let journalKey=null,journalChat=null;
+
     try {
-        shared=await acquireSharedOperation(`Vectorizing ${type.label || contentType}`,{activityId:progressTracker.activityId,category:'content-write',resourceKey:sourceName});
-        control.bindSharedOperation(shared);
-        await control.checkpoint();
         // Step 1: Resolve source
         progressTracker.updateProgress(1, 'Loading content...');
         const rawContent = await resolveSource(contentType, source);
@@ -125,13 +56,10 @@ export async function vectorizeContent({ contentType, source, settings }) {
         // Step 2: Prepare and chunk
         progressTracker.updateProgress(2, 'Chunking content...');
         const preparedContent = await prepareContent(contentType, rawContent, settings);
-        await control.checkpoint();
         const chunks = await chunkText(preparedContent.text || preparedContent, {
             strategy: settings.strategy || type.defaultStrategy,
             chunkSize: settings.chunkSize || type.defaults.chunkSize,
-            chunkOverlap: settings.chunkOverlap ?? type.defaults.chunkOverlap,
-            batchSize: settings.batchSize || 4,
-            conversationTurnOrder: settings.conversationTurnOrder || 'user_character',
+            chunkOverlap: settings.chunkOverlap || type.defaults.chunkOverlap,
         });
 
         if (chunks.length === 0) {
@@ -148,187 +76,59 @@ export async function vectorizeContent({ contentType, source, settings }) {
 
         // Step 3: Enrich and hash
         progressTracker.updateProgress(3, 'Processing chunks...');
-        // Settings used by the embedding backend, not the modal's chunking options.
+        const collectionId = generateCollectionId(contentType, source, settings);
+        
+        // Get full extension settings for keyword extraction (includes custom_stopwords)
         const vecthareSettings = extension_settings.vecthare;
-        const isOpenChat = contentType === 'chat' && source.type === 'current';
-        const chatUUID = isOpenChat ? getChatUUID() : null;
-        const currentBackend = vecthareSettings.vector_backend || 'standard';
-        const currentSource = vecthareSettings.source || 'transformers';
-        let collectionId = generateCollectionId(contentType, source, settings);
-        if (contentType === 'chat' && source.type === 'file') {
-            // Uploaded chat has no trustworthy current-chat ownership. Never
-            // inherit the chat that happens to be open in SillyTavern.
-            const safeName = (source.filename || source.name || 'upload').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 42);
-            collectionId = `vecthare_chat_upload_${safeName}_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-        } else if (isOpenChat) {
-            if (source.replaceExisting) {
-                const selectedKey=source.replacedCollectionKey;
-                if(selectedKey){
-                    const parsed=parseRegistryKey(selectedKey);
-                    if(parsed.backend!==currentBackend || parsed.source!==currentSource)
-                        throw new Error('Selected replacement source uses a different vector backend or embedding provider');
-                    const owner=getCollectionOwner(selectedKey);
-                    if(owner && owner!==chatUUID)throw new Error('Selected collection belongs to another chat. Cannot disable or reassign it.');
-                }
-                // Staged replacement: new physical collection, old one retained.
-                // Only switch the chat binding after all vectors are committed.
-                collectionId = `${collectionId}_replacement_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-            } else {
-                const target = resolveChatWriteTarget(vecthareSettings, chatUUID, collectionId);
-                collectionId = target.collectionId;
-                if (target.newCollection && extension_settings.vecthare?.vecthare_collection_registry?.some(k => parseRegistryKey(k).collectionId === collectionId)) {
-                    throw new Error('Existing unconnected collection found. Connect and verify its settings first, or choose Replace All to create a safe replacement.');
-                }
-            }
-        }
-        let collectionKey = `${currentBackend}:${currentSource}:${collectionId}`;
-
-        // Use the same provider settings throughout this operation.
-        // Use the same pure planner as the non-chat preview; for a connected
-        // open chat the canonical expected-message constructor takes priority.
-        // For the connected current chat, both entry points must produce the
-        // same chunk hashes/manifests so Scan & Sync agree on the source of truth.
-        const effectiveProfileSettings = {...vecthareSettings, chunking_strategy:settings.strategy || vecthareSettings.chunking_strategy,
-            chunk_size:settings.chunkSize || vecthareSettings.chunk_size,
-            batch_size:settings.batchSize || vecthareSettings.batch_size,
-            conversation_turn_order:settings.conversationTurnOrder || 'user_character',cleaning_snapshot:settings.cleaning_snapshot};
-        let hashedChunks = isOpenChat && ['per_message','conversation_turns','message_batch','adaptive'].includes(settings.strategy)
-            ? await buildExpectedChatItems(getContext().chat,effectiveProfileSettings)
-            : await buildContentEmbeddingPlan(chunks,contentType,source,settings,preparedContent,effectiveProfileSettings);
-        if (!hashedChunks.length) {
-            // Some source content can disappear during cleaning and embedding
-            // preparation. Do not persist a profile, manifest or empty binding.
-            throw new Error('No vectorisable chunks remain after preprocessing; no collection was created');
-        }
-        // Resumable staged replacements: identify source by exact planned hashes
-        // and configuration, not just by a filename or the open character.
-        // No original text, credentials or embeddings are placed in the journal.
-        const pending=extension_settings.vecthare.pendingVectorizations ||= {};
-        const sourceFingerprint=JSON.stringify([contentType,source.type,sourceName,chatUUID,
-            source.replacedCollectionKey||null,settings.strategy,settings.chunkSize,settings.batchSize,settings.conversationTurnOrder || 'user_character',
-            currentBackend,currentSource,hashedChunks.map(c=>String(c.hash))]);
-        const pendingKey=String(getStringHash(sourceFingerprint));
-        let prior=pending[pendingKey];
-        if(!prior){try{prior=JSON.parse(globalThis.localStorage?.getItem(`vecthare:pending-content:v1:${pendingKey}`)||'null');}catch{}}
-        if(prior && prior.fingerprint===sourceFingerprint && prior.registryKey &&
-           (source.replaceExisting || source.type==='file' || (isOpenChat && prior.fingerprint===sourceFingerprint))) {
-            const parsed=parseRegistryKey(prior.registryKey);
-            if(parsed.backend!==currentBackend||parsed.source!==currentSource)
-                throw new Error('An interrupted collection belongs to a different backend');
-            collectionKey=prior.registryKey;collectionId=parsed.collectionId;
-        }
-        await control.checkpoint();
-        assertOriginalChat();
-        const alreadyConnected = getChatBinding(chatUUID);
-        const activeKey = alreadyConnected?.registryKey;
-        let profile;
-        if((getCollectionProfile(collectionKey) && !source.replaceExisting) || (prior?.registryKey===collectionKey && getCollectionProfile(collectionKey))) {
-            const check = await applyAndVerifyProfile(collectionKey,effectiveProfileSettings);
-            profile = check.profile;
-            for(const field of ['chunking_strategy','chunk_size','batch_size','conversation_turn_order']) {
-                if(profile.chunking?.[field] !== undefined && effectiveProfileSettings[field] !== profile.chunking[field])
-                    throw new Error(`Collection was created with ${field}=${profile.chunking[field]}; you selected ${effectiveProfileSettings[field]}. Use safe Re-vectorize instead of mixing strategies.`);
-            }
-        } else {
-            // Existing unbound or externally created collections must not be
-            // silently adopted using today's global embedding settings.
-            if(!source.replaceExisting && prior?.registryKey!==collectionKey && extension_settings.vecthare?.vecthare_collection_registry?.includes(collectionKey) && !getCollectionProfile(collectionKey))
-                throw new Error('Existing collection has no verified settings. Connect read-only, restore original settings or Re-vectorize safely.');
-            profile = await makeCollectionProfile(effectiveProfileSettings);
-            if(!profile.embedding.verified) throw new Error(profile.embedding.reason || 'Embedding model identity unknown. Cannot create a verified collection.');
-        }
-        if (isOpenChat) assertOriginalChat();
+        
+        const enrichedChunks = enrichChunks(chunks, contentType, source, settings, preparedContent, vecthareSettings);
+        const hashedChunks = enrichedChunks.map(chunk => ({
+            ...chunk,
+            hash: getStringHash(chunk.text),
+        }));
 
         // Step 4: Insert into vector store (streaming: embed + write together)
         progressTracker.updateProgress(4, 'Processing chunks...');
 
-        // Persist the collection's original profile and recovery intent before
-        // the first write. A process crash after an acknowledged insert cannot
-        // make this collection an unidentifiable/unverifiable orphan.
-        const firstWrite=!getCollectionProfile(collectionKey);
-        if(firstWrite && currentBackend === 'qdrant') {
-            const candidateBackend = await getBackend(effectiveProfileSettings);
-            const before = await candidateBackend.listChunks(collectionId,effectiveProfileSettings,{offset:0,limit:1});
-            if(!Array.isArray(before?.items) || before.items.length) throw new Error('Qdrant collection name already exists; refusing to reuse it without verified ownership');
-            claimQdrantIdentity(collectionKey,effectiveProfileSettings);
+        // Ensure backend is initialized and healthy before attempting inserts.
+        // Some backends (LanceDB/Qdrant) require initialization which may fail
+        // if attempted lazily during insert; pre-initializing reduces first-run failures.
+        try {
+            await getBackend(vecthareSettings);
+        } catch (e) {
+            console.warn('VectHare: Backend initialization failed before insert, will still attempt insert:', e.message);
+            try {
+                progressTracker.addError(`Backend init failed: ${e.message}`);
+            } catch (_) {}
+            try {
+                toastr.error('Backend initialization failed: ' + e.message, 'VectHare');
+            } catch (_) {}
         }
-        if(firstWrite)await saveCollectionProfile(collectionKey,profile);
-        if(isOpenChat && !source.replaceExisting && !getChatChunkManifest(collectionKey))
-            await saveChatChunkManifest(collectionKey,[],chatUUID);
-        if(source.replaceExisting || source.type==='file' || isOpenChat){
-            pending[pendingKey]={fingerprint:sourceFingerprint,registryKey:collectionKey,createdAt:Date.now()};
-            try{globalThis.localStorage?.setItem(`vecthare:pending-content:v1:${pendingKey}`,JSON.stringify(pending[pendingKey]));}catch{}
-            // This calls saveSettingsDebounced through the recovery journal below.
+
+        try {
+            await insertVectorItems(collectionId, hashedChunks, vecthareSettings, (embedded, total) => {
+            // Update progress with streaming count
+            console.log(`[Content Vectorization] Processing progress callback: ${embedded}/${total}`);
+            progressTracker.updateEmbeddingProgress(embedded, total);
+
+            // Streaming approach: embedding and writing happen together
+            progressTracker.updateCurrentItem(`Processing: ${embedded}/${total} chunks (${total - embedded} remaining)`);
+            });
+        } catch (error) {
+            // Surface insert errors to the UI so users see why vectorization may have failed
+            console.error('VectHare: insertVectorItems failed', error);
+            try {
+                progressTracker.addError(error.message || String(error));
+            } catch (_) {}
+            try {
+                toastr.error('Failed to write embeddings: ' + (error.message || String(error)), 'VectHare');
+            } catch (_) {}
+            // Re-throw so outer handler records completion state and any callers can react
+            throw error;
         }
-        journalKey=collectionKey;
-        journalChat=chatUUID||`content:${pendingKey}`;
-        const backend=await getBackend(effectiveProfileSettings);
-        let stored=[];
-        try{stored=await inspectCollectionChunks(backend,collectionId,effectiveProfileSettings);}
-        catch(e){
-            if(/\b404\b/.test(e.message) && (firstWrite || prior?.registryKey===collectionKey || source.replaceExisting))stored=[];
-            else if(/\b404\b/.test(e.message) && !getChatChunkManifest(collectionKey))stored=[];
-            else throw e;
-        }
-        const rowMap=new Map();
-        for(const row of stored){
-            if(rowMap.has(String(row.hash)))throw new Error('Duplicate stored hash; use Scan/Repair before continuing');
-            rowMap.set(String(row.hash),row);
-        }
-        const matches=(storedItem,item)=>{
-            if(!storedItem)return false;
-            if(isOpenChat)return chunkMatchesExpected(storedItem,item);
-            const text=String(storedItem.text??'');
-            return text===String(item.text) || text===expectedEmbeddedText(item);
-        };
-        const confirmed=hashedChunks.filter(item=>matches(rowMap.get(String(item.hash)),item));
-        const needed=hashedChunks.filter(item=>!matches(rowMap.get(String(item.hash)),item));
-        beginSyncCheckpoint(journalKey,journalChat,hashedChunks.length,confirmed.length);
-        if(isOpenChat && confirmed.length){
-            const known=new Set((getChatChunkManifest(collectionKey)?.entries||[]).map(e=>String(e.hash)));
-            const recovered=confirmed.filter(item=>!known.has(String(item.hash)));
-            if(recovered.length)await patchChatChunkManifest(collectionKey,recovered,chatUUID);
-        }
-        progressTracker.updateVerifiedChunks(confirmed.length,hashedChunks.length,`${confirmed.length} chunks already verified`);
-        let written=0;
-        for(const chunk of needed){
-            await control.checkpoint();
-            assertOriginalChat();
-            updateSyncCheckpoint(journalKey,journalChat,{phase:'running',activeHash:String(chunk.hash)});
-            await insertVectorItems(collectionId,[chunk],effectiveProfileSettings);
-            let storedItem=typeof backend.getChunk==='function'?await backend.getChunk(collectionId,chunk.hash,effectiveProfileSettings):null;
-            if(!storedItem) {
-                const rows=await inspectCollectionChunks(backend,collectionId,effectiveProfileSettings);
-                storedItem=rows.find(row=>String(row.hash)===String(chunk.hash));
-            }
-            if(!matches(storedItem,chunk))throw new Error(`Inserted chunk ${chunk.hash} could not be verified; retry will inspect it before re-embedding`);
-            if(isOpenChat)await patchChatChunkManifest(collectionKey,[chunk],chatUUID);
-            written++;
-            const count=confirmed.length+written;
-            acknowledgeSyncChunk(journalKey,journalChat,chunk.hash,count);
-            progressTracker.updateVerifiedChunks(count,hashedChunks.length,`Verified ${count}/${hashedChunks.length} chunks`);
-        }
-        await control.checkpoint();
-        assertOriginalChat();
-        // Explicitly recheck every chunk before committing a replacement.
-        const finalRows=await inspectCollectionChunks(backend,collectionId,effectiveProfileSettings);
-        const finalMap=new Map(finalRows.map(row=>[String(row.hash),row]));
-        if(hashedChunks.some(item=>!matches(finalMap.get(String(item.hash)),item)))
-            throw new Error('Final database verification failed; original collection remains active');
-        if(isOpenChat && !source.replaceExisting){
-            const wanted=new Set(hashedChunks.map(item=>String(item.hash)));
-            const obsolete=finalRows.filter(row=>!wanted.has(String(row.hash))).map(row=>row.hash);
-            if(obsolete.length){
-                const {deleteVectorItems}=await import('./core-vector-api.js');
-                await deleteVectorItems(collectionId,obsolete,effectiveProfileSettings);
-                const after=await inspectCollectionChunks(backend,collectionId,effectiveProfileSettings);
-                if(after.some(row=>obsolete.map(String).includes(String(row.hash))))throw new Error('Obsolete chat chunks were not fully deleted');
-                await patchChatChunkManifest(collectionKey,[],chatUUID,obsolete);
-            }
-        }
-        finalizeSyncCheckpoint(journalKey,journalChat,'completed','All chunks verified');
+
         // Save collection metadata
-        setCollectionMeta(collectionKey, {
+        setCollectionMeta(collectionId, {
             contentType,
             sourceName,
             scope: settings.scope || 'global',
@@ -344,23 +144,10 @@ export async function vectorizeContent({ contentType, source, settings }) {
         });
 
         // Register collection in the registry so it's discoverable
-        registerCollection(collectionKey);
-        if (isOpenChat) {
-            const previous=source.replacedCollectionKey || getChatBinding(chatUUID)?.registryKey;
-            bindChatCollection(chatUUID, collectionKey, { replace: !!source.replaceExisting, writeVerified: true });
-            if(source.replaceExisting && previous && previous !== collectionKey) {
-                // Backup is preserved but disabled to avoid duplicate retrieval.
-                setCollectionMeta(previous,{enabled:false,autoSync:false,replacedBy:collectionKey});
-            }
-        }
-        // The replacement connection is now committed; only now discard the
-        // recoverable staging pointer. Earlier failure leaves it available.
-        delete pending[pendingKey];
-        try{globalThis.localStorage?.removeItem(`vecthare:pending-content:v1:${pendingKey}`);}catch{}
-        console.log(`VectHare: Registered collection ${collectionKey}`);
+        registerCollection(collectionId);
+        console.log(`VectHare: Registered collection ${collectionId}`);
 
-        sharedOutcome='completed';
-        progressTracker.complete(true, `Verified ${hashedChunks.length} chunks (${written} newly written)`);
+        progressTracker.complete(true, `Vectorized ${hashedChunks.length} chunks`);
 
         return {
             success: true,
@@ -368,14 +155,9 @@ export async function vectorizeContent({ contentType, source, settings }) {
             collectionId,
         };
     } catch (error) {
-        sharedOutcome=error instanceof OperationStoppedError||error instanceof SharedOperationStoppedError?'stopped':'failed';
-        if(journalKey)finalizeSyncCheckpoint(journalKey,journalChat,sharedOutcome==='stopped'?'stopped':'interrupted',error.message);
         progressTracker.addError(error.message);
-        progressTracker.complete(sharedOutcome==='stopped'?'stopped':false,sharedOutcome==='stopped'?'Stopped safely; verified chunks preserved':'Vectorization failed');
+        progressTracker.complete(false, 'Vectorization failed');
         throw error;
-    }finally{
-        if(shared)try{await finishSharedOperation(shared,sharedOutcome);}catch(e){console.error('VectHare: failed to finalize shared content job',e);}
-        detachOperationControl(control.activityId);contentVectorizationActive=false;
     }
 }
 
@@ -594,7 +376,7 @@ function prepareLorebookContent(rawContent, settings) {
     // Filter to entries that have content, and apply text cleaning
     const validEntries = entries
         .filter(e => e && e.content)
-        .map(e => ({ ...e, content: cleanText(e.content, settings.cleaning_snapshot) }));
+        .map(e => ({ ...e, content: cleanText(e.content) }));
 
     if (settings.strategy === 'per_entry') {
         // Each entry becomes its own chunk - return array of content strings
@@ -639,7 +421,7 @@ function prepareCharacterContent(rawContent, settings) {
         const fields = {};
         for (const [fieldId, enabled] of Object.entries(selectedFields)) {
             if (enabled && FIELD_MAP[fieldId] && character[FIELD_MAP[fieldId].key]) {
-                fields[FIELD_MAP[fieldId].label] = cleanText(character[FIELD_MAP[fieldId].key], settings.cleaning_snapshot);
+                fields[FIELD_MAP[fieldId].label] = cleanText(character[FIELD_MAP[fieldId].key]);
             }
         }
         return { text: fields, type: 'fields', character: character };
@@ -651,7 +433,7 @@ function prepareCharacterContent(rawContent, settings) {
         .map(([fieldId]) => {
             const field = FIELD_MAP[fieldId];
             if (field && character[field.key]) {
-                return `## ${field.label}\n${cleanText(character[field.key], settings.cleaning_snapshot)}`;
+                return `## ${field.label}\n${cleanText(character[field.key])}`;
             }
             return null;
         })
@@ -669,14 +451,14 @@ function prepareChatContent(rawContent, settings) {
     const messages = rawContent.messages || rawContent.content;
 
     if (!Array.isArray(messages)) {
-        return { text: cleanText(String(messages), settings.cleaning_snapshot), type: 'text' };
+        return { text: cleanText(String(messages)), type: 'text' };
     }
 
     // Filter out system messages and empty messages
-    const validMessages = messages.map((m, index) => ({...m, index})).filter(m => m.mes && !m.is_system);
+    const validMessages = messages.filter(m => m.mes && !m.is_system);
 
     // Apply text cleaning to messages
-    const cleanedMessages = cleanMessages(validMessages, settings.cleaning_snapshot);
+    const cleanedMessages = cleanMessages(validMessages);
 
     // Normalize messages to have consistent properties for chunking.js
     const normalizedMessages = cleanedMessages.map((m, idx) => ({
@@ -684,7 +466,7 @@ function prepareChatContent(rawContent, settings) {
         mes: m.mes,
         is_user: m.is_user,
         name: m.name,
-        index: m.index ?? idx,
+        index: idx,
         id: m.send_date || m.id || idx,
     }));
 
@@ -733,7 +515,7 @@ function prepareUrlContent(rawContent, settings) {
     // Basic text cleaning for web content
     if (typeof text === 'string') {
         // Apply user's cleaning patterns first
-        text = cleanText(text, settings.cleaning_snapshot);
+        text = cleanText(text);
         // Remove excessive whitespace
         text = text.replace(/\n{3,}/g, '\n\n');
         // Remove common web artifacts
@@ -755,7 +537,7 @@ function prepareDocumentContent(rawContent, settings) {
     // Basic text cleaning
     if (typeof text === 'string') {
         // Apply user's cleaning patterns first
-        text = cleanText(text, settings.cleaning_snapshot);
+        text = cleanText(text);
         // Remove excessive whitespace
         text = text.replace(/\n{3,}/g, '\n\n');
         // Trim
@@ -774,7 +556,7 @@ function prepareWikiContent(rawContent, settings) {
     // Wiki content is already formatted with headers from scraper
     if (typeof text === 'string') {
         // Apply user's cleaning patterns first
-        text = cleanText(text, settings.cleaning_snapshot);
+        text = cleanText(text);
         // Remove excessive whitespace
         text = text.replace(/\n{3,}/g, '\n\n');
         // Trim
@@ -785,7 +567,7 @@ function prepareWikiContent(rawContent, settings) {
     if (settings.strategy === 'per_page' && rawContent.pages) {
         return {
             text: rawContent.pages.map(p => ({
-                text: cleanText(`# ${p.title}\n\n${p.content}`, settings.cleaning_snapshot),
+                text: cleanText(`# ${p.title}\n\n${p.content}`),
                 metadata: {
                     pageTitle: p.title,
                 },
@@ -814,7 +596,7 @@ function prepareYouTubeContent(rawContent, settings) {
     // Clean up transcript text
     if (typeof text === 'string') {
         // Apply user's cleaning patterns first
-        text = cleanText(text, settings.cleaning_snapshot);
+        text = cleanText(text);
         // Remove excessive whitespace
         text = text.replace(/\n{3,}/g, '\n\n');
         // Trim
@@ -910,7 +692,7 @@ function generateCollectionId(contentType, source, settings) {
 function enrichChunks(chunks, contentType, source, settings, preparedContent, vecthareSettings) {
     // Get keyword extraction settings
     const keywordLevel = settings.keywordLevel || 'balanced';
-    const keywordBaseWeight = settings.keywordBaseWeight ?? 1.5;
+    const keywordBaseWeight = settings.keywordBaseWeight || 1.5;
 
     return chunks.map((chunk, index) => {
         const chunkText = typeof chunk === 'string' ? chunk : chunk.text;
@@ -1005,8 +787,6 @@ function enrichChunks(chunks, contentType, source, settings, preparedContent, ve
  */
 export async function deleteContentCollection(collectionId) {
     const vecthareSettings = extension_settings.vecthare;
-    if (await purgeVectorIndex(collectionId, vecthareSettings) !== true) {
-        throw new Error(`Failed to delete content collection ${collectionId}`);
-    }
+    await purgeVectorIndex(collectionId, vecthareSettings);
     console.log(`VectHare: Deleted collection: ${collectionId}`);
 }

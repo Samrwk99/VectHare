@@ -205,8 +205,8 @@ describe('StandardBackend', () => {
     });
 
     describe('healthCheck', () => {
-        it('should return true when ST API returns a valid hash list', async () => {
-            fetchMock.mockResolvedValueOnce(mockFetchResponse([]));
+        it('should return true when ST API is available', async () => {
+            fetchMock.mockResolvedValueOnce(mockFetchResponse({}));
 
             const result = await backend.healthCheck();
 
@@ -214,12 +214,12 @@ describe('StandardBackend', () => {
             expect(fetchMock).toHaveBeenCalledWith('/api/vector/list', expect.any(Object));
         });
 
-        it('should return false on 500 status (server error)', async () => {
+        it('should return true even on 500 status (collection not found)', async () => {
             fetchMock.mockResolvedValueOnce(mockFetchResponse({}, { ok: false, status: 500 }));
 
             const result = await backend.healthCheck();
 
-            expect(result).toBe(false);
+            expect(result).toBe(true);
         });
 
         it('should return false on network error', async () => {
@@ -240,28 +240,19 @@ describe('StandardBackend', () => {
             expect(result).toEqual([12345, 67890]);
         });
 
-        it('should return [] on HTTP 200 for an empty collection', async () => {
-            fetchMock.mockResolvedValueOnce(mockFetchResponse([]));
-            expect(await backend.getSavedHashes('test-collection', defaultSettings)).toEqual([]);
-        });
+        it('should return empty array on 500 status', async () => {
+            fetchMock.mockResolvedValueOnce(mockFetchError(500, 'Collection not found'));
 
-        it('should throw on 500 instead of reporting an empty collection', async () => {
-            fetchMock.mockResolvedValueOnce(mockFetchError(500, 'Internal Server Error'));
-            await expect(backend.getSavedHashes('test-collection', defaultSettings))
-                .rejects.toThrow('HTTP 500');
-        });
+            const result = await backend.getSavedHashes('test-collection', defaultSettings);
 
-        it('should reject malformed successful list responses', async () => {
-            fetchMock.mockResolvedValueOnce(mockFetchResponse({ success: true }));
-            await expect(backend.getSavedHashes('test-collection', defaultSettings))
-                .rejects.toThrow('expected an array');
+            expect(result).toEqual([]);
         });
 
         it('should throw on other errors', async () => {
             fetchMock.mockResolvedValueOnce(mockFetchError(403, 'Forbidden'));
 
             await expect(backend.getSavedHashes('test-collection', defaultSettings))
-                .rejects.toThrow('Failed to list hashes');
+                .rejects.toThrow('Failed to get saved hashes');
         });
     });
 
@@ -445,10 +436,17 @@ describe('StandardBackend', () => {
     });
 
     describe('purgeAllVectorIndexes', () => {
-        it('blocks unsafe whole-user native purge', async () => {
-            await expect(backend.purgeAllVectorIndexes(defaultSettings))
-                .rejects.toThrow('Unsafe native Purge All');
-            expect(fetchMock).not.toHaveBeenCalled();
+        it('should purge all collections successfully', async () => {
+            fetchMock.mockResolvedValueOnce(mockFetchResponse({}));
+
+            await backend.purgeAllVectorIndexes(defaultSettings);
+
+            expect(fetchMock).toHaveBeenCalledWith(
+                '/api/vector/purge-all',
+                expect.objectContaining({
+                    method: 'POST',
+                })
+            );
         });
     });
 
@@ -746,75 +744,6 @@ describe('QdrantBackend', () => {
             await backend.insertVectorItems('test-collection', manyItems, defaultSettings);
 
             expect(fetchMock).toHaveBeenCalledTimes(2);
-        });
-    });
-
-    describe('embedding provider endpoint forwarding', () => {
-        it('uses the configured llama.cpp URL for Qdrant inserts, queries, hybrid searches, and re-embedding', async () => {
-            const settings = {
-                ...defaultSettings,
-                source: 'llamacpp',
-                use_alt_endpoint: true,
-                alt_endpoint_url: 'http://127.0.0.1:9977',
-                qdrant_use_cloud: true,
-                qdrant_url: 'https://example.qdrant.io',
-            };
-            fetchMock.mockResolvedValue(mockFetchResponse({ results: [] }));
-
-            await backend.insertVectorItems('vh:chat:test', sampleItems, settings);
-            await backend.queryCollection('vh:chat:test', 'hello', 5, settings);
-            await backend.queryMultipleCollections(['vh:chat:test'], 'hello', 5, 0, settings);
-            await backend.hybridQuery('vh:chat:test', 'hello', 5, settings);
-            await backend.updateChunkText('vh:chat:test', 12345, 'updated text', settings);
-
-            const requestUrls = fetchMock.mock.calls.map(([url]) => url);
-            expect(requestUrls).toEqual([
-                '/api/plugins/similharity/chunks/insert',
-                '/api/plugins/similharity/chunks/query',
-                '/api/plugins/similharity/chunks/query',
-                '/api/plugins/similharity/chunks/hybrid-query',
-                '/api/plugins/similharity/chunks/12345/text',
-            ]);
-            const payloads = fetchMock.mock.calls.map(([, options]) => JSON.parse(options.body));
-            for (const payload of payloads) {
-                expect(payload.apiUrl).toBe('http://127.0.0.1:9977');
-                expect(payload.source).toBe('llamacpp');
-                expect(payload.apiUrl).not.toBe(settings.qdrant_url);
-            }
-        });
-
-        it('uses the SillyTavern llama.cpp URL when the override is disabled', async () => {
-            fetchMock.mockResolvedValueOnce(mockFetchResponse({ results: [] }));
-            await backend.queryCollection('test', 'hello', 5, {
-                ...defaultSettings,
-                source: 'llamacpp',
-                use_alt_endpoint: false,
-                alt_endpoint_url: 'http://127.0.0.1:9977',
-            });
-            const body = JSON.parse(fetchMock.mock.calls[0][1].body);
-            expect(body.apiUrl).toBe('http://localhost:8080');
-        });
-
-        it('preserves Ollama endpoint, model and keep flags', async () => {
-            fetchMock.mockResolvedValueOnce(mockFetchResponse({ results: [] }));
-            await backend.queryCollection('test', 'hello', 5, {
-                ...defaultSettings,
-                source: 'ollama',
-                use_alt_endpoint: true,
-                alt_endpoint_url: 'http://127.0.0.1:11499',
-                ollama_keep: true,
-            });
-            const body = JSON.parse(fetchMock.mock.calls[0][1].body);
-            expect(body.apiUrl).toBe('http://127.0.0.1:11499');
-            expect(body.model).toBe('mxbai-embed-large');
-            expect(body.keep).toBe(true);
-        });
-
-        it('does not add an embedding URL for Transformers', async () => {
-            fetchMock.mockResolvedValueOnce(mockFetchResponse({ results: [] }));
-            await backend.queryCollection('test', 'hello', 5, defaultSettings);
-            const body = JSON.parse(fetchMock.mock.calls[0][1].body);
-            expect(body.apiUrl).toBeUndefined();
         });
     });
 

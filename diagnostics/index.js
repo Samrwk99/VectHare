@@ -71,7 +71,6 @@ import { testConditionalActivation } from './activation-tests.js';
 
 import { runVisualizerTests } from './visualizer-tests.js';
 import { cleanupTestCollections } from '../core/collection-loader.js';
-import { extension_settings } from '../../../../extensions.js';
 
 /**
  * Runs all diagnostic checks
@@ -354,8 +353,8 @@ export async function executeFixAction(check) {
         case 'removeDuplicateHashes':
             if (check.data?.duplicates && check.data?.collectionId) {
                 // Need settings for the fix function - get from VectHare
-                const settings = extension_settings.vecthare;
-                if (!settings) return { success: false, message: 'VectHare settings are not loaded' };
+                const { getVectHareSettings } = await import('../ui/ui-settings.js');
+                const settings = getVectHareSettings();
                 return await fixDuplicateHashes(check.data.duplicates, check.data.collectionId, settings);
             }
             return { success: false, message: 'No duplicate data found in check' };
@@ -385,8 +384,9 @@ async function fixOrphanedGroupMembers() {
         const { getCollectionMeta, saveCollectionMeta } = await import('../core/collection-metadata.js');
         const { getCollectionRegistry } = await import('../core/collection-loader.js');
         const { getSavedHashes } = await import('../core/core-vector-api.js');
-        const settings = extension_settings.vecthare;
-        if (!settings) return { success: false, message: 'VectHare settings are not loaded' };
+        const { getVectHareSettings } = await import('../ui/ui-settings.js');
+
+        const settings = getVectHareSettings();
         const registry = getCollectionRegistry();
         let totalCleaned = 0;
         let collectionsFixed = 0;

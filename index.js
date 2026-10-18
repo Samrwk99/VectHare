@@ -1,6 +1,3 @@
-import { saveVectHareSettingsDebounced as saveSettingsDebounced } from './core/settings-durability.js';
-import { getChatUUID } from './core/collection-ids.js';
-import { initialiseSettingsDurability, flushVectHareSettings, getSettingsDurabilityStatus } from './core/settings-durability.js';
 /**
  * ============================================================================
  * VECTHARE - ADVANCED RAG SYSTEM
@@ -13,19 +10,8 @@ import { initialiseSettingsDurability, flushVectHareSettings, getSettingsDurabil
  * ============================================================================
  */
 
-import {scanCurrentChat, repairCurrentChat, reconcileDeletedMessages} from './core/chat-repair.js';
-import {startActivity, updateActivity, finishActivity, registerActivityRetry} from './ui/activity-status.js';
-import {acquireSharedOperation,finishSharedOperation,SharedOperationStoppedError} from './ui/shared-operations.js';
-import {createOperationControl, detachOperationControl, hasActiveVectorWrite, OperationStoppedError} from './ui/operation-controls.js';
-import { clearAllRecovery } from './core/sync-checkpoints.js';
-import { openPurgeDialog } from './ui/purge-dialog.js';
-import { getCollectionProfile, verifyAndRestoreLegacyProfile } from './core/vectorization-profile.js';
-import { openContentVectorizer } from './ui/content-vectorizer.js';
-import { getChatBinding, reconcileActiveChatRename } from './core/collection-ownership.js';
-import { recordCurrentChatIdentity, repairCurrentLegacyBranchIdentity, confirmReopenedLegacyBranchIdentity, observeChatIdentityTransition } from './core/chat-identity-ledger.js';
 import {
     eventSource,
-    getCurrentChatId,
     event_types,
     extension_prompt_types,
 } from '../../../../script.js';
@@ -37,16 +23,17 @@ import { debounce } from '../../../utils.js';
 import { debounce_timeout } from '../../../constants.js';
 
 // VectHare modules - Core
-import { synchronizeChat, rearrangeChat, vectorizeAll } from './core/chat-vectorization.js';
+import { synchronizeChat, rearrangeChat, vectorizeAll, repairChatVectors, checkUnfinishedVectorization, isVectorizationActive, consumeWasLastRunStoppedByUser, flagImmediateReverseSync, parseRegistryKey } from './core/chat-vectorization.js';
 import { purgeAllVectorIndexes, purgeVectorIndex } from './core/core-vector-api.js';
 import { getChatCollectionId } from './core/chat-vectorization.js';
 import { getDefaultDecaySettings } from './core/temporal-decay.js';
 import { migrateOldEnabledKeys } from './core/collection-metadata.js';
-import { clearCollectionRegistry, discoverExistingCollections } from './core/collection-loader.js';
+import { clearCollectionRegistry, discoverExistingCollections, getCollectionRegistry } from './core/collection-loader.js';
 import AsyncUtils from './utils/async-utils.js';
 
 // VectHare modules - UI
-import { renderSettings, openDiagnosticsModal, loadWebLlmModels, updateWebLlmStatus, refreshAutoSyncCheckbox } from './ui/ui-manager.js';
+import { renderSettings, openDiagnosticsModal, loadWebLlmModels, updateWebLlmStatus, refreshAutoSyncCheckbox, updateContinueVectorizationButton, updateVectorizationStatus } from './ui/ui-manager.js';
+import { progressTracker } from './ui/progress-tracker.js';
 import { initializeVisualizer } from './ui/chunk-visualizer.js';
 import { initializeDatabaseBrowser } from './ui/database-browser.js';
 import { initializeSceneMarkers, updateAllMarkerStates, setSceneSettings } from './ui/scene-markers.js';
@@ -77,17 +64,6 @@ const defaultSettings = {
     milvus_address: '',
     alt_endpoint_url: '',
     use_alt_endpoint: false,
-    nanogpt_model: '',
-    nanogpt_api_key: '',
-    custom_model: '',
-    custom_api_key: '',
-    custom_endpoint_mode: 'base', // 'base' appends /v1/embeddings; 'exact' uses the URL verbatim.
-    vllm_api_key: '',
-    openrouter_api_key_override: '',
-    electronhub_api_key_override: '',
-    bananabread_model: '',
-    koboldcpp_model: '',
-    embedding_max_tokens: 0,
     rate_limit_calls: 5,
     rate_limit_interval: 60, // seconds
 
@@ -109,7 +85,6 @@ const defaultSettings = {
     // Chat vectorization
     enabled_chats: false,
     chunking_strategy: 'per_message', // per_message, conversation_turns, message_batch, adaptive
-    conversation_turn_order: 'user_character', // Preferred logical pairing order for Conversation Turns
     batch_size: 4, // Messages per batch for message_batch strategy
     depth: 2,
     position: extension_prompt_types.IN_PROMPT,
@@ -145,10 +120,6 @@ const defaultSettings = {
 
     // Advanced features
     temporal_decay: getDefaultDecaySettings(),
-
-    // P2 #57: 0 disables an additional limit; Top-K still applies.
-    memory_max_injections: 0,
-    memory_token_budget: 0,
 
     // Global defaults for new collections
     default_decay_enabled: false,    // Whether new collections have temporal weighting enabled
@@ -189,18 +160,8 @@ const moduleWorker = new ModuleWorkerWrapper(() => synchronizeChat(settings, get
 // Batch size based on provider
 const getBatchSize = () => ['transformers', 'ollama'].includes(settings.source) ? 1 : 5;
 
-// Capture the originating chat BEFORE scheduling the delayed Auto-Sync work.
-// A branch/chat switch during debounce must never convert an event from A
-// into an unrequested write to B, even when both chats use the same character.
-const debouncedChatUpdate = debounce(async (sourceUUID, sourceChatFile) => {
-    if (!sourceUUID || !sourceChatFile ||
-        getChatUUID() !== sourceUUID || getCurrentChatId() !== sourceChatFile) {
-        console.warn('VectHare: discarding a stale chat event after a chat/branch switch');
-        return;
-    }
-    await moduleWorker.update();
-}, debounce_timeout.relaxed);
-const onChatEvent = () => debouncedChatUpdate(getChatUUID(), getCurrentChatId());
+// Chat event handler (debounced)
+const onChatEvent = debounce(async () => await moduleWorker.update(), debounce_timeout.relaxed);
 
 /**
  * Generation interceptor - searches and injects relevant messages
@@ -213,159 +174,212 @@ async function vecthare_rearrangeChat(chat, _contextSize, _abort, type) {
 window['vecthare_rearrangeChat'] = vecthare_rearrangeChat;
 
 /**
- * Action: Vectorize all messages in current chat
+ * VectHare+ R12: Repair-only entry point (Repair Chunks button).
+ * Fixes already-vectorized content (stale/duplicate vectors + replacements
+ * of edited messages) WITHOUT continuing the backlog.
+ */
+async function onRepairClick() {
+    await repairChatVectors(settings, getBatchSize());
+    offerResumeOfUnfinishedVectorization(); // refresh status line + button
+}
+
+/**
+ * Action: Vectorize all messages in current chat (full sync: repair + backlog)
  */
 async function onVectorizeAllClick() {
     await vectorizeAll(settings, getBatchSize());
-    refreshActiveChatProfile();
+    // VectHare+ FIX: after a run ends (especially Stop / partial / failure),
+    // re-run the backlog check so the Continue button + toast reflect the
+    // CURRENT chat's state. Previously the check only fired on CHAT_CHANGED,
+    // so stopping mid-run and staying in the same chat left no resume
+    // affordance at all until the user switched chats or reloaded.
+    offerResumeOfUnfinishedVectorization();
 }
-// Only a user interaction in Live Status can resume an interrupted chat.
-window.vecthareResumeFromStatus = onVectorizeAllClick;
-window.vecthareOpenStagedRecovery = (oldKey) => openContentVectorizer('chat',oldKey);
-// Explicit opt-in legacy-branch identity repair. Never copies a parent's vectors.
-window.vecthareRepairLegacyBranchIdentity = async () => {
-    let shared=null, outcome='failed';
-    try {
-        // Same-server tabs must not simultaneously rewrite the same legacy
-        // chat's identity metadata. Acquire the user's durable write slot.
-        const originalFile=getCurrentChatId();
-        shared=await acquireSharedOperation('Repair Legacy Chat Identity',
-            {category:'identity-repair',resourceKey:`chat:${originalFile}`,queue:false});
-        if(getCurrentChatId()!==originalFile)throw new Error('Chat switched while acquiring identity-repair lock');
-        const result=await repairCurrentLegacyBranchIdentity({confirm:async()=>window.confirm(
-            'VectHare detected an ambiguous legacy branch identity. Give THIS chat an independent VectHare identity?\n\nNo existing vectors will move or be deleted, and automatic vectorisation will remain off. You must switch away and reopen the chat before starting a new collection.')});
-        if(result?.repaired){toastr.info(result.reason,'VectHare: Legacy Branch');refreshActiveChatProfile();}
-        outcome='completed';
-    }catch(error){toastr.error(error.message,'VectHare: Branch Repair');}
-    finally{if(shared)await finishSharedOperation(shared,outcome).catch(e=>console.warn('VectHare identity repair requires lease reconciliation:',e));}
-};
 
-let lastChatScan = null;
-function refreshActiveChatProfile() {
-    const identity=recordCurrentChatIdentity();
-    const statusEl=document.getElementById('vecthare_active_profile_status');
-    if(!identity.verified){
-        if(statusEl) {
-            statusEl.replaceChildren();
-            statusEl.appendChild(document.createTextNode(`VectHare write access blocked: ${identity.reason} `));
-            if(/collision|are required/i.test(identity.reason)) {
-                const button=document.createElement('button');
-                button.type='button';button.textContent='Repair This Legacy Chat Identity';
-                button.addEventListener('click',()=>void window.vecthareRepairLegacyBranchIdentity());
-                statusEl.appendChild(button);
-            }
+/**
+ * VectHare+ Resume-on-load: detects unfinished vectorization work for the
+ * current chat and offers continuation. Cursor-free by design — the vector
+ * DB itself is the checkpoint, so any interruption (crash, page reload,
+ * Stop button, closed browser) resumes exactly from what is missing.
+ *
+ * Robust against startup ordering: the collection registry is populated
+ * asynchronously (discoverExistingCollections runs with its own retries), so
+ * this polls until the check yields a definitive answer or attempts run out.
+ */
+const RESUME_CHECK_MAX_ATTEMPTS = 5;   // covers slow collection discovery
+const RESUME_CHECK_RETRY_MS = 3000;
+
+function showResumeToast(pending, total) {
+    // R7/R10: informational only - points at the (renamed) Repair Chunks button
+    toastr.info(
+        `${pending} of ${total} message groups not yet vectorized. Use the "Repair Chunks" button in VectHare's Actions panel to resume/repair from where it stopped.`,
+        'VectHare: Unfinished vectorization',
+        {
+            timeOut: 20000,
+            closeOnHover: false,
+            preventDuplicates: true, // CHAT_CHANGED fires at startup too - don't double-toast
+        }
+    );
+}
+
+/**
+ * VectHare+ R10: Updates the Actions-card status line.
+ * States: running (live % from the tracker) / backlog % / fully vectorized /
+ * no collection. Called from the resume check's definitive branch and by a
+ * light 3s interval while a run is active.
+ * @param {{hasBacklog?: boolean, pending?: number, total?: number}} [result]
+ */
+function refreshVectorizationStatusDisplay(result = null) {
+    if (isVectorizationActive()) {
+        // Live progress from the tracker while a run is in flight
+        const s = progressTracker.stats;
+        const done = s.totalChunksToEmbed > 0 ? s.embeddedChunks : s.processedItems;
+        const total = s.totalChunksToEmbed > 0 ? s.totalChunksToEmbed : s.totalItems;
+        const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+        updateVectorizationStatus(`Running — ${pct}% (${done}/${total}) — click to view`);
+        return;
+    }
+    if (result && typeof result.total === 'number' && result.total > 0) {
+        if (result.hasBacklog) {
+            const doneCount = result.total - result.pending;
+            const pct = Math.round((doneCount / result.total) * 100);
+            updateVectorizationStatus(`Vectorized: ${pct}% (${doneCount}/${result.total}) — click for details`);
+        } else {
+            updateVectorizationStatus(`Fully vectorized (${result.total}/${result.total}) ✓`);
         }
         return;
     }
-    let binding;
-    try { binding=getChatBinding(); }
-    catch(error) {
-        const el=document.getElementById('vecthare_active_profile_status');
-        if (el) el.textContent=`VectHare write access blocked: ${error.message}`;
-        console.warn('VectHare: unsafe chat/branch binding:',error);
-        return;
+    updateVectorizationStatus('Status: no vectorization data for this chat');
+}
+
+// R10: light interval keeps the status line live during runs without the core
+// needing UI hooks. Only active while a run is in flight (cheap no-op otherwise).
+setInterval(() => {
+    if (isVectorizationActive()) {
+        refreshVectorizationStatusDisplay();
     }
-    const profile=binding?.registryKey ? getCollectionProfile(binding.registryKey) : null;
-    const state=profile ? `Connected: ${binding.registryKey} | Embedding: ${profile.embedding?.modelId || 'Unverified'} (${profile.embedding?.verified?'verified':'unverified'}) | Strategy: ${profile.chunking?.chunking_strategy || 'unknown'}; global settings only apply to new collections.` : binding ? 'This connected legacy collection has no saved vectorization profile; writing remains blocked until verified or re-vectorized.' : 'No writable collection is connected. Global settings apply to newly created collections.';
-    $('#vecthare_collection_profile_status').text(state);
-}
-function setScanButton(label, disabled=false) {
-    const button = $('#vecthare_scan_chat');
-    button.find('span').text(label);
-    button.prop('disabled',disabled);
-}
-async function onScanRepairClick() {
-    if(hasActiveVectorWrite()){toastr.info('Wait for the active vector operation to finish or pause/stop it before scanning.','VectHare');return;}
-    const currentSettings=extension_settings.vecthare || settings;
-    const repairing=Boolean(lastChatScan?.issues?.length);
-    const activityId=startActivity(repairing?'Repair Chat Embeddings':'Scan Chat Embeddings',
-        {category:repairing?'repair':'scan',detail:repairing?'Preparing verified replacements':'Comparing chat and stored vectors'});
-    let activityFinished=false, shared=null,sharedOutcome='failed';
-    const originalChat=getChatUUID();
-    const control=createOperationControl(activityId,{pausable:repairing,stoppable:true,writeOperation:repairing});
-    registerActivityRetry(activityId,async()=>{
-        if(originalChat!==getChatUUID())throw new Error('Return to the original chat before retrying');
-        lastChatScan=null;await onScanRepairClick();
-    });
-    try {
-        if(repairing){shared=await acquireSharedOperation('Repair Chat Embeddings',{activityId,category:'repair',resourceKey:originalChat||''});control.bindSharedOperation(shared);}
-        if(lastChatScan?.issues?.length) {
-            const problems=lastChatScan.issues;
-            if(!confirm(`Repair ${problems.length} chat embedding issue(s)? Replacements are verified before outdated vectors are removed.`)) {
-                sharedOutcome='completed';finishActivity(activityId,true,'Repair cancelled; no data changed'); activityFinished=true; return;
-            }
-            setScanButton('Repairing...',true);
-            updateActivity(activityId,{total:problems.length+1,detail:'Repairing and checking stored embeddings'});
-            const after=await repairCurrentChat(currentSettings,lastChatScan, {control,onProgress: ({detail,completed,total}) => updateActivity(activityId,{detail,completed,total})});
-            lastChatScan=after.issues.length?after:null;
-            setScanButton(after.issues.length?`Repair (${after.issues.length} Issues)`:'All Clear');
-            sharedOutcome=after.issues.length?'failed':'completed';
-            finishActivity(activityId,after.issues.length===0,after.issues.length?`${after.issues.length} issues still need attention`:'All repairs verified');activityFinished=true;
-            if(after.issues.length)toastr.warning(`${after.issues.length} issues remain after repair`, 'VectHare');
-            else toastr.success('Chat embeddings verified after repair','VectHare');
+}, 3000);
+
+async function offerResumeOfUnfinishedVectorization() {
+    // VectHare+ FIX (notification behavior): a run already in flight IS the
+    // resume — don't nag while it works. BUT we must not bail permanently:
+    // this can fire while a run is aborting (e.g. user switched chats mid-run,
+    // CHAT_CHANGED beats the "chat changed" cleanup), and a bare return would
+    // strand the NEW chat's backlog unchecked. So wait (bounded, up to 10 min)
+    // for the active run to finish, then proceed with the normal check.
+    if (isVectorizationActive()) {
+        console.debug('VectHare: Resume check waiting for active vectorization run to finish...');
+        let waitedMs = 0;
+        while (isVectorizationActive() && waitedMs < 600000) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            waitedMs += 2000;
+        }
+        if (isVectorizationActive()) {
+            console.debug('VectHare: Resume check gave up waiting (run exceeded 10 min wait window)');
             return;
         }
-        setScanButton('Scanning...',true);
-        const scan=await scanCurrentChat(currentSettings,{control,onProgress:({detail,completed,total})=>updateActivity(activityId,{detail,completed,total})});
-        lastChatScan=scan.issues.length?scan:null;
-        setScanButton(scan.issues.length?`Repair (${scan.issues.length} Issues)`:'All Clear');
-        finishActivity(activityId,true,scan.issues.length?`${scan.issues.length} issue(s) found; repair available`:'All scanned vectors match the chat');activityFinished=true;
-        if(scan.issues.length) {
-            const counts=Object.groupBy ? Object.groupBy(scan.issues,issue=>issue.type) : null;
-            const summary=counts?Object.entries(counts).map(([kind,items])=>`${kind}: ${items.length}`).join(', '):`${scan.issues.length} issues`;
-            toastr.warning(`Scan found ${summary}. Click Repair to reconcile.`, 'VectHare', {timeOut:9000});
-        } else toastr.success('All scanned vectors match the current chat', 'VectHare');
-    } catch(error) {
-        if(!activityFinished) {finishActivity(activityId,error instanceof OperationStoppedError || error instanceof SharedOperationStoppedError?'stopped':false,error.message || 'Scan/repair failed');activityFinished=true;}
-        if(error instanceof OperationStoppedError || error instanceof SharedOperationStoppedError){lastChatScan=null;setScanButton('Scan Chat');return;}
-        lastChatScan=null;
-        setScanButton('Retry Scan');
-        if(/(no verified vectorization profile|embedding identity is unverified|lacks a verifiable chunk manifest)/i.test(error.message)) {
-            const binding=getChatBinding();
-            if(binding) {
-                const choice=prompt(`This older collection cannot be safely scanned or resumed: ${error.message}\n\n` +
-                    'Options:\nRESTORE — First set the original embedding provider, model and chunking strategy in Settings, then verify against stored vector samples.\n' +
-                    'RE-VECTORIZE — Build a new collection and keep this one as a disabled backup.\n' +
-                    'CANCEL — Keep the collection read-only.\n\nType RESTORE or RE-VECTORIZE:','CANCEL');
-                if(choice?.trim().toUpperCase()==='RE-VECTORIZE') {
-                    openContentVectorizer('chat',binding.registryKey);return;
-                }
-                if(choice?.trim().toUpperCase()==='RESTORE') {
-                    try {
-                        await verifyAndRestoreLegacyProfile(binding.registryKey,currentSettings);
-                        toastr.success('Stored vectors match the selected embedding model. Profile restored; scan again to inspect chat chunks.','VectHare');
-                        setScanButton('Scan Chat');refreshActiveChatProfile();return;
-                    } catch(verificationError) {toastr.error(`Original settings could not be verified: ${verificationError.message}`,'VectHare',{timeOut:12000});return;}
-                }
-                return;
-            }
-        }
-        toastr.error(`Scan/repair could not finish: ${error.message}`,'VectHare',{timeOut:12000});
-        console.error('VectHare: Chat repair error',error);
-    }finally{
-        if(shared)try{await finishSharedOperation(shared,sharedOutcome);}catch(e){console.warn('VectHare: repair job needs recovery:',e);}
-        detachOperationControl(activityId);
     }
+
+    for (let attempt = 1; attempt <= RESUME_CHECK_MAX_ATTEMPTS; attempt++) {
+        let result = null;
+        try {
+            result = await checkUnfinishedVectorization(settings);
+        } catch (error) {
+            console.warn('VectHare: Resume-on-load check failed:', error.message);
+        }
+
+        if (result) {
+            // Definitive answer — reflect it in the UI (Repair Chunks button +
+            // R10 status line) and stop polling.
+            // R23: 'available' instead of hiding on no-backlog - the button is a
+            // working tool (repair is a safe no-op when clean), and the old
+            // hide-on-clean made it flicker away based on racy async timing.
+            updateContinueVectorizationButton(
+                result.hasBacklog ? 'backlog' : 'available',
+                result.pending,
+                result.total
+            );
+            refreshVectorizationStatusDisplay(result);
+            // R9: if the user just pressed Stop, they KNOW it's unfinished - don't
+            // immediately nag with the toast. Button still updates (persistent
+            // affordance). Flag is consume-on-read so later natural checks toast.
+            const justStoppedByUser = consumeWasLastRunStoppedByUser();
+            if (result.hasBacklog && !isVectorizationActive() && !justStoppedByUser) {
+                console.log(`VectHare: Unfinished vectorization detected (${result.pending}/${result.total} pending)`);
+                showResumeToast(result.pending, result.total);
+            }
+            return;
+        }
+
+        // Collection not discovered yet — wait for discovery and retry
+        if (attempt < RESUME_CHECK_MAX_ATTEMPTS) {
+            await new Promise(resolve => setTimeout(resolve, RESUME_CHECK_RETRY_MS));
+        }
+    }
+
+    // Inconclusive: the check couldn't determine state (discovery/init still
+    // warming up, or chat truly has no collection).
+    // R23 FIX: previously "leave the button in whatever state it was" - which,
+    // combined with hide-on-clean calls elsewhere, is exactly how the user saw
+    // the Repair Chunks button vanish after actions and reappear after reload.
+    // Now: inconclusive state is resolved by REGISTRY TRUTH instead of timing.
+    // - Collection known to the registry -> button shows as 'available'
+    //   (repair is a safe no-op when clean; better a present harmless button
+    //   than a racy vanishing one)
+    // - Collection unknown -> genuinely no collection -> hidden (correct)
+    // R11 status-line refresh retained.
+    try {
+        const collectionId = getChatCollectionId();
+        const known = collectionId && getCollectionRegistry().some(
+            key => parseRegistryKey(key).collectionId === collectionId
+        );
+        updateContinueVectorizationButton(known ? 'available' : 'hide');
+    } catch (e) {
+        console.warn('VectHare: R23 inconclusive-state button resolution failed:', e.message);
+    }
+    refreshVectorizationStatusDisplay();
+    console.debug('VectHare: Resume check inconclusive after retries (no vector collection discovered yet)');
 }
+
 /**
  * Action: Full purge - wipes ALL vector data and settings
  */
 async function onPurgeClick() {
-    const purgeActivity=startActivity('Purge VectHare Data',{category:'purge',total:1,unit:'operation',detail:'Preparing scoped deletion inventory'});
+    const confirmed = confirm(
+        'WARNING: This will delete ALL vector data and reset VectHare settings.\n\n' +
+        'This cannot be undone. Continue?'
+    );
+
+    if (!confirmed) {
+        toastr.info('Purge cancelled');
+        return;
+    }
+
     try {
-        const result=await openPurgeDialog(settings,{allowReset:true});
-        if(!result){finishActivity(purgeActivity,true,'Cancelled without deleting data');return;}
-        if(result.resetSettings){
-            settings={...defaultSettings,enabled:extension_settings.vecthare.enabled};
-            toastr.success(`Verified deletion of ${result.completed.length} collection(s). Settings were reset. Reload SillyTavern to refresh all controls.`,'VectHare');
-        }else{
-            toastr.success(`Verified deletion of ${result.completed.length} VectHare collection(s). Provider and other settings preserved.`,'VectHare');
+        const { getRequestHeaders } = await import('../../../../script.js');
+
+        // 1. Delete entire vectors folder
+        await fetch('/api/plugins/similharity/purge-all', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+        });
+
+        // 2. Clear extension_settings.vecthare
+        for (const key in extension_settings.vecthare) {
+            if (key !== 'enabled') {
+                delete extension_settings.vecthare[key];
+            }
         }
-        finishActivity(purgeActivity,true,'Verified scoped deletion complete');
-    }catch(error){
-        finishActivity(purgeActivity,false,error.message);
-        toastr.error(`Purge aborted or incomplete: ${error.message}`,'VectHare',{timeOut:15000});
-        console.error('VectHare: Purge failed:',error);
+
+        // 3. Save settings
+        const { saveSettingsDebounced } = await import('../../../../script.js');
+        saveSettingsDebounced();
+
+        toastr.success('All vector data purged', 'Purge Complete');
+
+    } catch (error) {
+        console.error('VectHare: Purge failed:', error);
+        toastr.error('Purge failed: ' + error.message);
     }
 }
 
@@ -382,25 +396,24 @@ function onRunDiagnosticsClick() {
 jQuery(async () => {
     console.log('VectHare: Initializing...');
 
-    // One live settings object throughout the extension. The previous copy-on-
-    // startup model split `settings.collections` from collection metadata in
-    // extension_settings, permitting UI/runtime values to diverge after edits.
-    if (!extension_settings.vecthare) extension_settings.vecthare = {};
-    settings = extension_settings.vecthare;
-    for (const [key,defaultValue] of Object.entries(defaultSettings)) {
-        if(settings[key]===undefined)settings[key]=structuredClone(defaultValue);
+    // Load saved settings
+    if (!extension_settings.vecthare) {
+        extension_settings.vecthare = defaultSettings;
     }
-    if(!settings.temporal_decay || typeof settings.temporal_decay!=='object' || Array.isArray(settings.temporal_decay))
-        settings.temporal_decay=structuredClone(defaultSettings.temporal_decay||{});
-    for(const [key,defaultValue] of Object.entries(defaultSettings.temporal_decay||{})){
-        if(settings.temporal_decay[key]===undefined)settings.temporal_decay[key]=structuredClone(defaultValue);
-    }
-    // Collection metadata MUST remain the actual shared registry object, never
-    // a shallow clone that can become stale while a modal is open.
 
-    // Check the authoritative recovery copy without silently replacing local
-    // settings; any host/server mismatch must be resolved explicitly.
-    initialiseSettingsDurability().catch(error=>console.warn('[VectHare] Settings recovery copy unavailable:',error.message));
+    // Merge saved settings with defaults
+    settings = {
+        ...defaultSettings,
+        ...extension_settings.vecthare,
+        temporal_decay: {
+            ...defaultSettings.temporal_decay,
+            ...extension_settings.vecthare.temporal_decay
+        },
+        collections: {
+            ...defaultSettings.collections,
+            ...extension_settings.vecthare.collections
+        }
+    };
 
     // Migrate old scattered enabled keys to new collections structure
     const migrationResult = migrateOldEnabledKeys();
@@ -411,14 +424,33 @@ jQuery(async () => {
     // Render UI
     renderSettings('extensions_settings2', settings, {
         onVectorizeAll: onVectorizeAllClick,
-        onScanRepair: onScanRepairClick,
+        // R12: Repair Chunks is now a DISTINCT operation - repairs existing
+        // vectors only, never continues the backlog (use Sync Chat for that)
+        onContinueVectorization: onRepairClick,
+        onVectorizationStatusClick: () => {
+            // R10: clicking the status display opens/revives the progress panel.
+            // If no panel exists this session (nothing run yet), report status
+            // via toast instead - there is no meaningful panel to show.
+            if (progressTracker.panel) {
+                progressTracker.reveal();
+            } else {
+                // R12 FIX: show REAL numbers instead of the confusing
+                // "not run this session" line (the status line already knows
+                // collection-wide truth regardless of session state)
+                const s = progressTracker.stats;
+                toastr.info(
+                    'No vectorization panel to show yet this session. Run "Sync Chat" or "Repair Chunks" to open it. Current status is shown in the status line below.',
+                    'VectHare'
+                );
+                void s; // (status line itself carries the real numbers)
+            }
+        },
         onPurge: onPurgeClick,
         onRunDiagnostics: onRunDiagnosticsClick
     });
 
     // Initialize auto-sync checkbox state for current chat (if any)
     refreshAutoSyncCheckbox(settings);
-    refreshActiveChatProfile();
 
     // Initialize visualizer
     initializeVisualizer();
@@ -462,75 +494,37 @@ jQuery(async () => {
         }
     })();
 
-    // Register identity independently of any database collection.
-    // New chats/branches remain entirely unvectorised until user initiation.
-    recordCurrentChatIdentity();
     // Register event handlers
-    eventSource.on(event_types.MESSAGE_DELETED, (...args) => {
-        lastChatScan=null;
-        setScanButton('Scan Chat');
-        onChatEvent(...args);
-        // Capture BOTH immutable identity and source chat file at event time.
-        // A delayed callback must never retarget a newly opened branch/chat.
-        const sourceChatId = getCurrentChatId();
-        const sourceChatUUID = getChatUUID();
-        // Queue by both identities; a branch switch is not a licence to
-        // repair a different chat. Only queue an already connected collection.
-        let hasVerifiedBinding = false;
-        try { hasVerifiedBinding = !!(sourceChatId && sourceChatUUID && getChatBinding(sourceChatUUID)); }
-        catch(error) { console.warn('VectHare: deletion source identity ambiguous; no automatic repair:', error); }
-        if (hasVerifiedBinding) {
-            extension_settings.vecthare.pendingDeletionReconciliations ||= {};
-            extension_settings.vecthare.pendingDeletionReconciliations[sourceChatUUID] =
-                {sourceChatId,sourceChatUUID,requestedAt:Date.now()};
-            saveSettingsDebounced();
-        }
-        setTimeout(async () => {
-            if (getCurrentChatId() !== sourceChatId || getChatUUID() !== sourceChatUUID) {
-                console.warn('VectHare: chat switched before delete reconciliation; source remains for explicit Scan/Repair');
-                return;
-            }
-            const complete=await reconcileDeletedMessages(extension_settings.vecthare || settings,
-                {sourceChatId,sourceChatUUID});
-            if(complete===true) {
-                delete extension_settings.vecthare.pendingDeletionReconciliations?.[sourceChatUUID];
-                saveSettingsDebounced();
-            }
-        }, 350);
-    });
-    eventSource.on(event_types.MESSAGE_EDITED, (...args) => { lastChatScan=null;setScanButton('Scan Chat');onChatEvent(...args); });
+    eventSource.on(event_types.MESSAGE_DELETED, onChatEvent);
+    eventSource.on(event_types.MESSAGE_EDITED, onChatEvent);
+    // VectHare+ R10: edits/deletes flag the reverse-sync (repair) pass to run
+    // on the very next sync instead of waiting out the 5-minute throttle -
+    // the DB is corrected as soon as anything observes the change.
+    eventSource.on(event_types.MESSAGE_EDITED, () => flagImmediateReverseSync());
+    eventSource.on(event_types.MESSAGE_DELETED, () => flagImmediateReverseSync());
     // Run vector sync tasks on message events
     // Note: Semantic WI injection happens in the generate_interceptor (rearrangeChat), not here
     eventSource.on(event_types.MESSAGE_SENT, onChatEvent);
     eventSource.on(event_types.MESSAGE_RECEIVED, onChatEvent);
-    eventSource.on(event_types.MESSAGE_SWIPED, (...args) => { lastChatScan=null;setScanButton('Scan Chat');onChatEvent(...args); });
-    // 1.19 emits the rename after a successful server-side move. Only the
-    // active original UUID/file pair can update its binding; copied branches
-    // and identically named chats may not adopt the collection.
-    if (event_types.CHAT_RENAMED) eventSource.on(event_types.CHAT_RENAMED, event => {
-        if (reconcileActiveChatRename(event)) {
-            // A deletion pending when the SAME chat is renamed must follow
-            // its verified new filename; otherwise it becomes stranded until
-            // manually repaired. Never retarget a different UUID/branch.
-            const uuid=getChatUUID();
-            const oldFile=String(event?.oldFileName||'').replace(/\.jsonl$/i,'');
-            const pending=extension_settings.vecthare?.pendingDeletionReconciliations?.[uuid];
-            if(pending?.sourceChatUUID===uuid && pending.sourceChatId===oldFile){
-                pending.sourceChatId=getCurrentChatId();
-                saveSettingsDebounced();
+    eventSource.on(event_types.MESSAGE_SWIPED, onChatEvent);
+    // When a chat is deleted, purge its vectors (not full purge, just that chat)
+    eventSource.on(event_types.CHAT_DELETED, async (chatId) => {
+        if (chatId) {
+            const collectionId = getChatCollectionId(chatId);
+            if (collectionId) {
+                await purgeVectorIndex(collectionId, settings);
+                console.log(`VectHare: Purged vectors for deleted chat: ${chatId}`);
             }
-            console.info('VectHare: verified chat rename updated its identity and any existing collection binding');
-            refreshActiveChatProfile();
         }
     });
-
-    // Chat deletion must not automatically erase stored memories. Collections
-    // and their ownership record remain available for explicit recovery/deletion.
-    eventSource.on(event_types.CHAT_DELETED, chatId => {
-        console.info(`VectHare: Chat ${chatId} deleted; preserving vectors and metadata`);
-    });
-    eventSource.on(event_types.GROUP_CHAT_DELETED, chatId => {
-        console.info(`VectHare: Group chat ${chatId} deleted; preserving vectors and metadata`);
+    eventSource.on(event_types.GROUP_CHAT_DELETED, async (chatId) => {
+        if (chatId) {
+            const collectionId = getChatCollectionId(chatId);
+            if (collectionId) {
+                await purgeVectorIndex(collectionId, settings);
+                console.log(`VectHare: Purged vectors for deleted group chat: ${chatId}`);
+            }
+        }
     });
 
     // When WebLLM extension is loaded, refresh the model list
@@ -544,25 +538,14 @@ jQuery(async () => {
 
     // When chat changes, refresh UI state to match settings
     eventSource.on(event_types.CHAT_CHANGED, () => {
-        observeChatIdentityTransition();
-        const identity=confirmReopenedLegacyBranchIdentity();
-        if(!identity.verified)console.warn('[VectHare] Unsafe branch identity, writes blocked:',identity.reason);
         console.log('VectHare: Chat changed, refreshing UI state');
         refreshAutoSyncCheckbox(settings);
-        lastChatScan=null;setScanButton('Scan Chat');refreshActiveChatProfile();
-        const sourceChatUUID=getChatUUID(), sourceChatId=getCurrentChatId();
-        const pending=extension_settings.vecthare?.pendingDeletionReconciliations?.[sourceChatUUID];
-        if(pending && pending.sourceChatId===sourceChatId) {
-            setTimeout(async()=>{
-                if(getChatUUID()!==sourceChatUUID || getCurrentChatId()!==sourceChatId)return;
-                const complete=await reconcileDeletedMessages(extension_settings.vecthare||settings,pending);
-                if(complete===true){
-                    delete extension_settings.vecthare.pendingDeletionReconciliations[sourceChatUUID];
-                    saveSettingsDebounced();
-                }
-            },350);
-        }
+        // VectHare+: check for interrupted vectorization on the loaded chat
+        offerResumeOfUnfinishedVectorization();
     });
+
+    // VectHare+: one-time resume check at startup (page reload / ST reopen)
+    setTimeout(offerResumeOfUnfinishedVectorization, 5000);
 
     console.log('VectHare: ✅ Initialized successfully');
 });

@@ -1,6 +1,3 @@
-import { withSharedWriteHeaders,runExclusiveNativeMutation } from '../ui/shared-operations.js';
-import { saveVectHareSettingsDebounced as saveSettingsDebounced } from '../core/settings-durability.js';
-import { assertEmbeddingQueryFits } from '../core/embedding-overflow.js';
 /**
  * ============================================================================
  * STANDARD BACKEND (Vectra - ST Native + Plugin)
@@ -16,11 +13,13 @@ import { assertEmbeddingQueryFits } from '../core/embedding-overflow.js';
  */
 
 import { getRequestHeaders } from '../../../../../script.js';
-import { extension_settings } from '../../../../extensions.js';
 import { VectorBackend } from './backend-interface.js';
 import { getModelField } from '../core/providers.js';
-import { getProviderSpecificParams } from './provider-params.js';
 import { VECTOR_LIST_LIMIT } from '../core/constants.js';
+import { extension_settings } from '../../../../extensions.js';
+import { textgen_types, textgenerationwebui_settings } from '../../../../textgen-settings.js';
+import { oai_settings } from '../../../../openai.js';
+import { secret_state } from '../../../../secrets.js';
 
 /**
  * Get the model value from settings based on provider
@@ -31,50 +30,74 @@ function getModelFromSettings(settings) {
 }
 
 /**
- * Native SillyTavern vector storage does not persist rich VectHare metadata.
- * Maintain a per-source/per-collection sidecar for metadata + text. It is
- * committed ONLY after a successful native write, and dropped ONLY after a
- * successful delete/purge. This is not a substitute for plugin-side metadata
- * when sharing databases between installations (export settings together).
+ * Build provider-specific parameters for API requests.
+ * @param {object} settings - VectHare settings
+ * @param {boolean} isQuery - Whether this is a query operation
+ * @returns {object} Provider-specific parameters
  */
-function nativeSidecars() {
-    if (!extension_settings.vecthare) throw new Error('VectHare settings are unavailable');
-    return extension_settings.vecthare.nativeStandardChunks ||= {};
-}
-function sidecarKey(collectionId, settings) {
-    return JSON.stringify(['standard', settings?.source || 'transformers', getModelFromSettings(settings), collectionId]);
-}
-function nativeRecord(item) {
-    const extras = ['keywords', 'importance', 'customWeights', 'disabledKeywords',
-        'chunkGroup', 'conditions', 'summary', 'isSummaryChunk', 'parentHash'];
-    const metadata = { ...(item.metadata || {}) };
-    for (const key of extras) if (item[key] !== undefined) metadata[key] = item[key];
-    return { hash: item.hash, text: item.text || '', index: item.index ?? 0, metadata };
-}
-function saveSidecar(collectionId, items, settings) {
-    const key = sidecarKey(collectionId, settings);
-    const records = nativeSidecars()[key] ||= {};
-    for (const item of items) records[String(item.hash)] = nativeRecord(item);
-    saveSettingsDebounced();
-}
-function deleteSidecarHashes(collectionId, hashes, settings) {
-    const records = nativeSidecars()[sidecarKey(collectionId, settings)];
-    if (!records) return;
-    for (const hash of hashes) delete records[String(hash)];
-    saveSettingsDebounced();
-}
-function purgeSidecars(collectionId) {
-    let changed = false;
-    for (const key of Object.keys(nativeSidecars())) {
-        try {
-            const [, , , storedCollection] = JSON.parse(key);
-            if (storedCollection === collectionId) {
-                delete nativeSidecars()[key];
-                changed = true;
+function getProviderSpecificParams(settings, isQuery = false) {
+    const params = {};
+    const source = settings.source;
+
+    switch (source) {
+        case 'extras':
+            params.extrasUrl = extension_settings.apiUrl;
+            params.extrasKey = extension_settings.apiKey;
+            break;
+
+        case 'cohere':
+            params.input_type = isQuery ? 'search_query' : 'search_document';
+            break;
+
+        case 'ollama':
+            params.apiUrl = settings.use_alt_endpoint
+                ? settings.alt_endpoint_url
+                : textgenerationwebui_settings.server_urls[textgen_types.OLLAMA];
+            params.keep = !!settings.ollama_keep;
+            break;
+
+        case 'llamacpp':
+            params.apiUrl = settings.use_alt_endpoint
+                ? settings.alt_endpoint_url
+                : textgenerationwebui_settings.server_urls[textgen_types.LLAMACPP];
+            console.log(`VectHare DEBUG llamacpp: use_alt_endpoint=${settings.use_alt_endpoint}, alt_endpoint_url="${settings.alt_endpoint_url}", ST_url="${textgenerationwebui_settings.server_urls[textgen_types.LLAMACPP]}", final apiUrl="${params.apiUrl}"`);
+            break;
+
+        case 'vllm':
+            params.apiUrl = settings.use_alt_endpoint
+                ? settings.alt_endpoint_url
+                : textgenerationwebui_settings.server_urls[textgen_types.VLLM];
+            break;
+
+        case 'bananabread':
+            params.apiUrl = settings.use_alt_endpoint
+                ? settings.alt_endpoint_url
+                : 'http://localhost:8008';
+            if (secret_state['bananabread_api_key']) {
+                const secrets = secret_state['bananabread_api_key'];
+                const activeSecret = Array.isArray(secrets) ? (secrets.find(s => s.active) || secrets[0]) : null;
+                if (activeSecret) {
+                    params.apiKey = activeSecret.value;
+                }
             }
-        } catch { /* preserve unknown keys; never guess which collection */ }
+            break;
+
+        case 'palm':
+            params.api = 'makersuite';
+            break;
+
+        case 'vertexai':
+            params.api = 'vertexai';
+            params.vertexai_auth_mode = oai_settings.vertexai_auth_mode;
+            params.vertexai_region = oai_settings.vertexai_region;
+            params.vertexai_express_project_id = oai_settings.vertexai_express_project_id;
+            break;
+
+        default:
+            break;
     }
-    if (changed) saveSettingsDebounced();
+
+    return params;
 }
 
 export class StandardBackend extends VectorBackend {
@@ -94,7 +117,7 @@ export class StandardBackend extends VectorBackend {
             if (this.pluginAvailable) {
                 await fetch('/api/plugins/similharity/backend/init/vectra', {
                     method: 'POST',
-                    headers: withSharedWriteHeaders(getRequestHeaders()),
+                    headers: getRequestHeaders(),
                 });
                 console.log('VectHare: Standard backend initialized (plugin available)');
             } else {
@@ -108,23 +131,19 @@ export class StandardBackend extends VectorBackend {
     }
 
     async healthCheck() {
-        // Probe the native API. Even a missing collection should return HTTP 200
-        // with an empty hash array; HTTP 500 is a server failure, not "not found".
+        // Native ST API is always available if ST is running
         try {
+            // Quick test: try to list a non-existent collection (should return empty array or error)
             const response = await fetch('/api/vector/list', {
                 method: 'POST',
-                headers: withSharedWriteHeaders(getRequestHeaders()),
+                headers: getRequestHeaders(),
                 body: JSON.stringify({
                     collectionId: '__vecthare_health_check__',
                     source: 'transformers'
                 }),
             });
-            if (!response.ok) {
-                console.warn(`[Standard] Native vector health check returned HTTP ${response.status}`);
-                return false;
-            }
-            const hashes = await response.json();
-            return Array.isArray(hashes);
+            // 200 = works (empty collection), 500 = syntax error (no collection), both are "working"
+            return response.status === 200 || response.status === 500;
         } catch (error) {
             console.error('[Standard] Health check failed:', error);
             return false;
@@ -141,7 +160,7 @@ export class StandardBackend extends VectorBackend {
 
         const response = await fetch('/api/vector/list', {
             method: 'POST',
-            headers: withSharedWriteHeaders(getRequestHeaders()),
+            headers: getRequestHeaders(),
             body: JSON.stringify({
                 collectionId: collectionId,
                 source: settings.source || 'transformers',
@@ -151,19 +170,18 @@ export class StandardBackend extends VectorBackend {
         });
 
         if (!response.ok) {
-            // SillyTavern's /api/vector/list returns 200 + [] for an empty (or
-            // newly created) index. A 500 indicates a backend/index error.
-            // Never disguise it as an empty collection: callers use the hash
-            // list for incremental sync, repair, and deletion decisions.
+            // Collection doesn't exist or error
+            if (response.status === 500) {
+                // Likely collection doesn't exist
+                return [];
+            }
             const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`[Standard] Failed to list hashes for ${collectionId}: HTTP ${response.status} ${response.statusText} - ${errorBody}`);
+            throw new Error(`Failed to get saved hashes: ${response.status} ${response.statusText} - ${errorBody}`);
         }
 
         const data = await response.json();
-        if (!Array.isArray(data)) {
-            throw new Error(`[Standard] Invalid hash list for ${collectionId}: native API returned ${data === null ? 'null' : typeof data}, expected an array`);
-        }
-        return data;
+        // Native API returns array of hashes directly
+        return Array.isArray(data) ? data : [];
     }
 
     /**
@@ -171,13 +189,6 @@ export class StandardBackend extends VectorBackend {
      * Uses plugin API if available (for metadata support), falls back to native ST API
      */
     async insertVectorItems(collectionId, items, settings) {
-        // Plugin routes are fenced by their own middleware. Native HTTP routes
-        // are not, so a shared lease must encompass the entire native write.
-        if(this.pluginAvailable)return this._insertVectorItems(collectionId, items, settings);
-        return runExclusiveNativeMutation('Standard: insertVectorItems',collectionId,()=>this._insertVectorItems(collectionId, items, settings));
-    }
-
-    async _insertVectorItems(collectionId, items, settings) {
         if (items.length === 0) return;
 
         const providerParams = getProviderSpecificParams(settings, false);
@@ -210,9 +221,6 @@ export class StandardBackend extends VectorBackend {
             // Try plugin API first (supports metadata) - fallback to native API if unavailable
             console.log('VectHare DEBUG: this.pluginAvailable =', this.pluginAvailable);
             let usePluginApi = this.pluginAvailable;
-            if (['nanogpt','custom','ollama'].includes(settings.source) && !usePluginApi) {
-                throw new Error(`${settings.source} requires the matching Similharity plugin for safe embedding requests (Ollama truncate:false and custom provider routing); refusing an unsafe native fallback`);
-            }
             let endpoint = usePluginApi ? '/api/plugins/similharity/chunks/insert' : '/api/vector/insert';
 
             console.log(`VectHare DEBUG: Using ${usePluginApi ? 'PLUGIN' : 'NATIVE'} API for insertion (${endpoint})`);
@@ -253,7 +261,6 @@ export class StandardBackend extends VectorBackend {
                 }),
                 source: settings.source || 'transformers',
                 model: model,
-                ...providerParams,
             } : {
                 collectionId: collectionId,
                 items: items.map(item => ({
@@ -273,7 +280,7 @@ export class StandardBackend extends VectorBackend {
 
             const response = await fetch(endpoint, {
                 method: 'POST',
-                headers: withSharedWriteHeaders(getRequestHeaders()),
+                headers: getRequestHeaders(),
                 body: JSON.stringify(payload),
             });
 
@@ -282,7 +289,6 @@ export class StandardBackend extends VectorBackend {
                 throw new Error(`Failed to insert vectors: ${response.status} - ${errorBody}`);
             }
 
-            if (!usePluginApi) saveSidecar(collectionId, items, settings);
             console.log(`VectHare Standard: Inserted ${items.length} vectors into ${collectionId}`);
         } catch (error) {
             // Enhanced error logging for OOM debugging
@@ -305,13 +311,9 @@ export class StandardBackend extends VectorBackend {
      * Uses native ST API
      */
     async deleteVectorItems(collectionId, hashes, settings) {
-        return runExclusiveNativeMutation('Standard: deleteVectorItems',collectionId,()=>this._deleteVectorItems(collectionId, hashes, settings));
-    }
-
-    async _deleteVectorItems(collectionId, hashes, settings) {
         const response = await fetch('/api/vector/delete', {
             method: 'POST',
-            headers: withSharedWriteHeaders(getRequestHeaders()),
+            headers: getRequestHeaders(),
             body: JSON.stringify({
                 collectionId: collectionId,
                 hashes: hashes,
@@ -323,7 +325,6 @@ export class StandardBackend extends VectorBackend {
             const errorBody = await response.text().catch(() => 'No response body');
             throw new Error(`Failed to delete vectors: ${response.status} ${response.statusText} - ${errorBody}`);
         }
-        deleteSidecarHashes(collectionId, hashes, settings);
     }
 
     /**
@@ -331,7 +332,6 @@ export class StandardBackend extends VectorBackend {
      * Uses native ST API
      */
     async queryCollection(collectionId, searchText, topK, settings, queryVector = null) {
-        if (!queryVector) await assertEmbeddingQueryFits(searchText, settings);
         const providerParams = getProviderSpecificParams(settings, true);
         const model = getModelFromSettings(settings);
 
@@ -352,7 +352,7 @@ export class StandardBackend extends VectorBackend {
 
         const response = await fetch('/api/vector/query', {
             method: 'POST',
-            headers: withSharedWriteHeaders(getRequestHeaders()),
+            headers: getRequestHeaders(),
             body: JSON.stringify(requestBody),
         });
 
@@ -364,21 +364,14 @@ export class StandardBackend extends VectorBackend {
         const data = await response.json();
 
         // Native API returns { hashes: [], metadata: [] }
-        const hashes = data.hashes || [];
-        const sidecar = nativeSidecars()[sidecarKey(collectionId, settings)] || {};
         return {
-            hashes,
-            metadata: hashes.map((hash, idx) => {
-                const m = (data.metadata || [])[idx] || {};
-                const stored = sidecar[String(hash)];
-                return {
-                    ...stored?.metadata,
-                    hash,
-                    text: m.text || stored?.text || '',
-                    ...m,
-                    score: m.score ?? 0,
-                };
-            }),
+            hashes: data.hashes || [],
+            metadata: (data.metadata || []).map((m, idx) => ({
+                hash: data.hashes?.[idx],
+                text: m.text,
+                score: m.score || 0,
+                ...m,
+            })),
         };
     }
 
@@ -387,7 +380,6 @@ export class StandardBackend extends VectorBackend {
      * Uses native ST API
      */
     async queryMultipleCollections(collectionIds, searchText, topK, threshold, settings, queryVector = null) {
-        if (!queryVector) await assertEmbeddingQueryFits(searchText, settings);
         const providerParams = getProviderSpecificParams(settings, true);
         const model = getModelFromSettings(settings);
 
@@ -407,7 +399,7 @@ export class StandardBackend extends VectorBackend {
 
         const response = await fetch('/api/vector/query-multi', {
             method: 'POST',
-            headers: withSharedWriteHeaders(getRequestHeaders()),
+            headers: getRequestHeaders(),
             body: JSON.stringify(requestBody),
         });
 
@@ -431,19 +423,7 @@ export class StandardBackend extends VectorBackend {
             return results;
         }
 
-        const results = await response.json();
-        // Preserve locally recorded chunk attributes when native results omit
-        // them; never merge metadata belonging to another collection.
-        for (const [collectionId, result] of Object.entries(results || {})) {
-            if (!result || !Array.isArray(result.hashes)) continue;
-            const sidecar = nativeSidecars()[sidecarKey(collectionId, settings)] || {};
-            result.metadata = result.hashes.map((hash, i) => {
-                const server = result.metadata?.[i] || {};
-                const stored = sidecar[String(hash)];
-                return { ...stored?.metadata, hash, text: server.text || stored?.text || '', ...server };
-            });
-        }
-        return results;
+        return await response.json();
     }
 
     /**
@@ -451,13 +431,9 @@ export class StandardBackend extends VectorBackend {
      * Uses native ST API
      */
     async purgeVectorIndex(collectionId, settings) {
-        return runExclusiveNativeMutation('Standard: purgeVectorIndex',collectionId,()=>this._purgeVectorIndex(collectionId, settings));
-    }
-
-    async _purgeVectorIndex(collectionId, settings) {
         const response = await fetch('/api/vector/purge', {
             method: 'POST',
-            headers: withSharedWriteHeaders(getRequestHeaders()),
+            headers: getRequestHeaders(),
             body: JSON.stringify({
                 collectionId: collectionId,
             }),
@@ -467,7 +443,6 @@ export class StandardBackend extends VectorBackend {
             const errorBody = await response.text().catch(() => 'No response body');
             throw new Error(`Failed to purge collection: ${response.status} ${response.statusText} - ${errorBody}`);
         }
-        purgeSidecars(collectionId);
     }
 
     async purgeFileVectorIndex(collectionId, settings) {
@@ -478,10 +453,16 @@ export class StandardBackend extends VectorBackend {
      * Purge all vector indexes
      * Uses native ST API
      */
-    async purgeAllVectorIndexes() {
-        // Whole-user native purge also deletes unrelated SillyTavern vectors.
-        // Only the scoped, verified VectHare purge flow is permitted.
-        throw new Error('Unsafe native Purge All is disabled. Use the VectHare scoped Purge dialog instead.');
+    async purgeAllVectorIndexes(settings) {
+        const response = await fetch('/api/vector/purge-all', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+        });
+
+        if (!response.ok) {
+            const errorBody = await response.text().catch(() => 'No response body');
+            throw new Error(`Failed to purge all: ${response.status} ${response.statusText} - ${errorBody}`);
+        }
     }
 
     // ========================================================================
@@ -497,7 +478,7 @@ export class StandardBackend extends VectorBackend {
             try {
                 const response = await fetch('/api/plugins/similharity/chunks/list', {
                     method: 'POST',
-                    headers: withSharedWriteHeaders(getRequestHeaders()),
+                    headers: getRequestHeaders(),
                     body: JSON.stringify({
                         backend: 'vectra',
                         collectionId: collectionId,
@@ -510,28 +491,17 @@ export class StandardBackend extends VectorBackend {
                 });
 
                 if (response.ok) {
-                    const result=await response.json();
-                    if(!result || result.success === false || !Array.isArray(result.items) ||
-                       (result.total != null && (!Number.isSafeInteger(result.total) || result.total<0)))
-                        throw new Error('Similharity chunk listing returned malformed or failed success data');
-                    return result;
+                    return await response.json();
                 }
-                if (response.status !== 404 && response.status !== 501)
-                    throw new Error(`Similharity chunk listing failed (HTTP ${response.status})`);
             } catch (e) {
-                // Network errors and server failures must not become false-empty.
-                throw new Error(`Similharity chunk listing unavailable: ${e.message}`, {cause:e});
+                console.warn('VectHare: Plugin listChunks failed, using native fallback');
             }
         }
 
         // Fallback: use native list (hashes only)
         const hashes = await this.getSavedHashes(collectionId, settings);
-        const records = nativeSidecars()[sidecarKey(collectionId, settings)] || {};
-        const offset = Math.max(0, options.offset || 0);
-        const limit = Math.max(1, options.limit || 100);
         return {
-            items: hashes.slice(offset, offset + limit).map(hash => records[String(hash)] ||
-                { hash, text: '', metadata: { unverifiedNativeMetadata: true } }),
+            items: hashes.map(hash => ({ hash, text: '', metadata: {} })),
             total: hashes.length,
         };
     }
@@ -541,11 +511,7 @@ export class StandardBackend extends VectorBackend {
      * Returns null if plugin unavailable
      */
     async getChunk(collectionId, hash, settings) {
-        if (!this.pluginAvailable) {
-            const hashes = await this.getSavedHashes(collectionId, settings);
-            if (!hashes.some(h => String(h) === String(hash))) return null;
-            return nativeSidecars()[sidecarKey(collectionId, settings)]?.[String(hash)] || null;
-        }
+        if (!this.pluginAvailable) return null;
 
         try {
             const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}?` + new URLSearchParams({
@@ -554,7 +520,7 @@ export class StandardBackend extends VectorBackend {
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
             }), {
-                headers: withSharedWriteHeaders(getRequestHeaders()),
+                headers: getRequestHeaders(),
             });
 
             if (response.ok) {
@@ -572,14 +538,13 @@ export class StandardBackend extends VectorBackend {
      * Update chunk text (plugin-only feature)
      */
     async updateChunkText(collectionId, hash, newText, settings) {
-        await assertEmbeddingQueryFits(newText, settings); // Edit re-embeds one vector; do not silently truncate or split it.
         if (!this.pluginAvailable) {
             throw new Error('Chunk text editing requires the Similharity plugin');
         }
 
         const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}/text`, {
             method: 'PATCH',
-            headers: withSharedWriteHeaders(getRequestHeaders()),
+            headers: getRequestHeaders(),
             body: JSON.stringify({
                 backend: 'vectra',
                 collectionId: collectionId,
@@ -607,7 +572,7 @@ export class StandardBackend extends VectorBackend {
 
         const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}/metadata`, {
             method: 'PATCH',
-            headers: withSharedWriteHeaders(getRequestHeaders()),
+            headers: getRequestHeaders(),
             body: JSON.stringify({
                 backend: 'vectra',
                 collectionId: collectionId,
@@ -634,7 +599,7 @@ export class StandardBackend extends VectorBackend {
             try {
                 const response = await fetch('/api/plugins/similharity/chunks/stats', {
                     method: 'POST',
-                    headers: withSharedWriteHeaders(getRequestHeaders()),
+                    headers: getRequestHeaders(),
                     body: JSON.stringify({
                         backend: 'vectra',
                         collectionId: collectionId,
@@ -668,7 +633,7 @@ export class StandardBackend extends VectorBackend {
         if (this.pluginAvailable) {
             try {
                 const response = await fetch('/api/plugins/similharity/collections', {
-                    headers: withSharedWriteHeaders(getRequestHeaders()),
+                    headers: getRequestHeaders(),
                 });
 
                 if (response.ok) {

@@ -67,22 +67,15 @@ export const COLLECTION_SCOPES = {
  * @returns {string|null} Chat UUID or null if no chat
  */
 export function getChatUUID() {
-    // Per-file VectHare recovery identities may replace a copied legacy ST UUID.
-    // The host integrity UUID stays unchanged; VectHare never edits it.
-    // A modern SillyTavern branch copies custom metadata but mints a NEW
-    // host integrity UUID. Never inherit its parent's VectHare override.
-    const overrideIsForThisHostId = !!chat_metadata?.vecthare_instance_uuid &&
-        !!chat_metadata?.vecthare_instance_integrity &&
-        String(chat_metadata.vecthare_instance_integrity)===String(chat_metadata.integrity);
-    const integrity = overrideIsForThisHostId ? chat_metadata.vecthare_instance_uuid : chat_metadata?.integrity;
+    const integrity = chat_metadata?.integrity;
     if (integrity) {
         return integrity;
     }
-    // SillyTavern 1.19 mints distinct integrity UUIDs for new branches.
-    // A filename is NOT a stable replacement: renames, clones and old branch
-    // files can reuse it. Never grant a write owner based on a guessed UUID.
-    if (getCurrentChatId()) {
-        console.warn('VectHare: this chat has no verified integrity UUID; vector writes remain disabled until SillyTavern assigns a durable identity');
+    // Fallback: use chatId (less ideal but works for old chats)
+    const chatId = getCurrentChatId();
+    if (chatId) {
+        console.warn('VectHare: chat_metadata.integrity not found, falling back to chatId');
+        return chatId;
     }
     return null;
 }
@@ -344,8 +337,14 @@ export function buildChatSearchPatterns(chatId, chatUUID) {
     if (id) {
         patterns.push(`${COLLECTION_PREFIXES.VECTHARE_CHAT}${id}`.toLowerCase());
 
-        // Character-name matches are deliberately not ownership evidence.
-
+        // Extract character name (before " - " in filename)
+        const charNameMatch = id.match(/^([^-]+)/);
+        if (charNameMatch) {
+            const charName = charNameMatch[1].trim().toLowerCase();
+            if (charName) {
+                patterns.push(`${COLLECTION_PREFIXES.VECTHARE_CHAT}${charName}`.toLowerCase());
+            }
+        }
     }
 
     return patterns;
@@ -391,7 +390,7 @@ export function parseRegistryKey(registryKey) {
     const knownBackends = ['standard', 'lancedb', 'vectra', 'milvus', 'qdrant'];
     const knownSources = ['transformers', 'openai', 'cohere', 'ollama', 'llamacpp',
         'vllm', 'koboldcpp', 'webllm', 'bananabread', 'openrouter',
-        'electronhub', 'nanogpt', 'custom', 'mistral', 'nomicai', 'palm', 'vertexai', 'togetherai', 'extras'];
+        'electronhub', 'mistral', 'nomicai', 'palm', 'vertexai', 'togetherai', 'extras'];
 
     const parts = registryKey.split(':');
 

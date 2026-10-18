@@ -1,4 +1,3 @@
-import { saveVectHareSettingsDebounced as saveSettingsDebounced } from './settings-durability.js';
 /**
  * ============================================================================
  * VECTHARE COLLECTION LOADER
@@ -12,7 +11,7 @@ import { saveVectHareSettingsDebounced as saveSettingsDebounced } from './settin
 
 import { extension_settings } from '../../../../extensions.js';
 import { getContext } from '../../../../extensions.js';
-import { characters, substituteParams, getRequestHeaders } from '../../../../../script.js';
+import { characters, substituteParams, getRequestHeaders, saveSettingsDebounced } from '../../../../../script.js';
 import { getSavedHashes, queryCollection } from './core-vector-api.js';
 import { getStringHash } from '../../../../utils.js';
 import {
@@ -26,11 +25,6 @@ import {
     getCollectionMeta,
 } from './collection-metadata.js';
 import { purgeVectorIndex } from './core-vector-api.js';
-import { clearRecoveryForCollection } from './sync-checkpoints.js';
-import { forgetQdrantIdentity } from './physical-identity.js';
-import { getBackend } from '../backends/backend-manager.js';
-import { retireChatChunkManifest } from './vectorization-profile.js';
-import { getChatBinding, getCollectionOwner, forgetDeletedCollection } from './collection-ownership.js';
 // Import from collection-ids.js - single source of truth for collection ID operations
 import {
     getChatUUID,
@@ -45,16 +39,6 @@ import {
 
 // Plugin detection state
 let pluginAvailable = null;
-let pluginCheckedAt = 0;
-const PLUGIN_HEALTHY_TTL_MS = 60_000;
-const PLUGIN_FAILED_TTL_MS = 10_000;
-
-/** Allows explicit retry following plugin installation / restart. */
-export function resetPluginAvailability() {
-    pluginAvailable = null;
-    pluginCheckedAt = 0;
-    pluginCollectionData = null;
-}
 
 /**
  * Gets or initializes the collection registry
@@ -122,56 +106,26 @@ export async function deleteCollection(collectionId, settings, registryKey = nul
 
     console.log(`VectHare: Deleting collection ${collectionId} (registry key: ${registryKey || collectionId})`);
 
-    // Use the collection's fully qualified identity; never delete from the
-    // currently configured backend if it differs from the collection's owner.
-    const actualKey = registryKey || collectionId;
-    const parsedKey = parseRegistryKey(actualKey);
-    if (parsedKey.backend && (settings.vector_backend || 'standard') !== parsedKey.backend) {
-        return { success: false, errors: [`Backend mismatch: ${parsedKey.backend}`], vectorsDeleted: false, registryDeleted: false, metadataDeleted: false };
-    }
-    if (parsedKey.source && (settings.source || 'transformers') !== parsedKey.source) {
-        return { success: false, errors: [`Embedding source mismatch: ${parsedKey.source}`], vectorsDeleted: false, registryDeleted: false, metadataDeleted: false };
-    }
+    // Step 1: Delete vectors from backend (most important - actual data)
     try {
-        vectorsDeleted = await purgeVectorIndex(parsedKey.collectionId, settings) === true;
-        if (!vectorsDeleted) throw new Error('Backend did not confirm vector deletion');
+        await purgeVectorIndex(collectionId, settings);
+        vectorsDeleted = true;
+        console.log(`VectHare: ✓ Deleted vectors for ${collectionId}`);
     } catch (error) {
         errors.push(`Vectors: ${error.message}`);
-    }
-    if (vectorsDeleted) {
-        try {
-            const backend = await getBackend(settings);
-            if (typeof backend.listChunks !== 'function') throw new Error('Backend does not expose a verifiable chunk listing');
-            const listing = await backend.listChunks(parsedKey.collectionId, settings, {offset:0,limit:1});
-            if (!Array.isArray(listing?.items)) throw new Error('Backend returned an unverified deletion response');
-            if (listing.items.length) throw new Error('Vectors still exist after purge');
-        } catch(error) {
-            // Some APIs return a genuine 404 when a deleted physical index no
-            // longer exists. Other errors must preserve metadata for recovery.
-            if (!/\b404\b/.test(error.message)) {
-                vectorsDeleted = false;
-                errors.push(`Verification: ${error.message}`);
-            }
-        }
-    }
-    if (!vectorsDeleted) {
-        console.error(`VectHare: Retaining registry and metadata after unsuccessful vector deletion: ${actualKey}`);
-        return { success: false, errors, vectorsDeleted: false, registryDeleted: false, metadataDeleted: false };
+        console.warn(`VectHare: ✗ Failed to delete vectors for ${collectionId}:`, error.message);
+        // Continue anyway - registry/metadata cleanup is still valuable
     }
 
-    // Purge the independent browser manifest before discarding recovery keys.
-    // A failure retains the registry so the partial deletion can be retried.
-    try {await retireChatChunkManifest(actualKey);}
-    catch(error){
-        errors.push(`Manifest cleanup: ${error.message}`);
-        return {success:false,errors,vectorsDeleted:true,registryDeleted:false,metadataDeleted:false};
-    }
     // Step 2: Unregister from registry (try both formats)
     try {
         const keyToUnregister = registryKey || collectionId;
         unregisterCollection(keyToUnregister);
 
-        // Do not unregister a bare ID that might designate another backend.
+        // Also try the other format if they differ
+        if (registryKey && registryKey !== collectionId) {
+            unregisterCollection(collectionId);
+        }
 
         registryDeleted = true;
         console.log(`VectHare: ✓ Unregistered ${collectionId}`);
@@ -182,7 +136,7 @@ export async function deleteCollection(collectionId, settings, registryKey = nul
 
     // Step 3: Delete metadata
     try {
-        deleteCollectionMeta(actualKey);
+        deleteCollectionMeta(collectionId);
         metadataDeleted = true;
         console.log(`VectHare: ✓ Deleted metadata for ${collectionId}`);
     } catch (error) {
@@ -191,7 +145,6 @@ export async function deleteCollection(collectionId, settings, registryKey = nul
     }
 
     const success = vectorsDeleted && registryDeleted && metadataDeleted;
-    if (success){forgetDeletedCollection(actualKey);clearRecoveryForCollection(actualKey);forgetQdrantIdentity(actualKey,settings);}
 
     if (success) {
         console.log(`VectHare: ✓ Fully deleted collection ${collectionId}`);
@@ -335,12 +288,9 @@ function getCollectionDisplayName(collectionId, metadata) {
  * @returns {Promise<boolean>} True if plugin is available
  */
 async function checkPluginAvailable() {
-    const maxAge = pluginAvailable ? PLUGIN_HEALTHY_TTL_MS : PLUGIN_FAILED_TTL_MS;
-    if (pluginAvailable !== null && Date.now() - pluginCheckedAt < maxAge) {
+    if (pluginAvailable !== null) {
         return pluginAvailable;
     }
-    // A failed probe must not permanently disable discovery; retry after TTL.
-    pluginCheckedAt = Date.now();
 
     try {
         const response = await fetch('/api/plugins/similharity/health', {
@@ -381,10 +331,6 @@ async function discoverViaPlugin(settings) {
         });
 
         if (!response.ok) {
-            // A failed discovery means this cached plugin availability is stale.
-            // Retry from native discovery instead of presenting zero collections.
-            pluginAvailable = false;
-            pluginCheckedAt = Date.now();
             console.warn(`⚠️ VectHare: Plugin collections endpoint failed (status: ${response.status})`);
             console.log('   💡 Make sure the Similharity plugin is installed and running');
             return [];
@@ -476,7 +422,7 @@ async function discoverViaPlugin(settings) {
 
                 if (matchingPluginKeys.length > 0) {
                     console.debug(`   🔄 Migrating: ${oldKey} -> ${matchingPluginKeys.join(', ')}`);
-                    // Keep the old alias until collection metadata has been migrated safely.
+                    unregisterCollection(oldKey);
                     migratedEntries.push(oldKey);
                     // Don't register here - will be registered in the main loop below
                 } else {
@@ -495,8 +441,7 @@ async function discoverViaPlugin(settings) {
                 console.debug(`   🗑️  Removing ${staleEntries.length} stale registry entries:`);
                 for (const staleKey of staleEntries) {
                     console.debug(`      - ${staleKey}`);
-                    // Discovery is not proof of deletion (backend may be offline).
-                    // Keep registry and metadata for manual verification.
+                    unregisterCollection(staleKey);
                 }
             }
 
@@ -538,9 +483,7 @@ async function probeCollection(collectionId, settings) {
             return { exists: true, count: hashes.length };
         }
     } catch (error) {
-        // A failed native listing is not evidence that the collection is empty.
-        // Let discovery abort rather than report an incorrect missing collection.
-        throw new Error(`Failed to probe collection ${collectionId}: ${error.message}`, { cause: error });
+        // Collection doesn't exist or error - that's fine
     }
     return { exists: false, count: 0 };
 }
@@ -582,8 +525,9 @@ async function discoverViaFallback(settings) {
             }
             console.log(`VectHare: Verified registry entry: ${collectionId} (${result.count} chunks)`);
         } else {
-            // Failed or empty probe is not proof of deletion. Preserve registry.
-            console.warn(`VectHare: Could not verify registry entry, preserving: ${registryKey}`);
+            // Remove stale entry
+            unregisterCollection(registryKey);
+            console.log(`VectHare: Removed stale registry entry: ${registryKey}`);
         }
     }
 
@@ -660,10 +604,7 @@ export async function discoverExistingCollections(settings) {
 
     if (hasPlugin) {
         console.log('VectHare: Using plugin for collection discovery');
-        const found = await discoverViaPlugin(settings);
-        if (pluginAvailable === true) return found; // an empty but healthy plugin is valid
-        console.warn('VectHare: Plugin discovery failed, retaining registry and trying native fallback');
-        return await discoverViaFallback(settings);
+        return await discoverViaPlugin(settings);
     } else {
         console.log('VectHare: Plugin not available, using fallback discovery');
         return await discoverViaFallback(settings);
@@ -688,34 +629,63 @@ export async function doesChatHaveVectors(settings, overrideChatId, overrideUUID
     const uuid = overrideUUID || getChatUUID();
     const chatId = overrideChatId || (getContext().chatId);
 
-    const binding = getChatBinding(uuid);
-    const exactId = getChatCollectionId(uuid);
-    const legacyId = getLegacyChatCollectionId(chatId);
+    // Use unified pattern builder from collection-ids.js
+    const searchPatterns = buildChatSearchPatterns(chatId, uuid);
+
+    console.log(`VectHare: Searching for chat vectors. UUID: ${uuid}, Patterns:`, searchPatterns);
+
+    // Collect ALL matching collections, then pick the best one
+    // This handles ghost collections (empty) vs real collections (has chunks)
     const matchingCollections = [];
+
     for (const registryKey of registry) {
+        // Use unified registry key parser from collection-ids.js
         const parsed = parseRegistryKey(registryKey);
         const collectionId = parsed.collectionId;
-        const isBound = binding?.registryKey === registryKey;
-        const exactMatch = collectionId === exactId || collectionId === legacyId;
-        if (!isBound && !exactMatch) continue; // Never promote character substring matches.
-        const owner = getCollectionOwner(registryKey);
-        if (owner && owner !== uuid) continue;
-        const cached = pluginCollectionData?.[registryKey];
-        matchingCollections.push({
-            collectionId, registryKey,
-            chunkCount: cached ? (cached.chunkCount ?? null) : null,
-            countVerified: cached?.chunkCount != null,
-            source: parsed.source || cached?.source || 'unknown',
-            backend: parsed.backend || cached?.backend || 'standard',
-            matchType: isBound ? 'bound' : 'exact',
-        });
+
+        // Use unified pattern matching from collection-ids.js
+        const matches = matchesPatterns(registryKey, searchPatterns) ||
+                       matchesPatterns(collectionId, searchPatterns);
+
+        if (matches) {
+            // Get chunk count, source, and backend from plugin cache if available
+            let chunkCount = 0;
+            let source = parsed.source || 'unknown';
+            let backend = parsed.backend || 'standard';
+
+            if (pluginCollectionData && pluginCollectionData[registryKey]) {
+                const cacheData = pluginCollectionData[registryKey];
+                chunkCount = cacheData.chunkCount || 0;
+                source = cacheData.source || source;
+                backend = cacheData.backend || backend;
+            }
+
+            matchingCollections.push({
+                collectionId,
+                registryKey,
+                chunkCount,
+                source,
+                backend
+            });
+            console.log(`VectHare: Found matching collection ${collectionId} (${chunkCount} chunks, backend: ${backend})`);
+        }
     }
-    matchingCollections.sort((a, b) => (b.matchType === 'bound') - (a.matchType === 'bound') || b.chunkCount - a.chunkCount);
-    if (matchingCollections.length) {
+
+    // If we found matches, return ALL of them sorted by chunk count (best first)
+    if (matchingCollections.length > 0) {
+        // Sort by chunk count descending
+        matchingCollections.sort((a, b) => b.chunkCount - a.chunkCount);
+
         const best = matchingCollections[0];
-        return { hasVectors: true, collectionId: best.collectionId,
-            registryKey: best.registryKey, chunkCount: best.chunkCount,
-            allMatches: matchingCollections };
+        console.log(`VectHare: Found ${matchingCollections.length} matching collection(s), best is ${best.collectionId} with ${best.chunkCount} chunks`);
+
+        return {
+            hasVectors: true,
+            collectionId: best.collectionId,
+            registryKey: best.registryKey,
+            chunkCount: best.chunkCount,
+            allMatches: matchingCollections  // Return ALL matches for user selection
+        };
     }
 
     // Not found in registry - try direct query as last resort
@@ -727,24 +697,17 @@ export async function doesChatHaveVectors(settings, overrideChatId, overrideUUID
             const hashes = await getSavedHashes(id, settings);
             if (hashes && hashes.length > 0) {
                 // Found vectors! Register it now
-                // No backend identity can be assumed beyond the active settings.
-                const registryKey = `${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${id}`;
-                registerCollection(registryKey);
-                console.log(`VectHare: Found ${hashes.length} vectors via direct query, registered ${registryKey}`);
+                registerCollection(id);
+                console.log(`VectHare: Found ${hashes.length} vectors via direct query, registered ${id}`);
                 return {
                     hasVectors: true,
                     collectionId: id,
-                    registryKey,
-                    chunkCount: hashes.length,
-                    allMatches: [{collectionId: id, registryKey, chunkCount: hashes.length, countVerified: true, backend: settings.vector_backend || 'standard', source: settings.source || 'transformers', matchType: 'exact'}],
+                    registryKey: id,
+                    chunkCount: hashes.length
                 };
             }
-        } catch (error) {
-            // Native /api/vector/list reports 200 + [] for missing/empty indexes.
-            // Never suppress HTTP 500 (or network failures) as "no vectors".
-            // Other backends may use 404 for a missing physical collection.
-            if ((settings.vector_backend || 'standard') !== 'standard' && /\b404\b/.test(error.message)) continue;
-            throw new Error(`Unable to determine whether chat collection ${id} contains vectors: ${error.message}`, { cause: error });
+        } catch (e) {
+            // Query failed, continue to next format
         }
     }
 
@@ -832,19 +795,30 @@ export async function loadAllCollections(settings, autoDiscover = true) {
 
                 console.log(`VectHare:   Plugin reported ${chunkCount} chunks (backend: ${backend}, source: ${source}, models: ${models.length})`);
             } else {
-                // Never probe a known Qdrant/LanceDB/Milvus collection using
-                // Standard merely because the plugin is offline.
-                const probeBackend = registryBackend || settings.vector_backend || 'standard';
-                const probeSettings = {
-                    ...settings, vector_backend: probeBackend,
-                    source: registrySource || settings.source || 'transformers',
-                };
+                // Fallback mode: we don't know which backend the collection was created with
+                // Try 'standard' first (most common), only try configured backend if standard fails
+                console.log(`VectHare:   Using fallback mode - trying standard backend first`);
+                const standardSettings = { ...settings, vector_backend: 'standard' };
                 try {
-                    hashes = await getSavedHashes(collectionId, probeSettings);
+                    hashes = await getSavedHashes(collectionId, standardSettings);
                     chunkCount = hashes?.length || 0;
-                } catch (error) {
-                    console.warn(`VectHare: Cannot verify ${registryKey} on ${probeBackend}:`, error.message);
-                    chunkCount = 0;
+                    console.log(`VectHare:   Found ${chunkCount} hashes via standard backend`);
+                } catch (standardError) {
+                    // Standard failed, try the configured backend if different
+                    if (settings.vector_backend && settings.vector_backend !== 'standard') {
+                        console.log(`VectHare:   Standard backend failed, trying ${settings.vector_backend}`);
+                        try {
+                            hashes = await getSavedHashes(collectionId, settings);
+                            chunkCount = hashes?.length || 0;
+                            console.log(`VectHare:   Found ${chunkCount} hashes via ${settings.vector_backend}`);
+                        } catch (altError) {
+                            console.warn(`VectHare:   Both backends failed for ${collectionId}`);
+                            chunkCount = 0;
+                        }
+                    } else {
+                        console.warn(`VectHare:   Standard backend failed for ${collectionId}`);
+                        chunkCount = 0;
+                    }
                 }
             }
 

@@ -1,4 +1,3 @@
-import { saveVectHareSettingsDebounced as saveSettingsDebounced } from './settings-durability.js';
 /**
  * VectHare Collection Metadata Manager
  *
@@ -11,18 +10,8 @@ import { saveVectHareSettingsDebounced as saveSettingsDebounced } from './settin
  */
 
 import { extension_settings } from '../../../../extensions.js';
-import { getCurrentChatId } from '../../../../../script.js';
-import { parseRegistryKey, parseCollectionId, getChatUUID } from './collection-ids.js';
-import { assertQdrantIdentity } from './physical-identity.js';
-
-/** Resolve lorebook classification from collection provenance, not names containing 'lorebook'. */
-export function isLorebookCollection(id) {
-    const meta=getCollectionMeta(id);
-    if (meta?.collectionType === 'lorebook' || meta?.type === 'lorebook') return true;
-    if (meta?.collectionType && meta.collectionType !== 'unknown') return false;
-    const parsed=parseRegistryKey(id);
-    return parseCollectionId(parsed.collectionId || id).type === 'lorebook';
-}
+import { saveSettingsDebounced } from '../../../../../script.js';
+import { parseRegistryKey } from './collection-ids.js';
 
 // ============================================================================
 // COLLECTION METADATA CRUD
@@ -243,21 +232,13 @@ function resolveStoredCollectionKey(collectionId) {
         return collectionId;
     }
 
-    const parsedTarget = parseRegistryKey(collectionId);
-    // Unknown legacy metadata must not be guessed to belong to a new fully
-    // qualified backend identity. Preserve it for explicit future migration.
-    if (parsedTarget.backend) return null;
-    // Never route a fully qualified key to a different backend or provider.
-    const matches = Object.keys(collections).filter(key => {
-        const parsed = parseRegistryKey(key);
-        return parsed.collectionId === parsedTarget.collectionId &&
-            (!parsedTarget.backend || !parsed.backend || parsed.backend === parsedTarget.backend) &&
-            (!parsedTarget.source || !parsed.source || parsed.source === parsedTarget.source);
-    });
-    // Bare and legacy IDs can be migrated only if there is a UNIQUE match.
-    // Ambiguous names must not borrow another backend's metadata.
-    if (matches.length === 1) return matches[0];
-    if (matches.length > 1) console.warn(`VectHare: Ambiguous metadata key ${collectionId}; refusing implicit match`);
+    const targetBareId = parseRegistryKey(collectionId).collectionId || collectionId;
+    for (const key of Object.keys(collections)) {
+        const bareId = parseRegistryKey(key).collectionId || key;
+        if (bareId === targetBareId) {
+            return key;
+        }
+    }
 
     return null;
 }
@@ -274,10 +255,6 @@ export function getCollectionMeta(collectionId) {
     }
 
     const key = resolveStoredCollectionKey(collectionId);
-    if(parseRegistryKey(key).backend === 'qdrant'){
-        try{assertQdrantIdentity(key,{...extension_settings.vecthare,vector_backend:'qdrant'});}
-        catch(error){return {...defaultCollectionMeta,enabled:false,storageUnverified:true,storageError:error.message};}
-    }
     const stored = key ? extension_settings.vecthare.collections[key] : null;
 
     if (!stored) {
@@ -304,15 +281,8 @@ export function setCollectionMeta(collectionId, data) {
 
     ensureCollectionsObject();
 
-    const resolved = resolveStoredCollectionKey(collectionId);
-    const qualified = !!parseRegistryKey(collectionId).backend;
-    const key = qualified ? collectionId : (resolved || collectionId);
-    if(parseRegistryKey(key).backend === 'qdrant') assertQdrantIdentity(key,{...extension_settings.vecthare,vector_backend:'qdrant'},{allowNew:true});
-    const existing = extension_settings.vecthare.collections[key] ||
-        (qualified && resolved && !parseRegistryKey(resolved).backend ? extension_settings.vecthare.collections[resolved] : {}) || {};
-    if (qualified && resolved && resolved !== key && !parseRegistryKey(resolved).backend) {
-        delete extension_settings.vecthare.collections[resolved]; // safe one-to-one legacy migration
-    }
+    const key = resolveStoredCollectionKey(collectionId) || collectionId;
+    const existing = extension_settings.vecthare.collections[key] || {};
 
     extension_settings.vecthare.collections[key] = {
         ...defaultCollectionMeta,
@@ -333,7 +303,6 @@ export function deleteCollectionMeta(collectionId) {
 
     const key = resolveStoredCollectionKey(collectionId);
     if (key) {
-        if(parseRegistryKey(key).backend === 'qdrant') assertQdrantIdentity(key,{...extension_settings.vecthare,vector_backend:'qdrant'});
         delete extension_settings.vecthare.collections[key];
         saveSettingsDebounced();
         console.log(`VectHare: Deleted metadata for collection ${key}`);
@@ -384,39 +353,7 @@ function normalizeCollectionKey(collectionId) {
 
 function collectionKeysMatch(a, b) {
     if (!a || !b) return false;
-    if (String(a) === String(b)) return true;
-    const pa = parseRegistryKey(a), pb = parseRegistryKey(b);
-    if (pa.collectionId !== pb.collectionId) return false;
-    if (pa.backend && pb.backend) {
-        return pa.backend === pb.backend && pa.source === pb.source;
-    }
-    // Legacy policies may contain only a bare collection name. Do not let
-    // them implicitly select BOTH Standard and Qdrant collections with that
-    // name; allow migration only if exactly one registered identity matches.
-    const registry = extension_settings.vecthare?.vecthare_collection_registry || [];
-    return registry.filter(key => parseRegistryKey(key).collectionId === pa.collectionId).length === 1;
-}
-
-/** UUID is the stable identity used by collection ownership. Only translate
- * chat-file IDs when they refer to the CURRENT chat; never guess another chat's
- * identity. Read legacy keys until the next explicit policy save migrates them.
- */
-export function resolveChatPolicyId(chatId) {
-    if (!chatId) return null;
-    const id = String(chatId);
-    const currentFileId = getCurrentChatId();
-    if (currentFileId && id === String(currentFileId)) return String(getChatUUID() || id);
-    return id;
-}
-
-function legacyCurrentChatPolicyId(chatId) {
-    const fileId = getCurrentChatId();
-    const uuid = getChatUUID();
-    if (fileId && uuid && String(uuid) !== String(fileId) &&
-        (String(chatId) === String(fileId) || String(chatId) === String(uuid))) {
-        return String(fileId);
-    }
-    return null;
+    return String(a) === String(b) || normalizeCollectionKey(a) === normalizeCollectionKey(b);
 }
 
 function ensureChatCollectionPoliciesObject() {
@@ -439,10 +376,7 @@ export function getChatCollectionPolicy(chatId) {
         return { ...defaultChatCollectionPolicy, selectedCollections: [] };
     }
 
-    const canonicalId = resolveChatPolicyId(chatId);
-    const policies = extension_settings.vecthare.chatCollectionPolicies;
-    const legacyId = legacyCurrentChatPolicyId(chatId);
-    const stored = policies[canonicalId] || (legacyId ? policies[legacyId] : null) || {};
+    const stored = extension_settings.vecthare.chatCollectionPolicies[String(chatId)] || {};
     const selectedCollections = Array.isArray(stored.selectedCollections) ? stored.selectedCollections : [];
 
     return {
@@ -467,16 +401,11 @@ export function setChatCollectionPolicy(chatId, policy) {
         ? [...new Set(policy.selectedCollections.map(String))]
         : existing.selectedCollections;
 
-    const canonicalId = resolveChatPolicyId(chatId);
-    extension_settings.vecthare.chatCollectionPolicies[canonicalId] = {
+    extension_settings.vecthare.chatCollectionPolicies[String(chatId)] = {
         ...existing,
         ...policy,
         selectedCollections,
     };
-    const legacyId = legacyCurrentChatPolicyId(chatId);
-    if (legacyId && legacyId !== canonicalId) {
-        delete extension_settings.vecthare.chatCollectionPolicies[legacyId];
-    }
 
     saveSettingsDebounced();
     console.log(`VectHare: Updated collection policy for chat ${chatId}`);
@@ -536,7 +465,7 @@ export function applyChatCollectionPolicy(collectionIds, chatId, options = {}) {
     }
 
     const isSelected = (id) => policy.selectedCollections.some(selected => collectionKeysMatch(selected, id));
-    const inScope = (id) => !options.lorebooksOnly || isLorebookCollection(id);
+    const inScope = (id) => !options.lorebooksOnly || String(id).includes('lorebook') || normalizeCollectionKey(id).includes('lorebook');
 
     if (mode === 'only_selected') {
         return collectionIds.filter(id => !inScope(id) || isSelected(id));
@@ -544,7 +473,8 @@ export function applyChatCollectionPolicy(collectionIds, chatId, options = {}) {
 
     if (mode === 'prefer_selected') {
         const selected = collectionIds.filter(id => inScope(id) && isSelected(id));
-        const rest = collectionIds.filter(id => !selected.some(chosen => collectionKeysMatch(id, chosen)));
+        const selectedKeys = new Set(selected.map(id => normalizeCollectionKey(id)));
+        const rest = collectionIds.filter(id => !selectedKeys.has(normalizeCollectionKey(id)));
         return [...selected, ...rest];
     }
 
@@ -596,12 +526,12 @@ export function isCollectionAutoSyncEnabled(collectionId) {
  * @param {string} hash Chunk hash
  * @returns {object|null} Chunk metadata or null if not found
  */
-export function getChunkMetadata(hash, collectionKey = null) {
+export function getChunkMetadata(hash) {
     if (!extension_settings.vecthare) {
         return null;
     }
 
-    const key = collectionKey ? `vecthare_chunk_meta_scoped_${encodeURIComponent(collectionKey)}_${hash}` : `vecthare_chunk_meta_${hash}`;
+    const key = `vecthare_chunk_meta_${hash}`;
     return extension_settings.vecthare[key] || null;
 }
 
@@ -610,12 +540,12 @@ export function getChunkMetadata(hash, collectionKey = null) {
  * @param {string} hash Chunk hash
  * @param {object} metadata Chunk metadata
  */
-export function saveChunkMetadata(hash, metadata, collectionKey = null) {
+export function saveChunkMetadata(hash, metadata) {
     if (!extension_settings.vecthare) {
         extension_settings.vecthare = {};
     }
 
-    const key = collectionKey ? `vecthare_chunk_meta_scoped_${encodeURIComponent(collectionKey)}_${hash}` : `vecthare_chunk_meta_${hash}`;
+    const key = `vecthare_chunk_meta_${hash}`;
     extension_settings.vecthare[key] = {
         ...metadata,
         updatedAt: Date.now(),
@@ -628,12 +558,12 @@ export function saveChunkMetadata(hash, metadata, collectionKey = null) {
  * Deletes metadata for a specific chunk
  * @param {string} hash Chunk hash
  */
-export function deleteChunkMetadata(hash, collectionKey = null) {
+export function deleteChunkMetadata(hash) {
     if (!extension_settings.vecthare) {
         return;
     }
 
-    const key = collectionKey ? `vecthare_chunk_meta_scoped_${encodeURIComponent(collectionKey)}_${hash}` : `vecthare_chunk_meta_${hash}`;
+    const key = `vecthare_chunk_meta_${hash}`;
     if (extension_settings.vecthare[key]) {
         delete extension_settings.vecthare[key];
         saveSettingsDebounced();
@@ -644,18 +574,15 @@ export function deleteChunkMetadata(hash, collectionKey = null) {
  * Gets all chunk metadata entries
  * @returns {object} Map of hash -> metadata
  */
-export function getAllChunkMetadata(collectionKey = null) {
+export function getAllChunkMetadata() {
     if (!extension_settings.vecthare) {
         return {};
     }
 
     const result = {};
-    const prefix = collectionKey
-        ? `vecthare_chunk_meta_scoped_${encodeURIComponent(collectionKey)}_`
-        : 'vecthare_chunk_meta_';
+    const prefix = 'vecthare_chunk_meta_';
 
     for (const key in extension_settings.vecthare) {
-        if (!collectionKey && key.startsWith('vecthare_chunk_meta_scoped_')) continue;
         if (key.startsWith(prefix)) {
             const hash = key.replace(prefix, '');
             result[hash] = extension_settings.vecthare[key];
@@ -721,20 +648,29 @@ export function migrateOldEnabledKeys() {
  * @param {string[]} actualCollectionIds Array of collection IDs that actually exist
  * @returns {object} Cleanup stats
  */
-export function cleanupOrphanedMeta(actualCollectionIds, { scanComplete = false } = {}) {
-    // Partial discoveries, offline providers and bare-ID lists cannot demonstrate
-    // that a collection is deleted. Keep metadata until explicitly deleted.
+export function cleanupOrphanedMeta(actualCollectionIds) {
     ensureCollectionsObject();
-    if (!scanComplete || !Array.isArray(actualCollectionIds) ||
-        actualCollectionIds.some(id => !parseRegistryKey(id).backend)) {
-        return { removed: 0, orphanedIds: [], skipped: true };
-    }
+
     const actualSet = new Set(actualCollectionIds);
-    const orphanedIds = Object.keys(extension_settings.vecthare.collections)
-        .filter(key => parseRegistryKey(key).backend && !actualSet.has(key));
-    // Report potential orphans, but do not delete metadata as discovery can
-    // be incomplete even when a plugin responds successfully.
-    return { removed: 0, orphanedIds, skipped: true };
+    const orphaned = [];
+
+    for (const collectionId in extension_settings.vecthare.collections) {
+        if (!actualSet.has(collectionId)) {
+            orphaned.push(collectionId);
+        }
+    }
+
+    for (const collectionId of orphaned) {
+        delete extension_settings.vecthare.collections[collectionId];
+        console.log(`VectHare: Removed orphaned metadata for ${collectionId}`);
+    }
+
+    if (orphaned.length > 0) {
+        saveSettingsDebounced();
+        console.log(`VectHare: Cleaned up ${orphaned.length} orphaned metadata entries`);
+    }
+
+    return { removed: orphaned.length, orphanedIds: orphaned };
 }
 
 // ============================================================================
@@ -1176,7 +1112,7 @@ export async function shouldCollectionActivate(collectionId, context) {
         const chatAllowed = hasChatLocks && currentChatId && chatLocks.some(id => String(id) === String(currentChatId));
         const characterAllowed = hasCharacterLocks && currentCharacterId && characterLocks.some(id => String(id) === String(currentCharacterId));
 
-        if ((hasChatLocks && !chatAllowed) || (hasCharacterLocks && !characterAllowed)) {
+        if ((hasChatLocks || hasCharacterLocks) && !chatAllowed && !characterAllowed) {
             console.log(`[VectHare Activation Filter] Collection ${collectionId}: ✗ LOCKED_TO_OTHER_CONTEXT`);
             recordDecision('skipped', 'Collection is locked to another chat/character');
             return false;
@@ -1276,7 +1212,8 @@ export async function filterActiveCollections(collectionIds, context) {
         finalActiveIds = activeIds.filter(id => {
             if (exclusiveActiveIds.includes(id)) return true;
             if (suppressAll) return false;
-            return !isLorebookCollection(id);
+            const normalized = normalizeCollectionKey(id);
+            return !String(id).includes('lorebook') && !normalized.includes('lorebook');
         });
 
         console.log(`[VectHare Activation Filter] Exclusive collection(s) active, suppressed ${activeIds.length - finalActiveIds.length} peer collection(s)`);
@@ -1454,11 +1391,8 @@ export function setCollectionDecaySettings(collectionId, decaySettings) {
  * @returns {boolean} Whether collection has custom decay configuration
  */
 export function hasCustomDecaySettings(collectionId) {
-    // getCollectionMeta() always merges defaultTemporalDecay, so testing that
-    // object would incorrectly claim every collection has an explicit override.
-    const key = resolveStoredCollectionKey(collectionId);
-    const stored = key ? extension_settings.vecthare?.collections?.[key] : null;
-    return stored?.temporalDecay !== undefined && stored?.temporalDecay !== null;
+    const meta = getCollectionMeta(collectionId);
+    return meta.temporalDecay !== undefined && meta.temporalDecay !== null;
 }
 
 /**

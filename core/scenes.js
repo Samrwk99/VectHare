@@ -27,7 +27,7 @@ import {
     insertVectorItems,
     deleteVectorItems,
 } from './core-vector-api.js';
-import { getChatCollectionId } from './chat-vectorization.js';
+import { getChatCollectionId, getTextWithoutAttachments } from './chat-vectorization.js';
 import {
     getChunkMetadata,
     saveChunkMetadata,
@@ -72,33 +72,42 @@ export function getCurrentCollectionId() {
 
 /**
  * Builds combined text from messages in a range
+ * R24: `substitute` param - hashing MUST use raw text (stable identity across
+ * reloads, matching the R22 chat-hash policy); embedding/display text stays
+ * substituted (macros resolve at use time)
  * @param {object[]} messages - Chat messages array
  * @param {number} start - Start index
  * @param {number} end - End index
+ * @param {boolean} [substitute=true] - Resolve macros (display text) or keep raw (hashing)
  * @returns {string}
  */
-function buildSceneText(messages, start, end) {
+function buildSceneText(messages, start, end, substitute = true) {
     const sceneMessages = messages.slice(start, end + 1);
     return sceneMessages
         .filter(msg => msg.mes && !msg.is_system)
-        .map(msg => `${msg.name || 'Unknown'}: ${substituteParams(msg.mes)}`)
+        .map(msg => `${msg.name || 'Unknown'}: ${substitute ? substituteParams(msg.mes) : msg.mes}`)
         .join('\n\n');
 }
 
 /**
- * Computes hash for scene from combined text
+ * Computes hash for scene from combined RAW text
+ * R24: raw, not substituted - scene identity must be reload-stable
  * @param {object[]} messages - Chat messages array
  * @param {number} start - Start index
  * @param {number} end - End index
  * @returns {number}
  */
 export function computeSceneHash(messages, start, end) {
-    const text = buildSceneText(messages, start, end);
+    const text = buildSceneText(messages, start, end, false);
     return getStringHash(text);
 }
 
 /**
  * Gets hashes of individual chunks within a scene range
+ * R24: uses the EXACT chat-vectorizer formula (getTextWithoutAttachments,
+ * raw) - the previous inline getStringHash(msg.mes) diverged for messages
+ * with file attachments (attachment prefix left in), making scene disable-
+ * linkage point at hashes that don't exist in the DB
  * @param {object[]} messages - Chat messages array
  * @param {number} start - Start index
  * @param {number} end - End index
@@ -110,8 +119,7 @@ export function getContainedChunkHashes(messages, start, end) {
 
     for (const msg of sceneMessages) {
         if (msg.mes && !msg.is_system) {
-            const hash = getStringHash(substituteParams(msg.mes));
-            hashes.push(hash);
+            hashes.push(getStringHash(getTextWithoutAttachments(msg)));
         }
     }
 
@@ -147,12 +155,14 @@ export async function createSceneChunk(start, end, sceneData, settings) {
     }
 
     // Build scene text and compute hash
-    const sceneText = buildSceneText(messages, start, end);
+    // R24: display/embed text stays substituted; the HASH comes from RAW text
+    // (reload-stable identity, matches computeSceneHash)
+    const sceneText = buildSceneText(messages, start, end, true);
     if (!sceneText.trim()) {
         return { success: false, error: 'Scene contains no text' };
     }
 
-    const sceneHash = getStringHash(sceneText);
+    const sceneHash = computeSceneHash(messages, start, end);
     const containedHashes = getContainedChunkHashes(messages, start, end);
 
     // Build chunk for insertion
@@ -178,12 +188,12 @@ export async function createSceneChunk(start, end, sceneData, settings) {
 
         // Disable contained chunks
         for (const hash of containedHashes) {
-            const existing = getChunkMetadata(hash, `${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}`) || {};
+            const existing = getChunkMetadata(hash) || {};
             saveChunkMetadata(hash, {
                 ...existing,
                 disabledByScene: sceneHash,
                 disabledAt: Date.now(),
-            }, `${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}`);
+            });
         }
 
         console.log(`VectHare Scenes: Created scene chunk ${sceneHash} (${start}-${end}), disabled ${containedHashes.length} chunks`);
@@ -214,14 +224,13 @@ export async function deleteSceneChunk(sceneHash, containedHashes, settings) {
 
         // Re-enable contained chunks
         for (const hash of containedHashes) {
-            const scoped = `${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}`;
-            const existing = getChunkMetadata(hash, scoped);
+            const existing = getChunkMetadata(hash);
             if (existing && existing.disabledByScene === sceneHash) {
                 const { disabledByScene, disabledAt, ...rest } = existing;
                 if (Object.keys(rest).length > 0) {
-                    saveChunkMetadata(hash, rest, scoped);
+                    saveChunkMetadata(hash, rest);
                 } else {
-                    deleteChunkMetadata(hash, scoped);
+                    deleteChunkMetadata(hash);
                 }
             }
         }

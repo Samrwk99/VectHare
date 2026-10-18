@@ -5,8 +5,8 @@
  * True hybrid search combining dense vector similarity with full-text (BM25)
  * search using Reciprocal Rank Fusion (RRF) or weighted linear combination.
  *
- * Supports native backend hybrid search and a bounded independent lexical
- * scan for clients with verified full-text chunk listing.
+ * Supports both native backend hybrid search (Qdrant/Milvus) and client-side
+ * fusion for backends without native support (Standard/LanceDB).
  *
  * @version 1.0.0
  * ============================================================================
@@ -14,7 +14,6 @@
 
 import { getBackend } from '../backends/backend-manager.js';
 import { createBM25Scorer, tokenize } from './bm25-scorer.js';
-import { createStreamingLexicalAccumulator } from './lexical-stream.js';
 
 /** Default RRF constant (prevents division by zero, balances contribution) */
 export const DEFAULT_RRF_K = 60;
@@ -70,70 +69,6 @@ export async function hybridSearch(collectionId, searchText, topK, settings, opt
 }
 
 /**
- * Independent lexical source. BM25 must be able to discover a chunk that dense
- * vector search never returned. A bounded complete inventory is required:
- * silently treating a partial scroll as the whole corpus distorts BM25 IDF.
- * Never cache another tenant's entries or fall back to unverified native hashes.
- */
-async function collectLexicalCandidates(backend, collectionId, settings, onRow = null) {
-    if (typeof backend.listChunks !== 'function') {
-        throw new Error('Independent lexical search requires a text-capable listChunks backend');
-    }
-    const maxDocuments = Math.max(100, Math.min(100000,
-        Math.trunc(Number(settings.hybrid_lexical_scan_limit ?? 20000) || 20000)));
-    const seen = new Set();
-    const docs = [];
-    let cursor = null, offset = 0;
-    const seenCursors = new Set();
-    const qdrant = settings.vector_backend === 'qdrant';
-    while (true) {
-        const requestLimit = Math.min(200, maxDocuments - seen.size + 1);
-        const page = await backend.listChunks(collectionId, settings,
-            qdrant ? { cursor, pageSize: requestLimit }
-                : { offset, limit: requestLimit });
-        if (!page || !Array.isArray(page.items) || page.items.length > requestLimit)
-            throw new Error('Malformed lexical inventory; refusing incomplete hybrid results');
-        if (qdrant && (page.pageMode !== 'cursor' || typeof page.hasMore !== 'boolean'))
-            throw new Error('Qdrant lexical retrieval requires verified cursor pagination');
-        if (!qdrant && (!Number.isSafeInteger(page.total) || page.total < 0 || page.total < offset + page.items.length))
-            throw new Error('Lexical inventory lacks an authoritative total count');
-        for (const row of page.items) {
-            const hash = row.hash ?? row.metadata?.hash;
-            if (hash == null || row.metadata?.unverifiedNativeMetadata || typeof (row.text ?? row.metadata?.text) !== 'string') {
-                throw new Error('Lexical inventory lacks verified chunk identities or text');
-            }
-            if (seen.has(String(hash))) continue;
-            seen.add(String(hash));
-            const doc={ hash, text: row.text ?? row.metadata?.text,
-                title: row.metadata?.entryName ?? row.metadata?.title ?? '',
-                tags: row.metadata?.keywords ?? [], metadata: row.metadata ?? row };
-            if (seen.size > maxDocuments) {
-                throw new Error(`Lexical search exceeded ${maxDocuments} documents; use native indexed hybrid search or narrow the collection (client-side scan is bounded)`);
-            }
-            if(onRow)onRow(doc);else docs.push(doc);
-        }
-        if (qdrant) {
-            if (!page.hasMore) {
-                if (page.cursor != null) throw new Error('Terminal Qdrant lexical page carries an unexpected cursor');
-                break;
-            }
-            const next = page.cursor;
-            const key=JSON.stringify(next);
-            if (next == null || seenCursors.has(key) || key === JSON.stringify(cursor))
-                throw new Error('Lexical inventory cursor made no progress');
-            seenCursors.add(key);
-            cursor = next;
-        } else {
-            offset += page.items.length;
-            if (offset === page.total) break;
-            if (offset > page.total) throw new Error('Lexical page exceeded authoritative total');
-        }
-        if (page.items.length === 0) throw new Error('Lexical inventory was truncated before completion');
-    }
-    return onRow ? seen.size : docs;
-}
-
-/**
  * Client-side hybrid search using dual queries + fusion
  *
  * @param {object} backend - Vector backend instance
@@ -154,7 +89,7 @@ async function clientSideHybridSearch(backend, collectionId, searchText, topK, s
     } = options;
 
     // Fetch more results for fusion (need candidates from both methods)
-    const expandedTopK = Math.min(65536, Math.max(topK, topK * 3));
+    const expandedTopK = Math.min(topK * 3, 100);
 
     // 1. Vector search
     console.log(`[HybridSearch] Fetching ${expandedTopK} vector results from collection: ${collectionId}`);
@@ -172,15 +107,14 @@ async function clientSideHybridSearch(backend, collectionId, searchText, topK, s
         console.log(`[HybridSearch] Raw vector results:`, vectorResults ? `hashes=${vectorResults.hashes?.length}, metadata=${vectorResults.metadata?.length}` : 'null');
     } catch (error) {
         console.error(`[HybridSearch] Vector query failed:`, error);
-        throw new Error(`Hybrid vector query failed for ${collectionId}: ${error.message}`, { cause: error });
+        return { hashes: [], metadata: [] };
     }
 
-    if (!vectorResults || !Array.isArray(vectorResults.hashes) || !Array.isArray(vectorResults.metadata))
-        throw new Error(`Malformed hybrid vector response for ${collectionId}; cannot treat a failed query as empty`);
-    if (vectorResults.hashes.length !== vectorResults.metadata.length)
-        throw new Error(`Malformed hybrid vector response for ${collectionId}: hash/metadata length mismatch`);
-    // Do not return early when dense search is empty. Independent lexical
-    // search can still discover keyword-only memories.
+    if (!vectorResults || !vectorResults.metadata || vectorResults.metadata.length === 0) {
+        console.log('[HybridSearch] No vector results found');
+        console.log(`[HybridSearch] Debug - vectorResults:`, JSON.stringify(vectorResults));
+        return { hashes: [], metadata: [] };
+    }
 
     // 2. Convert to format for BM25 scoring (include title and tags for field boosting)
     const resultsWithText = vectorResults.metadata.map((meta, idx) => ({
@@ -192,26 +126,13 @@ async function clientSideHybridSearch(backend, collectionId, searchText, topK, s
         metadata: meta
     }));
 
-    // 3. Score an independently enumerated lexical corpus, not just vectors.
-    // Never silently interpret a failed/partial scan as a complete result.
-    const bm25Options={k1:settings.bm25_k1 ?? 1.5,b:settings.bm25_b ?? 0.75,fieldBoosting:true};
-    const shortlistSize=Math.min(65536,Math.max(topK*3,100));
-    const requestedLimit=Math.max(100,Math.min(100000,Number(settings.hybrid_lexical_scan_limit ?? 20000)||20000));
-    let bm25Results;
-    if(requestedLimit>20000){
-        // O(N) network scan is still necessary without a trustworthy native
-        // sparse/text index, but query-scoped scoring avoids building an entire
-        // corpus-sized vocabulary and term-frequency index in browser RAM.
-        const accumulator=createStreamingLexicalAccumulator(searchText,bm25Options);
-        const count=await collectLexicalCandidates(backend,collectionId,settings,doc=>accumulator.add(doc));
-        console.log(`[HybridSearch] Query-scoped BM25 streamed ${count} docs, retained ${accumulator.retainedDocs} matching docs`);
-        bm25Results=accumulator.results(shortlistSize).filter(row=>row.bm25Score>0);
-    }else{
-        const lexicalCorpus=await collectLexicalCandidates(backend,collectionId,settings);
-        console.log(`[HybridSearch] Computing BM25 scores for ${lexicalCorpus.length} independent lexical candidates...`);
-        bm25Results=performBM25Search(lexicalCorpus,searchText,bm25Options).filter(row=>row.bm25Score>0);
-        bm25Results.length=Math.min(bm25Results.length,shortlistSize);
-    }
+    // 3. Perform BM25 full-text search over the result set with field boosting
+    console.log(`[HybridSearch] Computing BM25 scores for ${resultsWithText.length} results...`);
+    const bm25Results = performBM25Search(resultsWithText, searchText, {
+        k1: settings.bm25_k1 || 1.5,
+        b: settings.bm25_b || 0.75,
+        fieldBoosting: true  // Enable title (3x) and tags (2x) boosting
+    });
 
     // 4. Fuse results
     let fusedResults;
@@ -462,14 +383,11 @@ function normalizeScores(results, scoreField = 'score') {
     const scores = results.map(r => r[scoreField] || 0);
     const minScore = Math.min(...scores);
     const maxScore = Math.max(...scores);
-    const range = maxScore - minScore;
-    // Relative min/max scaling maps a single positive hit (or tied positive hits)
-    // to zero, which erroneously discards the only match. Use a stable positive
-    // saturation in that case; preserve genuine zero scores.
-    const tiedScore = maxScore > 0 ? maxScore / (maxScore + 1) : 0;
+    const range = maxScore - minScore || 1; // Avoid division by zero
+
     return results.map(r => ({
         ...r,
-        normalizedScore: range > 0 ? ((r[scoreField] ?? 0) - minScore) / range : tiedScore
+        normalizedScore: ((r[scoreField] || 0) - minScore) / range
     }));
 }
 

@@ -1,4 +1,3 @@
-import { assertEmbeddingQueryFits } from '../core/embedding-overflow.js';
 /**
  * ============================================================================
  * MILVUS BACKEND (via Unified Plugin API)
@@ -21,7 +20,6 @@ import { assertEmbeddingQueryFits } from '../core/embedding-overflow.js';
 import { getRequestHeaders } from '../../../../../script.js';
 import { VectorBackend } from './backend-interface.js';
 import { getModelField } from '../core/providers.js';
-import { getProviderSpecificParams } from './provider-params.js';
 import { VECTOR_LIST_LIMIT } from '../core/constants.js';
 
 const BACKEND_TYPE = 'milvus';
@@ -137,7 +135,7 @@ export class MilvusBackend extends VectorBackend {
         // Strip registry key prefix if present (backend:source:collectionId)
         const knownBackends = ['standard', 'lancedb', 'vectra', 'milvus', 'qdrant'];
         const knownSources = ['transformers', 'openai', 'cohere', 'ollama', 'llamacpp',
-            'vllm', 'koboldcpp', 'webllm', 'bananabread', 'openrouter', 'nanogpt', 'custom'];
+            'vllm', 'koboldcpp', 'webllm', 'bananabread', 'openrouter'];
         
         const parts = collectionId.split(':');
         
@@ -191,7 +189,6 @@ export class MilvusBackend extends VectorBackend {
                 collectionId: 'vecthare_main', // Always use main collection
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                ...getProviderSpecificParams(settings),
                 limit: VECTOR_LIST_LIMIT,
                 filters: { type, sourceId }, // Filter by tenant
             }),
@@ -238,7 +235,6 @@ export class MilvusBackend extends VectorBackend {
                 })),
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                ...getProviderSpecificParams(settings),
                 filters: { type, sourceId }, // Pass multitenancy info
             }),
         });
@@ -263,7 +259,6 @@ export class MilvusBackend extends VectorBackend {
                 hashes: hashes,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                ...getProviderSpecificParams(settings),
                 filters: { type, sourceId },
             }),
         });
@@ -275,7 +270,6 @@ export class MilvusBackend extends VectorBackend {
     }
 
     async queryCollection(collectionId, searchText, topK, settings) {
-        await assertEmbeddingQueryFits(searchText, settings);
         const { type, sourceId } = this._parseCollectionId(collectionId);
 
         const response = await fetch('/api/plugins/similharity/chunks/query', {
@@ -289,7 +283,6 @@ export class MilvusBackend extends VectorBackend {
                 threshold: 0.0,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                ...getProviderSpecificParams(settings),
                 filters: { type, sourceId },
             }),
         });
@@ -314,7 +307,6 @@ export class MilvusBackend extends VectorBackend {
     }
 
     async queryMultipleCollections(collectionIds, searchText, topK, threshold, settings) {
-        await assertEmbeddingQueryFits(searchText, settings);
         const results = {};
 
         for (const collectionId of collectionIds) {
@@ -332,7 +324,6 @@ export class MilvusBackend extends VectorBackend {
                         threshold: threshold,
                         source: settings.source || 'transformers',
                         model: getModelFromSettings(settings),
-                ...getProviderSpecificParams(settings),
                         filters: { type, sourceId },
                     }),
                 });
@@ -374,7 +365,6 @@ export class MilvusBackend extends VectorBackend {
                 collectionId: 'vecthare_main',
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                ...getProviderSpecificParams(settings),
                 filters: { type, sourceId }, // Purge specific tenant
             }),
         });
@@ -401,7 +391,6 @@ export class MilvusBackend extends VectorBackend {
                 collectionId: 'vecthare_main',
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                ...getProviderSpecificParams(settings),
                 // No filters = purge everything
             }),
         });
@@ -427,7 +416,6 @@ export class MilvusBackend extends VectorBackend {
             collectionId: 'vecthare_main',
             source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                ...getProviderSpecificParams(settings),
         }), {
             headers: getRequestHeaders(),
         });
@@ -456,7 +444,6 @@ export class MilvusBackend extends VectorBackend {
                 collectionId: 'vecthare_main',
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                ...getProviderSpecificParams(settings),
                 offset: options.offset || 0,
                 limit: options.limit || 100,
                 includeVectors: options.includeVectors || false,
@@ -476,7 +463,6 @@ export class MilvusBackend extends VectorBackend {
      * Update chunk text (triggers re-embedding)
      */
     async updateChunkText(collectionId, hash, newText, settings) {
-        await assertEmbeddingQueryFits(newText, settings); // Edit re-embeds one vector; do not silently truncate or split it.
         const { type, sourceId } = this._parseCollectionId(collectionId);
 
         const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}/text`, {
@@ -488,7 +474,6 @@ export class MilvusBackend extends VectorBackend {
                 text: newText,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                ...getProviderSpecificParams(settings),
                 filters: { type, sourceId },
             }),
         });
@@ -516,7 +501,6 @@ export class MilvusBackend extends VectorBackend {
                 metadata: metadata,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                ...getProviderSpecificParams(settings),
                 filters: { type, sourceId },
             }),
         });
@@ -543,7 +527,6 @@ export class MilvusBackend extends VectorBackend {
                 collectionId: 'vecthare_main',
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                ...getProviderSpecificParams(settings),
                 filters: { type, sourceId },
             }),
         });
@@ -582,7 +565,6 @@ export class MilvusBackend extends VectorBackend {
      * @returns {Promise<{hashes: number[], metadata: object[]}>}
      */
     async hybridQuery(collectionId, searchText, topK, settings, hybridOptions = {}) {
-        await assertEmbeddingQueryFits(searchText, settings);
         const {
             vectorWeight = 0.5,
             textWeight = 0.5,
@@ -600,7 +582,6 @@ export class MilvusBackend extends VectorBackend {
             threshold: 0.0,
             source: settings.source || 'transformers',
             model: getModelFromSettings(settings),
-                ...getProviderSpecificParams(settings),
             filters: { type, sourceId },
             // Hybrid-specific parameters
             hybrid: true,

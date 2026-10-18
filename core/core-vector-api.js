@@ -1,4 +1,3 @@
-import { withSharedWriteHeaders } from '../ui/shared-operations.js';
 /**
  * ============================================================================
  * CORE VECTOR API CLIENT
@@ -30,8 +29,6 @@ import { textgen_types, textgenerationwebui_settings } from '../../../../textgen
 import { oai_settings } from '../../../../openai.js';
 import { isWebLlmSupported } from '../../../shared.js';
 import { getWebLlmProvider } from '../providers/webllm.js';
-import { parseRegistryKey } from './collection-ids.js';
-import { assertQueryModelCompatible, settingsForCollectionQuery } from './vectorization-profile.js';
 import { getBackend, invalidateBackendHealth, recordQuery, recordInsert, recordDelete, recordError } from '../backends/backend-manager.js';
 import {
     getProviderConfig,
@@ -53,7 +50,8 @@ import {
     RETRY_MAX_ATTEMPTS,
     RETRY_INITIAL_DELAY_MS,
     RETRY_MAX_DELAY_MS,
-    RETRY_BACKOFF_MULTIPLIER
+    RETRY_BACKOFF_MULTIPLIER,
+    VECTOR_LIST_LIMIT
 } from './constants.js';
 
 // Get shared WebLLM provider singleton (lazy-initialized)
@@ -142,12 +140,81 @@ function chunkArray(array, size) {
 }
 
 // Retry configuration for transient failures (matches AsyncUtils.retry signature)
+/**
+ * R13: Detects an abort error (user pressed Stop and we cancelled the request).
+ * Aborts must NEVER be retried - the user asked for the work to stop.
+ * @param {Error} error
+ * @returns {boolean}
+ */
+function isAbortError(error) {
+    return error?.name === 'AbortError' || error?.code === 20 || error?.message?.includes('abort');
+}
+
+/**
+ * R13: Makes an await abortable: rejects with AbortError as soon as the signal
+ * fires, instead of waiting for the underlying request. The underlying promise
+ * is detached (its eventual result/rejection is swallowed) - for server-side
+ * embedding sources the server may still complete and write a valid chunk,
+ * which is harmless: chunks are written as complete units and the next sync's
+ * hash diff reconciles either outcome. Never partial data.
+ * @param {Promise<any>} promise
+ * @param {AbortSignal|null} abortSignal
+ * @returns {Promise<any>}
+ */
+function makeAbortable(promise, abortSignal) {
+    if (!abortSignal) return promise;
+    // Swallow the detached promise's eventual outcome to avoid
+    // unhandled-rejection noise when we've already returned via abort.
+    // R13 fix: attached BEFORE the already-aborted early return too - if the
+    // signal fired before we were called, the underlying request can still
+    // reject later (e.g. server-side failure) and must not surface as an
+    // unhandled rejection.
+    promise.catch(() => { /* detached after abort - intentionally ignored */ });
+    if (abortSignal.aborted) {
+        return Promise.reject(new DOMException('Aborted by user (Stop)', 'AbortError'));
+    }
+    return new Promise((resolve, reject) => {
+        const onAbort = () => reject(new DOMException('Aborted by user (Stop)', 'AbortError'));
+        abortSignal.addEventListener('abort', onAbort, { once: true });
+        promise.then(
+            (value) => { abortSignal.removeEventListener('abort', onAbort); resolve(value); },
+            (error) => { abortSignal.removeEventListener('abort', onAbort); reject(error); }
+        );
+    });
+}
+
+/**
+ * R17 (user-reported hang): Universal guard for ALL backend operations.
+ * Every backend await is now:
+ *  - TIMEOUT-BOUNDED (API_TIMEOUT_MS * 4): a hung server-side request (e.g.
+ *    the ST server stuck on an Ollama call) can no longer stall the run
+ *    forever - previously getBackend/deleteVectorItems/getSavedHashes had
+ *    NO timeout, so Stop/Pause looked dead while Ollama sat idle.
+ *  - ABORTABLE: the caller's await is freed the instant the user presses
+ *    Stop (the underlying request is detached and its outcome reconciled
+ *    by the next sync's hash diff - chunks are written whole or not at all).
+ * @param {Function} fn - () => Promise for the backend operation
+ * @param {AbortSignal|null} abortSignal
+ * @param {string} label - Operation label for the timeout error
+ * @returns {Promise<any>}
+ */
+async function withOpGuard(fn, abortSignal, label) {
+    const op = fn();
+    // Prevent unhandled-rejection noise if the timeout loses the race
+    op.catch(() => { /* detached - see timeout below */ });
+    const bounded = AsyncUtils.timeout(op, API_TIMEOUT_MS * 4, `${label} timed out - backend unresponsive`);
+    return await makeAbortable(bounded, abortSignal);
+}
+
 const RETRY_CONFIG = {
     maxAttempts: RETRY_MAX_ATTEMPTS,
     delay: RETRY_INITIAL_DELAY_MS,
     maxDelay: RETRY_MAX_DELAY_MS,
     backoffFactor: RETRY_BACKOFF_MULTIPLIER,
     shouldRetry: (error) => {
+        // R13: NEVER retry an abort - the user explicitly stopped the work
+        if (isAbortError(error)) return false;
+
         // Retry on network errors and rate limits
         const message = error?.message?.toLowerCase() || '';
         const isRetryable =
@@ -197,22 +264,9 @@ export function getVectorsRequestBody(args = {}, settings) {
             break;
         case 'electronhub':
             body.model = settings.electronhub_model;
-            if (settings.use_alt_endpoint) {body.apiUrl = settings.alt_endpoint_url;body.apiKey=settings.electronhub_api_key_override||'';}
             break;
         case 'openrouter':
             body.model = settings.openrouter_model;
-            if (settings.use_alt_endpoint) {body.apiUrl = settings.alt_endpoint_url;body.apiKey=settings.openrouter_api_key_override||'';}
-            break;
-        case 'nanogpt':
-            body.model = settings.nanogpt_model;
-            body.apiUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : 'https://nano-gpt.com/api/v1';
-            body.apiKey = settings.nanogpt_api_key || '';
-            break;
-        case 'custom':
-            body.model = settings.custom_model;
-            body.apiUrl = settings.alt_endpoint_url;
-            body.apiKey = settings.custom_api_key || '';
-            body.customEndpointMode = settings.custom_endpoint_mode || 'base';
             break;
         case 'togetherai':
             body.model = settings.togetherai_model;
@@ -230,15 +284,13 @@ export function getVectorsRequestBody(args = {}, settings) {
             break;
         case 'llamacpp':
             body.apiUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : textgenerationwebui_settings.server_urls[textgen_types.LLAMACPP];
-            console.debug('VectHare DEBUG llamacpp: embedding endpoint selected (URL redacted)');
+            console.log(`VectHare DEBUG llamacpp (core-vector-api): use_alt_endpoint=${settings.use_alt_endpoint}, alt_endpoint_url="${settings.alt_endpoint_url}", ST_url="${textgenerationwebui_settings.server_urls[textgen_types.LLAMACPP]}", final apiUrl="${body.apiUrl}"`);
             break;
         case 'vllm':
-            body.apiKey = settings.vllm_api_key || '';
             body.apiUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : textgenerationwebui_settings.server_urls[textgen_types.VLLM];
             body.model = settings.vllm_model;
             break;
         case 'bananabread':
-            body.model=settings.bananabread_model||'';
             body.apiUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : 'http://localhost:8008';
             // Use extension settings for API key (custom keys aren't returned by ST's readSecretState)
             if (settings.bananabread_api_key) {
@@ -273,20 +325,20 @@ export function getVectorsRequestBody(args = {}, settings) {
  * @param {Function} onProgress - Optional callback (embedded, total) => void for progress updates
  * @returns {Promise<object>} Additional arguments
  */
-export async function getAdditionalArgs(items, settings, onProgress = null) {
+export async function getAdditionalArgs(items, settings, onProgress = null, abortSignal = null) {
     const args = {};
     switch (settings.source) {
         case 'webllm':
             args.embeddings = await createWebLlmEmbeddings(items, settings);
             break;
         case 'koboldcpp': {
-            const { embeddings, model } = await createKoboldCppEmbeddings(items, settings, onProgress);
+            const { embeddings, model } = await createKoboldCppEmbeddings(items, settings, onProgress, abortSignal);
             args.embeddings = embeddings;
             args.model = model;
             break;
         }
         case 'bananabread': {
-            const { embeddings, model } = await createBananaBreadEmbeddings(items, settings);
+            const { embeddings, model } = await createBananaBreadEmbeddings(items, settings, abortSignal);
             args.embeddings = embeddings;
             args.model = model;
             break;
@@ -340,7 +392,7 @@ async function createWebLlmEmbeddings(items, settings) {
  * @param {Function} onProgress - Optional callback (embedded, total) => void for progress updates
  * @returns {Promise<{embeddings: Record<string, number[]>, model: string}>} Calculated embeddings
  */
-async function createKoboldCppEmbeddings(items, settings, onProgress = null) {
+async function createKoboldCppEmbeddings(items, settings, onProgress = null, abortSignal = null) {
     // Clean text before embedding (strip HTML/Markdown)
     const cleanedItems = items.map(item => stripFormatting(item) || item);
 
@@ -362,6 +414,7 @@ async function createKoboldCppEmbeddings(items, settings, onProgress = null) {
                 }
 
                 const cleanUrl = serverUrl.replace(/\/$/, '');
+                // R13: signalAbort - Stop truly cancels client-side embedding fetches
                 const response = await fetch(`${cleanUrl}/v1/embeddings`, {
                     method: 'POST',
                     headers: {
@@ -371,6 +424,7 @@ async function createKoboldCppEmbeddings(items, settings, onProgress = null) {
                         input: batchItems,
                         model: settings.koboldcpp_model || 'koboldcpp',
                     }),
+                    signal: abortSignal || undefined,
                 });
 
                 if (!response.ok) {
@@ -441,7 +495,7 @@ async function createKoboldCppEmbeddings(items, settings, onProgress = null) {
  * @param {object} settings VectHare settings object
  * @returns {Promise<{embeddings: number[][], model: string}>} Calculated embeddings as array (index-aligned with input items)
  */
-async function createBananaBreadEmbeddings(items, settings) {
+async function createBananaBreadEmbeddings(items, settings, abortSignal = null) {
     // Clean text before embedding (strip HTML/Markdown & Handle mixed types: strings vs objects)
     // Note: Must preserve 1:1 mapping with input items, so we replace empty strings with space instead of filtering
     const cleanedItems = items.map(item => {
@@ -474,6 +528,7 @@ async function createBananaBreadEmbeddings(items, settings) {
                 headers['Authorization'] = `Bearer ${settings.bananabread_api_key}`;
             }
 
+            // R13: signalAbort - Stop truly cancels client-side embedding fetches
             const fetchPromise = fetch(`${cleanUrl}/v1/embeddings`, {
                 method: 'POST',
                 headers: headers,
@@ -481,6 +536,7 @@ async function createBananaBreadEmbeddings(items, settings) {
                     input: cleanedItems,
                     model: settings.bananabread_model || 'bananabread',
                 }),
+                signal: abortSignal || undefined,
             });
 
             const response = await AsyncUtils.timeout(fetchPromise, API_TIMEOUT_MS * 20, 'BananaBread embedding request timed out');
@@ -536,7 +592,7 @@ export function throwIfSourceInvalid(settings) {
     }
 
     // Check API key requirement
-    if (requiresApiKey(source) && source !== 'nanogpt' && !(settings.use_alt_endpoint && ['openrouter','electronhub'].includes(source) && settings[`${source}_api_key_override`])) {
+    if (requiresApiKey(source)) {
         const secretKey = getSecretKey(source);
         if (secretKey && !secret_state[secretKey]) {
             // Special case: VertexAI can use service account as fallback
@@ -547,9 +603,6 @@ export function throwIfSourceInvalid(settings) {
             }
         }
     }
-
-    if (source === 'nanogpt' && !settings.nanogpt_api_key) throw new Error('VectHare: NanoGPT API key missing');
-    if (source === 'custom' && !settings.alt_endpoint_url) throw new Error('VectHare: Custom API endpoint URL missing');
 
     // Check URL requirement
     if (requiresUrl(source)) {
@@ -598,44 +651,76 @@ export function throwIfSourceInvalid(settings) {
  * @param {boolean} includeMetadata If true, returns {hashes: [], metadata: []} instead of just hashes
  * @returns {Promise<number[]|{hashes: number[], metadata: object[]}>} Saved hashes or full data
  */
-export async function getSavedHashes(collectionId, settings, includeMetadata = false) {
-    const backend = await getBackend(settings);
-    const hashes = await backend.getSavedHashes(collectionId, settings);
+export async function getSavedHashes(collectionId, settings, includeMetadata = false, abortSignal = null) {
+    // R17: guarded - collection reads during/around runs were unabortable+untimed
+    const backend = await withOpGuard(() => getBackend(settings), abortSignal, 'Backend initialization (read)');
 
     if (!includeMetadata) {
-        return hashes;
+        return await withOpGuard(
+            () => backend.getSavedHashes(collectionId, settings),
+            abortSignal,
+            'Read saved hashes'
+        );
     }
 
-    // Use unified chunks API to get full metadata (works with all backends)
+    // R16 FIX (consistency + correctness): hashes and metadata now come from a
+    // SINGLE backend request. The previous implementation made TWO separate
+    // fetches and callers zipped them BY INDEX: any concurrent write between
+    // the two requests (e.g. auto-sync reacting to the very message edit the
+    // user is repairing) shifted the mapping onto the WRONG hashes - breaking
+    // replacement detection and protected-chunk classification in repair and
+    // reverse sync. The inline second fetch also bypassed the backend's
+    // registry-prefix stripping, multitenancy collection mapping, and
+    // content_type filtering. backend.listChunks does all of it correctly in
+    // one request.
+    // R19 FIX: the R18 edit referenced an undefined `hashes` variable here -
+    // instant ReferenceError, silently caught by the fallback below, which
+    // returned hashes-only and made every repair abort with "Chunk metadata
+    // unavailable". (User-confirmed; the console line
+    // "Metadata read failed, returning hashes only: hashes is not defined"
+    // was the smoking gun.)
+    //
+    // Correct design: the AUTHORITATIVE hash list comes from the backend's own
+    // filtered read (respects Qdrant multitenancy content_type filtering, so
+    // no other chats' chunks leak in); metadata comes from listChunks; the two
+    // are joined BY HASH. Two requests, yes - but a hash-keyed join is
+    // SKEW-TOLERANT: a concurrent write between the two reads can only cause
+    // a missing hash to map to {} (treated as unprotected-but-current), never
+    // to ANOTHER chunk's metadata (the R16 index-zipping failure mode).
+    const hashes = await withOpGuard(
+        () => backend.getSavedHashes(collectionId, settings),
+        abortSignal,
+        'Read saved hashes'
+    );
+
     try {
-        const backendName = settings.vector_backend || 'standard';
-        const response = await fetch('/api/plugins/similharity/chunks/list', {
-            method: 'POST',
-            headers: withSharedWriteHeaders(getRequestHeaders()),
-            body: JSON.stringify({
-                backend: backendName === 'standard' ? 'vectra' : backendName,
-                collectionId: collectionId,
-                source: settings.source || 'transformers',
-                model: settings.model || '',
-                limit: 10000
-            })
-        });
-
-        if (response.ok) {
-            const data = await response.json();
-            if (data.success && data.items) {
-                return {
-                    hashes: hashes,
-                    metadata: data.items.map(item => item.metadata || item)
-                };
-            }
-        }
+        const data = await withOpGuard(
+            () => backend.listChunks(collectionId, settings, {
+                offset: 0,
+                limit: VECTOR_LIST_LIMIT,
+            }),
+            abortSignal,
+            'Read collection metadata'
+        );
+        const items = data?.items || data?.chunks || [];
+        const metaByHash = new Map(items.map(item => [String(item.hash), item.metadata || item]));
+        return {
+            hashes: hashes,
+            metadata: hashes.map(h => metaByHash.get(String(h)) || {}),
+        };
     } catch (error) {
-        console.warn('VectHare: Failed to get full metadata from chunks API, returning hashes only', error);
+        console.warn('VectHare: Metadata read failed, returning hashes only:', error.message);
+        // Fallback: hashes-only (old format) - callers treat missing metadata
+        // as "cannot classify protected chunks" and skip accordingly.
+        // R20: this fallback was a bare unbounded await - the last surviving
+        // instance of the R17 hang class (it lives in an error path, i.e.
+        // exactly where nobody looks while debugging a hang).
+        return await withOpGuard(
+            () => backend.getSavedHashes(collectionId, settings),
+            abortSignal,
+            'Read saved hashes (fallback)'
+        );
     }
-
-    // Fallback: return hashes as array (old format)
-    return hashes;
 }
 
 /**
@@ -648,8 +733,12 @@ export async function getSavedHashes(collectionId, settings, includeMetadata = f
  * @param {Function} onProgress - Optional callback (embedded, total) => void for progress updates
  * @returns {Promise<void>}
  */
-export async function insertVectorItems(collectionId, items, settings, onProgress = null) {
-    const backend = await getBackend(settings);
+export async function insertVectorItems(collectionId, items, settings, onProgress = null, abortSignal = null) {
+    // R17: getBackend was previously an UNABORTABLE, UNTIMED await executed
+    // once per item - the exact place a run could hang forever with Stop
+    // unable to free it (user symptom: "stopping hangs on embedding" while
+    // Ollama logs show no activity).
+    const backend = await withOpGuard(() => getBackend(settings), abortSignal, 'Backend initialization');
 
     // Sources that require client-side embedding generation
     const clientSideEmbeddingSources = ['webllm', 'koboldcpp', 'bananabread'];
@@ -667,7 +756,7 @@ export async function insertVectorItems(collectionId, items, settings, onProgres
             });
 
             // Use streaming embedding generation with immediate writes
-            await streamEmbeddingsAndWrite(backend, collectionId, items, textStrings, settings, onProgress);
+            await streamEmbeddingsAndWrite(backend, collectionId, items, textStrings, settings, onProgress, abortSignal);
         } else {
             // Server-side embeddings - backend handles everything
             // VEC-6: Use configurable batch size for optimized bulk inserts
@@ -683,15 +772,23 @@ export async function insertVectorItems(collectionId, items, settings, onProgres
             for (let i = 0; i < batches.length; i++) {
                 const processBatch = async () => {
                     await AsyncUtils.retry(async () => {
-                        await backend.insertVectorItems(collectionId, batches[i], settings);
+                        // R17: timeout-bounded + abortable (was a bare unbounded fetch)
+                        await withOpGuard(
+                            () => backend.insertVectorItems(collectionId, batches[i], settings),
+                            abortSignal,
+                            'Batch insert'
+                        );
                     }, RETRY_CONFIG);
                 };
 
-                // Apply rate limiting if configured, otherwise execute directly
+                // Apply rate limiting if configured, otherwise execute directly.
+                // R13: abortable - Stop cancels the wait instantly. For server-side
+                // sources the detached request may still complete server-side and
+                // write a valid chunk, which the next sync's hash diff reconciles.
                 if (hasRateLimit) {
-                    await dynamicRateLimiter.execute(processBatch, settings);
+                    await makeAbortable(dynamicRateLimiter.execute(processBatch, settings), abortSignal);
                 } else {
-                    await processBatch();
+                    await makeAbortable(processBatch(), abortSignal);
                 }
 
                 if (onProgress) {
@@ -720,7 +817,7 @@ export async function insertVectorItems(collectionId, items, settings, onProgres
  * @param {object} settings - Settings object
  * @param {Function} onProgress - Progress callback
  */
-async function streamEmbeddingsAndWrite(backend, collectionId, items, textStrings, settings, onProgress) {
+async function streamEmbeddingsAndWrite(backend, collectionId, items, textStrings, settings, onProgress, abortSignal = null) {
     // VEC-6: Use configurable batch size for optimized bulk inserts
     const EMBEDDING_BATCH_SIZE = settings.insert_batch_size || 50;
     let totalProcessed = 0;
@@ -740,10 +837,13 @@ async function streamEmbeddingsAndWrite(backend, collectionId, items, textString
         // VEC-6: Retry logic per batch instead of per chunk
         let additionalArgs;
         try {
-            additionalArgs = await AsyncUtils.retry(async () => {
-                return await getAdditionalArgs(batchTextStrings, settings);
-            }, RETRY_CONFIG);
+            // R13: abortable - Stop cancels client-side embedding work instantly
+            // (abort never retried: isAbortError guard in RETRY_CONFIG)
+            additionalArgs = await makeAbortable(AsyncUtils.retry(async () => {
+                return await getAdditionalArgs(batchTextStrings, settings, null, abortSignal);
+            }, RETRY_CONFIG), abortSignal);
         } catch (error) {
+            if (isAbortError(error)) throw error; // R13: propagate verbatim, no wrapping
             throw new Error(`VectHare: Failed to generate embeddings for batch ${batchNum} after retries: ${error.message}`);
         }
 
@@ -782,10 +882,16 @@ async function streamEmbeddingsAndWrite(backend, collectionId, items, textString
         // VEC-6: Write batch to database with retry logic
         console.log(`VectHare: Writing batch ${batchNum} to database (${itemsToWrite.length} items)`);
         try {
-            await AsyncUtils.retry(async () => {
-                await backend.insertVectorItems(collectionId, itemsToWrite, settings);
-            }, RETRY_CONFIG);
+            // R13: abortable. R17: also timeout-bounded (was unbounded).
+            await makeAbortable(AsyncUtils.retry(async () => {
+                await withOpGuard(
+                    () => backend.insertVectorItems(collectionId, itemsToWrite, settings),
+                    abortSignal,
+                    'Streamed batch write'
+                );
+            }, RETRY_CONFIG), abortSignal);
         } catch (error) {
+            if (isAbortError(error)) throw error; // R13: propagate verbatim, no wrapping
             throw new Error(`VectHare: Failed to write batch ${batchNum} to database after retries: ${error.message}`);
         }
 
@@ -808,13 +914,18 @@ async function streamEmbeddingsAndWrite(backend, collectionId, items, textString
  * @param {object} settings VectHare settings object
  * @returns {Promise<void>}
  */
-export async function deleteVectorItems(collectionId, hashes, settings) {
-    const backend = await getBackend(settings);
+export async function deleteVectorItems(collectionId, hashes, settings, abortSignal = null) {
+    // R17: guarded - deletes during a run were unabortable+untimed awaits
+    const backend = await withOpGuard(() => getBackend(settings), abortSignal, 'Backend initialization (delete)');
     try {
-        // VEC-33: Wrap with health invalidation
-        const result = await withHealthInvalidation(
-            () => backend.deleteVectorItems(collectionId, hashes, settings),
-            settings
+        // VEC-33: Wrap with health invalidation. R17: abortable + timeout-bounded.
+        const result = await withOpGuard(
+            () => withHealthInvalidation(
+                () => backend.deleteVectorItems(collectionId, hashes, settings),
+                settings
+            ),
+            abortSignal,
+            'Delete vectors'
         );
         // VEC-18: Record successful delete operation
         recordDelete(settings?.vector_backend || 'standard', hashes.length);
@@ -837,17 +948,6 @@ export async function deleteVectorItems(collectionId, hashes, settings) {
  * @returns {Promise<{ hashes: number[], metadata: object[]}>} - Hashes and metadata of the results
  */
 export async function queryCollection(collectionId, searchText, topK, settings) {
-    const key = parseRegistryKey(collectionId);
-    if (key.backend || key.source) {
-        settings = { ...settings,
-            vector_backend: key.backend || settings.vector_backend,
-            source: key.source || settings.source,
-        };
-        collectionId = key.collectionId;
-    }
-    const registryIdentity = `${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}`;
-    settings=settingsForCollectionQuery(registryIdentity, settings);
-    await assertQueryModelCompatible(registryIdentity, settings);
     const backend = await getBackend(settings);
 
     // Sources that require client-side embedding generation
@@ -906,8 +1006,8 @@ export async function queryCollection(collectionId, searchText, topK, settings) 
 
     // Convert to format expected by keyword boost
     const resultsForBoost = rawResults.metadata.map((meta, idx) => ({
-        hash: meta.hash ?? rawResults.hashes[idx],
-        score: meta.score ?? 0,
+        hash: meta.hash || rawResults.hashes[idx],
+        score: meta.score || 0,
         metadata: meta,
         text: meta.text || ''
     }));
@@ -920,7 +1020,7 @@ export async function queryCollection(collectionId, searchText, topK, settings) 
         metadata: finalResults.map(r => ({
             ...r.metadata,
             score: r.score,
-            originalScore: r.originalScore ?? r.vectorScore,
+            originalScore: r.originalScore || r.vectorScore,
             keywordBoost: r.keywordBoost,
             bm25Score: r.bm25Score,
             normalizedBM25: r.normalizedBM25,
@@ -953,7 +1053,7 @@ function scoreResults(resultsForBoost, searchText, topK, settings, overfetchAmou
         // Use BM25 scoring only
         const bm25Results = applyBM25Scoring(resultsForBoost, searchText, {
             k1: settings.bm25_k1 || 1.5,
-            b: settings.bm25_b ?? 0.75,
+            b: settings.bm25_b || 0.75,
             alpha: 0.5,
             beta: 0.5
         });
@@ -965,7 +1065,7 @@ function scoreResults(resultsForBoost, searchText, topK, settings, overfetchAmou
         const keywordBoosted = applyKeywordBoosts(resultsForBoost, searchText, keywordBoostLimit);
         const hybridResults = applyBM25Scoring(keywordBoosted, searchText, {
             k1: settings.bm25_k1 || 1.5,
-            b: settings.bm25_b ?? 0.75,
+            b: settings.bm25_b || 0.75,
             alpha: 0.6,
             beta: 0.4
         });
@@ -988,22 +1088,6 @@ function scoreResults(resultsForBoost, searchText, topK, settings, overfetchAmou
  * @returns {Promise<Record<string, { hashes: number[], metadata: object[] }>>} - Results mapped to collection IDs
  */
 export async function queryMultipleCollections(collectionIds, searchText, topK, threshold, settings) {
-    // Fully qualified registry keys may span several databases and providers.
-    // Do not hand them to one currently selected backend.
-    if (collectionIds.some(id => parseRegistryKey(id).backend)) {
-        const results = {};
-        for (const key of collectionIds) {
-            try {
-                results[key] = await queryCollection(key, searchText, topK, settings);
-            } catch (error) {
-                console.error(`VectHare: Backend-specific query failed for ${key}`, error);
-                results[key] = { hashes: [], metadata: [], error: error.message };
-            }
-        }
-        const failures=Object.entries(results).filter(([,result])=>result?.error);
-        if (failures.length) throw new Error(`Multi-collection retrieval degraded: ${failures.map(([key,result])=>key+': '+result.error).join('; ')}`);
-        return results;
-    }
     const backend = await getBackend(settings);
 
     // Sources that require client-side embedding generation
@@ -1042,11 +1126,9 @@ export async function queryMultipleCollections(collectionIds, searchText, topK, 
                 console.warn(`[VectHare] Hybrid search failed for ${collectionId}:`, error.message);
                 // VEC-18: Record error
                 recordError(settings?.vector_backend || 'standard', error);
-                processedResults[collectionId] = { hashes: [], metadata: [], error: error.message };
+                processedResults[collectionId] = { hashes: [], metadata: [] };
             }
         }
-        const failures=Object.entries(processedResults).filter(([,result])=>result?.error);
-        if (failures.length) throw new Error(`Hybrid retrieval degraded: ${failures.map(([key,result])=>key+': '+result.error).join('; ')}`);
         return processedResults;
     }
 
@@ -1077,8 +1159,8 @@ export async function queryMultipleCollections(collectionIds, searchText, topK, 
 
         // Convert to format expected by scoring functions
         const resultsForBoost = collectionResults.metadata.map((meta, idx) => ({
-            hash: meta.hash ?? collectionResults.hashes[idx],
-            score: meta.score ?? 0,
+            hash: meta.hash || collectionResults.hashes[idx],
+            score: meta.score || 0,
             metadata: meta,
             text: meta.text || ''
         }));
@@ -1091,7 +1173,7 @@ export async function queryMultipleCollections(collectionIds, searchText, topK, 
             metadata: finalResults.map(r => ({
                 ...r.metadata,
                 score: r.score,
-                originalScore: r.originalScore ?? r.vectorScore,
+                originalScore: r.originalScore || r.vectorScore,
                 keywordBoost: r.keywordBoost,
                 bm25Score: r.bm25Score,
                 normalizedBM25: r.normalizedBM25,
@@ -1130,18 +1212,9 @@ export async function queryActiveCollections(collectionIds, searchText, topK, th
         return {};
     }
 
-    // Route each collection to its own declared backend/source; never query a
-    // Qdrant collection through Standard simply because it is currently selected.
-    const results = {};
-    for (const key of activeCollectionIds) {
-        try {
-            results[key] = await queryCollection(key, searchText, topK, settings);
-        } catch (error) {
-            console.error(`VectHare: Query failed for ${key}:`, error);
-            results[key] = { hashes: [], metadata: [], error: error.message };
-        }
-    }
-    return results;
+    // Query only the active collections
+    const backend = await getBackend(settings);
+    return await backend.queryMultipleCollections(activeCollectionIds, searchText, topK, threshold, settings);
 }
 
 /**
@@ -1153,8 +1226,7 @@ export async function queryActiveCollections(collectionIds, searchText, topK, th
 export async function purgeVectorIndex(collectionId, settings) {
     try {
         const backend = await getBackend(settings);
-        const result = await backend.purgeVectorIndex(collectionId, settings);
-        if (result === false || result?.success === false) throw new Error('Backend rejected purge');
+        await backend.purgeVectorIndex(collectionId, settings);
         console.log(`VectHare: Purged vector index for collection ${collectionId}`);
         return true;
     } catch (error) {
@@ -1189,8 +1261,18 @@ export async function purgeFileVectorIndex(collectionId, settings) {
  * @param {object} settings VectHare settings object
  * @returns {Promise<void>}
  */
-export async function purgeAllVectorIndexes() {
-    throw new Error('Unsafe backend-wide purge disabled: use scoped VectHare purge with verified backend inventory and user confirmation.');
+export async function purgeAllVectorIndexes(settings) {
+    try {
+        const backend = await getBackend(settings);
+        await backend.purgeAllVectorIndexes(settings);
+        console.log('VectHare: Purged all vector indexes');
+        toastr.success('All vector indexes purged', 'Purge successful');
+    } catch (error) {
+        // VEC-33: Invalidate health cache on operation error
+        invalidateBackendHealth(settings?.vector_backend || 'standard', error);
+        console.error('VectHare: Failed to purge all', error);
+        toastr.error('Failed to purge all vector indexes', 'Purge failed');
+    }
 }
 
 /**

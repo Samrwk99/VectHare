@@ -12,7 +12,6 @@
 
 import { extension_settings } from '../../../../extensions.js';
 import { uuidv4 } from '../../../../utils.js';
-import { saveVectHareSettingsDebounced } from './settings-durability.js';
 
 // ============================================================================
 // BUILT-IN PRESETS
@@ -160,22 +159,15 @@ export function saveCleaningSettings(settings) {
     if (!extension_settings.vecthare) {
         extension_settings.vecthare = {};
     }
-    // Store a detached value. A caller retaining its old form draft must not
-    // silently mutate the committed cleaning configuration later.
-    extension_settings.vecthare.cleaning = structuredClone(settings);
-    saveVectHareSettingsDebounced();
+    extension_settings.vecthare.cleaning = settings;
 }
 
 /**
  * Gets all active patterns (builtin + custom)
  * @returns {Array<object>} Array of active pattern objects
  */
-export function getActivePatterns(cleaningSnapshot = null) {
-    // The saved recipe freezes the actual regexes, not just their preset IDs.
-    // Otherwise an update to the built-in presets changes old collection text.
-    if (cleaningSnapshot && Array.isArray(cleaningSnapshot.resolvedPatterns))
-        return structuredClone(cleaningSnapshot.resolvedPatterns);
-    const settings = cleaningSnapshot ?? getCleaningSettings();
+export function getActivePatterns() {
+    const settings = getCleaningSettings();
     const patterns = [];
 
     // If using a preset, get its patterns
@@ -230,10 +222,10 @@ function applyPattern(text, pattern) {
  * @param {string} text - Text to clean
  * @returns {string} Cleaned text
  */
-export function cleanText(text, cleaningSnapshot = null) {
+export function cleanText(text) {
     if (!text || typeof text !== 'string') return text;
 
-    const patterns = getActivePatterns(cleaningSnapshot);
+    const patterns = getActivePatterns();
     if (patterns.length === 0) return text;
 
     let result = text;
@@ -252,16 +244,16 @@ export function cleanText(text, cleaningSnapshot = null) {
  * @param {Array<object>} messages - Messages with .mes or .text property
  * @returns {Array<object>} Messages with cleaned text
  */
-export function cleanMessages(messages, cleaningSnapshot = null) {
+export function cleanMessages(messages) {
     if (!Array.isArray(messages)) return messages;
 
     return messages.map(msg => {
         const cleaned = { ...msg };
         if (cleaned.mes) {
-            cleaned.mes = cleanText(cleaned.mes, cleaningSnapshot);
+            cleaned.mes = cleanText(cleaned.mes);
         }
         if (cleaned.text) {
-            cleaned.text = cleanText(cleaned.text, cleaningSnapshot);
+            cleaned.text = cleanText(cleaned.text);
         }
         return cleaned;
     });
@@ -455,16 +447,4 @@ export function testPattern(pattern, flags, replacement, sampleText) {
     } catch (e) {
         return { success: false, error: e.message };
     }
-}
-
-/** Capture actual rules, not only the selected preset name. */
-export function captureCleaningSnapshot(presetOverride=null) {
-    const current=structuredClone(getCleaningSettings());
-    if(presetOverride != null) {
-        if(!Object.prototype.hasOwnProperty.call(CLEANING_PRESETS,presetOverride) && presetOverride!=='custom')
-            throw new Error(`Unknown text-cleaning preset: ${presetOverride}`);
-        current.selectedPreset=presetOverride;
-    }
-    current.resolvedPatterns=structuredClone(getActivePatterns(current));
-    return current;
 }

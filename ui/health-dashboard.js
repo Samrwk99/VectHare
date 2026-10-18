@@ -1,4 +1,3 @@
-import { escapeUntrustedHtml } from '../utils/safe-html.js';
 /**
  * ============================================================================
  * VEC-18: BACKEND HEALTH DASHBOARD
@@ -103,13 +102,13 @@ function renderDashboard() {
                     <span class="vecthare-health-label">${currentMetrics.healthy ? 'Healthy' : 'Unhealthy'}</span>
                 </div>
                 <div class="vecthare-health-uptime">
-                    <small>Uptime: ${escapeUntrustedHtml(metrics.uptimeFormatted)}</small>
+                    <small>Uptime: ${metrics.uptimeFormatted}</small>
                 </div>
             </div>
 
             <!-- Current Backend Section -->
             <div class="vecthare-health-section">
-                <h4>Current Backend: ${escapeUntrustedHtml(currentBackend)}</h4>
+                <h4>Current Backend: ${currentBackend}</h4>
                 <div class="vecthare-health-grid">
                     <div class="vecthare-health-stat">
                         <span class="vecthare-stat-value">${currentMetrics.queries}</span>
@@ -174,7 +173,7 @@ function renderDashboard() {
                 <h4>Last Error</h4>
                 <div class="vecthare-health-error-box">
                     <span class="vecthare-error-time">${formatRelativeTime(currentMetrics.lastError.timestamp)}</span>
-                    <span class="vecthare-error-message">${escapeUntrustedHtml(currentMetrics.lastError.message)}</span>
+                    <span class="vecthare-error-message">${currentMetrics.lastError.message}</span>
                 </div>
             </div>
             ` : ''}
@@ -203,7 +202,7 @@ function renderDashboard() {
             <div class="vecthare-health-section">
                 <h4>Active Backends</h4>
                 <div class="vecthare-active-backends">
-                    ${metrics.activeBackends.map(name => `<span class="vecthare-backend-badge">${escapeUntrustedHtml(name)}</span>`).join('')}
+                    ${metrics.activeBackends.map(name => `<span class="vecthare-backend-badge">${name}</span>`).join('')}
                 </div>
             </div>
             ` : ''}

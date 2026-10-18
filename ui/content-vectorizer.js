@@ -1,4 +1,3 @@
-import { saveVectHareSettingsDebounced as saveSettingsDebounced, flushVectHareSettings } from '../core/settings-durability.js';
 /**
  * ============================================================================
  * VECTHARE CONTENT VECTORIZER UI
@@ -26,15 +25,10 @@ import {
     CHARACTER_FIELDS,
 } from '../core/content-types.js';
 import { extension_settings, getContext } from '../../../../extensions.js';
-
+import { saveSettingsDebounced } from '../../../../../script.js';
 import { getChatUUID } from '../core/chat-vectorization.js';
 import { callGenericPopup, POPUP_TYPE } from '../../../../popup.js';
 import { openTextCleaningManager } from './text-cleaning-manager.js';
-import { captureCleaningSnapshot } from '../core/text-cleaning.js';
-import { getCollectionConfiguration, getCollectionProfile, saveCollectionDraft } from '../core/vectorization-profile.js';
-import { modelIsolationDecision } from '../core/model-isolation-consent.js';
-import { getModelField } from '../core/providers.js';
-import { getChatBinding } from '../core/collection-ownership.js';
 
 // ============================================================================
 // STATE
@@ -43,7 +37,6 @@ import { getChatBinding } from '../core/collection-ownership.js';
 let currentContentType = 'lorebook';
 let currentSettings = {};
 let sourceData = null;
-let replacementSourceKey = null;
 
 // ============================================================================
 // MODAL CREATION
@@ -53,28 +46,11 @@ let replacementSourceKey = null;
  * Opens the content vectorizer modal
  * @param {string} initialType - Optional initial content type to select
  */
-export function openContentVectorizer(initialType = null, replaceCollectionKey = null) {
-    replacementSourceKey = replaceCollectionKey;
+export function openContentVectorizer(initialType = null) {
     currentContentType = initialType;
     currentSettings = initialType ? { ...getContentTypeDefaults(initialType) } : {};
-    if (initialType === 'chat') {
-        currentSettings.conversationTurnOrder = extension_settings.vecthare?.conversation_turn_order || 'user_character';
-        const binding=!replaceCollectionKey?getChatBinding():null;
-        const original=binding?getCollectionConfiguration(binding.registryKey)?.originalRecipe:null;
-        if(original){
-            currentSettings.strategy=original.settings.chunking_strategy;
-            currentSettings.chunkSize=original.settings.chunk_size ?? currentSettings.chunkSize;
-            currentSettings.chunkOverlap=original.settings.chunk_overlap ?? currentSettings.chunkOverlap;
-            currentSettings.batchSize=original.settings.batch_size ?? currentSettings.batchSize;
-            currentSettings.conversationTurnOrder=original.settings.conversation_turn_order || 'user_character';
-            currentSettings.cleaningPreset=original.cleaning?.selectedPreset || 'none';
-            currentSettings.cleaning_snapshot=structuredClone(original.cleaning);
-        }
-    }
-    currentSettings.cleaning_snapshot ||= captureCleaningSnapshot(currentSettings.cleaningPreset);
     sourceData = null;
 
-    $(document).off('.vecthareContentVectorizer');
     createModal();
     bindEvents();
 
@@ -98,7 +74,6 @@ export function openContentVectorizer(initialType = null, replaceCollectionKey =
  * Closes the modal
  */
 export function closeContentVectorizer() {
-    $(document).off('.vecthareContentVectorizer');
     $('#vecthare_content_vectorizer_modal').fadeOut(200, function() {
         $(this).remove();
     });
@@ -175,15 +150,6 @@ function createModal() {
                                 <span class="vecthare-cv-strategy-desc" id="vecthare_cv_strategy_desc"></span>
                             </div>
 
-                            <div id="vecthare_cv_turn_order_settings" style="display:none;margin:10px 0;">
-                                <label for="vecthare_cv_turn_order">Conversation Turns Pairing Order</label>
-                                <select id="vecthare_cv_turn_order" class="vecthare-select">
-                                    <option value="user_character">User → Character</option>
-                                    <option value="character_user">Character → User</option>
-                                </select>
-                                <small class="vecthare-cv-hint">Consecutive messages by the same speaker are treated as one turn.</small>
-                            </div>
-
                             <!-- Size/Overlap controls - only shown for text-based strategies -->
                             <div class="vecthare-cv-size-controls" id="vecthare_cv_size_controls">
                                 <div class="vecthare-cv-slider-row" id="vecthare_cv_chunk_size_row">
@@ -242,8 +208,6 @@ function createModal() {
 
                 <div class="vecthare-cv-footer">
                     <button class="vecthare-btn-secondary" id="vecthare_cv_cancel">Cancel</button>
-                    <button class="vecthare-btn-secondary" id="vecthare_cv_save_draft" title="Save chat settings draft without changing the existing collection's embedded recipe">Save Chat Draft</button>
-                    <button class="vecthare-btn-secondary" id="vecthare_cv_load_draft" title="Load the last saved draft for the connected chat">Load Chat Draft</button>
                     <button class="vecthare-btn-secondary" id="vecthare_cv_preview_btn">
                         <i class="fa-solid fa-eye"></i> Preview Chunks
                     </button>
@@ -721,30 +685,18 @@ function updateChunkingSection(type) {
     strategySelect.empty();
 
     strategies.forEach(s => {
-        // Scene markers own scene creation. The Content Vectorizer cannot
-        // reconstruct marked boundaries and must not offer a zero-chunk run.
-        if (type.id === 'chat' && s.id === 'per_scene') return;
         const selected = s.id === selectedStrategyId;
         strategySelect.append(`<option value="${s.id}" ${selected ? 'selected' : ''}>${s.name}</option>`);
     });
-    // If a saved setting references marker-only Per Scene (or an unavailable
-    // strategy), visibly select the real fallback AND update the effective
-    // settings; otherwise the UI and the actual operation disagree.
-    if (!strategies.some(item => item.id === selectedStrategyId &&
-        !(type.id === 'chat' && item.id === 'per_scene'))) {
-        strategySelect.val(type.defaultStrategy);
-        currentSettings.strategy = type.defaultStrategy;
-    }
 
     // Update description
     const currentStrategy = getChunkingStrategy(strategySelect.val());
     $('#vecthare_cv_strategy_desc').text(currentStrategy?.description || '');
-    $('#vecthare_cv_turn_order').val(currentSettings.conversationTurnOrder === 'character_user' ? 'character_user' : 'user_character');
 
     // Get strategy-specific defaults if available
     const strategyDefaults = currentStrategy || {};
     const chunkSize = currentSettings.chunkSize || strategyDefaults.defaultSize || defaults.chunkSize;
-    const chunkOverlap = currentSettings.chunkOverlap ?? strategyDefaults.defaultOverlap ?? defaults.chunkOverlap;
+    const chunkOverlap = currentSettings.chunkOverlap || strategyDefaults.defaultOverlap || defaults.chunkOverlap;
 
     // Update size controls values
     $('#vecthare_cv_chunk_size').val(chunkSize);
@@ -775,7 +727,6 @@ function updateSizeControlsVisibility() {
     // Show/hide individual controls
     $('#vecthare_cv_chunk_size_row').toggle(needsSize);
     $('#vecthare_cv_overlap_row').toggle(needsOverlap);
-    $('#vecthare_cv_turn_order_settings').toggle(currentContentType === 'chat' && strategyId === 'conversation_turns');
 
     // Update description when strategy changes
     $('#vecthare_cv_strategy_desc').text(strategy?.description || '');
@@ -831,7 +782,7 @@ function updateOptionsSection(type) {
                     <label for="vecthare_cv_keyword_weight">Base Weight:</label>
                     <input type="number" id="vecthare_cv_keyword_weight"
                            min="0.01" max="3.0" step="0.01"
-                           value="${currentSettings.keywordBaseWeight ?? 1.5}"
+                           value="${currentSettings.keywordBaseWeight || 1.5}"
                            class="vecthare-input-number">
                     <span class="vecthare-cv-weight-hint">×</span>
                 </div>
@@ -970,9 +921,9 @@ function renderTemporalDecayOptions() {
     const decayType = decay.type || 'decay';
     const decayMode = decay.mode || 'exponential';
     const halfLife = decay.halfLife || 50;
-    const linearRate = decay.linearRate ?? 0.01;
-    const minRelevance = decay.minRelevance ?? 0.3;
-    const maxBoost = decay.maxBoost ?? 1.2;
+    const linearRate = decay.linearRate || 0.01;
+    const minRelevance = decay.minRelevance || 0.3;
+    const maxBoost = decay.maxBoost || 1.2;
 
     return `
         <div class="vecthare-cv-option-row vecthare-cv-temporal-settings ${isEnabled ? 'enabled' : ''}">
@@ -1149,7 +1100,6 @@ function bindEvents() {
 
         currentContentType = type;
         currentSettings = { ...getContentTypeDefaults(type) };
-        if (type === 'chat') currentSettings.conversationTurnOrder = extension_settings.vecthare?.conversation_turn_order || 'user_character';
 
         // Show type-specific hint
         const typeInfo = getContentType(type);
@@ -1182,10 +1132,6 @@ function bindEvents() {
         updateSizeControlsVisibility();
     });
 
-    $('#vecthare_cv_turn_order').on('change', function() {
-        currentSettings.conversationTurnOrder = $(this).val() === 'character_user' ? 'character_user' : 'user_character';
-    });
-
     // Size sliders
     $('#vecthare_cv_chunk_size').on('input', function() {
         const val = $(this).val();
@@ -1200,26 +1146,26 @@ function bindEvents() {
     });
 
     // Scope selection
-    $(document).on('change.vecthareContentVectorizer', 'input[name="vecthare_cv_scope"]', function() {
+    $(document).on('change', 'input[name="vecthare_cv_scope"]', function() {
         currentSettings.scope = $(this).val();
         $('.vecthare-cv-scope-option').removeClass('selected');
         $(this).closest('.vecthare-cv-scope-option').addClass('selected');
     });
 
     // Keyword level dropdown
-    $(document).on('change.vecthareContentVectorizer', '#vecthare_cv_keyword_level', function() {
+    $(document).on('change', '#vecthare_cv_keyword_level', function() {
         currentSettings.keywordLevel = $(this).val();
     });
 
     // Keyword base weight
-    $(document).on('change.vecthareContentVectorizer', '#vecthare_cv_keyword_weight', function() {
+    $(document).on('change', '#vecthare_cv_keyword_weight', function() {
         const value = parseFloat($(this).val());
         currentSettings.keywordBaseWeight = isNaN(value) ? 1.5 : Math.min(3.0, Math.max(0.01, value));
         $(this).val(currentSettings.keywordBaseWeight);
     });
 
     // Temporal weighting enable/disable
-    $(document).on('change.vecthareContentVectorizer', '#vecthare_cv_temporal_decay', function() {
+    $(document).on('change', '#vecthare_cv_temporal_decay', function() {
         const isEnabled = $(this).prop('checked');
         if (!currentSettings.temporalDecay) {
             currentSettings.temporalDecay = { enabled: false, type: 'decay', mode: 'exponential' };
@@ -1231,7 +1177,7 @@ function bindEvents() {
     });
 
     // Temporal weighting type toggle (decay vs nostalgia)
-    $(document).on('change.vecthareContentVectorizer', 'input[name="vecthare_cv_decay_type"]', function() {
+    $(document).on('change', 'input[name="vecthare_cv_decay_type"]', function() {
         const type = $(this).val();
         if (!currentSettings.temporalDecay) {
             currentSettings.temporalDecay = { enabled: true, type: 'decay', mode: 'exponential' };
@@ -1246,7 +1192,7 @@ function bindEvents() {
     });
 
     // Temporal weighting curve toggle (exponential vs linear)
-    $(document).on('change.vecthareContentVectorizer', 'input[name="vecthare_cv_decay_mode"]', function() {
+    $(document).on('change', 'input[name="vecthare_cv_decay_mode"]', function() {
         const mode = $(this).val();
         if (!currentSettings.temporalDecay) {
             currentSettings.temporalDecay = { enabled: true, type: 'decay', mode: 'exponential' };
@@ -1261,28 +1207,27 @@ function bindEvents() {
     });
 
     // Temporal weighting numeric inputs
-    $(document).on('change.vecthareContentVectorizer', '#vecthare_cv_decay_halflife', function() {
+    $(document).on('change', '#vecthare_cv_decay_halflife', function() {
         if (!currentSettings.temporalDecay) currentSettings.temporalDecay = {};
         currentSettings.temporalDecay.halfLife = parseInt($(this).val()) || 50;
     });
-    $(document).on('change.vecthareContentVectorizer', '#vecthare_cv_decay_rate', function() {
+    $(document).on('change', '#vecthare_cv_decay_rate', function() {
         if (!currentSettings.temporalDecay) currentSettings.temporalDecay = {};
-        currentSettings.temporalDecay.linearRate = finiteCVNumber($(this).val(), 0.01, 0, 1);
+        currentSettings.temporalDecay.linearRate = parseFloat($(this).val()) || 0.01;
     });
-    $(document).on('change.vecthareContentVectorizer', '#vecthare_cv_decay_min', function() {
+    $(document).on('change', '#vecthare_cv_decay_min', function() {
         if (!currentSettings.temporalDecay) currentSettings.temporalDecay = {};
-        currentSettings.temporalDecay.minRelevance = finiteCVNumber($(this).val(), 0.3, 0, 1);
+        currentSettings.temporalDecay.minRelevance = parseFloat($(this).val()) || 0.3;
     });
-    $(document).on('change.vecthareContentVectorizer', '#vecthare_cv_decay_max_boost', function() {
+    $(document).on('change', '#vecthare_cv_decay_max_boost', function() {
         if (!currentSettings.temporalDecay) currentSettings.temporalDecay = {};
-        currentSettings.temporalDecay.maxBoost = finiteCVNumber($(this).val(), 1.2, 0, 100);
+        currentSettings.temporalDecay.maxBoost = parseFloat($(this).val()) || 1.2;
     });
 
     // Cleaning preset dropdown
-    $(document).on('change.vecthareContentVectorizer', '#vecthare_cv_cleaning_preset', function() {
+    $(document).on('change', '#vecthare_cv_cleaning_preset', function() {
         const presetId = $(this).val();
         currentSettings.cleaningPreset = presetId;
-        currentSettings.cleaning_snapshot = captureCleaningSnapshot(presetId);
 
         // Update hint text
         const hints = {
@@ -1296,8 +1241,8 @@ function bindEvents() {
         };
         $('#vecthare_cv_cleaning_hint').text(hints[presetId] || '');
 
-        // Modal preference is local to this vectorization; never rewrite the global preset.
-        // The selected preset is recorded in the new collection recipe on commit.
+        // Save to extension settings
+        saveCleaningPresetToSettings(presetId);
     });
 
     // Manage cleaning patterns button - opens the standalone Text Cleaning Manager
@@ -1305,51 +1250,6 @@ function bindEvents() {
     $('#vecthare_content_vectorizer_modal').on('click', '#vecthare_cv_manage_cleaning', function(e) {
         e.preventDefault();
         openTextCleaningManager();
-    });
-
-    // Drafts are UI preferences only. Never alter a verified embedded recipe by saving/loading one.
-    $('#vecthare_cv_save_draft').on('click', async () => {
-        const binding = currentContentType === 'chat' ? getChatBinding() : null;
-        if (!binding?.registryKey) {
-            toastr.warning('Save Draft is available for an existing, connected chat collection.');
-            return;
-        }
-        try {
-            saveCollectionDraft(binding.registryKey, {
-                chunking_strategy: currentSettings.strategy,
-                conversation_turn_order: currentSettings.conversationTurnOrder,
-                chunk_size: currentSettings.chunkSize,
-                chunk_overlap: currentSettings.chunkOverlap,
-                batch_size: currentSettings.batchSize,
-                cleaning_preset: currentSettings.cleaningPreset,
-                keyword_extraction_level: currentSettings.keywordLevel,
-                keyword_weight: currentSettings.keywordBaseWeight,
-            });
-            // User-triggered critical draft saves require verified recovery-copy
-            // acknowledgement rather than merely scheduling a debounce.
-            await flushVectHareSettings();
-            toastr.success('Draft recovery copy confirmed. Existing vectors and their original recipe are unchanged.');
-        } catch (error) { toastr.error('Could not save draft: ' + error.message); }
-    });
-    $('#vecthare_cv_load_draft').on('click', () => {
-        const binding = currentContentType === 'chat' ? getChatBinding() : null;
-        const draft = binding?.registryKey ? getCollectionConfiguration(binding.registryKey)?.lastUsedDraft : null;
-        if (!draft || !Object.keys(draft).length) {
-            toastr.info('This chat has no saved draft. Its original embedding recipe remains unchanged.');
-            return;
-        }
-        currentSettings = {
-            ...currentSettings,
-            strategy: draft.chunking_strategy ?? currentSettings.strategy,
-            conversationTurnOrder: draft.conversation_turn_order ?? currentSettings.conversationTurnOrder,
-            chunkSize: draft.chunk_size ?? currentSettings.chunkSize,
-            chunkOverlap: draft.chunk_overlap ?? currentSettings.chunkOverlap,
-            batchSize: draft.batch_size ?? currentSettings.batchSize,
-            cleaningPreset: draft.cleaning_preset ?? currentSettings.cleaningPreset,
-            keywordLevel: draft.keyword_extraction_level ?? currentSettings.keywordLevel,
-        };
-        updateUIForContentType();
-        toastr.info('Chat draft loaded for review only. Existing vectors retain their original recipe; changes require compatibility checks or staged re-vectorization.');
     });
 
     // Preview button
@@ -1889,7 +1789,7 @@ async function fetchUrl() {
 
     } catch (e) {
         console.error('VectHare: URL fetch failed:', e);
-        status.html(`<i class="fa-solid fa-times" style="color: var(--vecthare-danger);"></i> ${escapeHtml(String(e.message))}`);
+        status.html(`<i class="fa-solid fa-times" style="color: var(--vecthare-danger);"></i> ${e.message}`);
         toastr.error('Failed to fetch URL: ' + e.message);
     }
 }
@@ -2033,7 +1933,7 @@ async function scrapeWiki() {
 
     } catch (e) {
         console.error('VectHare: Wiki scrape failed:', e);
-        status.html(`<i class="fa-solid fa-times" style="color: var(--vecthare-danger);"></i> ${escapeHtml(String(e.message))}`);
+        status.html(`<i class="fa-solid fa-times" style="color: var(--vecthare-danger);"></i> ${e.message}`);
         scrapeBtn.prop('disabled', false);
         toastr.error('Failed to scrape wiki: ' + e.message);
     }
@@ -2139,7 +2039,7 @@ async function fetchYouTubeTranscript() {
 
     } catch (e) {
         console.error('VectHare: YouTube fetch failed:', e);
-        status.html(`<i class="fa-solid fa-times" style="color: var(--vecthare-danger);"></i> ${escapeHtml(String(e.message))}`);
+        status.html(`<i class="fa-solid fa-times" style="color: var(--vecthare-danger);"></i> ${e.message}`);
         fetchBtn.prop('disabled', false);
         toastr.error('Failed to fetch transcript: ' + e.message);
     }
@@ -2338,10 +2238,6 @@ function clearChatUpload() {
  * Previews how content will be chunked
  */
 async function previewChunks() {
-    if (currentSettings.strategy === 'per_scene') {
-        toastr.info('Per Scene uses the chat scene markers. Mark scene boundaries in chat instead of batch vectorizing.');
-        return;
-    }
     const type = getContentType(currentContentType);
     const source = getSourceData();
 
@@ -2369,42 +2265,11 @@ async function previewChunks() {
             return;
         }
 
-        const isOpenChat=currentContentType==='chat' && source.type==='current';
-        let chunks;
-        if (isOpenChat && ['per_message','conversation_turns','message_batch','adaptive'].includes(currentSettings.strategy)) {
-            // Exactly the same canonical expected-items builder and overflow
-            // plan as Content Vectorizer's actual open-chat write path.
-            const {buildExpectedChatItems}=await import('../core/chat-vectorization.js');
-            const globals=extension_settings.vecthare||{};
-            const effective={...globals,
-                chunking_strategy:currentSettings.strategy || globals.chunking_strategy,
-                chunk_size:currentSettings.chunkSize || globals.chunk_size,
-                chunk_overlap:currentSettings.chunkOverlap ?? globals.chunk_overlap,
-                batch_size:currentSettings.batchSize || globals.batch_size,
-                conversation_turn_order:currentSettings.conversationTurnOrder || 'user_character',
-                cleaning_snapshot:currentSettings.cleaning_snapshot};
-            chunks=await buildExpectedChatItems(getContext().chat,effective);
-        } else {
-            chunks=await chunkText(contentText, {
-                strategy:currentSettings.strategy || type.defaultStrategy,
-                chunkSize:currentSettings.chunkSize || type.defaults.chunkSize,
-                chunkOverlap:currentSettings.chunkOverlap ?? type.defaults.chunkOverlap,
-                batchSize:currentSettings.batchSize || 4,
-                conversationTurnOrder:currentSettings.conversationTurnOrder || 'user_character',
-            });
-            // The same enrichment, keyword and provider overflow planner as
-            // the write operation. No profile or vector store is mutated.
-            const {buildContentEmbeddingPlan}=await import('../core/content-vectorization.js');
-            const globals=extension_settings.vecthare||{};
-            const effective={...globals,
-                chunking_strategy:currentSettings.strategy || globals.chunking_strategy,
-                chunk_size:currentSettings.chunkSize || globals.chunk_size,
-                chunk_overlap:currentSettings.chunkOverlap ?? globals.chunk_overlap,
-                batch_size:currentSettings.batchSize || globals.batch_size,
-                conversation_turn_order:currentSettings.conversationTurnOrder || 'user_character',
-                cleaning_snapshot:currentSettings.cleaning_snapshot};
-            chunks=await buildContentEmbeddingPlan(chunks,currentContentType,source,currentSettings,prepared,effective);
-        }
+        const chunks = await chunkText(contentText, {
+            strategy: currentSettings.strategy || type.defaultStrategy,
+            chunkSize: currentSettings.chunkSize || type.defaults.chunkSize,
+            chunkOverlap: currentSettings.chunkOverlap || type.defaults.chunkOverlap,
+        });
 
         // Handle empty or undefined chunks
         if (!chunks || chunks.length === 0) {
@@ -2420,7 +2285,7 @@ async function previewChunks() {
 
         container.html(`
             <div class="vecthare-cv-preview-stats">
-                <span><strong>${chunks.length}</strong> planned vectors</span>
+                <span><strong>${chunks.length}</strong> chunks</span>
                 <span>~<strong>${avgChars}</strong> chars avg</span>
             </div>
             <div class="vecthare-cv-preview-list">
@@ -2439,7 +2304,7 @@ async function previewChunks() {
 
     } catch (e) {
         console.error('VectHare: Preview failed:', e);
-        container.html(`<div class="vecthare-cv-error">Preview failed: ${escapeHtml(String(e.message))}</div>`);
+        container.html(`<div class="vecthare-cv-error">Preview failed: ${e.message}</div>`);
     }
 }
 
@@ -2551,10 +2416,6 @@ function getSourceData() {
  * Starts the vectorization process
  */
 async function startVectorization() {
-    if (currentSettings.strategy === 'per_scene') {
-        toastr.warning('Per Scene is created using scene markers in chat, not the Content Vectorizer.');
-        return;
-    }
     const type = getContentType(currentContentType);
     const source = getSourceData();
 
@@ -2563,61 +2424,56 @@ async function startVectorization() {
         return;
     }
 
-    if(replacementSourceKey && currentContentType==='chat' && source.type==='current') {
-        source.replaceExisting=true;
-        source.replacedCollectionKey=replacementSourceKey;
-    }
-    // Confirm any replacement without deleting the original vectors first.
-    // A replacement is written to a separate collection and the binding changes
-    // only when the new insertion has fully succeeded.
-    if (currentContentType === 'chat' && source.type === 'current' && !source.replaceExisting) {
+    // Check if vectors already exist for this content (chat specifically)
+    // R8 FIX: was source.sourceType === 'current' but getSourceData() returns
+    // { type: 'current' } - the property mismatch made this whole flow DEAD
+    // CODE: the confirm dialog never appeared and re-vectorizing silently
+    // stacked vectors on top of existing ones.
+    if (currentContentType === 'chat' && source.type === 'current') {
         try {
             const { doesChatHaveVectors } = await import('../core/collection-loader.js');
             const existing = await doesChatHaveVectors(currentSettings);
-            if (existing.hasVectors) {
+
+            if (existing.hasVectors && existing.chunkCount > 0) {
                 const confirmed = await callGenericPopup(
-                    `<p>This chat already has a collection (${existing.chunkCount} chunks).</p><p>Replace it with a newly vectorized collection? The original will be preserved until you explicitly delete it.</p>`,
-                    POPUP_TYPE.CONFIRM, '', { okButton: 'Replace All', cancelButton: 'Cancel' });
-                if (!confirmed) return;
-                source.replaceExisting = true;
+                    `<div style="text-align: center;">
+                        <p>This chat already has <strong>${existing.chunkCount} chunks</strong> vectorized.</p>
+                        <p style="margin-top: 10px;">What would you like to do?</p>
+                    </div>`,
+                    POPUP_TYPE.CONFIRM,
+                    '',
+                    {
+                        okButton: 'Replace All',
+                        cancelButton: 'Cancel',
+                    }
+                );
+
+                if (!confirmed) {
+                    return;
+                }
+
+                // User wants to replace - purge existing first
+                const { purgeVectorIndex } = await import('../core/core-vector-api.js');
+                const { unregisterCollection } = await import('../core/collection-loader.js');
+                await purgeVectorIndex(existing.collectionId, currentSettings);
+                // R8 FIX: unregister with the registry key (backend:source:id)
+                // when available - the bare collectionId never matched a registry
+                // entry, leaving a stale key behind.
+                unregisterCollection(existing.registryKey || existing.collectionId);
+                // R8 FIX: clear the stored vectorization config fingerprint.
+                // Without this, Replace All with changed settings would leave the
+                // old fingerprint behind and the NEXT Sync Chat would be blocked
+                // by the mismatch check - making the prescribed escape hatch from
+                // the blocked-run toast a dead end. Fresh start = no fingerprint;
+                // the next chat sync adopts the current settings.
+                const { setCollectionMeta } = await import('../core/collection-metadata.js');
+                setCollectionMeta(existing.collectionId, { vectorizationConfigFingerprint: null });
+                toastr.info('Cleared existing vectors', 'VectHare');
             }
         } catch (e) {
-            toastr.error(`Could not verify existing collections: ${e.message}`, 'VectHare');
-            return; // Fail closed; never write blindly after failed discovery.
+            console.warn('VectHare: Could not check for existing vectors:', e);
+            // Continue anyway
         }
-    }
-
-    // Acknowledgement is scoped to THIS provider/model and THIS operation.
-    // Do not allow the popup to override backend/model/dimension safeguards.
-    const globals=extension_settings.vecthare||{};
-    const provider=globals.source||'transformers';
-    const field=getModelField(provider);
-    const selectedModel=String((field && globals[field]) || globals.model || '');
-    const savedProfiles=(globals.vecthare_collection_registry||[])
-        .map(key=>getCollectionProfile(key)).filter(Boolean);
-    const currentBinding=currentContentType==='chat' && source.type==='current' && !source.replaceExisting
-        ? getChatBinding(getChatUUID()):null;
-    const isContinuation=!!(currentBinding && getCollectionProfile(currentBinding.registryKey));
-    const modelRisk=modelIsolationDecision(provider,selectedModel,savedProfiles);
-    if (isContinuation) {
-        const original=getCollectionProfile(currentBinding.registryKey)?.embedding;
-        const savedModel=String(original?.configuredModel||original?.modelId||'');
-        if (original && (original.provider!==provider || (savedModel && selectedModel && savedModel!==selectedModel))) {
-            toastr.error('This chat belongs to a collection created with another embedding model/provider. Nothing has been written. Restore the original model or choose a STAGED replacement; the original collection must not be mixed with new embeddings.', 'VectHare — Model Mismatch', {timeOut:12000});
-            return;
-        }
-    }
-    if (!isContinuation && modelRisk.requiresConfirmation) {
-        const accepted=await callGenericPopup(
-            `<p><strong>Different embedding model detected.</strong></p>`+
-            `<p>Other collections use a different model/provider. Different models may be incompatible even if vector dimensions match. `+
-            `VectHare will create an isolated logical collection; it will <strong>not</strong> alter or combine existing vectors.</p>`+
-            `<p>If Qdrant shared storage has incompatible dimensions, this operation will still be blocked. `+
-            `Confirmation cannot override storage safety checks.</p>`+
-            `<p><strong>Accept these limitations and proceed with the new collection?</strong></p>`,
-            POPUP_TYPE.CONFIRM, '', {okButton:'I Understand — Continue',cancelButton:'Cancel'});
-        if (!accepted) return;
-        source.modelRiskAccepted=modelRisk.token;
     }
 
     const btn = $('#vecthare_cv_vectorize');
@@ -2637,18 +2493,13 @@ async function startVectorization() {
         closeContentVectorizer();
 
     } catch (e) {
-        if(e?.name==='OperationStoppedError'){
-            toastr.info('Vectorization stopped safely; completed chunks preserved. Reopen the same source to resume.','VectHare');
-            btn.prop('disabled',false).html('<i class="fa-solid fa-bolt"></i> Vectorize');
-            return;
-        }
         console.error('VectHare: Vectorization failed:', e);
 
         // Check for dimension mismatch error and provide helpful guidance
         if (e.message.includes('dimension mismatch') || e.message.includes('Vector dimension error')) {
             toastr.error(
                 'Vector dimension mismatch detected. You likely switched embedding models. ' +
-                'No existing collection was deleted. Use a separately configured physical collection with the correct dimensions, or return to the original embedding model. Do NOT delete existing vectors.',
+                'Please delete this collection in Database Browser and try again.',
                 'VectHare - Dimension Mismatch',
                 { timeOut: 10000 }
             );
@@ -2687,10 +2538,3 @@ async function saveCleaningPresetToSettings(presetId) {
 // Note: Text cleaning management is now handled by the standalone Text Cleaning Manager
 // accessible from the Actions panel. The openTextCleaningManager() function is imported
 // from './text-cleaning-manager.js' and used by the gear button in the Content Vectorizer.
-
-/** Validate numeric UI values without treating zero as missing. */
-function finiteCVNumber(raw, fallback, min, max) {
-    if(raw === '' || raw == null) return fallback;
-    const n=Number(raw);
-    return Number.isFinite(n) && n>=min && n<=max ? n : fallback;
-}

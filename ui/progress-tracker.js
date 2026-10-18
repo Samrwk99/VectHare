@@ -4,13 +4,12 @@
  * ============================================================================
  * Real-time progress panel for vectorization operations
  * Shows detailed status, progress bars, and live updates
+ * VectHare+: Pause / Resume / Stop controls on the progress panel
  *
  * @author VectHare
- * @version 2.2.0-alpha
+ * @version 2.2.1-alpha
  * ============================================================================
  */
-
-import { startActivity, updateActivity, finishActivity, registerActivityRetry } from './activity-status.js';
 
 /**
  * Progress Tracker - Manages progress panel UI
@@ -22,9 +21,12 @@ export class ProgressTracker {
         this.currentOperation = null;
         this.timeIntervalId = null;
         this.isComplete = false;
-        this.activityId = null;
+        this.isStopping = false; // R10: true while a requested Stop is draining
+        this.currentEta = ''; // R7: last computed ETA string, appended by the timer
         // PERF: Cache DOM element references to avoid repeated getElementById calls
         this.elements = null;
+        // VectHare+: run-control callbacks (wired by vectorizeAll)
+        this.controls = null;
         this.stats = {
             totalItems: 0,
             processedItems: 0,
@@ -41,17 +43,28 @@ export class ProgressTracker {
         };
     }
 
-    /** Detailed operation stats from the original floating tracker, shared with Live Status. */
-    activityMetrics() {
-        const stats=this.stats;
-        const elapsedMs=stats.startTime ? Math.max(0,Date.now()-stats.startTime) : 0;
-        let speed = 0;
-        if (stats.lastBatchTime > 0 && stats.lastBatchSize > 0) speed=stats.lastBatchSize/(stats.lastBatchTime/1000);
-        else if (stats.embeddedChunks > 0 && elapsedMs > 0) speed=stats.embeddedChunks/(elapsedMs/1000);
-        return {processedItems:stats.processedItems,totalItems:stats.totalItems,totalChunks:stats.totalChunks,
-            embeddedChunks:stats.embeddedChunks,totalChunksToEmbed:stats.totalChunksToEmbed,
-            currentBatch:stats.currentBatch,totalBatches:stats.totalBatches,
-            speedPerSecond:Math.round(speed*10)/10};
+    /**
+     * Wire run-control callbacks (Pause / Resume / Stop buttons)
+     * @param {{onPause: Function, onResume: Function, onStop: Function}} controls
+     */
+    setControls(controls) {
+        this.controls = controls || null;
+        if (!this.elements) return;
+        const { pauseBtn, resumeBtn, stopBtn } = this.elements;
+        if (pauseBtn) pauseBtn.style.display = 'inline-block';
+        if (stopBtn) stopBtn.style.display = 'inline-block';
+        if (resumeBtn) resumeBtn.style.display = 'none';
+    }
+
+    /**
+     * Hide all run-control buttons (used on completion/failure)
+     */
+    hideControls() {
+        if (!this.elements) return;
+        const { pauseBtn, resumeBtn, stopBtn } = this.elements;
+        if (pauseBtn) pauseBtn.style.display = 'none';
+        if (stopBtn) stopBtn.style.display = 'none';
+        if (resumeBtn) resumeBtn.style.display = 'none';
     }
 
     /**
@@ -61,10 +74,10 @@ export class ProgressTracker {
      * @param {string} itemLabel - Label for items (e.g., "Messages", "Steps", "Entries")
      */
     show(operation, totalItems = 0, itemLabel = 'Progress') {
-        if (this.activityId) finishActivity(this.activityId, false, 'Interrupted by another operation');
-        this.activityId = startActivity(operation, {total:totalItems, unit:itemLabel});
         this.currentOperation = operation;
         this.isComplete = false;
+        this.isStopping = false; // R10: fresh run must not inherit a stale stopping state
+        this.currentEta = '';
         this.stats = {
             totalItems: totalItems,
             processedItems: 0,
@@ -92,10 +105,9 @@ export class ProgressTracker {
         // Start/restart time updater
         this.startTimeUpdater();
 
-        // Keep updating the tracker even when CSS hides the floating panel on mobile.
+        this.updateDisplay();
         this.panel.style.display = 'block';
         this.isVisible = true;
-        this.updateDisplay();
     }
 
     /**
@@ -106,7 +118,39 @@ export class ProgressTracker {
             this.panel.style.display = 'none';
         }
         this.isVisible = false;
-        // Hiding the old floating panel does not stop the operation.
+        this.currentOperation = null;
+    }
+
+    /**
+     * VectHare+ BUG FIX: Re-shows an existing panel WITHOUT resetting stats or
+     * controls. Anchor for the paused-run recovery: a paused run whose panel
+     * was closed by the user would otherwise strand its only Resume/Stop
+     * controls behind a hidden element (re-entry was rejected with "use the
+     * panel", pointing at a panel that no longer existed). vectorizeAll's
+     * re-entrancy guard calls this when it detects a paused run.
+     * Caller supplies the status line afterwards via updateDisplay('...').
+     */
+    reveal() {
+        if (!this.panel) return;
+
+        // R16 FIX: a COMPLETED panel must never resurrect its run controls.
+        // The previous logic inferred state from resumeBtn visibility, and
+        // "resumeBtn hidden" (which is ALSO the post-complete state) was
+        // misread as "running, not paused" - revealing Pause/Stop buttons
+        // bound to a run that no longer existed (user-visible as a green-tick
+        // 100% panel with clickable Pause/Stop).
+        if (this.isComplete) {
+            this.hideControls();
+        } else if (this.elements) {
+            const isPaused = this.elements.resumeBtn && this.elements.resumeBtn.style.display !== 'none';
+            if (this.elements.pauseBtn) this.elements.pauseBtn.style.display = isPaused ? 'none' : 'inline-block';
+            if (this.elements.resumeBtn) this.elements.resumeBtn.style.display = isPaused ? 'inline-block' : 'none';
+            if (this.elements.stopBtn) this.elements.stopBtn.style.display = 'inline-block';
+        }
+
+        this.panel.style.display = 'block';
+        this.isVisible = true;
+        this.updateDisplay();
     }
 
     /**
@@ -116,19 +160,7 @@ export class ProgressTracker {
      */
     updateProgress(processedItems, status = '') {
         this.stats.processedItems = processedItems;
-        if (this.activityId) updateActivity(this.activityId, {completed: processedItems, total:this.stats.totalItems, detail:status || this.generateStatusMessage(), metrics: this.activityMetrics()});
         this.updateDisplay(status);
-    }
-
-    /** Verified database chunks (not merely submitted messages). */
-    updateVerifiedChunks(verified,total,detail='') {
-        this.stats.embeddedChunks=verified;
-        this.stats.totalChunksToEmbed=total;
-        this.stats.processedItems=verified;
-        this.stats.totalItems=total;
-        this.stats.totalChunks=total;
-        if(this.activityId)updateActivity(this.activityId,{completed:verified,total,unit:'chunks',detail,metrics:this.activityMetrics()});
-        this.updateDisplay(detail);
     }
 
     /**
@@ -139,7 +171,6 @@ export class ProgressTracker {
     updateBatch(currentBatch, totalBatches) {
         this.stats.currentBatch = currentBatch;
         this.stats.totalBatches = totalBatches;
-        if (this.activityId) updateActivity(this.activityId, {detail:`Batch ${currentBatch}/${totalBatches}`, metrics:this.activityMetrics()});
         this.updateDisplay();
     }
 
@@ -149,7 +180,6 @@ export class ProgressTracker {
      */
     updateChunks(totalChunks) {
         this.stats.totalChunks = totalChunks;
-        if (this.activityId) updateActivity(this.activityId, {detail:`${totalChunks} chunks prepared`, metrics:this.activityMetrics()});
         this.updateDisplay();
     }
 
@@ -160,11 +190,11 @@ export class ProgressTracker {
      */
     updateEmbeddingProgress(embeddedChunks, totalChunksToEmbed) {
         console.log(`[ProgressTracker] updateEmbeddingProgress: ${embeddedChunks}/${totalChunksToEmbed}`);
-        
+
         // Track batch timing for speed calculation
         const previousEmbedded = this.stats.embeddedChunks || 0;
         const batchSize = embeddedChunks - previousEmbedded;
-        
+
         if (batchSize > 0 && this.stats.lastBatchStartTime) {
             const now = Date.now();
             this.stats.lastBatchTime = now - this.stats.lastBatchStartTime;
@@ -172,15 +202,7 @@ export class ProgressTracker {
             this.stats.lastBatchStartTime = now; // Reset for next batch
             console.log(`[ProgressTracker] Batch completed: ${batchSize} chunks in ${this.stats.lastBatchTime}ms`);
         }
-        
-        this.stats.embeddedChunks = embeddedChunks;
-        this.stats.totalChunksToEmbed = totalChunksToEmbed;
-        if (this.activityId) updateActivity(this.activityId, {completed:embeddedChunks, total:totalChunksToEmbed, detail:`Embedding ${embeddedChunks}/${totalChunksToEmbed} chunks`, unit:'chunks', metrics:this.activityMetrics()});
-        this.updateDisplay();
-    }
 
-    /**
-     * Update current item being processed (e.g., "Message 3, Chunk 2/5")
         this.stats.embeddedChunks = embeddedChunks;
         this.stats.totalChunksToEmbed = totalChunksToEmbed;
         this.updateDisplay();
@@ -191,7 +213,6 @@ export class ProgressTracker {
      * @param {string} text - Current item description
      */
     updateCurrentItem(text) {
-        if (this.activityId && text) updateActivity(this.activityId, {detail:text});
         // PERF: Use cached element references
         const el = this.elements?.current;
         const textEl = this.elements?.currentText;
@@ -214,8 +235,26 @@ export class ProgressTracker {
             message: error,
             timestamp: Date.now(),
         });
-        if (this.activityId) updateActivity(this.activityId, {error, metrics:this.activityMetrics()});
         this.updateDisplay();
+    }
+
+    /**
+     * VectHare+: mark the panel as paused (keeps panel open, shows Resume/Stop)
+     * @param {string} message - Paused status message
+     */
+    markPaused(message = '') {
+        this.isComplete = true;
+        this.updateCurrentItem(null); // R17: clear the fossil "Item N - embedding" line
+        if (this.timeIntervalId) {
+            clearInterval(this.timeIntervalId);
+            this.timeIntervalId = null;
+        }
+        if (this.elements) {
+            if (this.elements.pauseBtn) this.elements.pauseBtn.style.display = 'none';
+            if (this.elements.resumeBtn) this.elements.resumeBtn.style.display = 'inline-block';
+            if (this.elements.stopBtn) this.elements.stopBtn.style.display = 'inline-block';
+        }
+        this.updateDisplay(`⏸ ${message || 'Paused'}`);
     }
 
     /**
@@ -223,15 +262,13 @@ export class ProgressTracker {
      * @param {boolean} success - Whether operation succeeded
      * @param {string} message - Completion message
      */
-    registerRetry(callback){if(this.activityId)registerActivityRetry(this.activityId,callback);}
-
     complete(success, message = '') {
         this.isComplete = true;
-        if (this.activityId) {
-            updateActivity(this.activityId, {metrics:this.activityMetrics()});
-            finishActivity(this.activityId, success, message || (success ? 'Finished' : 'Failed'));
-            this.activityId = null;
-        }
+        this.isStopping = false; // R10: drain finished - no lingering "stopping…" state
+        this.currentEta = '';
+        this.updateCurrentItem(null); // R17: clear the fossil "Item N - embedding" line
+        // R17: a finished panel must never show live-looking controls
+        this.hideControls();
 
         // Stop the time updater
         if (this.timeIntervalId) {
@@ -239,10 +276,11 @@ export class ProgressTracker {
             this.timeIntervalId = null;
         }
 
-        const duration = Date.now() - this.stats.startTime;
+        const startTime = this.stats?.startTime || Date.now();
+        const duration = Date.now() - startTime;
         const seconds = (duration / 1000).toFixed(1);
 
-        const completionMessage = success==='stopped' ? `⏹ ${message || 'Stopped; verified progress preserved'} (${seconds}s)` : success
+        const completionMessage = success
             ? `✅ ${message || 'Operation completed successfully'} (${seconds}s)`
             : `❌ ${message || 'Operation failed'} (${seconds}s)`;
 
@@ -278,6 +316,22 @@ export class ProgressTracker {
                     <!-- Current Item Progress -->
                     <div id="vecthare_progress_current" class="vecthare-progress-current" style="display: none;">
                         <span id="vecthare_progress_current_text">Processing...</span>
+                    </div>
+
+                    <!-- Run Controls (VectHare+) -->
+                    <div class="vecthare-progress-section" id="vecthare_progress_controls" style="margin-top: 8px;">
+                        <button id="vecthare_progress_pause" title="Pause: finish in-flight work, then stop starting new items"
+                            class="menu_button" style="display: none;">
+                            <i class="fa-solid fa-pause"></i> Pause
+                        </button>
+                        <button id="vecthare_progress_resume" title="Resume: continue from the last completed item"
+                            class="menu_button" style="display: none;">
+                            <i class="fa-solid fa-play"></i> Resume
+                        </button>
+                        <button id="vecthare_progress_stop" title="Stop: end the run and keep everything completed so far"
+                            class="menu_button" style="display: none;">
+                            <i class="fa-solid fa-stop"></i> Stop
+                        </button>
                     </div>
 
                     <!-- Stats Grid -->
@@ -335,11 +389,26 @@ export class ProgressTracker {
             errors: document.getElementById('vecthare_progress_errors'),
             errorsList: document.getElementById('vecthare_progress_errors_list'),
             closeBtn: document.getElementById('vecthare_progress_close'),
+            // VectHare+ controls
+            pauseBtn: document.getElementById('vecthare_progress_pause'),
+            resumeBtn: document.getElementById('vecthare_progress_resume'),
+            stopBtn: document.getElementById('vecthare_progress_stop'),
         };
 
         // Bind close button
         this.elements.closeBtn.addEventListener('click', () => {
             this.hide();
+        });
+
+        // VectHare+: bind run-control buttons
+        this.elements.pauseBtn?.addEventListener('click', () => {
+            this.controls?.onPause?.();
+        });
+        this.elements.resumeBtn?.addEventListener('click', () => {
+            this.controls?.onResume?.();
+        });
+        this.elements.stopBtn?.addEventListener('click', () => {
+            this.controls?.onStop?.();
         });
 
         // Start time update interval
@@ -358,7 +427,6 @@ export class ProgressTracker {
         let percent = 0;
         if (this.stats.totalChunksToEmbed > 0 && this.stats.embeddedChunks >= 0) {
             percent = Math.round((this.stats.embeddedChunks / this.stats.totalChunksToEmbed) * 100);
-            console.log(`[ProgressTracker] Progress bar: ${this.stats.embeddedChunks}/${this.stats.totalChunksToEmbed} = ${percent}%`);
         } else if (this.stats.totalItems > 0) {
             percent = Math.round((this.stats.processedItems / this.stats.totalItems) * 100);
         }
@@ -369,8 +437,13 @@ export class ProgressTracker {
         // Update title
         if (els.title) els.title.textContent = this.currentOperation || 'VectHare Progress';
 
-        // Update status
-        const status = statusOverride || this.generateStatusMessage();
+        // Update status.
+        // R10 FIX: while a Stop is draining, ALWAYS synthesize the stopping
+        // status - the 2s ETA-recalc tick calls updateDisplay() without an
+        // override, which would otherwise clobber the onStop status line back
+        // to "Processing chunks..." two seconds after Stop was pressed.
+        const status = statusOverride
+            || (this.isStopping ? '⏹ Stopping - waiting for the in-flight embedding to finish...' : this.generateStatusMessage());
         if (els.status) els.status.textContent = status;
 
         // Update progress bar
@@ -388,7 +461,6 @@ export class ProgressTracker {
                 // Show embedding progress: "45/100 (55 left)"
                 const remaining = this.stats.totalChunksToEmbed - this.stats.embeddedChunks;
                 const displayText = `${this.stats.embeddedChunks}/${this.stats.totalChunksToEmbed} (${remaining} left)`;
-                console.log(`[ProgressTracker] Updating chunks display with embedding progress: "${displayText}"`);
                 els.chunks.textContent = displayText;
             } else if (this.stats.totalChunks > this.stats.processedItems && this.stats.processedItems > 0) {
                 // Messages are being split into multiple chunks
@@ -412,6 +484,30 @@ export class ProgressTracker {
         }
         if (els.speed) els.speed.textContent = `${speed}/s`;
 
+        // R7/R10: compute ETA and stash it for the elapsed-time timer to append.
+        // R10: while a Stop is draining, show "stopping…" instead of a nonsense
+        // countdown; ETA is also recomputed by the 2s status timer (see
+        // startTimeUpdater) so it stays fresh even during long single embeds.
+        if (this.isStopping) {
+            this.currentEta = ' · stopping…';
+        } else {
+            const done = this.stats.totalChunksToEmbed > 0
+                ? this.stats.embeddedChunks
+                : this.stats.processedItems;
+            const totalUnits = this.stats.totalChunksToEmbed > 0
+                ? this.stats.totalChunksToEmbed
+                : this.stats.totalItems;
+            const elapsedSec = this.stats.startTime ? (Date.now() - this.stats.startTime) / 1000 : 0;
+            if (done > 0 && totalUnits > done && elapsedSec > 2) {
+                const etaSec = Math.round((elapsedSec / done) * (totalUnits - done));
+                const mins = Math.floor(etaSec / 60);
+                const secs = etaSec % 60;
+                this.currentEta = ` · ETA ${mins > 0 ? `${mins}m ` : ''}${secs}s`;
+            } else {
+                this.currentEta = '';
+            }
+        }
+
         // Show/hide errors
         if (this.stats.errors.length > 0) {
             this.updateErrorsList();
@@ -423,6 +519,14 @@ export class ProgressTracker {
      * Generate status message based on current state
      */
     generateStatusMessage() {
+        // R14 FIX: repair runs have their own status vocabulary. The 2s
+        // ETA-recompute tick regenerates status without an override, which
+        // previously clobbered the repair status line with generic sync text
+        // ("Processing items..."/"Finalizing...") mid-repair.
+        if (this.currentOperation && this.currentOperation.toLowerCase().includes('repair')) {
+            const remaining = Math.max(0, this.stats.totalItems - this.stats.processedItems);
+            return remaining > 0 ? `Repairing... ${remaining} item(s) remaining` : 'Finalizing...';
+        }
         if (this.stats.processedItems === 0) {
             return 'Starting...';
         } else if (this.stats.totalChunksToEmbed > 0 && this.stats.embeddedChunks >= 0) {
@@ -450,7 +554,7 @@ export class ProgressTracker {
         const errorsList = this.elements?.errorsList;
         if (errorsList) {
             errorsList.innerHTML = this.stats.errors
-                .map(err => { const row = document.createElement('div'); row.textContent = err.message; row.className = 'vecthare-progress-error-item'; return row.outerHTML; })
+                .map(err => `<div class="vecthare-progress-error-item">${err.message}</div>`)
                 .join('');
         }
     }
@@ -464,13 +568,26 @@ export class ProgressTracker {
             clearInterval(this.timeIntervalId);
         }
 
+        // R10: fast 100ms tick keeps elapsed fresh; every 2s (~20th tick) the
+        // ETA is RECOMPUTED here too, so it stays current even when the run is
+        // inside one long embedding request (updateDisplay only fires between
+        // items, which could otherwise freeze the ETA for minutes).
+        let tickCount = 0;
         this.timeIntervalId = setInterval(() => {
+            tickCount++;
+
+            // Recompute ETA every ~2s while a run is active
+            if (tickCount % 20 === 0 && this.isVisible && !this.isComplete) {
+                this.updateDisplay();
+            }
+
             // Only update if visible, not complete, and has start time
             if (this.isVisible && !this.isComplete && this.stats.startTime) {
                 const elapsed = ((Date.now() - this.stats.startTime) / 1000).toFixed(1);
                 // PERF: Use cached element reference
+                // R7/R10: elapsed + stashed ETA, e.g. "1m 12.4s · ETA 25m 3s"
                 if (this.elements?.time) {
-                    this.elements.time.textContent = `${elapsed}s`;
+                    this.elements.time.textContent = `${elapsed}s${this.currentEta || ''}`;
                 }
             }
         }, 100);
