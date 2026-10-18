@@ -31,6 +31,7 @@
 import { getRequestHeaders } from '../../../../../script.js';
 import { VectorBackend } from './backend-interface.js';
 import { getModelField } from '../core/providers.js';
+import { getProviderSpecificParams } from './provider-params.js';
 import { VECTOR_LIST_LIMIT } from '../core/constants.js';
 
 const BACKEND_TYPE = 'qdrant';
@@ -297,6 +298,7 @@ export class QdrantBackend extends VectorBackend {
                     }),
                     source: settings.source || 'transformers',
                     model: getModelFromSettings(settings),
+                    ...getProviderSpecificParams(settings),
                 }),
             });
 
@@ -382,6 +384,7 @@ export class QdrantBackend extends VectorBackend {
             threshold: 0.0,
             source: settings.source || 'transformers',
             model: getModelFromSettings(settings),
+            ...getProviderSpecificParams(settings, true),
         };
 
     //Use queryVector if provided, otherwise searchText
@@ -428,7 +431,7 @@ export class QdrantBackend extends VectorBackend {
         return { hashes, metadata };
     }
 
-    async queryMultipleCollections(collectionIds, searchText, topK, threshold, settings) {
+    async queryMultipleCollections(collectionIds, searchText, topK, threshold, settings, queryVector = null) {
         const results = {};
 
         for (const collectionId of collectionIds) {
@@ -444,6 +447,7 @@ export class QdrantBackend extends VectorBackend {
                     threshold: threshold,
                     source: settings.source || 'transformers',
                     model: getModelFromSettings(settings),
+                    ...getProviderSpecificParams(settings, true),
                 };
 
 
@@ -618,6 +622,7 @@ export class QdrantBackend extends VectorBackend {
                 text: newText,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
+                ...getProviderSpecificParams(settings),
             }),
         });
 
@@ -722,6 +727,7 @@ export class QdrantBackend extends VectorBackend {
             threshold: 0.0,
             source: settings.source || 'transformers',
             model: getModelFromSettings(settings),
+            ...getProviderSpecificParams(settings, true),
             // Hybrid-specific parameters
             hybrid: true,
             hybridOptions: {
