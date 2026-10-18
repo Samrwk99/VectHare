@@ -54,6 +54,14 @@ import {
     VECTOR_LIST_LIMIT
 } from './constants.js';
 
+// Notify the Status UI only after a write has successfully reached the DB.
+// Window events keep the backend/API independent of the progress panel.
+function notifyDatabaseChanged(collectionId = null) {
+    if (typeof window !== 'undefined' && typeof CustomEvent !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('vecthare:database-changed', { detail: { collectionId } }));
+    }
+}
+
 // Get shared WebLLM provider singleton (lazy-initialized)
 const webllmProvider = getWebLlmProvider();
 
@@ -791,6 +799,7 @@ export async function insertVectorItems(collectionId, items, settings, onProgres
                     await makeAbortable(processBatch(), abortSignal);
                 }
 
+                notifyDatabaseChanged(collectionId);
                 if (onProgress) {
                     const embeddedCount = (i + 1) * BATCH_SIZE;
                     const actualEmbedded = Math.min(embeddedCount, items.length);
@@ -896,6 +905,7 @@ async function streamEmbeddingsAndWrite(backend, collectionId, items, textString
         }
 
         totalProcessed += itemsToWrite.length;
+        notifyDatabaseChanged(collectionId);
 
         // Update progress
         if (onProgress) {
@@ -929,6 +939,7 @@ export async function deleteVectorItems(collectionId, hashes, settings, abortSig
         );
         // VEC-18: Record successful delete operation
         recordDelete(settings?.vector_backend || 'standard', hashes.length);
+        notifyDatabaseChanged(collectionId);
         return result;
     } catch (error) {
         // VEC-18: Record error
@@ -1228,6 +1239,7 @@ export async function purgeVectorIndex(collectionId, settings) {
         const backend = await getBackend(settings);
         await backend.purgeVectorIndex(collectionId, settings);
         console.log(`VectHare: Purged vector index for collection ${collectionId}`);
+        notifyDatabaseChanged(collectionId);
         return true;
     } catch (error) {
         // VEC-33: Invalidate health cache on operation error
@@ -1249,6 +1261,7 @@ export async function purgeFileVectorIndex(collectionId, settings) {
         const backend = await getBackend(settings);
         await backend.purgeFileVectorIndex(collectionId, settings);
         console.log(`VectHare: Purged vector index for collection ${collectionId}`);
+        notifyDatabaseChanged(collectionId);
     } catch (error) {
         // VEC-33: Invalidate health cache on operation error
         invalidateBackendHealth(settings?.vector_backend || 'standard', error);
@@ -1266,6 +1279,7 @@ export async function purgeAllVectorIndexes(settings) {
         const backend = await getBackend(settings);
         await backend.purgeAllVectorIndexes(settings);
         console.log('VectHare: Purged all vector indexes');
+        notifyDatabaseChanged();
         toastr.success('All vector indexes purged', 'Purge successful');
     } catch (error) {
         // VEC-33: Invalidate health cache on operation error

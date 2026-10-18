@@ -458,3 +458,34 @@
     }
 }
 
+
+/* Status opens as a full modal, matching Database Browser, rather than a
+   floating bottom-right popup. The existing tracker and controls are reused. */
+.vecthare-progress-modal-content {
+    max-width: 600px;
+    width: min(90%, 600px);
+    max-height: calc(100dvh - 40px);
+}
+.vecthare-progress-modal-content .vecthare-progress-panel {
+    position: static;
+    width: 100%;
+    max-height: calc(100dvh - 40px);
+    box-sizing: border-box;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    animation: none;
+    overflow-y: auto;
+}
+#vecthare_progress_controls {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+@media (max-width: 768px) {
+    .vecthare-progress-modal-content .vecthare-progress-panel {
+        width: 100%;
+        left: auto;
+        right: auto;
+    }
+}

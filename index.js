@@ -230,16 +230,23 @@ function showResumeToast(pending, total) {
  * light 3s interval while a run is active.
  * @param {{hasBacklog?: boolean, pending?: number, total?: number}} [result]
  */
+let lastDbStatus = null;
+let dbStatusRequestId = 0;
+let dbRefreshTimer = null;
+
 function refreshVectorizationStatusDisplay(result = null) {
+    if (result) lastDbStatus = { ...result, collectionId: getChatCollectionId() };
     if (isVectorizationActive()) {
         // Live progress from the tracker while a run is in flight
         const s = progressTracker.stats;
-        const done = s.totalChunksToEmbed > 0 ? s.embeddedChunks : s.processedItems;
-        const total = s.totalChunksToEmbed > 0 ? s.totalChunksToEmbed : s.totalItems;
+        const db = lastDbStatus?.collectionId === getChatCollectionId() ? lastDbStatus : null;
+        const done = db ? (db.total - db.pending) : (s.totalChunksToEmbed > 0 ? s.embeddedChunks : s.processedItems);
+        const total = db ? db.total : (s.totalChunksToEmbed > 0 ? s.totalChunksToEmbed : s.totalItems);
         const pct = total > 0 ? Math.round((done / total) * 100) : 0;
         updateVectorizationStatus(`Running — ${pct}% (${done}/${total}) — click to view`);
         return;
     }
+    if (!result && lastDbStatus?.collectionId === getChatCollectionId()) result = lastDbStatus;
     if (result && typeof result.total === 'number' && result.total > 0) {
         if (result.hasBacklog) {
             const doneCount = result.total - result.pending;
@@ -250,7 +257,40 @@ function refreshVectorizationStatusDisplay(result = null) {
         }
         return;
     }
-    updateVectorizationStatus('Status: no vectorization data for this chat');
+    updateVectorizationStatus('Status: no saved vector data for this chat');
+}
+
+// Read the actual saved hashes, coalescing rapid writes into one DB query.
+// Runs after each committed insert/delete/purge and whenever Status opens.
+async function refreshSavedDatabaseStatus() {
+    const requestId = ++dbStatusRequestId;
+    const collectionId = getChatCollectionId();
+    let result = null;
+    try {
+        result = await checkUnfinishedVectorization(settings);
+    } catch (error) {
+        console.warn('VectHare: Status refresh failed:', error);
+    }
+    // Ignore replies from a previous chat or a superseded DB read.
+    if (requestId !== dbStatusRequestId || collectionId !== getChatCollectionId()) return;
+    lastDbStatus = result ? { ...result, collectionId } : null;
+
+    if (isVectorizationActive() && result && progressTracker.currentOperation === 'Vectorizing Chat') {
+        // This is collection-wide *persisted* progress, not just the last
+        // in-memory batch. Shows each saved chunk even mid-batch.
+        const done = result.total - result.pending;
+        progressTracker.stats.totalItems = result.total;
+        progressTracker.updateEmbeddingProgress(done, result.total);
+        progressTracker.updateProgress(done, progressTracker.isPaused ? '' : `${result.pending} message groups remaining`);
+    } else if (!isVectorizationActive() && progressTracker.isDatabaseSnapshot) {
+        progressTracker.setDatabaseStatus(result);
+    }
+    refreshVectorizationStatusDisplay(result);
+}
+
+function scheduleSavedDatabaseRefresh() {
+    clearTimeout(dbRefreshTimer);
+    dbRefreshTimer = setTimeout(() => { void refreshSavedDatabaseStatus(); }, 350);
 }
 
 // R10: light interval keeps the status line live during runs without the core
@@ -301,6 +341,7 @@ async function offerResumeOfUnfinishedVectorization() {
                 result.total
             );
             refreshVectorizationStatusDisplay(result);
+            if (!isVectorizationActive() && progressTracker.isDatabaseSnapshot) progressTracker.setDatabaseStatus(result);
             // R9: if the user just pressed Stop, they KNOW it's unfinished - don't
             // immediately nag with the toast. Button still updates (persistent
             // affordance). Flag is consume-on-read so later natural checks toast.
@@ -429,26 +470,23 @@ jQuery(async () => {
         // vectors only, never continues the backlog (use Sync Chat for that)
         onContinueVectorization: onRepairClick,
         onVectorizationStatusClick: () => {
-            // R10: clicking the status display opens/revives the progress panel.
-            // If no panel exists this session (nothing run yet), report status
-            // via toast instead - there is no meaningful panel to show.
-            if (progressTracker.panel) {
-                progressTracker.reveal();
-            } else {
-                // R12 FIX: show REAL numbers instead of the confusing
-                // "not run this session" line (the status line already knows
-                // collection-wide truth regardless of session state)
-                const s = progressTracker.stats;
-                toastr.info(
-                    'No vectorization panel to show yet this session. Run "Sync Chat" or "Repair Chunks" to open it. Current status is shown in the status line below.',
-                    'VectHare'
-                );
-                void s; // (status line itself carries the real numbers)
-            }
+            progressTracker.openStatus();
+            // Always re-read the actual DB on click (also works before first run).
+            if (!isVectorizationActive()) void refreshSavedDatabaseStatus();
         },
         onPurge: onPurgeClick,
         onRunDiagnostics: onRunDiagnosticsClick
     });
+
+    progressTracker.setStartCallback(onVectorizeAllClick);
+    window.addEventListener('vecthare:database-changed', event => {
+        const collectionId = event.detail?.collectionId;
+        if (!collectionId || collectionId === getChatCollectionId()) scheduleSavedDatabaseRefresh();
+    });
+    // Catch changes made outside VectHare while the Status window is open.
+    setInterval(() => {
+        if (progressTracker.isVisible && !isVectorizationActive()) void refreshSavedDatabaseStatus();
+    }, 10000);
 
     // Initialize auto-sync checkbox state for current chat (if any)
     refreshAutoSyncCheckbox(settings);
@@ -541,12 +579,16 @@ jQuery(async () => {
     eventSource.on(event_types.CHAT_CHANGED, () => {
         console.log('VectHare: Chat changed, refreshing UI state');
         refreshAutoSyncCheckbox(settings);
+        lastDbStatus = null;
+        ++dbStatusRequestId;
+        scheduleSavedDatabaseRefresh();
         // VectHare+: check for interrupted vectorization on the loaded chat
         offerResumeOfUnfinishedVectorization();
     });
 
     // VectHare+: one-time resume check at startup (page reload / ST reopen)
     setTimeout(offerResumeOfUnfinishedVectorization, 5000);
+    setTimeout(scheduleSavedDatabaseRefresh, 5000);
 
     console.log('VectHare: ✅ Initialized successfully');
 });

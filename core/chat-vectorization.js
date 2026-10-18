@@ -2507,6 +2507,8 @@ export async function vectorizeAll(settings, batchSize) {
                     progressTracker._pausedAt = null;
                 }
                 progressTracker.isComplete = false;
+                progressTracker.isPaused = false;
+                progressTracker.terminalStatus = '';
                 progressTracker.startTimeUpdater();
                 if (progressTracker.elements?.pauseBtn) progressTracker.elements.pauseBtn.style.display = 'inline-block';
                 if (progressTracker.elements?.resumeBtn) progressTracker.elements.resumeBtn.style.display = 'none';
@@ -2912,6 +2914,8 @@ export async function repairChatVectors(settings, batchSize = 5) {
             onResume: () => {
                 resumeVectorization();
                 progressTracker.isComplete = false;
+                progressTracker.isPaused = false;
+                progressTracker.terminalStatus = '';
                 progressTracker.startTimeUpdater();
                 if (progressTracker.elements?.pauseBtn) progressTracker.elements.pauseBtn.style.display = 'inline-block';
                 if (progressTracker.elements?.resumeBtn) progressTracker.elements.resumeBtn.style.display = 'none';
@@ -3099,7 +3103,8 @@ export async function checkUnfinishedVectorization(settings, collectionIdOverrid
         return {
             hasBacklog: pending > 0,
             pending,
-            total: groupedItems.length
+            total: groupedItems.length,
+            storedChunks: existingHashes.size
         };
     } catch (error) {
         console.warn('VectHare: Could not check for unfinished vectorization:', error.message);
