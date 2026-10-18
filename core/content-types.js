@@ -36,7 +36,7 @@ export const CHUNKING_STRATEGIES = {
     conversation_turns: {
         id: 'conversation_turns',
         name: 'Conversation Turns',
-        description: 'Pairs user + AI messages together. Good for dialogue context.',
+        description: 'Pairs consecutive User and Character turns in the selected order.',
         needsSize: false,
         needsOverlap: false,
         needsBatchSize: false,
@@ -198,6 +198,7 @@ export const CONTENT_TYPES = {
         defaults: {
             chunkSize: 500,
             batchSize: 4,
+            conversation_turn_order: 'user_character',
             temporalDecay: { enabled: true, halfLife: 50, floor: 0.3 },
             autoKeywords: false,
         },

@@ -707,6 +707,16 @@ export function renderSettings(containerId, settings, callbacks) {
                                 <span id="vecthare_strategy_description"></span>
                             </div>
 
+                            <!-- Conversation Turns order (only shown for conversation_turns) -->
+                            <div id="vecthare_turn_order_settings" style="display: none; margin-bottom: 12px;">
+                                <label for="vecthare_turn_order"><small>Pairing Order</small></label>
+                                <select id="vecthare_turn_order" class="vecthare-select">
+                                    <option value="user_character">User → Character</option>
+                                    <option value="character_user">Character → User</option>
+                                </select>
+                                <small class="vecthare_hint">Consecutive messages from one speaker count as a single turn.</small>
+                            </div>
+
                             <!-- Message Batch settings (only shown for message_batch strategy) -->
                             <div id="vecthare_batch_settings" style="display: none;">
                                 <label for="vecthare_batch_size">
@@ -1757,6 +1767,7 @@ function bindSettingsEvents(settings, callbacks) {
         $('#vecthare_strategy_description').text(strategy?.description || '');
         // Show/hide batch settings
         $('#vecthare_batch_settings').toggle(strategyId === 'message_batch');
+        $('#vecthare_turn_order_settings').toggle(strategyId === 'conversation_turns');
     }
 
     strategySelect.on('change', function() {
@@ -1766,6 +1777,14 @@ function bindSettingsEvents(settings, callbacks) {
         updateStrategyUI(settings.chunking_strategy);
     });
     updateStrategyUI(settings.chunking_strategy || 'per_message');
+
+    $('#vecthare_turn_order')
+        .val(settings.conversation_turn_order || 'user_character')
+        .on('change', function() {
+            settings.conversation_turn_order = String($(this).val());
+            applySettingsSnapshot(settings);
+            saveSettingsDebounced();
+        });
 
     // Batch size (for message_batch strategy)
     $('#vecthare_batch_size')
