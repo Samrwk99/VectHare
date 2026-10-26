@@ -33,6 +33,7 @@ import {
 } from './collection-loader.js';
 import { progressTracker } from '../ui/progress-tracker.js';
 import { getStringHash } from '../../../../utils.js';
+import { getConfiguredEmbeddingModel } from './providers.js';
 
 // ============================================================================
 // CONSTANTS
@@ -66,7 +67,7 @@ async function fetchChunksWithVectors(collectionId, settings) {
             backend: backendName === 'standard' ? 'vectra' : backendName,
             collectionId: collectionId,
             source: settings.source || 'transformers',
-            model: settings.model || '',
+            model: settings.model || getConfiguredEmbeddingModel(settings),
             limit: 50000, // High limit to get all chunks
             includeVectors: true, // Include the actual embedding vectors
         }),
@@ -161,7 +162,7 @@ export async function exportCollection(collectionId, settings, collectionInfo = 
         ...settings,
         vector_backend: collectionInfo.backend || settings.vector_backend,
         source: collectionInfo.source || settings.source,
-        model: collectionInfo.model || settings.model,
+        model: collectionInfo.model || getConfiguredEmbeddingModel(settings, collectionInfo.source || settings.source),
     };
 
     try {
@@ -391,7 +392,8 @@ export function validateImportData(data, currentSettings = {}) {
         }
         if (vectors.count && currentSettings.source) {
             const sourceMatch = embedding.source === currentSettings.source;
-            const modelMatch = !embedding.model || !currentSettings.model || embedding.model === currentSettings.model;
+            const currentModel = getConfiguredEmbeddingModel(currentSettings);
+            const modelMatch = (embedding.model || '') === currentModel;
             if (!sourceMatch || !modelMatch) {
                 compatible = false;
                 warnings.push(`Embedding mismatch for ${id}: export used ${embedding.source}/${embedding.model || 'default'}; current settings use ${currentSettings.source}/${currentSettings.model || 'default'}. Vectors will be re-embedded.`);
@@ -418,7 +420,7 @@ async function insertChunksWithVectors(collectionId, chunks, settings) {
             backend: backendName === 'standard' ? 'vectra' : backendName,
             collectionId: collectionId,
             source: settings.source || 'transformers',
-            model: settings.model || '',
+            model: getConfiguredEmbeddingModel(settings),
             items: chunks.map(c => ({
                 hash: c.hash,
                 text: c.text,
@@ -478,7 +480,7 @@ export async function importCollection(exportData, settings, options = {}) {
     const canUseVectors = !options.forceReembed &&
         chunksWithVectors.length > 0 && chunksWithVectors.length === validChunks.length &&
         embeddingInfo.source === settings.source &&
-        (!embeddingInfo.model || !settings.model || embeddingInfo.model === settings.model);
+        (embeddingInfo.model || '') === getConfiguredEmbeddingModel(settings);
 
     const totalSteps = 4;
     progressTracker.show('Importing Collection', totalSteps, 'Steps');
@@ -679,7 +681,7 @@ async function importCollectionSilent(exportData, settings, options = {}) {
     const canUseVectors = !options.forceReembed &&
         chunksWithVectors.length > 0 && chunksWithVectors.length === validChunks.length &&
         embeddingInfo.source === settings.source &&
-        (!embeddingInfo.model || !settings.model || embeddingInfo.model === settings.model);
+        (embeddingInfo.model || '') === getConfiguredEmbeddingModel(settings);
 
     // Handle existing collection
     if (options.overwrite) {

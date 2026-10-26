@@ -199,6 +199,16 @@ export function getModelField(providerId) {
 }
 
 /**
+ * Resolve the embedding model from the active provider's configuration.
+ * Legacy/fieldless providers may still carry an explicit `model` setting.
+ * Never use a stale generic model in place of a provider's dedicated model.
+ */
+export function getConfiguredEmbeddingModel(settings = {}, source = settings.source) {
+    const field = getModelField(source);
+    return field ? (settings[field] || '') : (settings.model || '');
+}
+
+/**
  * Get the secret key constant for a provider
  */
 export function getSecretKey(providerId) {

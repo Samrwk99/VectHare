@@ -18,6 +18,7 @@ import { VectorBackend } from './backend-interface.js';
 import { getModelField } from '../core/providers.js';
 import { getProviderSpecificParams } from './provider-params.js';
 import { VECTOR_LIST_LIMIT } from '../core/constants.js';
+import { hybridEndpointUnsupported } from '../utils/backend-response-validation.js';
 
 /**
  * Get the model value from settings based on provider
@@ -31,9 +32,12 @@ export class StandardBackend extends VectorBackend {
     constructor() {
         super();
         this.pluginAvailable = false;
+        this.pluginInsertUnavailable = false;
     }
 
     async initialize(settings) {
+        // Re-probe the insert route after an explicit backend re-initialization.
+        this.pluginInsertUnavailable = false;
         // Check if plugin is available
         console.log('VectHare DEBUG: Checking plugin availability...');
         try {
@@ -147,66 +151,75 @@ export class StandardBackend extends VectorBackend {
         }
 
         try {
-            // Try plugin API first (supports metadata) - fallback to native API if unavailable
-            console.log('VectHare DEBUG: this.pluginAvailable =', this.pluginAvailable);
-            let usePluginApi = this.pluginAvailable;
-            let endpoint = usePluginApi ? '/api/plugins/similharity/chunks/insert' : '/api/vector/insert';
-
-            console.log(`VectHare DEBUG: Using ${usePluginApi ? 'PLUGIN' : 'NATIVE'} API for insertion (${endpoint})`);
-            
-            // Warn if keywords will be lost
-            if (!usePluginApi && chunksWithKeywords > 0) {
-                console.warn(`⚠️ VectHare: ${chunksWithKeywords} chunks have keywords, but native ST API doesn't support metadata!`);
-                console.warn(`⚠️ VectHare: Install the Similharity plugin to save keywords: https://github.com/SillyTavern/SillyTavern-Extras-Similharity-plugin`);
-            }
-
-            const payload = usePluginApi ? {
+            // An available plugin may not implement the insert route. Remember only
+            // endpoint *unavailability*, not ordinary failed insert attempts.
+            const pluginPreferred = this.pluginAvailable && !this.pluginInsertUnavailable;
+            const makePayload = (usePluginApi) => usePluginApi ? {
                 backend: 'vectra',
-                collectionId: collectionId,
-                items: items.map(item => {
-                    const mappedItem = {
-                        hash: item.hash,
-                        text: item.text || '',
-                        index: item.index ?? 0,
-                        vector: item.vector,
-                        metadata: mergeDefinedChunkMetadata(item),
-                    };
-                    // Debug: Log first item's metadata
-                    if (item === items[0] && item.keywords?.length > 0) {
-                        console.log(`VectHare DEBUG: First item metadata being sent:`, mappedItem.metadata);
-                    }
-                    return mappedItem;
-                }),
+                collectionId,
+                items: items.map(item => ({
+                    hash: item.hash,
+                    text: item.text || '',
+                    index: item.index ?? 0,
+                    vector: item.vector,
+                    metadata: mergeDefinedChunkMetadata(item),
+                })),
                 source: settings.source || 'transformers',
-                model: model,
+                model,
+                ...providerParams,
             } : {
-                collectionId: collectionId,
+                collectionId,
                 items: items.map(item => ({
                     hash: item.hash,
                     text: item.text || '',
                     index: item.index ?? 0,
                 })),
                 source: settings.source || 'transformers',
-                model: model,
-                // Pass embeddings if pre-computed (for webllm, koboldcpp, bananabread)
+                model,
                 embeddings: items[0]?.vector ? Object.fromEntries(items.map(i => [
                     i.text || '',
-                    i.vector
+                    i.vector,
                 ])) : undefined,
                 ...providerParams,
             };
 
-            const response = await fetch(endpoint, {
-                method: 'POST',
-                headers: getRequestHeaders(),
-                body: JSON.stringify(payload),
-            });
+            const insertVia = async (usePluginApi) => {
+                const endpoint = usePluginApi
+                    ? '/api/plugins/similharity/chunks/insert'
+                    : '/api/vector/insert';
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: getRequestHeaders(),
+                    body: JSON.stringify(makePayload(usePluginApi)),
+                });
+                if (!response.ok) return { response, endpoint };
+                // Some native API versions return an empty body. When the server
+                // supplies a status/count, reject explicit application failures.
+                const result = await response.json().catch(() => null);
+                if (result && (result.success === false || result.error ||
+                    (typeof result.inserted === 'number' && result.inserted < items.length))) {
+                    throw new Error(`Failed to insert vectors: ${result.error || 'server rejected or partially accepted the batch'}`);
+                }
+                return { response, endpoint };
+            };
 
+            let usedPlugin = pluginPreferred;
+            let { response, endpoint } = await insertVia(usedPlugin);
+            if (!response.ok && usedPlugin && hybridEndpointUnsupported(response.status)) {
+                // No plugin insert route: native insertion still works but loses
+                // plugin-only metadata. Do NOT retry for 401/403/500/transport errors.
+                this.pluginInsertUnavailable = true;
+                usedPlugin = false;
+                console.warn(`VectHare: Plugin insert endpoint unavailable (HTTP ${response.status}); retrying with native ST insert`);
+                ({ response, endpoint } = await insertVia(false));
+            }
+            if (!usedPlugin && chunksWithKeywords > 0) {
+                console.warn('VectHare: Native ST insertion does not store custom chunk metadata/keywords');
+            }
             if (!response.ok) {
                 const errorBody = await response.text().catch(() => 'No response body');
-                throw new Error(`Failed to insert vectors: ${response.status} - ${errorBody}`);
+                throw new Error(`Failed to insert vectors (${endpoint}): ${response.status} - ${errorBody}`);
             }
-
             console.log(`VectHare Standard: Inserted ${items.length} vectors into ${collectionId}`);
         } catch (error) {
             // Enhanced error logging for OOM debugging

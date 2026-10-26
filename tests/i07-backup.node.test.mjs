@@ -26,6 +26,7 @@ const exportedModules={
     './collection-loader.js':{registerCollection:id=>registry.add(id),getCollectionRegistry:()=>Array.from(registry)},
     '../ui/progress-tracker.js':{progressTracker:tracker},
     '../../../../utils.js':{getStringHash:txt=>txt.length*19},
+    './providers.js':{getConfiguredEmbeddingModel:settings=>settings.model || ''},
 };
 let modPromise;
 async function mod() {
