@@ -41,6 +41,8 @@ import {
 } from '../core/chunk-groups.js';
 import { getContext } from '../../../../extensions.js';
 import { eventSource } from '../../../../../script.js';
+import { normalizeConditionRule } from '../core/condition-rule-compat.js';
+import { validateConditionRule } from '../core/conditional-activation.js';
 
 // ============================================================================
 // STATE
@@ -1582,8 +1584,9 @@ function renderDetailPanel() {
 function formatConditionRule(rule) {
     if (!rule || !rule.type) return 'Unknown condition';
 
-    const negation = rule.negated ? 'NOT ' : '';
-    const value = rule.settings?.value || rule.value || '';  // Support both formats
+    const normalized = normalizeConditionRule(rule);
+    const negation = normalized.negate ? 'NOT ' : '';
+    const value = normalized.settings?.value ?? normalized.settings?.patterns?.join(', ') ?? normalized.settings?.values?.join(', ') ?? rule.value ?? ''; 
 
     switch (rule.type) {
         case 'pattern':
@@ -2113,11 +2116,16 @@ function openConditionEditor(chunk) {
             return;
         }
 
-        const rule = {
+        const rule = normalizeConditionRule({
             type,
-            negated,
-            settings: { value }
-        };
+            negate: negated,
+            value: type === 'isGroupChat' && !value ? 'true' : type === 'randomChance' && !value ? '50' : value,
+        });
+        const validation = validateConditionRule(rule);
+        if (!validation.valid) {
+            toastr.warning(validation.errors.join('; '), 'VectHare');
+            return;
+        }
 
         if (!chunk.data.conditions.rules) {
             chunk.data.conditions.rules = [];

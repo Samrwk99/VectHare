@@ -45,6 +45,7 @@ import {
     getStopSignal,
 } from './vectorization-control.js';
 import { buildSearchContext, filterChunksByConditions, processChunkLinks } from './conditional-activation.js';
+import { getRequiredConditionDepth } from './condition-rule-compat.js';
 import { getChunkMetadata, getCollectionMeta } from './collection-metadata.js';
 import { processChunkGroups, mergeVirtualLinks } from './chunk-groups.js';
 import { createDebugData, setLastSearchDebug, addTrace, recordChunkFate } from '../ui/search-debug.js';
@@ -479,8 +480,10 @@ async function applyChunkConditions(chunks, chat, settings) {
         return filtered;
     }
 
-    // Build search context for condition evaluation
-    const context = buildSearchContext(chat, settings.query || 10, chunksWithConditions, {
+    // Chunk conditions can scan farther back than semantic query construction.
+    const conditionDepth = chunksWithConditions.reduce((depth, c) =>
+        getRequiredConditionDepth(c.conditions, depth), 0);
+    const context = buildSearchContext(chat, Math.max(settings.query || 10, conditionDepth), chunksWithConditions, {
         generationType: settings.generationType || 'normal',
         isGroupChat: settings.isGroupChat || false,
         currentCharacter: settings.currentCharacter || null,
@@ -970,7 +973,8 @@ function gatherCollectionsToQuery(settings) {
         }
     }
 
-    return applyChatCollectionPolicy(collectionsToQuery, currentChatId);
+    // The UI's only_selected policy applies to lorebooks, not chat/document collections.
+    return applyChatCollectionPolicy(collectionsToQuery, currentChatId, { lorebooksOnly: true });
 }
 
 /**
@@ -2086,7 +2090,12 @@ export async function rearrangeChat(chat, settings, type) {
         let activeCollections = [];
         const collectionDecisions = [];
         if (hasCollections) {
-            const searchContext = buildSearchContext(chat, settings.query || 10, [], {
+            // Include configured collection trigger/pattern windows even if query depth is small.
+            const activationDepth = collectionsToQuery.reduce((depth, id) => {
+                const meta = getCollectionMeta(id);
+                return Math.max(depth, Number(meta?.triggerScanDepth) || 0, getRequiredConditionDepth(meta?.conditions));
+            }, settings.query || 10);
+            const searchContext = buildSearchContext(chat, activationDepth, [], {
                 generationType: type || 'normal',
                 isGroupChat: getContext().groupId != null,
                 currentCharacter: getContext().name2 || null,
@@ -2285,7 +2294,12 @@ export async function rearrangeChat(chat, settings, type) {
         debugData.stats.afterDecay = chunks.length;
 
         // === STAGE 8: Chunk conditions ===
-        chunks = await applyConditionsStage(chunks, chat, settings, debugData);
+        chunks = await applyConditionsStage(chunks, chat, {
+            ...settings,
+            generationType: type || 'normal',
+            isGroupChat: getContext().groupId != null,
+            currentCharacter: getContext().name2 || null,
+        }, debugData);
         debugData.stages.afterConditions = [...chunks];
         debugData.stats.afterConditions = chunks.length;
 

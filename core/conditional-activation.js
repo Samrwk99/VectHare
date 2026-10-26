@@ -10,6 +10,8 @@
  * ============================================================================
  */
 
+import { EVALUATED_CONDITION_TYPES, normalizeConditionRule } from './condition-rule-compat.js';
+
 // ============================================================================
 // EXPRESSIONS EXTENSION INTEGRATION
 // ============================================================================
@@ -303,6 +305,10 @@ function evaluateMessageCountCondition(rule, context) {
             return context.messageCount <= count;
         case 'between':
             return context.messageCount >= count && context.messageCount <= upperBound;
+        case 'gt':
+            return context.messageCount > count;
+        case 'lt':
+            return context.messageCount < count;
         default:
             return context.messageCount >= count;
     }
@@ -494,10 +500,15 @@ function evaluateFrequencyCondition(rule, context) {
 function evaluateTimeOfDayCondition(rule, context) {
     try {
         const settings = rule.settings || {};
-        const startTime = settings.startTime || '00:00';
-        const endTime = settings.endTime || '23:59';
+        // normalizeConditionRule() parses validated legacy HH:MM-HH:MM strings.
+        if (settings.invalidLegacyRange) return false;
+        const startTime = settings.startTime ?? '00:00';
+        const endTime = settings.endTime ?? '23:59';
+        const validTime = /^([01]?\d|2[0-3]):[0-5]\d$/;
+        if (!validTime.test(startTime) || !validTime.test(endTime)) return false;
 
-        const now = new Date();
+        const now = context.timestamp ? new Date(context.timestamp) : new Date();
+        if (Number.isNaN(now.getTime())) return false;
         const currentTime = now.getHours() * 60 + now.getMinutes();
         const [startH, startM] = startTime.split(':').map(n => parseInt(n));
         const [endH, endM] = endTime.split(':').map(n => parseInt(n));
@@ -643,18 +654,10 @@ function evaluateCharacterPresentCondition(rule, context) {
     const targetCharacters = settings.values || [];
     const matchType = settings.matchType || 'any';
     const speakers = context.messageSpeakers || [];
-
-    if (matchType === 'all') {
-        // All characters must be present
-        return targetCharacters.every(char =>
-            speakers.some(speaker => (speaker || '').toLowerCase().includes(char.toLowerCase()))
-        );
-    } else {
-        // Any character present (default)
-        return targetCharacters.some(char =>
-            speakers.some(speaker => (speaker || '').toLowerCase().includes(char.toLowerCase()))
-        );
-    }
+    const normalizedSpeakers = new Set(speakers.map(s => String(s ?? '').trim().toLocaleLowerCase()).filter(Boolean));
+    const matches = name => normalizedSpeakers.has(String(name ?? '').trim().toLocaleLowerCase());
+    return matchType === 'all' ? targetCharacters.length > 0 && targetCharacters.every(matches)
+        : targetCharacters.some(matches);
 }
 
 /**
@@ -665,7 +668,7 @@ function evaluateCharacterPresentCondition(rule, context) {
  */
 function evaluateRandomChanceCondition(rule, context) {
     const settings = rule.settings || { probability: parseInt(rule.value) || 50 };
-    const chance = settings.probability || 50;
+    const chance = settings.probability ?? 50;
     const roll = Math.random() * 100;
     return roll <= chance;
 }
@@ -730,27 +733,18 @@ function evaluateLorebookActiveCondition(rule, context) {
     const matchType = settings.matchType || 'any';
     const activeEntries = context.activeLorebookEntries || [];
 
-    if (matchType === 'all') {
-        // All entries must be active
-        return targetEntries.every(target => {
-            const targetLower = target.toLowerCase();
-            return activeEntries.some(entry => {
-                const entryKey = (entry.key || '').toLowerCase();
-                const entryUid = String(entry.uid || '').toLowerCase();
-                return entryKey.includes(targetLower) || entryUid === targetLower;
-            });
+    const matches = target => {
+        const targetLower = String(target ?? '').trim().toLowerCase();
+        if (!targetLower) return false;
+        return activeEntries.some(entry => {
+            const keys = Array.isArray(entry?.key) ? entry.key : [entry?.key];
+            const entryUid = entry?.uid == null ? '' : String(entry.uid).toLowerCase();
+            return entryUid === targetLower || keys.some(key =>
+                String(key ?? '').toLowerCase().includes(targetLower));
         });
-    } else {
-        // Any entry active (default)
-        return targetEntries.some(target => {
-            const targetLower = target.toLowerCase();
-            return activeEntries.some(entry => {
-                const entryKey = (entry.key || '').toLowerCase();
-                const entryUid = String(entry.uid || '').toLowerCase();
-                return entryKey.includes(targetLower) || entryUid === targetLower;
-            });
-        });
-    }
+    };
+    return matchType === 'all' ? targetEntries.length > 0 && targetEntries.every(matches)
+        : targetEntries.some(matches);
 }
 
 /**
@@ -776,7 +770,13 @@ function evaluateIsGroupChatCondition(rule, context) {
  * @param {object} context Search context
  * @returns {boolean} Whether condition is met
  */
-export function evaluateConditionRule(rule, context) {
+export function evaluateConditionRule(rawRule, context) {
+    const rule = normalizeConditionRule(rawRule);
+    // An unsupported condition must never pass, even when marked NOT.
+    if (!EVALUATED_CONDITION_TYPES.includes(rule.type)) {
+        console.warn(`VectHare Conditions: Unsupported condition type: ${rule.type}`);
+        return false;
+    }
     let result = false;
 
     switch (rule.type) {
@@ -921,6 +921,7 @@ export function filterChunksByConditions(chunks, baseContext) {
  */
 export function buildSearchContext(chat, contextWindow = 10, activeChunks = [], metadata = {}) {
     const recentMessages = chat.slice(-contextWindow).map(m => m.mes || '');
+    const messageRoles = chat.slice(-contextWindow).map(m => m.is_user ? 'user' : 'assistant');
     const lastMessage = chat[chat.length - 1] || {};
     //currentCharacterId: metadata.currentCharacterId || null,
     //currentChatId: metadata.currentChatId || null,
@@ -942,6 +943,7 @@ export function buildSearchContext(chat, contextWindow = 10, activeChunks = [], 
         messageCount: chat.length,
         activeChunks,
         messageSpeakers,           // Array of speaker names for characterPresent
+        messageRoles,              // Align role filters with exactly the same recent message window
         timestamp: new Date(),     // Current timestamp for timeOfDay
 
         // Context for collection & general conditionals
@@ -1016,8 +1018,12 @@ export const VALID_GENERATION_TYPES = ['normal', 'swipe', 'regenerate', 'continu
  * @param {object} rule Condition rule to validate
  * @returns {object} Validation result { valid: boolean, errors: string[] }
  */
-export function validateConditionRule(rule) {
+export function validateConditionRule(rawRule) {
+    const rule = normalizeConditionRule(rawRule);
     const errors = [];
+    if (!EVALUATED_CONDITION_TYPES.includes(rule.type)) {
+        return { valid: false, errors: [`Unsupported condition type: ${rule.type || '(missing)'}`] };
+    }
 
     if (!rule.type) {
         errors.push('Condition type is required');
@@ -1025,7 +1031,7 @@ export function validateConditionRule(rule) {
 
     // Value validation depends on whether settings are used
     const hasSettings = rule.settings && Object.keys(rule.settings).length > 0;
-    if (!hasSettings && (!rule.value || String(rule.value).trim() === '')) {
+    if (!hasSettings && rule.type !== 'isGroupChat' && (rule.value == null || String(rule.value).trim() === '')) {
         errors.push('Condition value is required');
     }
 
@@ -1048,6 +1054,9 @@ export function validateConditionRule(rule) {
 
         case 'timeOfDay':
             const todSettings = rule.settings || {};
+            if (todSettings.invalidLegacyRange) {
+                errors.push('Invalid time range. Use HH:MM-HH:MM');
+            }
             if (todSettings.startTime || todSettings.endTime) {
                 const timeRegex = /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/;
                 if (todSettings.startTime && !timeRegex.test(todSettings.startTime)) {
