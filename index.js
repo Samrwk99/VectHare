@@ -189,13 +189,14 @@ async function onRepairClick() {
  * Action: Vectorize all messages in current chat (full sync: repair + backlog)
  */
 async function onVectorizeAllClick() {
-    await vectorizeAll(settings, getBatchSize());
+    const result = await vectorizeAll(settings, getBatchSize());
     // VectHare+ FIX: after a run ends (especially Stop / partial / failure),
     // re-run the backlog check so the Continue button + toast reflect the
     // CURRENT chat's state. Previously the check only fired on CHAT_CHANGED,
     // so stopping mid-run and staying in the same chat left no resume
     // affordance at all until the user switched chats or reloaded.
     offerResumeOfUnfinishedVectorization();
+    return result;
 }
 
 /**
@@ -210,6 +211,7 @@ async function onVectorizeAllClick() {
  */
 const RESUME_CHECK_MAX_ATTEMPTS = 5;   // covers slow collection discovery
 const RESUME_CHECK_RETRY_MS = 3000;
+let resumeCheckRequestId = 0;
 
 function showResumeToast(pending, total) {
     // R7/R10: informational only - points at the (renamed) Repair Chunks button
@@ -303,6 +305,12 @@ setInterval(() => {
 }, 3000);
 
 async function offerResumeOfUnfinishedVectorization() {
+    // A newer refresh or a chat switch invalidates any prior asynchronous work.
+    const requestId = ++resumeCheckRequestId;
+    const collectionIdAtStart = getChatCollectionId();
+    const isCurrent = () => requestId === resumeCheckRequestId &&
+        collectionIdAtStart === getChatCollectionId();
+    if (!isCurrent()) return;
     // VectHare+ FIX (notification behavior): a run already in flight IS the
     // resume — don't nag while it works. BUT we must not bail permanently:
     // this can fire while a run is aborting (e.g. user switched chats mid-run,
@@ -312,10 +320,11 @@ async function offerResumeOfUnfinishedVectorization() {
     if (isVectorizationActive()) {
         console.debug('VectHare: Resume check waiting for active vectorization run to finish...');
         let waitedMs = 0;
-        while (isVectorizationActive() && waitedMs < 600000) {
+        while (isCurrent() && isVectorizationActive() && waitedMs < 600000) {
             await new Promise(resolve => setTimeout(resolve, 2000));
             waitedMs += 2000;
         }
+        if (!isCurrent()) return;
         if (isVectorizationActive()) {
             console.debug('VectHare: Resume check gave up waiting (run exceeded 10 min wait window)');
             return;
@@ -323,12 +332,14 @@ async function offerResumeOfUnfinishedVectorization() {
     }
 
     for (let attempt = 1; attempt <= RESUME_CHECK_MAX_ATTEMPTS; attempt++) {
+        if (!isCurrent()) return;
         let result = null;
         try {
             result = await checkUnfinishedVectorization(settings);
         } catch (error) {
             console.warn('VectHare: Resume-on-load check failed:', error.message);
         }
+        if (!isCurrent()) return;
 
         if (result) {
             // Definitive answer — reflect it in the UI (Repair Chunks button +
@@ -359,6 +370,7 @@ async function offerResumeOfUnfinishedVectorization() {
             await new Promise(resolve => setTimeout(resolve, RESUME_CHECK_RETRY_MS));
         }
     }
+    if (!isCurrent()) return;
 
     // Inconclusive: the check couldn't determine state (discovery/init still
     // warming up, or chat truly has no collection).
@@ -534,8 +546,8 @@ jQuery(async () => {
     // VectHare+ R10: edits/deletes flag the reverse-sync (repair) pass to run
     // on the very next sync instead of waiting out the 5-minute throttle -
     // the DB is corrected as soon as anything observes the change.
-    eventSource.on(event_types.MESSAGE_EDITED, () => flagImmediateReverseSync());
-    eventSource.on(event_types.MESSAGE_DELETED, () => flagImmediateReverseSync());
+    eventSource.on(event_types.MESSAGE_EDITED, () => flagImmediateReverseSync(getChatCollectionId(), settings));
+    eventSource.on(event_types.MESSAGE_DELETED, () => flagImmediateReverseSync(getChatCollectionId(), settings));
     // Run vector sync tasks on message events
     // Note: Semantic WI injection happens in the generate_interceptor (rearrangeChat), not here
     eventSource.on(event_types.MESSAGE_SENT, onChatEvent);
@@ -572,6 +584,7 @@ jQuery(async () => {
 
     // When chat changes, refresh UI state to match settings
     eventSource.on(event_types.CHAT_CHANGED, () => {
+        ++resumeCheckRequestId; // Invalidate any pending resume check immediately.
         console.log('VectHare: Chat changed, refreshing UI state');
         refreshAutoSyncCheckbox(settings);
         lastDbStatus = null;

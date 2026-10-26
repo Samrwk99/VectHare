@@ -50,6 +50,7 @@ import { processChunkGroups, mergeVirtualLinks } from './chunk-groups.js';
 import { createDebugData, setLastSearchDebug, addTrace, recordChunkFate } from '../ui/search-debug.js';
 import { getSemanticWorldInfoEntries } from './world-info-integration.js';
 import { Queue, LRUCache } from '../utils/data-structures.js';
+import { createReverseSyncThrottle } from '../utils/reverse-sync-throttle.js';
 import { getRequestHeaders } from '../../../../../script.js';
 import { EXTENSION_PROMPT_TAG, HASH_CACHE_SIZE } from './constants.js';
 // Import from collection-ids.js - single source of truth for collection ID operations
@@ -78,8 +79,12 @@ let autoSyncFingerprintWarned = false;
  * MESSAGE_DELETED so edited/removed messages get repaired on the very next
  * sync rather than up to 5 minutes later.
  */
-export function flagImmediateReverseSync() {
-    lastReverseSyncAt = 0;
+function reverseSyncThrottleKey(collectionId, settings = {}) {
+    return JSON.stringify([settings.vector_backend || 'standard', settings.source || '', collectionId]);
+}
+
+export function flagImmediateReverseSync(collectionId = getChatCollectionId(), settings = {}) {
+    if (collectionId) reverseSyncThrottle.force(reverseSyncThrottleKey(collectionId, settings));
 }
 
 /**
@@ -118,9 +123,9 @@ async function computeVectorizationConfigFingerprint(settings) {
     }
 }
 
-// VectHare+ R6: reverse-sync throttle timestamp (module-scope so it spans
-// event-driven sync passes AND vectorizeAll loop iterations)
-let lastReverseSyncAt = 0;
+// Keep successful reverse-sync times separately for each collection.
+// Failed or metadata-incomplete passes are not treated as completed cleanup.
+const reverseSyncThrottle = createReverseSyncThrottle(5 * 60 * 1000);
 
 // VectHare+: guards against concurrent vectorizeAll runs (they share one
 // singleton progress panel and would interleave Pause/Stop wiring)
@@ -150,7 +155,7 @@ export function consumeWasLastRunStoppedByUser() {
 export function isVectorizationActive() {
     return vectorizeRunActive;
 }
-// (R7 note: lastReverseSyncAt already declared module-scope below, R6)
+// A manual edit/delete can invalidate only the current collection's throttle.
 
 /**
  * VectHare+ R12: Shared run acquisition for vectorizeAll AND repairChatVectors.
@@ -720,9 +725,8 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
         // happens promptly after edits/deletes; it just stops being a
         // per-message tax on large collections.
         // ========================================================================
-        const REVERSE_SYNC_MIN_INTERVAL_MS = 5 * 60 * 1000;
-        if (existingHashes.size > 0 && Date.now() - lastReverseSyncAt >= REVERSE_SYNC_MIN_INTERVAL_MS) {
-            lastReverseSyncAt = Date.now();
+        const throttleKey = reverseSyncThrottleKey(collectionId, settings);
+        if (existingHashes.size > 0 && reverseSyncThrottle.shouldRun(throttleKey)) {
             try {
                 const { getChunkMetadata } = await import('./collection-metadata.js');
 
@@ -768,7 +772,8 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                         .filter(([h, c]) => c > 1 && !isProtected(h, metaByHash.get(h) || null))
                         .map(([h]) => h);
                     if (duplicateHashes.length > 0) {
-                        await deleteVectorItems(collectionId, duplicateHashes, settings);
+                        const deleted = await deleteVectorItems(collectionId, duplicateHashes, settings);
+                        if (deleted === false || deleted?.success === false) throw new Error('Reverse-sync deletion was rejected');
                         console.warn(`VectHare: Removed ${duplicateHashes.length} duplicated vector(s); re-vectorizing them cleanly this pass`);
                         for (const h of duplicateHashes) {
                             existingHashes.delete(Number(h));
@@ -783,7 +788,8 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                     }
 
                     if (ghostHashes.length > 0) {
-                        await deleteVectorItems(collectionId, ghostHashes, settings);
+                        const deleted = await deleteVectorItems(collectionId, ghostHashes, settings);
+                        if (deleted === false || deleted?.success === false) throw new Error('Reverse-sync deletion was rejected');
                         console.log(`VectHare: Reverse sync removed ${ghostHashes.length} obsolete vector(s) (changed/deleted sources)`);
                         // VectHare+ FIX: do NOT deleteChunkMetadata(ghost) here.
                         // Chunk metadata is stored GLOBALLY by hash (shared across
@@ -792,6 +798,9 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                         // its metadata would destroy that collection's settings.
                         // Orphaned metadata for genuinely dead hashes is harmless.
                     }
+                    // Only a metadata-backed, successfully completed pass is
+                    // eligible for throttling. Otherwise the next sync retries.
+                    reverseSyncThrottle.markSuccessful(throttleKey);
                 } else {
                     console.debug('VectHare: Reverse sync skipped - chunk metadata unavailable from backend');
                 }
@@ -2365,14 +2374,14 @@ export async function vectorizeAll(settings, batchSize) {
         // of weird behavior seen in testing.
         // R12: shared acquisition guard (identical behavior for sync and repair)
         if (!tryAcquireVectorizationRun()) {
-            return;
+            return false;
         }
 
         const chatId = getCurrentChatId();
         if (!chatId) {
             toastr.info('No chat selected', 'Vectorization aborted');
             vectorizeRunActive = false;
-            return;
+            return false;
         }
 
         // Pre-flight check: verify backend is available before starting
@@ -2385,7 +2394,7 @@ export async function vectorizeAll(settings, batchSize) {
             );
             console.error(`VectHare: Backend ${backendName} failed health check before vectorization`);
             vectorizeRunActive = false;
-            return;
+            return false;
         }
 
         // Calculate total messages to vectorize
@@ -2401,7 +2410,7 @@ export async function vectorizeAll(settings, batchSize) {
             console.log('VectHare: Vectorization skipped - chat has no vectorizable messages');
             vectorizeRunActive = false;
             resetControlState();
-            return;
+            return false;
         }
 
         // VectHare+ FIX: per_scene messages are vectorized via scene markers
@@ -2417,7 +2426,7 @@ export async function vectorizeAll(settings, batchSize) {
             console.log('VectHare: Vectorization skipped - per_scene strategy uses scene markers');
             vectorizeRunActive = false;
             resetControlState();
-            return;
+            return false;
         }
 
         // ====================================================================
@@ -2457,7 +2466,7 @@ export async function vectorizeAll(settings, batchSize) {
                             console.error('VectHare: Run blocked - vectorization config fingerprint mismatch', { storedFingerprint, configFingerprint });
                             vectorizeRunActive = false;
                             resetControlState();
-                            return;
+                            return false;
                         }
                     }
 
@@ -2565,7 +2574,7 @@ export async function vectorizeAll(settings, batchSize) {
                 toastr.info('Vectorization stopped. Every completed vector is saved and syncing will continue from this point.', 'VectHare');
                 vectorizeRunActive = false;
                 resetControlState();
-                return;
+                return false;
             }
 
             // VectHare+: bypassAutoSync=true - the run was explicitly started by
@@ -2596,7 +2605,7 @@ export async function vectorizeAll(settings, batchSize) {
                     console.warn(`VectHare: Aborting run - 10 consecutive iterations with zero successful chunk inserts`);
                     vectorizeRunActive = false;
                     resetControlState();
-                    return;
+                    return false;
                 }
             } else {
                 consecutiveFailingIterations = 0;
@@ -2616,7 +2625,7 @@ export async function vectorizeAll(settings, batchSize) {
                     toastr.warning('Vectorization was blocked for 30 seconds and has been stopped. Everything completed so far is saved and resumable.', 'VectHare');
                     vectorizeRunActive = false;
                     resetControlState();
-                    return;
+                    return false;
                 }
                 await new Promise(resolve => setTimeout(resolve, 1000));
                 continue;
@@ -2664,6 +2673,7 @@ export async function vectorizeAll(settings, batchSize) {
         progressTracker.complete(true, `Vectorized ${processedCount} messages (${totalChunks} chunks)`);
         toastr.success('Chat vectorized successfully', 'VectHare');
         console.log(`VectHare: ✅ Vectorization complete after ${iteration} iterations`);
+        return true;
     } catch (error) {
         console.error('VectHare: Failed to vectorize all', error);
         vectorizeRunActive = false;
@@ -2671,6 +2681,7 @@ export async function vectorizeAll(settings, batchSize) {
         progressTracker.addError(error.message);
         progressTracker.complete(false, 'Vectorization failed');
         toastr.error(`Vectorization failed: ${error.message}`, 'VectHare');
+        return false;
     }
 }
 

@@ -1395,7 +1395,11 @@ export function updateContinueVectorizationButton(mode, pending = 0, total = 0) 
  * Call this when chat changes to keep UI in sync
  * @param {object} settings - VectHare settings object (unused, kept for API compatibility)
  */
+let autoSyncUiVersion = 0;
 export function refreshAutoSyncCheckbox(settings) {
+    const version = ++autoSyncUiVersion;
+    const $checkbox = $('#vecthare_autosync_enabled');
+    $checkbox.prop('disabled', false);
     const collectionId = getChatCollectionId();
     if (!collectionId) {
         $('#vecthare_autosync_enabled').prop('checked', false);
@@ -1403,9 +1407,10 @@ export function refreshAutoSyncCheckbox(settings) {
     }
     // Dynamically import to avoid circular dependency
     import('../core/collection-metadata.js').then(({ isCollectionAutoSyncEnabled }) => {
+        if (version !== autoSyncUiVersion || collectionId !== getChatCollectionId()) return;
         const isEnabled = isCollectionAutoSyncEnabled(collectionId);
         $('#vecthare_autosync_enabled').prop('checked', isEnabled);
-    });
+    }).catch(error => console.warn('VectHare: Could not refresh auto-sync checkbox:', error.message));
 }
 
 export function updateWebLlmStatus() {
@@ -1676,77 +1681,90 @@ function bindSettingsEvents(settings, callbacks) {
     // Initial state is set by refreshAutoSyncCheckbox() after chat loads
     $('#vecthare_autosync_enabled')
         .on('input', async function() {
-            const enabling = $(this).prop('checked');
             const $checkbox = $(this);
-
+            const enabling = $checkbox.prop('checked');
             const chatId = getCurrentChatId();
-            if (!chatId) {
-                // No chat open - warn and don't enable
-                toastr.warning('Open a chat first before enabling auto-sync');
-                $checkbox.prop('checked', false);
-                return;
-            }
-
             const collectionId = getChatCollectionId();
-            if (!collectionId) {
-                toastr.warning('Could not get collection ID for this chat');
+            const version = ++autoSyncUiVersion;
+            const isCurrent = () => version === autoSyncUiVersion &&
+                chatId === getCurrentChatId() && collectionId === getChatCollectionId();
+
+            if (!chatId || !collectionId) {
+                toastr.warning(!chatId ? 'Open a chat first before enabling auto-sync' : 'Could not get collection ID for this chat');
                 $checkbox.prop('checked', false);
                 return;
             }
 
-            // Import the metadata functions
-            const { setCollectionAutoSync } = await import('../core/collection-metadata.js');
+            // Keep this toggle from starting overlapping confirmation/modals.
+            // Other chats are allowed to refresh their checkbox independently.
+            $checkbox.prop('disabled', true);
+            let previousState;
+            let savedChange = false;
+            try {
+                const { setCollectionAutoSync, isCollectionAutoSyncEnabled } = await import('../core/collection-metadata.js');
+                if (!isCurrent()) return;
+                previousState = isCollectionAutoSyncEnabled(collectionId);
+                let action = null;
 
-            // If enabling, check if we need to set up the collection first
-            if (enabling) {
-                // SINGLE SOURCE OF TRUTH: Use doesChatHaveVectors which runs discovery
-                const { hasVectors, allMatches } = await doesChatHaveVectors(settings);
+                if (enabling) {
+                    const { hasVectors, allMatches } = await doesChatHaveVectors(settings);
+                    if (!isCurrent()) return;
+                    if (!hasVectors) {
+                        $checkbox.prop('checked', false);
+                        toastr.info('Set up your chat vectorization first');
+                        openContentVectorizer('chat');
+                        return;
+                    }
 
-                if (!hasVectors) {
-                    // No vectors found anywhere - open vectorizer panel
-                    $checkbox.prop('checked', false);
-                    toastr.info('Set up your chat vectorization first');
-                    openContentVectorizer('chat');
-                    return;
+                    const result = await showAutoSyncConfirmModal(allMatches, settings);
+                    if (!isCurrent()) return;
+                    action = result?.action;
+                    if (action === 'cancel' || action === 'revectorize' || !['continue', 'reconnect'].includes(action)) {
+                        $checkbox.prop('checked', false);
+                        if (action === 'revectorize') openContentVectorizer('chat');
+                        return;
+                    }
+                    if (action === 'reconnect' && !result.selectedCollection) {
+                        $checkbox.prop('checked', false);
+                        return;
+                    }
                 }
 
-                // Found existing vectors - show confirmation modal with all matches
-                const result = await showAutoSyncConfirmModal(allMatches, settings);
+                setCollectionAutoSync(collectionId, enabling);
+                savedChange = true;
 
-                if (result.action === 'cancel') {
-                    // User cancelled - don't enable
-                    $checkbox.prop('checked', false);
-                    return;
+                if (enabling && action === 'continue' && callbacks.onVectorizeAll) {
+                    toastr.info('Continuing vectorization from where it stopped...', 'VectHare');
+                    // Await completion: an error must not look like successful enabling.
+                    const vectorizeResult = await callbacks.onVectorizeAll();
+                    if (vectorizeResult === false) throw new Error('Vectorization could not be started');
                 }
 
-                if (result.action === 'reconnect' && result.selectedCollection) {
-                    // Connect to selected collection
-                    const selected = result.selectedCollection;
-                    toastr.success(`Connected to collection with ${selected.chunkCount} chunks`, 'Auto-Sync Enabled');
-                    console.log(`VectHare: Auto-sync enabled - connected to ${selected.collectionId} (${selected.chunkCount} chunks)`);
-                } else if (result.action === 'revectorize') {
-                    // User wants to start fresh - open vectorizer
-                    $checkbox.prop('checked', false);
-                    openContentVectorizer('chat');
-                    return;
+                if (!isCurrent()) return;
+                toastr[enabling ? 'success' : 'info'](`Auto-sync ${enabling ? 'enabled' : 'disabled'} for this chat`);
+                console.log(`VectHare: Chat auto-sync for ${collectionId}: ${enabling ? 'enabled' : 'disabled'}`);
+            } catch (error) {
+                // Undo the setting on a failed continuation; preserve the previous state.
+                if (savedChange && typeof previousState === 'boolean') {
+                    try {
+                        const { setCollectionAutoSync } = await import('../core/collection-metadata.js');
+                        // A later toggle for this same chat wins over this rollback.
+                        if (version === autoSyncUiVersion) setCollectionAutoSync(collectionId, previousState);
+                    } catch (rollbackError) {
+                        console.error('VectHare: Auto-sync rollback failed:', rollbackError);
+                    }
                 }
-            }
-
-            // Save to per-collection metadata instead of global setting
-            setCollectionAutoSync(collectionId, enabling);
-
-            if (!enabling) {
-                toastr.info('Auto-sync disabled for this chat');
-            } else {
-                toastr.success('Auto-sync enabled for this chat');
-            }
-            console.log(`VectHare: Chat auto-sync for ${collectionId}: ${enabling ? 'enabled' : 'disabled'}`);
-
-            // VectHare+: "Continue" = enable auto-sync, then run vectorization,
-            // which resumes from the first missing group (DB is the checkpoint)
-            if (enabling && result.action === 'continue' && callbacks.onVectorizeAll) {
-                toastr.info('Continuing vectorization from where it stopped...', 'VectHare');
-                callbacks.onVectorizeAll();
+                console.error('VectHare: Could not change auto-sync:', error);
+                if (isCurrent()) {
+                    $checkbox.prop('checked', Boolean(previousState));
+                    toastr.error('Could not enable auto-sync or continue vectorization');
+                }
+            } finally {
+                if (isCurrent()) {
+                    $checkbox.prop('disabled', false);
+                    // Reflect saved state rather than assuming the requested state stuck.
+                    refreshAutoSyncCheckbox(settings);
+                }
             }
         });
 
