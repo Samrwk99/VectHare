@@ -84,6 +84,67 @@ async function fetchChunksWithVectors(collectionId, settings) {
     return data.items;
 }
 
+/** Preserve all supported search, scene and group fields in exported chunk metadata. */
+const EXPORTED_CHUNK_FIELDS = [
+    'contentType', 'sourceName', 'entryName', 'entryUid', 'keywords', 'customWeights',
+    'disabledKeywords', 'keywordLevel', 'keywordBaseWeight', 'importance', 'conditions',
+    'chunkGroup', 'summary', 'isSummaryChunk', 'parentHash', 'speaker', 'isUser',
+    'messageId', 'messageIds', 'messageHashes', 'startIndex', 'endIndex', 'strategy',
+    'chunkingStrategy', 'isScene', 'sceneStart', 'sceneEnd', 'sceneId', 'sceneIndex',
+    'groupId', 'parentId', 'linkedChunks', 'linkedHashes', 'isGrouped',
+];
+function exportChunkMetadata(meta) {
+    return Object.fromEntries(EXPORTED_CHUNK_FIELDS
+        .filter(key => meta[key] !== undefined)
+        .map(key => [key, meta[key]]));
+}
+
+const BACKUP_SETTINGS_FIELDS = [
+    'enabled', 'lockMode', 'forceMode', 'exclusiveWhenActive', 'exclusiveScope',
+    'alwaysActive', 'triggers', 'triggerMatchMode', 'triggerCaseSensitive',
+    'triggerScanDepth', 'conditions', 'temporalDecay', 'groups', 'context', 'xmlTag',
+];
+function exportBehaviorSettings(meta) {
+    return Object.fromEntries(BACKUP_SETTINGS_FIELDS
+        .filter(key => meta[key] !== undefined)
+        .map(key => [key, meta[key]]));
+}
+function importBehaviorSettings(settings) {
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) return {};
+    return Object.fromEntries(BACKUP_SETTINGS_FIELDS
+        .filter(key => Object.hasOwn(settings, key) && settings[key] !== undefined)
+        .map(key => [key, settings[key]]));
+}
+
+/** Validate vectors as a *whole* before permitting any direct-vector insertion. */
+export function validatePrecomputedVectors(chunks, embedding = {}) {
+    if (!Array.isArray(chunks)) return { valid: false, reason: 'Invalid chunks array' };
+    const withVectors = chunks.filter(chunk => chunk.vector !== undefined && chunk.vector !== null);
+    if (withVectors.length === 0) return { valid: true, dimension: null, count: 0 };
+    if (!chunks.every(chunk => Array.isArray(chunk.vector))) {
+        return { valid: false, reason: 'Incomplete precomputed vectors' };
+    }
+    const expected = embedding.dimension ?? chunks[0].vector.length;
+    if (!Number.isSafeInteger(expected) || expected <= 0) {
+        return { valid: false, reason: 'Invalid embedding dimension' };
+    }
+    if (!chunks.every(chunk => chunk.vector.length === expected &&
+        chunk.vector.every(n => typeof n === 'number' && Number.isFinite(n)))) {
+        return { valid: false, reason: 'Precomputed vectors have inconsistent dimensions or non-finite values' };
+    }
+    return { valid: true, dimension: expected, count: chunks.length };
+}
+
+function assertCollectionShape(exportData) {
+    if (!exportData || typeof exportData !== 'object' || Array.isArray(exportData) ||
+        !exportData.collection || typeof exportData.collection.id !== 'string' ||
+        !exportData.collection.id.trim() || !Array.isArray(exportData.chunks) ||
+        exportData.chunks.some(c => !c || typeof c !== 'object' || Array.isArray(c) ||
+            typeof c.text !== 'string')) {
+        throw new Error('Invalid collection backup structure');
+    }
+}
+
 /**
  * Exports a single collection to a portable JSON format (includes vectors)
  * @param {string} collectionId - The collection to export
@@ -91,9 +152,9 @@ async function fetchChunksWithVectors(collectionId, settings) {
  * @param {object} collectionInfo - Optional collection info (backend, source, model)
  * @returns {Promise<object>} Export data object
  */
-export async function exportCollection(collectionId, settings, collectionInfo = {}) {
-    progressTracker.show('Exporting Collection', 3, 'Steps');
-    progressTracker.updateCurrentItem(collectionId);
+export async function exportCollection(collectionId, settings, collectionInfo = {}, { silent = false } = {}) {
+    if (!silent) progressTracker.show('Exporting Collection', 3, 'Steps');
+    if (!silent) progressTracker.updateCurrentItem(collectionId);
 
     // Use collection-specific settings if provided (for multi-backend support)
     const exportSettings = {
@@ -105,40 +166,21 @@ export async function exportCollection(collectionId, settings, collectionInfo = 
 
     try {
         // Step 1: Get collection metadata
-        progressTracker.updateProgress(1, 'Loading metadata...');
+        if (!silent) progressTracker.updateProgress(1, 'Loading metadata...');
         const collectionMeta = getCollectionMeta(collectionId) || {};
 
         // Step 2: Get all chunks WITH vectors
-        progressTracker.updateProgress(2, 'Loading chunks and vectors...');
+        if (!silent) progressTracker.updateProgress(2, 'Loading chunks and vectors...');
         const rawChunks = await fetchChunksWithVectors(collectionId, exportSettings);
 
         const chunks = rawChunks.map(item => {
-            const meta = item.metadata || item;
+            const meta = { ...item, ...(item.metadata || {}) };
             const chunk = {
-                hash: meta.hash || item.hash,
-                text: meta.text || item.text || '',
-                index: meta.index ?? item.index,
-                vector: item.vector || meta.vector || null, // The actual embedding!
-                metadata: {
-                    contentType: meta.contentType,
-                    sourceName: meta.sourceName,
-                    entryName: meta.entryName,
-                    entryUid: meta.entryUid,
-                    keywords: meta.keywords || [],
-                    customWeights: meta.customWeights,
-                    disabledKeywords: meta.disabledKeywords,
-                    keywordLevel: meta.keywordLevel,
-                    keywordBaseWeight: meta.keywordBaseWeight,
-                    importance: meta.importance,
-                    conditions: meta.conditions,
-                    chunkGroup: meta.chunkGroup,
-                    summary: meta.summary,
-                    isSummaryChunk: meta.isSummaryChunk,
-                    parentHash: meta.parentHash,
-                    speaker: meta.speaker,
-                    isUser: meta.isUser,
-                    messageId: meta.messageId,
-                },
+                hash: item.hash ?? meta.hash,
+                text: item.text ?? meta.text ?? '',
+                index: item.index ?? meta.index,
+                vector: item.vector ?? meta.vector ?? null, // The actual embedding!
+                metadata: exportChunkMetadata(meta),
             };
 
             // Get per-chunk metadata from VectHare settings
@@ -150,10 +192,10 @@ export async function exportCollection(collectionId, settings, collectionInfo = 
             return chunk;
         });
 
-        progressTracker.updateChunks(chunks.length);
+        if (!silent) progressTracker.updateChunks(chunks.length);
 
         // Step 3: Build export object
-        progressTracker.updateProgress(3, 'Building export...');
+        if (!silent) progressTracker.updateProgress(3, 'Building export...');
 
         // Get vector dimension from first chunk that has a vector
         const sampleVector = chunks.find(c => c.vector)?.vector;
@@ -190,32 +232,7 @@ export async function exportCollection(collectionId, settings, collectionInfo = 
             },
 
             // Settings that affect behavior
-            settings: {
-                // Activation
-                alwaysActive: collectionMeta.alwaysActive || false,
-                triggers: collectionMeta.triggers || [],
-                triggerMatchMode: collectionMeta.triggerMatchMode || 'any',
-                triggerCaseSensitive: collectionMeta.triggerCaseSensitive || false,
-                triggerScanDepth: collectionMeta.triggerScanDepth || 5,
-                conditions: collectionMeta.conditions || { enabled: false, logic: 'AND', rules: [] },
-
-                // Temporal decay
-                temporalDecay: collectionMeta.temporalDecay || {
-                    enabled: false,
-                    mode: 'exponential',
-                    halfLife: 50,
-                    linearRate: 0.01,
-                    minRelevance: 0.3,
-                    sceneAware: false,
-                },
-
-                // Chunk groups
-                groups: collectionMeta.groups || [],
-
-                // Prompt context
-                context: collectionMeta.context || '',
-                xmlTag: collectionMeta.xmlTag || '',
-            },
+            settings: exportBehaviorSettings(collectionMeta),
 
             // Chunks (text + metadata + vectors)
             chunks: chunks,
@@ -229,12 +246,12 @@ export async function exportCollection(collectionId, settings, collectionInfo = 
             },
         };
 
-        progressTracker.complete(true, `Exported ${chunks.length} chunks`);
+        if (!silent) progressTracker.complete(true, `Exported ${chunks.length} chunks`);
         return exportData;
 
     } catch (error) {
-        progressTracker.addError(error.message);
-        progressTracker.complete(false, 'Export failed');
+        if (!silent) progressTracker.addError(error.message);
+        if (!silent) progressTracker.complete(false, 'Export failed');
         throw error;
     }
 }
@@ -247,108 +264,33 @@ export async function exportCollection(collectionId, settings, collectionInfo = 
  */
 export async function exportMultipleCollections(collectionIds, settings) {
     progressTracker.show('Exporting Collections', collectionIds.length, 'Collections');
-
     const exports = [];
     const errors = [];
-
+    const registry = getCollectionRegistry();
     for (let i = 0; i < collectionIds.length; i++) {
         const collectionId = collectionIds[i];
         progressTracker.updateProgress(i + 1, `Exporting: ${collectionId}`);
         progressTracker.updateCurrentItem(collectionId);
-
         try {
-            // Export without showing nested progress
-            const collectionMeta = getCollectionMeta(collectionId) || {};
-            const chunksResult = await getSavedHashes(collectionId, settings, true);
-
-            let chunks = [];
-            if (chunksResult && chunksResult.metadata) {
-                chunks = chunksResult.metadata.map(meta => ({
-                    hash: meta.hash,
-                    text: meta.text || '',
-                    index: meta.index,
-                    metadata: {
-                        contentType: meta.contentType,
-                        sourceName: meta.sourceName,
-                        entryName: meta.entryName,
-                        entryUid: meta.entryUid,
-                        keywords: meta.keywords || [],
-                        customWeights: meta.customWeights,
-                        disabledKeywords: meta.disabledKeywords,
-                        keywordLevel: meta.keywordLevel,
-                        keywordBaseWeight: meta.keywordBaseWeight,
-                        importance: meta.importance,
-                        conditions: meta.conditions,
-                        chunkGroup: meta.chunkGroup,
-                        summary: meta.summary,
-                        isSummaryChunk: meta.isSummaryChunk,
-                        parentHash: meta.parentHash,
-                        speaker: meta.speaker,
-                        isUser: meta.isUser,
-                        messageId: meta.messageId,
-                    },
-                }));
-
-                for (const chunk of chunks) {
-                    const chunkMeta = getChunkMetadata(chunk.hash);
-                    if (chunkMeta) {
-                        chunk.chunkMeta = chunkMeta;
-                    }
-                }
-            }
-
-            exports.push({
-                collection: {
-                    id: collectionId,
-                    name: collectionMeta.displayName || collectionId,
-                    description: collectionMeta.description || '',
-                    contentType: collectionMeta.contentType || detectContentType(collectionId),
-                    scope: collectionMeta.scope || 'global',
-                    tags: collectionMeta.tags || [],
-                    color: collectionMeta.color,
-                    createdAt: collectionMeta.createdAt,
-                },
-                settings: {
-                    alwaysActive: collectionMeta.alwaysActive || false,
-                    triggers: collectionMeta.triggers || [],
-                    triggerMatchMode: collectionMeta.triggerMatchMode || 'any',
-                    triggerCaseSensitive: collectionMeta.triggerCaseSensitive || false,
-                    triggerScanDepth: collectionMeta.triggerScanDepth || 5,
-                    conditions: collectionMeta.conditions || { enabled: false, logic: 'AND', rules: [] },
-                    temporalDecay: collectionMeta.temporalDecay || {
-                        enabled: false,
-                        mode: 'exponential',
-                        halfLife: 50,
-                        linearRate: 0.01,
-                        minRelevance: 0.3,
-                        sceneAware: false,
-                    },
-                    groups: collectionMeta.groups || [],
-                    context: collectionMeta.context || '',
-                    xmlTag: collectionMeta.xmlTag || '',
-                },
-                chunks: chunks,
-                stats: {
-                    chunkCount: chunks.length,
-                    hasText: chunks.filter(c => c.text).length,
-                    hasKeywords: chunks.filter(c => c.metadata?.keywords?.length > 0).length,
-                },
-            });
+            // Share the exact vector/metadata export path with single-collection backup.
+            const info = Array.isArray(registry) ? registry.find(c =>
+                (typeof c === 'string' ? c : c.id || c.collectionId) === collectionId) :
+                registry?.[collectionId];
+            exports.push(await exportCollection(collectionId, settings,
+                info && typeof info === 'object' ? info : {}, { silent: true }));
         } catch (error) {
-            console.error(`VectHare Export: Failed to export ${collectionId}:`, error);
             errors.push({ collectionId, error: error.message });
         }
     }
-
-    progressTracker.complete(errors.length === 0, `Exported ${exports.length}/${collectionIds.length} collections`);
-
+    progressTracker.complete(errors.length === 0,
+        `Exported ${exports.length}/${collectionIds.length} collections`);
     return {
         version: EXPORT_VERSION,
         exportDate: new Date().toISOString(),
         generator: 'VectHare',
         type: 'multi',
         collections: exports,
-        errors: errors,
+        errors,
         stats: {
             totalCollections: exports.length,
             totalChunks: exports.reduce((sum, e) => sum + e.chunks.length, 0),
@@ -396,75 +338,69 @@ export function downloadExport(exportData, filename = null) {
 export function validateImportData(data, currentSettings = {}) {
     const errors = [];
     const warnings = [];
-
-    // Check version
-    if (!data.version) {
-        errors.push('Missing version field');
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        return { valid: false, errors: ['Backup must be a JSON object'], warnings,
+            compatible: false, embeddingInfo: null,
+            stats: { collectionCount: 0, totalChunks: 0, chunksWithVectors: 0 } };
+    }
+    if (typeof data.version !== 'string' || !data.version) {
+        errors.push('Missing or invalid version field');
     } else if (!data.version.startsWith('1.')) {
         warnings.push(`Export version ${data.version} may not be fully compatible`);
     }
-
-    // Check for collections
     const isMulti = data.type === 'multi';
     const collections = isMulti ? data.collections : [data];
-
-    if (!collections || collections.length === 0) {
-        errors.push('No collections found in export file');
+    if (!Array.isArray(collections) || collections.length === 0) {
+        errors.push('No valid collections array found in export file');
     }
-
-    // Check embedding compatibility
-    let embeddingInfo = null;
+    const safeCollections = Array.isArray(collections) ? collections : [];
     let compatible = true;
-
-    for (const col of collections) {
-        if (!col.collection?.id) {
-            errors.push('Collection missing ID');
+    let embeddingInfo = null;
+    let totalChunks = 0;
+    let chunksWithVectors = 0;
+    for (const [i, col] of safeCollections.entries()) {
+        if (!col || typeof col !== 'object' || Array.isArray(col)) {
+            errors.push(`Collection ${i + 1} must be an object`);
+            continue;
         }
-        if (!col.chunks || !Array.isArray(col.chunks)) {
-            errors.push(`Collection ${col.collection?.id || 'unknown'} has no chunks array`);
-        } else {
-            const chunksWithoutText = col.chunks.filter(c => !c.text);
-            if (chunksWithoutText.length > 0) {
-                warnings.push(`${col.collection?.id}: ${chunksWithoutText.length} chunks have no text (will be skipped)`);
+        const id = col.collection?.id;
+        if (typeof id !== 'string' || !id.trim()) errors.push(`Collection ${i + 1} missing valid ID`);
+        if (!Array.isArray(col.chunks)) {
+            errors.push(`Collection ${id || i + 1} has no chunks array`);
+            continue;
+        }
+        totalChunks += col.chunks.length;
+        let withoutText = 0;
+        const validChunks = [];
+        for (const [j, chunk] of col.chunks.entries()) {
+            if (!chunk || typeof chunk !== 'object' || Array.isArray(chunk) || typeof chunk.text !== 'string') {
+                errors.push(`Collection ${id || i + 1} chunk ${j + 1} has invalid text or structure`);
+            } else {
+                validChunks.push(chunk);
+                if (!chunk.text.trim()) withoutText++;
+                if (chunk.vector !== undefined && chunk.vector !== null) chunksWithVectors++;
             }
         }
-
-        // Check embedding info
-        if (col.embedding) {
-            embeddingInfo = col.embedding;
-            const hasVectors = col.chunks?.some(c => c.vector);
-
-            if (hasVectors && currentSettings.source) {
-                // Check if current settings match export
-                const sourceMatch = col.embedding.source === currentSettings.source;
-                const modelMatch = !col.embedding.model || !currentSettings.model ||
-                    col.embedding.model === currentSettings.model;
-
-                if (!sourceMatch || !modelMatch) {
-                    compatible = false;
-                    warnings.push(
-                        `Embedding mismatch: Export used ${col.embedding.source}/${col.embedding.model || 'default'}, ` +
-                        `but you're using ${currentSettings.source}/${currentSettings.model || 'default'}. ` +
-                        `Switch your settings to match, or vectors will be re-embedded.`
-                    );
-                }
+        if (withoutText) warnings.push(`${id || i + 1}: ${withoutText} chunks have no text (will be skipped)`);
+        const embedding = col.embedding || data.embedding || {};
+        if (col.embedding || data.embedding) embeddingInfo = embedding;
+        const usable = validChunks.filter(c => c.text.trim());
+        const vectors = validatePrecomputedVectors(usable, embedding);
+        if (!vectors.valid) {
+            errors.push(`${id || i + 1}: ${vectors.reason}`);
+        }
+        if (vectors.count && currentSettings.source) {
+            const sourceMatch = embedding.source === currentSettings.source;
+            const modelMatch = !embedding.model || !currentSettings.model || embedding.model === currentSettings.model;
+            if (!sourceMatch || !modelMatch) {
+                compatible = false;
+                warnings.push(`Embedding mismatch for ${id}: export used ${embedding.source}/${embedding.model || 'default'}; current settings use ${currentSettings.source}/${currentSettings.model || 'default'}. Vectors will be re-embedded.`);
             }
         }
     }
-
-    return {
-        valid: errors.length === 0,
-        errors,
-        warnings,
-        compatible,
-        embeddingInfo,
-        stats: {
-            collectionCount: collections.length,
-            totalChunks: collections.reduce((sum, c) => sum + (c.chunks?.length || 0), 0),
-            chunksWithVectors: collections.reduce((sum, c) =>
-                sum + (c.chunks?.filter(ch => ch.vector)?.length || 0), 0),
-        },
-    };
+    return { valid: errors.length === 0, errors, warnings, compatible,
+        embeddingInfo, stats: { collectionCount: safeCollections.length,
+            totalChunks, chunksWithVectors } };
 }
 
 /**
@@ -498,7 +434,12 @@ async function insertChunksWithVectors(collectionId, chunks, settings) {
         throw new Error(`Failed to insert chunks: ${error}`);
     }
 
-    return await response.json();
+    const result = await response.json();
+    if (!result || result.success === false || result.error ||
+        (typeof result.inserted === 'number' && result.inserted < chunks.length)) {
+        throw new Error(result?.error || 'Server did not confirm all imported vector writes');
+    }
+    return result;
 }
 
 /**
@@ -514,6 +455,7 @@ async function insertChunksWithVectors(collectionId, chunks, settings) {
  * @returns {Promise<{ success: boolean, collectionId: string, chunkCount: number, usedVectors: boolean, errors: string[] }>}
  */
 export async function importCollection(exportData, settings, options = {}) {
+    assertCollectionShape(exportData);
     const sourceCollection = exportData.collection || {};
     const collectionId = options.collectionId || sourceCollection.id;
 
@@ -524,15 +466,17 @@ export async function importCollection(exportData, settings, options = {}) {
     const chunks = exportData.chunks || [];
     const validChunks = chunks.filter(c => c.text && c.text.trim());
 
-    if (validChunks.length === 0) {
+    if (validChunks.length === 0 && chunks.length !== 0) {
         throw new Error('No valid chunks to import (all chunks missing text)');
     }
 
     // Check if we can use pre-computed vectors
     const embeddingInfo = exportData.embedding || {};
     const chunksWithVectors = validChunks.filter(c => c.vector && Array.isArray(c.vector));
+    const vectorValidation = validatePrecomputedVectors(validChunks, embeddingInfo);
+    if (!vectorValidation.valid) throw new Error(vectorValidation.reason);
     const canUseVectors = !options.forceReembed &&
-        chunksWithVectors.length === validChunks.length &&
+        chunksWithVectors.length > 0 && chunksWithVectors.length === validChunks.length &&
         embeddingInfo.source === settings.source &&
         (!embeddingInfo.model || !settings.model || embeddingInfo.model === settings.model);
 
@@ -569,7 +513,9 @@ export async function importCollection(exportData, settings, options = {}) {
         }));
 
         // Step 3: Insert chunks
-        if (canUseVectors) {
+        if (validChunks.length === 0) {
+            // Empty collections still have meaningful policies and registry metadata.
+        } else if (canUseVectors) {
             // Direct insert with pre-computed vectors (fast!)
             progressTracker.updateProgress(3, `Inserting ${preparedChunks.length} chunks (using existing vectors)...`);
             try {
@@ -608,18 +554,7 @@ export async function importCollection(exportData, settings, options = {}) {
 
         // Merge with exported settings
         if (exportData.settings) {
-            Object.assign(importedMeta, {
-                alwaysActive: exportData.settings.alwaysActive,
-                triggers: exportData.settings.triggers,
-                triggerMatchMode: exportData.settings.triggerMatchMode,
-                triggerCaseSensitive: exportData.settings.triggerCaseSensitive,
-                triggerScanDepth: exportData.settings.triggerScanDepth,
-                conditions: exportData.settings.conditions,
-                temporalDecay: exportData.settings.temporalDecay,
-                groups: exportData.settings.groups || [],
-                context: exportData.settings.context || '',
-                xmlTag: exportData.settings.xmlTag || '',
-            });
+            Object.assign(importedMeta, importBehaviorSettings(exportData.settings));
         }
 
         setCollectionMeta(collectionId, importedMeta);
@@ -664,7 +599,13 @@ export async function importCollection(exportData, settings, options = {}) {
  * @returns {Promise<{ success: boolean, imported: number, failed: number, results: object[] }>}
  */
 export async function importMultipleCollections(multiExportData, settings, options = {}) {
-    const collections = multiExportData.collections || [];
+    if (!multiExportData || !Array.isArray(multiExportData.collections)) {
+        throw new Error('Invalid multi-collection backup');
+    }
+    if (options.collectionId && multiExportData.collections.length > 1) {
+        throw new Error('A single collection ID override cannot be used for multiple collections');
+    }
+    const collections = multiExportData.collections;
 
     if (collections.length === 0) {
         throw new Error('No collections in export file');
@@ -685,7 +626,9 @@ export async function importMultipleCollections(multiExportData, settings, optio
 
         try {
             // Don't show nested progress tracker
-            const result = await importCollectionSilent(exportItem, settings, options);
+            const itemWithEmbedding = exportItem.embedding ? exportItem :
+                { ...exportItem, embedding: multiExportData.embedding };
+            const result = await importCollectionSilent(itemWithEmbedding, settings, options);
             results.push(result);
             imported++;
         } catch (error) {
@@ -713,6 +656,7 @@ export async function importMultipleCollections(multiExportData, settings, optio
  * Silent import (no progress tracker) for batch operations
  */
 async function importCollectionSilent(exportData, settings, options = {}) {
+    assertCollectionShape(exportData);
     const sourceCollection = exportData.collection || {};
     const collectionId = options.collectionId || sourceCollection.id;
 
@@ -723,15 +667,17 @@ async function importCollectionSilent(exportData, settings, options = {}) {
     const chunks = exportData.chunks || [];
     const validChunks = chunks.filter(c => c.text && c.text.trim());
 
-    if (validChunks.length === 0) {
+    if (validChunks.length === 0 && chunks.length !== 0) {
         throw new Error('No valid chunks to import');
     }
 
     // Check if we can use pre-computed vectors
     const embeddingInfo = exportData.embedding || {};
     const chunksWithVectors = validChunks.filter(c => c.vector && Array.isArray(c.vector));
+    const vectorValidation = validatePrecomputedVectors(validChunks, embeddingInfo);
+    if (!vectorValidation.valid) throw new Error(vectorValidation.reason);
     const canUseVectors = !options.forceReembed &&
-        chunksWithVectors.length === validChunks.length &&
+        chunksWithVectors.length > 0 && chunksWithVectors.length === validChunks.length &&
         embeddingInfo.source === settings.source &&
         (!embeddingInfo.model || !settings.model || embeddingInfo.model === settings.model);
 
@@ -755,7 +701,9 @@ async function importCollectionSilent(exportData, settings, options = {}) {
     }));
 
     // Insert
-    if (canUseVectors) {
+    if (validChunks.length === 0) {
+        // Metadata-only restore; no embedding or insertion request.
+    } else if (canUseVectors) {
         await insertChunksWithVectors(collectionId, preparedChunks, settings);
     } else {
         await insertVectorItems(collectionId, preparedChunks, settings);
@@ -776,18 +724,7 @@ async function importCollectionSilent(exportData, settings, options = {}) {
     };
 
     if (exportData.settings) {
-        Object.assign(importedMeta, {
-            alwaysActive: exportData.settings.alwaysActive,
-            triggers: exportData.settings.triggers,
-            triggerMatchMode: exportData.settings.triggerMatchMode,
-            triggerCaseSensitive: exportData.settings.triggerCaseSensitive,
-            triggerScanDepth: exportData.settings.triggerScanDepth,
-            conditions: exportData.settings.conditions,
-            temporalDecay: exportData.settings.temporalDecay,
-            groups: exportData.settings.groups || [],
-            context: exportData.settings.context || '',
-            xmlTag: exportData.settings.xmlTag || '',
-        });
+        Object.assign(importedMeta, importBehaviorSettings(exportData.settings));
     }
 
     setCollectionMeta(collectionId, importedMeta);
@@ -861,6 +798,8 @@ export async function readImportFile(file) {
  * @returns {object} Summary info
  */
 export function getExportInfo(data) {
+    const validation = validateImportData(data);
+    if (!validation.valid) throw new Error(`Invalid export: ${validation.errors.join('; ')}`);
     const isMulti = data.type === 'multi';
     const collections = isMulti ? data.collections : [data];
 

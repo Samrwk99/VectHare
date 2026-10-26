@@ -73,6 +73,7 @@ import { queryCollection } from "../core/core-vector-api.js";
 import {
   exportCollection,
   importCollection,
+  importMultipleCollections,
   downloadExport,
   readImportFile,
   validateImportData,
@@ -572,11 +573,18 @@ function bindBrowserEvents() {
         data = await readImportFile(file);
       }
 
-      const info = getExportInfo(data);
       const validation = validateImportData(data, browserState.settings);
+      if (!validation.valid) {
+        toastr.error(`Invalid export file:\n${validation.errors.join('\n')}`, 'VectHare Import');
+        return;
+      }
+      const info = getExportInfo(data);
 
       // Show import confirmation dialog
-      let message = `Import "${info.collections[0]?.name || "collection"}"?\n\n`;
+      let message = info.isMulti
+        ? `Import ${info.collectionCount} collections?\n${info.collections.map(c => `• ${c.name || c.id}`).join('\n')}\n\n`
+        : `Import "${info.collections[0]?.name || "collection"}"?\n\n`;
+      message += 'Existing collections with matching IDs will be overwritten.\n';
       message += `• ${info.totalChunks} chunks\n`;
       message += `• ${info.totalChunksWithVectors} with vectors\n`;
 
@@ -611,22 +619,20 @@ function bindBrowserEvents() {
       const confirmed = confirm(message);
       if (!confirmed) return;
 
-      // Perform import
-      const result = await importCollection(data, browserState.settings, {
-        overwrite: true, // Overwrite if exists
-      });
-
-      if (result.success) {
-        const vectorMsg = result.usedVectors
-          ? "(used existing vectors)"
-          : "(re-embedded)";
-        toastr.success(
-          `Imported ${result.chunkCount} chunks ${vectorMsg}`,
-          "VectHare Import",
-        );
-
-        // Refresh collections list
-        await refreshCollections();
+      // Import every member of a multi-backup rather than treating it as one collection.
+      if (info.isMulti) {
+        const result = await importMultipleCollections(data, browserState.settings, { overwrite: true });
+        const detail = result.results.map(r => `${r.collectionId}: ${r.success ? 'OK' : r.error}`).join('\n');
+        if (result.failed) toastr.warning(`Imported ${result.imported}; failed ${result.failed}.\n${detail}`, 'VectHare Import');
+        else toastr.success(`Imported ${result.imported} collections`, 'VectHare Import');
+        if (result.imported) await refreshCollections();
+      } else {
+        const result = await importCollection(data, browserState.settings, { overwrite: true });
+        if (result.success) {
+          const vectorMsg = result.usedVectors ? '(used existing vectors)' : '(re-embedded)';
+          toastr.success(`Imported ${result.chunkCount} chunks ${vectorMsg}`, 'VectHare Import');
+          await refreshCollections();
+        }
       }
     } catch (error) {
       console.error("VectHare: Import failed", error);

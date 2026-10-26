@@ -871,7 +871,7 @@ async function streamEmbeddingsAndWrite(backend, collectionId, items, textString
 
             if (embedding && Array.isArray(embedding) && embedding.length > 0) {
                 // Validate embedding values
-                const isValidEmbedding = embedding.every(val => typeof val === 'number' && !isNaN(val));
+                const isValidEmbedding = embedding.every(val => typeof val === 'number' && Number.isFinite(val));
                 if (!isValidEmbedding) {
                     console.error(`VectHare: Invalid embedding values for item ${i + j}:`, embedding.slice(0, 5));
                     missingEmbeddings++;

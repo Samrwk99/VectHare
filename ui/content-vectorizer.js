@@ -1716,7 +1716,9 @@ function extractCharaFromPng(bytes) {
 
                 // Decode base64 to JSON
                 try {
-                    const jsonStr = atob(base64Data);
+                    const binary = atob(base64Data);
+                    const jsonStr = new TextDecoder('utf-8', { fatal: true }).decode(
+                        Uint8Array.from(binary, c => c.charCodeAt(0)));
                     const charData = JSON.parse(jsonStr);
 
                     // Handle V2 format (data wrapped in 'data' object)
