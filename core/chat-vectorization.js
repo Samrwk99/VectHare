@@ -55,7 +55,7 @@ import { getSemanticWorldInfoEntries } from './world-info-integration.js';
 import { Queue, LRUCache } from '../utils/data-structures.js';
 import { createReverseSyncThrottle } from '../utils/reverse-sync-throttle.js';
 import { getRequestHeaders } from '../../../../../script.js';
-import { EXTENSION_PROMPT_TAG, HASH_CACHE_SIZE } from './constants.js';
+import { EXTENSION_PROMPT_TAG, LEGACY_WORLD_INFO_PROMPT_TAG, HASH_CACHE_SIZE } from './constants.js';
 // Import from collection-ids.js - single source of truth for collection ID operations
 import {
     getChatUUID,
@@ -1755,6 +1755,29 @@ function deduplicateChunks(chunks, chat, settings, debugData) {
     return { toInject, skipped };
 }
 
+/** Return true only for real retrieved text; unavailable vectors remain visible in debug data. */
+function hasInjectableText(chunk) {
+    const text = chunk?.text;
+    return typeof text === 'string' && text.trim().length > 0
+        && !/^\(text not (?:found|available)\)$/i.test(text.trim());
+}
+
+/** Clear every prompt tag created by VectHare, including legacy WI injection. */
+function clearVectHarePrompts(settings) {
+    setExtensionPrompt(EXTENSION_PROMPT_TAG, '', settings?.position ?? 0, settings?.depth ?? 2, false);
+    // Enumerate actual registered tags: a previous turn might have created >10 positions.
+    const prefix = `${EXTENSION_PROMPT_TAG}_pos`;
+    for (const tag of Object.keys(extension_prompts || {})) {
+        if (tag.startsWith(prefix) && /^\d+$/.test(tag.slice(prefix.length))) {
+            setExtensionPrompt(tag, '', 0, 0, false);
+        }
+    }
+    // The dormant World Info injector uses its own reserved tag, never the RAG tag.
+    if (extension_prompts?.[LEGACY_WORLD_INFO_PROMPT_TAG]) {
+        setExtensionPrompt(LEGACY_WORLD_INFO_PROMPT_TAG, '', 0, 0, false);
+    }
+}
+
 /**
  * Builds the nested prompt structure with context and XML tags at each level.
  * Groups chunks by collection and applies wrapping in this order:
@@ -1770,6 +1793,7 @@ function buildNestedInjectionText(chunks, settings) {
     // Group chunks by collection
     const byCollection = new Map();
     for (const chunk of chunks) {
+        if (!hasInjectableText(chunk)) continue;
         const collId = chunk.collectionId || 'unknown';
         if (!byCollection.has(collId)) {
             byCollection.set(collId, []);
@@ -1791,7 +1815,7 @@ function buildNestedInjectionText(chunks, settings) {
             const chunkMeta = getChunkMetadata(chunk.hash) || {};
             const chunkContext = chunkMeta.context ? substituteParams(chunkMeta.context) : '';
             const chunkXmlTag = chunkMeta.xmlTag || '';
-            const text = chunk.text || '(text not available)';
+            const text = chunk.text;
 
             // Build chunk with optional wrapping
             let chunkBlock = '';
@@ -1871,6 +1895,12 @@ function resolveChunkInjectionPosition(chunk, settings) {
  * @returns {{verified: boolean, text: string}} Injection result
  */
 function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
+    // Defence in depth: a caller must never inject an absent-text placeholder.
+    chunksToInject = chunksToInject.filter(hasInjectableText);
+    if (chunksToInject.length === 0) {
+        clearVectHarePrompts(settings);
+        return { verified: false, text: '' };
+    }
     // Control print: Log chunks QUEUED for injection (not yet injected)
     console.log(`[VectHare Injection Control] Preparing to inject ${chunksToInject.length} chunks`);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -1959,8 +1989,8 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
 
     for (const [key, group] of positionGroups) {
         // Build text for this position group (no global wrapper - that goes on outermost only)
-        const groupSettings = { ...settings, rag_context: '', rag_xml_tag: '' };
-        const groupText = buildNestedInjectionText(group.chunks, groupSettings);
+        // Each position group is a separate prompt block and needs its own global wrappers.
+        const groupText = buildNestedInjectionText(group.chunks, settings);
 
         console.log(`[VectHare Injection Control] Position group ${groupIndex + 1}/${positionGroups.size}: key="${key}", chunks=${group.chunks.length}, textLength=${groupText.length}`);
         group.chunks.forEach((chunk, idx) => {
@@ -2026,20 +2056,12 @@ export async function rearrangeChat(chat, settings, type) {
     console.log(`🐰 VectHare: rearrangeChat called (type: ${type}, chat length: ${chat?.length || 0})`);
 
     try {
+        // Clear stale prompt tags even if this run is quiet or exits before searching.
+        clearVectHarePrompts(settings);
         // === EARLY EXITS ===
         if (type === 'quiet') {
             console.debug('VectHare: Skipping quiet prompt');
             return;
-        }
-
-        // Clear extension prompts (main + any position-specific tags from previous run)
-        setExtensionPrompt(EXTENSION_PROMPT_TAG, '', settings.position, settings.depth, false);
-        // Clear position-specific tags (max 10 should be more than enough)
-        for (let i = 0; i < 10; i++) {
-            const posTag = `${EXTENSION_PROMPT_TAG}_pos${i}`;
-            if (extension_prompts[posTag]) {
-                setExtensionPrompt(posTag, '', 0, 0, false);
-            }
         }
 
         if (!getCurrentChatId() || !Array.isArray(chat)) {
@@ -2323,6 +2345,17 @@ export async function rearrangeChat(chat, settings, type) {
             settings: { threshold: settings.score_threshold, topK: (settings.top_k ?? settings.insert), temporal_decay: settings.temporal_decay }
         };
         console.log(`VectHare: Stored ${chunks.length} chunks for visualizer`);
+
+        // Reject unavailable record bodies instead of formatting literal placeholders.
+        const unavailableChunks = chunks.filter(chunk => !hasInjectableText(chunk));
+        for (const chunk of unavailableChunks) {
+            recordChunkFate(debugData, chunk.hash, 'injection', 'skipped',
+                'Retrieved chunk has no available text', { collectionId: chunk.collectionId });
+        }
+        if (unavailableChunks.length) {
+            console.warn(`VectHare: Skipping ${unavailableChunks.length} retrieved chunks with unavailable text`);
+        }
+        chunks = chunks.filter(hasInjectableText);
 
         // === STAGE 9: Deduplicate ===
         console.log(`[VectHare Deduplication] Starting with ${chunks.length} chunks before deduplication`);

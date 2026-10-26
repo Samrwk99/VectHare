@@ -21,7 +21,7 @@ import {
 import { parseRegistryKey } from './collection-ids.js';
 import { buildLorebookCollectionId } from './collection-ids.js';
 import { setExtensionPrompt, getCurrentChatId } from '../../../../../script.js';
-import { EXTENSION_PROMPT_TAG } from './constants.js';
+import { LEGACY_WORLD_INFO_PROMPT_TAG } from './constants.js';
 import { buildSearchContext } from './conditional-activation.js';
 
 // ============================================================================
@@ -353,8 +353,8 @@ export async function applySemanticEntriesToPrompt(chat, settings) {
         // Respect global RAG wrappers if configured
         const fullText = (settings.rag_context ? settings.rag_context + '\n\n' : '') + text;
 
-        // Inject into ST extension prompt tag so generation will include it
-        setExtensionPrompt(EXTENSION_PROMPT_TAG, fullText, settings.position || 0, settings.depth || 2, false);
+        // Dormant compatibility helper: never overwrite the active RAG prompt tag.
+        setExtensionPrompt(LEGACY_WORLD_INFO_PROMPT_TAG, fullText, settings.position ?? 0, settings.depth ?? 2, false);
         console.log(`VectHare: Injected ${entries.length} semantic WI entries into prompt`);
     } catch (err) {
         console.warn('VectHare: Failed to apply semantic WI to prompt', err.message || err);

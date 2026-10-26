@@ -17,6 +17,9 @@
 /** Extension prompt tag for SillyTavern's prompt system */
 export const EXTENSION_PROMPT_TAG = '3_vecthare';
 
+/** Reserved tag for the dormant World Info injector; never overwrite the RAG tag. */
+export const LEGACY_WORLD_INFO_PROMPT_TAG = 'vecthare_world_info';
+
 /** Extension name for logging and UI */
 export const EXTENSION_NAME = 'VectHare';
 
