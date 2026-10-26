@@ -1015,9 +1015,14 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
         }
     }
 
+    const queryFailures = [];
+    let successfulQueries = 0;
     for (const collectionId of activeCollections) {
         try {
             const queryResults = await queryCollection(collectionId, queryText, effectiveTopK, settings);
+
+            if (queryResults?.error) throw new Error(queryResults.error);
+            successfulQueries++;
 
             // TRACE: Vector query results for this collection
             addTrace(debugData, 'vector_search', `Query completed for ${collectionId}`, {
@@ -1090,9 +1095,22 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
             chunksForVisualizer.push(...collectionChunks);
         } catch (error) {
             console.warn(`VectHare: Failed to query collection ${collectionId}:`, error.message);
+            queryFailures.push({ collectionId, error: error.message });
             addTrace(debugData, 'vector_search', `Query failed for ${collectionId}`, {
                 error: error.message
             });
+        }
+    }
+
+    // Keep partial failures in diagnostics and report them to the user.
+    debugData.queryFailures = queryFailures;
+    if (queryFailures.length > 0) {
+        if (successfulQueries === 0) {
+            throw new Error(`All ${queryFailures.length} collection queries failed; no memory results are available`);
+        }
+        console.warn(`VectHare: ${queryFailures.length} of ${activeCollections.length} collection queries failed; using partial results`);
+        if (typeof toastr !== 'undefined') {
+            toastr.warning(`${queryFailures.length} memory collection(s) could not be searched; results may be incomplete.`, 'VectHare');
         }
     }
 
@@ -2490,6 +2508,7 @@ export async function vectorizeAll(settings, batchSize) {
         let totalChunks = 0;
         let transientBlockCount = 0; // VectHare+: consecutive transient-block counter
         let consecutiveFailingIterations = 0; // VectHare+ R6: all-fail loop guard
+        let totalFailedItems = 0; // I04: partial insertion failures must not yield success
 
         // VectHare+: wire Pause/Resume/Stop controls into the progress panel
         resetControlState();
@@ -2591,6 +2610,7 @@ export async function vectorizeAll(settings, batchSize) {
             // never reaches 0 and the run never ends. Detect consecutive
             // iterations that produced attempts but ZERO successful chunks and
             // bail out after 10 of them (work completed elsewhere is kept).
+            totalFailedItems += result.itemsFailed || 0;
             const iterationAttempts = result.messagesProcessed || 0;
             const iterationSuccesses = result.chunksCreated || 0;
             if (iterationAttempts > 0 && iterationSuccesses === 0) {
@@ -2670,6 +2690,11 @@ export async function vectorizeAll(settings, batchSize) {
 
         vectorizeRunActive = false;
         resetControlState();
+        if (totalFailedItems > 0) {
+            progressTracker.complete(false, `Incomplete: ${totalFailedItems} item(s) failed. ${totalChunks} chunks were saved; retry Sync Chat.`);
+            toastr.warning(`Vectorization incomplete: ${totalFailedItems} item(s) failed. Saved chunks are kept; retry Sync Chat.`, 'VectHare');
+            return false;
+        }
         progressTracker.complete(true, `Vectorized ${processedCount} messages (${totalChunks} chunks)`);
         toastr.success('Chat vectorized successfully', 'VectHare');
         console.log(`VectHare: ✅ Vectorization complete after ${iteration} iterations`);

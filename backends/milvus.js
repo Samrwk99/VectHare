@@ -21,6 +21,7 @@ import { getRequestHeaders } from '../../../../../script.js';
 import { VectorBackend } from './backend-interface.js';
 import { getModelField } from '../core/providers.js';
 import { VECTOR_LIST_LIMIT } from '../core/constants.js';
+import { requireListedItems, requireQueryItems, hybridEndpointUnsupported } from '../utils/backend-response-validation.js';
 
 const BACKEND_TYPE = 'milvus';
 
@@ -200,7 +201,7 @@ export class MilvusBackend extends VectorBackend {
         }
 
         const data = await response.json();
-        return data.items ? data.items.map(item => item.hash) : [];
+        return requireListedItems(data, 'Milvus').map(item => item.hash);
     }
 
     async insertVectorItems(collectionId, items, settings) {
@@ -294,9 +295,10 @@ export class MilvusBackend extends VectorBackend {
 
         const data = await response.json();
 
-        // Format results to match expected output
-        const hashes = data.results.map(r => r.hash);
-        const metadata = data.results.map(r => ({
+        // Reject application-level failures even when HTTP returned 200.
+        const items = requireQueryItems(data, 'milvus');
+        const hashes = items.map(r => r.hash);
+        const metadata = items.map(r => ({
             hash: r.hash,
             text: r.text,
             score: r.score,
@@ -330,7 +332,7 @@ export class MilvusBackend extends VectorBackend {
 
                 if (response.ok) {
                     const data = await response.json();
-                    const resultArray = data.results || data.chunks || [];
+                    const resultArray = requireQueryItems(data, 'Milvus');
 
                     results[collectionId] = {
                         hashes: resultArray.map(r => r.hash),
@@ -343,11 +345,11 @@ export class MilvusBackend extends VectorBackend {
                     };
                 } else {
                     console.error(`VectHare: Query failed for ${collectionId}: ${response.status} ${response.statusText}`);
-                    results[collectionId] = { hashes: [], metadata: [] };
+                    results[collectionId] = { hashes: [], metadata: [], error: `HTTP ${response.status} ${response.statusText}` };
                 }
             } catch (error) {
                 console.error(`Failed to query collection ${collectionId}:`, error);
-                results[collectionId] = { hashes: [], metadata: [] };
+                results[collectionId] = { hashes: [], metadata: [], error: error.message };
             }
         }
 
@@ -603,11 +605,12 @@ export class MilvusBackend extends VectorBackend {
 
             if (response.ok) {
                 const data = await response.json();
+                const hybridItems = requireQueryItems(data, 'Milvus hybrid');
                 console.log(`[Milvus] Native hybrid search returned ${data.results?.length || 0} results`);
 
                 return {
-                    hashes: data.results.map(r => r.hash),
-                    metadata: data.results.map(r => ({
+                    hashes: hybridItems.map(r => r.hash),
+                    metadata: hybridItems.map(r => ({
                         hash: r.hash,
                         text: r.text,
                         score: r.score,
@@ -620,10 +623,13 @@ export class MilvusBackend extends VectorBackend {
                 };
             }
 
-            // If hybrid endpoint returns 404 or similar, fall back
+            if (!hybridEndpointUnsupported(response.status)) {
+                throw new Error(`Hybrid query failed (HTTP ${response.status})`);
+            }
+            // An absent/unsupported endpoint can fall back to vector search.
             console.warn(`[Milvus] Hybrid endpoint not available (${response.status}), falling back to vector-only search`);
         } catch (error) {
-            console.warn(`[Milvus] Hybrid search failed:`, error.message);
+            throw error;
         }
 
         // Fallback to regular vector search

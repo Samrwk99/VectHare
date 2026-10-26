@@ -41,11 +41,16 @@ export class StandardBackend extends VectorBackend {
             this.pluginAvailable = response.ok;
 
             if (this.pluginAvailable) {
-                await fetch('/api/plugins/similharity/backend/init/vectra', {
+                const initResponse = await fetch('/api/plugins/similharity/backend/init/vectra', {
                     method: 'POST',
                     headers: getRequestHeaders(),
                 });
-                console.log('VectHare: Standard backend initialized (plugin available)');
+                if (!initResponse.ok) {
+                    this.pluginAvailable = false;
+                    console.warn(`VectHare: Standard plugin initialization rejected (HTTP ${initResponse.status}); using native ST API`);
+                } else {
+                    console.log('VectHare: Standard backend initialized (plugin available)');
+                }
             } else {
                 console.log('VectHare: Standard backend initialized (native ST API only - health check failed)');
             }
@@ -68,8 +73,8 @@ export class StandardBackend extends VectorBackend {
                     source: 'transformers'
                 }),
             });
-            // 200 = works (empty collection), 500 = syntax error (no collection), both are "working"
-            return response.status === 200 || response.status === 500;
+            // HTTP 500 can be a genuine server failure; never treat it as healthy.
+            return response.ok;
         } catch (error) {
             console.error('[Standard] Health check failed:', error);
             return false;
@@ -96,18 +101,15 @@ export class StandardBackend extends VectorBackend {
         });
 
         if (!response.ok) {
-            // Collection doesn't exist or error
-            if (response.status === 500) {
-                // Likely collection doesn't exist
-                return [];
-            }
+            // A server failure is not proof that a collection is empty.
             const errorBody = await response.text().catch(() => 'No response body');
             throw new Error(`Failed to get saved hashes: ${response.status} ${response.statusText} - ${errorBody}`);
         }
 
         const data = await response.json();
         // Native API returns array of hashes directly
-        return Array.isArray(data) ? data : [];
+        if (!Array.isArray(data)) throw new Error('Standard: invalid saved-hashes response (expected an array)');
+        return data;
     }
 
     /**
@@ -289,10 +291,14 @@ export class StandardBackend extends VectorBackend {
 
         const data = await response.json();
 
-        // Native API returns { hashes: [], metadata: [] }
+        // Distinguish a legitimate empty native result from an application error.
+        if (!data || data.success === false || data.error ||
+            !Array.isArray(data.hashes) || !Array.isArray(data.metadata)) {
+            throw new Error('Standard: invalid or unsuccessful query response');
+        }
         return {
-            hashes: data.hashes || [],
-            metadata: (data.metadata || []).map((m, idx) => ({
+            hashes: data.hashes,
+            metadata: data.metadata.map((m, idx) => ({
                 hash: data.hashes?.[idx],
                 text: m.text,
                 score: m.score || 0,

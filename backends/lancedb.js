@@ -17,6 +17,7 @@ import { getRequestHeaders } from '../../../../../script.js';
 import { VectorBackend } from './backend-interface.js';
 import { getModelField } from '../core/providers.js';
 import { VECTOR_LIST_LIMIT } from '../core/constants.js';
+import { requireListedItems, requireQueryItems, hybridEndpointUnsupported } from '../utils/backend-response-validation.js';
 
 const BACKEND_TYPE = 'lancedb';
 
@@ -109,7 +110,7 @@ export class LanceDBBackend extends VectorBackend {
         }
 
         const data = await response.json();
-        return data.items ? data.items.map(item => item.hash) : [];
+        return requireListedItems(data, 'LanceDB').map(item => item.hash);
     }
 
     async insertVectorItems(collectionId, items, settings) {
@@ -198,9 +199,10 @@ export class LanceDBBackend extends VectorBackend {
 
         const data = await response.json();
 
-        // Format results to match expected output
-        const hashes = data.results.map(r => r.hash);
-        const metadata = data.results.map(r => ({
+        // Reject application-level failures even when HTTP returned 200.
+        const items = requireQueryItems(data, 'lancedb');
+        const hashes = items.map(r => r.hash);
+        const metadata = items.map(r => ({
             hash: r.hash,
             text: r.text,
             score: r.score,
@@ -233,7 +235,7 @@ export class LanceDBBackend extends VectorBackend {
 
                 if (response.ok) {
                     const data = await response.json();
-                    const resultArray = data.results || data.chunks || [];
+                    const resultArray = requireQueryItems(data, 'LanceDB');
 
                     results[collectionId] = {
                         hashes: resultArray.map(r => r.hash),
@@ -246,11 +248,11 @@ export class LanceDBBackend extends VectorBackend {
                     };
                 } else {
                     console.error(`VectHare: Query failed for ${collectionId}: ${response.status} ${response.statusText}`);
-                    results[collectionId] = { hashes: [], metadata: [] };
+                    results[collectionId] = { hashes: [], metadata: [], error: `HTTP ${response.status} ${response.statusText}` };
                 }
             } catch (error) {
                 console.error(`Failed to query collection ${collectionId}:`, error);
-                results[collectionId] = { hashes: [], metadata: [] };
+                results[collectionId] = { hashes: [], metadata: [], error: error.message };
             }
         }
 

@@ -6,6 +6,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { clearBananaBreadKey } from '../utils/credential-controls.js';
+import { requireListedItems, requireQueryItems, hybridEndpointUnsupported } from '../utils/backend-response-validation.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const source = file => fs.readFileSync(path.join(root, file), 'utf8');
@@ -128,6 +129,7 @@ async function qdrantWithMock(fetchImpl) {
         '../core/providers.js': { getModelField: () => null },
         './provider-params.js': { getProviderSpecificParams: () => ({}) },
         '../core/constants.js': { VECTOR_LIST_LIMIT: 10000 },
+        '../utils/backend-response-validation.js': { requireListedItems, requireQueryItems, hybridEndpointUnsupported },
     };
     const mod = new vm.SourceTextModule(source('backends/qdrant.js'), { context });
     await mod.link(spec => {

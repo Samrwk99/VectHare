@@ -1137,7 +1137,7 @@ export async function queryMultipleCollections(collectionIds, searchText, topK, 
                 console.warn(`[VectHare] Hybrid search failed for ${collectionId}:`, error.message);
                 // VEC-18: Record error
                 recordError(settings?.vector_backend || 'standard', error);
-                processedResults[collectionId] = { hashes: [], metadata: [] };
+                processedResults[collectionId] = { hashes: [], metadata: [], error: error.message };
             }
         }
         return processedResults;
@@ -1164,6 +1164,12 @@ export async function queryMultipleCollections(collectionIds, searchText, topK, 
 
     for (const [collectionId, collectionResults] of Object.entries(rawResults)) {
         if (!collectionResults || !collectionResults.metadata) {
+            processedResults[collectionId] = collectionResults;
+            continue;
+        }
+
+        // Preserve adapter-level partial failures through the scoring layer.
+        if (collectionResults.error) {
             processedResults[collectionId] = collectionResults;
             continue;
         }
