@@ -25,6 +25,7 @@ import {
     getCollectionMeta,
 } from './collection-metadata.js';
 import { purgeVectorIndex } from './core-vector-api.js';
+import { isGeneratedDiagnosticCollectionId } from './destructive-safety.js';
 // Import from collection-ids.js - single source of truth for collection ID operations
 import {
     getChatUUID,
@@ -108,13 +109,19 @@ export async function deleteCollection(collectionId, settings, registryKey = nul
 
     // Step 1: Delete vectors from backend (most important - actual data)
     try {
-        await purgeVectorIndex(collectionId, settings);
+        // purgeVectorIndex returns false on backend failures; it does not
+        // necessarily throw. Treat only an explicit true as success.
+        if (await purgeVectorIndex(collectionId, settings) !== true) {
+            throw new Error('Backend purge did not confirm success');
+        }
         vectorsDeleted = true;
         console.log(`VectHare: ✓ Deleted vectors for ${collectionId}`);
     } catch (error) {
         errors.push(`Vectors: ${error.message}`);
         console.warn(`VectHare: ✗ Failed to delete vectors for ${collectionId}:`, error.message);
-        // Continue anyway - registry/metadata cleanup is still valuable
+        // Keep registry and metadata intact for a later retry. No cleanup
+        // may proceed when the vector purge was not acknowledged.
+        return { success: false, errors, vectorsDeleted, registryDeleted, metadataDeleted };
     }
 
     // Step 2: Unregister from registry (try both formats)
@@ -196,32 +203,54 @@ export function cleanupCollectionRegistry() {
  * Call this to remove ghost test entries that weren't properly cleaned up
  * @returns {number} Number of test entries removed
  */
+/**
+ * Marks a collection as created by the diagnostic suite. Only explicitly
+ * registered test collections can be removed by automatic registry cleanup.
+ * A collection merely containing "test" in its user-controlled ID is not
+ * proof of ownership.
+ */
+export function markDiagnosticTestCollection(collectionId) {
+    if (!isGeneratedDiagnosticCollectionId(collectionId)) {
+        throw new Error(`Unrecognized diagnostic collection ID: ${collectionId}`);
+    }
+    const settings = extension_settings.vecthare;
+    const verified = Array.isArray(settings.vecthare_diagnostic_test_ids)
+        ? settings.vecthare_diagnostic_test_ids : [];
+    if (!verified.includes(collectionId)) {
+        settings.vecthare_diagnostic_test_ids = [...verified, collectionId];
+        saveSettingsDebounced();
+    }
+}
+
+/**
+ * Clean only entries demonstrably registered by our diagnostics. Legacy
+ * prefix-like IDs without a tracking marker are preserved for manual review.
+ * This only changes registry entries: it never claims to purge backend data.
+ */
 export function cleanupTestCollections() {
     const registry = getCollectionRegistry();
-    const testPatterns = [
-        'vecthare_visualizer_test_',
-        '__vecthare_test_',
-        'vecthare_test_',
-    ];
-
-    const cleaned = registry.filter(id => {
-        if (!id) return false;
-        // Check if this is a test collection
-        for (const pattern of testPatterns) {
-            if (id.includes(pattern)) {
-                console.log(`VectHare: Removing test collection from registry: ${id}`);
-                return false;
-            }
+    const settings = extension_settings.vecthare;
+    const tracked = new Set(Array.isArray(settings.vecthare_diagnostic_test_ids)
+        ? settings.vecthare_diagnostic_test_ids : []);
+    const cleaned = registry.filter(key => {
+        const { collectionId } = parseRegistryKey(key);
+        const owned = tracked.has(collectionId) && isGeneratedDiagnosticCollectionId(collectionId);
+        if (owned) {
+            console.log(`VectHare: Removing verified diagnostic collection from registry: ${key}`);
         }
-        return true;
+        return !owned;
     });
-
     const removed = registry.length - cleaned.length;
-    if (removed > 0) {
-        extension_settings.vecthare.vecthare_collection_registry = cleaned;
-        console.log(`VectHare: Cleaned ${removed} test collection entries from registry`);
-        saveSettingsDebounced(); // Persist to disk!
+    // Prune markers for absent test entries too, so these cannot accumulate.
+    const remainingIds = new Set(cleaned.map(key => parseRegistryKey(key).collectionId));
+    const remainingTracked = [...tracked].filter(id =>
+        isGeneratedDiagnosticCollectionId(id) && remainingIds.has(id));
+    if (removed > 0 || remainingTracked.length !== tracked.size) {
+        settings.vecthare_collection_registry = cleaned;
+        settings.vecthare_diagnostic_test_ids = remainingTracked;
+        saveSettingsDebounced();
     }
+    if (removed) console.log(`VectHare: Cleaned ${removed} verified diagnostic registry entries`);
     return removed;
 }
 

@@ -30,6 +30,7 @@ import { getDefaultDecaySettings } from './core/temporal-decay.js';
 import { migrateOldEnabledKeys } from './core/collection-metadata.js';
 import { clearCollectionRegistry, discoverExistingCollections, getCollectionRegistry } from './core/collection-loader.js';
 import AsyncUtils from './utils/async-utils.js';
+import { purgeAllAndResetSettings } from './core/destructive-safety.js';
 
 // VectHare modules - UI
 import { renderSettings, openDiagnosticsModal, loadWebLlmModels, updateWebLlmStatus, refreshAutoSyncCheckbox, updateContinueVectorizationButton, updateVectorizationStatus } from './ui/ui-manager.js';
@@ -401,21 +402,15 @@ async function onPurgeClick() {
         const { getRequestHeaders } = await import('../../../../script.js');
 
         // 1. Delete entire vectors folder
-        await fetch('/api/plugins/similharity/purge-all', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-        });
-
-        // 2. Clear extension_settings.vecthare
-        for (const key in extension_settings.vecthare) {
-            if (key !== 'enabled') {
-                delete extension_settings.vecthare[key];
-            }
-        }
-
-        // 3. Save settings
         const { saveSettingsDebounced } = await import('../../../../script.js');
-        saveSettingsDebounced();
+        await purgeAllAndResetSettings({
+            requestPurge: () => fetch('/api/plugins/similharity/purge-all', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+            }),
+            settings: extension_settings.vecthare,
+            persistSettings: saveSettingsDebounced,
+        });
 
         toastr.success('All vector data purged', 'Purge Complete');
 

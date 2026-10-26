@@ -1109,15 +1109,12 @@ function bindCollectionCardEvents() {
           collection.registryKey,
         );
 
-        // Remove from state
-        browserState.collections = browserState.collections.filter(
-          (c) => (c.registryKey || c.id) !== collectionKey,
-        );
-
-        // Re-render
-        renderCollections();
-
         if (result.success) {
+          // Only remove a collection from the UI after confirmed deletion.
+          browserState.collections = browserState.collections.filter(
+            (c) => (c.registryKey || c.id) !== collectionKey,
+          );
+          renderCollections();
           toastr.success(`Deleted collection "${collection.name}"`, "VectHare");
         } else {
           toastr.warning(
@@ -3685,6 +3682,7 @@ function bindBulkEvents() {
             partialCount++;
           }
         } catch (error) {
+          partialCount++;
           console.error(`VectHare: Failed to delete ${collection.id}`, error);
         }
       }

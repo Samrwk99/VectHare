@@ -22,7 +22,7 @@ import {
     saveChunkMetadata,
     deleteChunkMetadata,
 } from '../core/collection-metadata.js';
-import { unregisterCollection } from '../core/collection-loader.js';
+import { unregisterCollection, markDiagnosticTestCollection } from '../core/collection-loader.js';
 import { getStringHash } from '../../../../utils.js';
 
 // Test collection prefix using new vh: format for proper multitenancy parsing
@@ -52,7 +52,9 @@ async function cleanupTestCollection(collectionId, settings) {
  * Uses vh:test:visualizer_{timestamp} format for proper Qdrant multitenancy
  */
 function getTestCollectionId() {
-    return `${TEST_COLLECTION_PREFIX}${Date.now()}`;
+    const collectionId = `${TEST_COLLECTION_PREFIX}${Date.now()}`;
+    markDiagnosticTestCollection(collectionId);
+    return collectionId;
 }
 
 /**

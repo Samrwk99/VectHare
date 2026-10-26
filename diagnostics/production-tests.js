@@ -13,7 +13,7 @@ import { getCurrentChatId, getRequestHeaders } from '../../../../../script.js';
 import { getSavedHashes, purgeVectorIndex } from '../core/core-vector-api.js';
 import { getChatCollectionId } from '../core/chat-vectorization.js';
 import { getModelField, getProviderConfig } from '../core/providers.js';
-import { unregisterCollection } from '../core/collection-loader.js';
+import { unregisterCollection, markDiagnosticTestCollection } from '../core/collection-loader.js';
 import { reciprocalRankFusion, weightedCombination } from '../core/hybrid-search.js';
 import { applyKeywordBoost, extractTextKeywords, extractLorebookKeywords } from '../core/keyword-boost.js';
 
@@ -165,6 +165,7 @@ export async function testEmbeddingGeneration(settings) {
 export async function testVectorStorage(settings) {
     try {
         const testCollectionId = `vh:test:storage_${Date.now()}`;
+        markDiagnosticTestCollection(testCollectionId);
         const testHash = String(Math.floor(Math.random() * 1000000));
         const testText = 'VectHare storage test message';
         const backend = settings.vector_backend || 'standard';
@@ -854,6 +855,7 @@ export async function testPluginEmbeddingGeneration(settings) {
 
     try {
         const testCollectionId = `vh:test:embed_${Date.now()}`;
+        markDiagnosticTestCollection(testCollectionId);
         const testHash = String(Math.floor(Math.random() * 1000000));
         const testText = 'Plugin embedding generation test';
 

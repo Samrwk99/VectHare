@@ -1237,7 +1237,11 @@ export async function queryActiveCollections(collectionIds, searchText, topK, th
 export async function purgeVectorIndex(collectionId, settings) {
     try {
         const backend = await getBackend(settings);
-        await backend.purgeVectorIndex(collectionId, settings);
+        const purgeResult = await backend.purgeVectorIndex(collectionId, settings);
+        // Some adapters may explicitly return false rather than throwing.
+        if (purgeResult === false || purgeResult?.success === false) {
+            throw new Error('Backend reported that the collection purge failed');
+        }
         console.log(`VectHare: Purged vector index for collection ${collectionId}`);
         notifyDatabaseChanged(collectionId);
         return true;

@@ -1602,18 +1602,16 @@ async function showAutoSyncConfirmModal(allMatches, settings) {
                 };
                 const result = await deleteCollection(ghost.collectionId, deleteSettings, ghost.registryKey);
 
-                // Remove from UI
-                allMatches.splice(index, 1);
-                $(this).closest('.vecthare-collection-option').fadeOut(200, function() {
-                    $(this).remove();
-                    // Re-index remaining items
-                    $modal.find('.vecthare-collection-option').each((i, el) => {
-                        $(el).attr('data-index', i);
-                        $(el).find('.vecthare-delete-ghost').attr('data-index', i);
-                    });
-                });
-
                 if (result.success) {
+                    // Retain failed deletions for retry instead of hiding them.
+                    allMatches.splice(index, 1);
+                    $(this).closest('.vecthare-collection-option').fadeOut(200, function() {
+                        $(this).remove();
+                        $modal.find('.vecthare-collection-option').each((i, el) => {
+                            $(el).attr('data-index', i);
+                            $(el).find('.vecthare-delete-ghost').attr('data-index', i);
+                        });
+                    });
                     toastr.success('Ghost collection deleted', 'VectHare');
                 } else {
                     toastr.warning(`Partial deletion: ${result.errors.join(', ')}`, 'VectHare');
