@@ -303,8 +303,8 @@ export function reciprocalRankFusion(resultLists, k = DEFAULT_RRF_K) {
             entry.rrfScore = Math.min(1.0, entry.rrfScore);
         }
 
-        // Re-sort by final score (may differ slightly from raw RRF order)
-        sortedResults.sort((a, b) => b.rrfScore - a.rrfScore);
+        // RRF determines ranking; rrfScore above is a display/confidence score.
+        // Re-sorting by the latter silently turns RRF into a different algorithm.
     }
 
     return sortedResults;
@@ -383,11 +383,15 @@ function normalizeScores(results, scoreField = 'score') {
     const scores = results.map(r => r[scoreField] || 0);
     const minScore = Math.min(...scores);
     const maxScore = Math.max(...scores);
-    const range = maxScore - minScore || 1; // Avoid division by zero
+    const range = maxScore - minScore;
 
     return results.map(r => ({
         ...r,
-        normalizedScore: ((r[scoreField] || 0) - minScore) / range
+        // Equal scores are equally informative, not all zero.  Preserve
+        // their absolute strength when the sample contains no spread.
+        normalizedScore: range === 0
+            ? Math.max(0, Math.min(1, Number(r[scoreField]) || 0))
+            : ((r[scoreField] || 0) - minScore) / range
     }));
 }
 

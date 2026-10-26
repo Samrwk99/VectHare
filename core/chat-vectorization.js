@@ -13,7 +13,9 @@ import { getCurrentChatId, is_send_press, setExtensionPrompt, substituteParams, 
 import { getContext } from '../../../../extensions.js';
 import { getStringHash as calculateHash, waitUntilCondition, onlyUnique } from '../../../../utils.js';
 import { isUnitStrategy, groupConversationTurns } from './chunking.js';
-import { extractChatKeywords, extractBM25Keywords } from './keyword-boost.js';
+import { extractChatKeywords, extractBM25Keywords, applyKeywordBoost } from './keyword-boost.js';
+import { containsLexicalPhrase } from '../utils/lexical-tokenization.js';
+import { mergeSemanticWorldInfoChunks } from '../utils/world-info-dedup.js';
 import { cleanText } from './text-cleaning.js';
 import {
     getSavedHashes,
@@ -986,8 +988,7 @@ function gatherCollectionsToQuery(settings) {
 function buildSearchQuery(chat, settings) {
     const recentMessages = chat
         .filter(x => !x.is_system)
-        .reverse()
-        .slice(0, settings.query)
+        .slice(-Math.max(1, Number(settings.query) || 3))
         .map(x => substituteParams(x.mes));
 
     return recentMessages.join('\n').trim();
@@ -2183,30 +2184,34 @@ export async function rearrangeChat(chat, settings, type) {
                 // Word-boundary match to avoid partial hits (e.g. "mel" inside "melody")
                 const matchedKeywords = chunkKeywords.filter(ck => {
                     if (queryKeywordTexts.includes(ck)) return true;
-                    const escaped = ck.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                    return new RegExp(`(?<![\\w])${escaped}(?![\\w])`, 'i').test(queryLower);
+                    return containsLexicalPhrase(queryLower, ck);
                 });
 
                 if (matchedKeywords.length > 0) {
-                    // Chunk matches query keywords - boost to perfect hit
+                    // Reuse configured per-keyword weights and bounded boosting;
+                    // keyword overlap must not override semantic relevance to 1.0.
                     const oldScore = chunk.score;
+                    const weighted = (chunk.metadata?.keywords || [])
+                        .filter(kw => matchedKeywords.includes(String(typeof kw === 'object' ? kw.text : kw).toLowerCase()));
+                    const boosted = applyKeywordBoost([{ ...chunk, keywords: weighted }], queryText)[0];
                     chunk.keywordMatched = true;
                     chunk.matchedQueryKeywords = matchedKeywords;
-                    chunk.score = 1.0; // 100% perfect match
+                    chunk.score = boosted?.score ?? oldScore;
+                    chunk.keywordBoost = boosted?.keywordBoost ?? 1;
                     chunk.originalScore = oldScore;
                     keywordMatchCount++;
 
                     addTrace(debugData, 'keyword_boost', `Chunk boosted by ${matchedKeywords.length} keyword(s)`, {
                         hash: chunk.hash,
                         matchedKeywords,
-                        newScore: 1.0,
+                        newScore: chunk.score,
                         oldScore
                     });
                 }
             }
 
             if (keywordMatchCount > 0) {
-                console.log(`VectHare: Boosted ${keywordMatchCount}/${chunks.length} chunks with matching keywords to 100% score`);
+                console.log(`VectHare: Applied bounded keyword boosts to ${keywordMatchCount}/${chunks.length} chunks`);
                 debugData.stages.afterKeywordBoost = [...chunks];
                 debugData.stats.keywordBoosted = keywordMatchCount;
                 addTrace(debugData, 'keyword_boost', `Boosted ${keywordMatchCount} chunks with keyword matches`, {
@@ -2224,8 +2229,7 @@ export async function rearrangeChat(chat, settings, type) {
                 // Build recentMessages array for WI query
                 const recentMessages = chat
                     .filter(x => !x.is_system)
-                    .reverse()
-                    .slice(0, settings.world_info_query_depth || settings.query)
+                    .slice(-Math.max(1, Number(settings.world_info_query_depth || settings.query) || 3))
                     .map(x => substituteParams(x.mes));
 
                 const wiEntries = await getSemanticWorldInfoEntries(recentMessages, [], settings);
@@ -2234,7 +2238,7 @@ export async function rearrangeChat(chat, settings, type) {
 
                     // Convert WI entries into chunk-like objects and merge
                     const wiChunks = wiEntries.map(e => {
-                        const hash = String(e.uid || getStringHash(e.content || e.key || ''));
+                        const hash = String(e.metadata?.hash ?? e.uid ?? getStringHash(e.content || e.key || ''));
                         return {
                             hash,
                             metadata: e.metadata || {},
@@ -2248,9 +2252,12 @@ export async function rearrangeChat(chat, settings, type) {
                         };
                     });
 
-                    // Prepend WI chunks so they get considered equally in downstream stages
-                    chunks = wiChunks.concat(chunks);
-                    debugData.stages.worldInfo = wiChunks;
+                    // WI semantic lookup and ordinary collection lookup may return
+                    // the same vector. Retain the ordinary hit instead of injecting
+                    // its content twice (collection-qualified to avoid cross-chat merges).
+                    const mergedWI = mergeSemanticWorldInfoChunks(chunks, wiChunks);
+                    chunks = mergedWI.chunks;
+                    debugData.stages.worldInfo = mergedWI.uniqueWIChunks;
                 }
             }
         } catch (wiError) {

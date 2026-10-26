@@ -1,4 +1,5 @@
 import { porterStemmer } from './bm25-scorer.js';
+import { lexicalTokens, containsLexicalPhrase } from '../utils/lexical-tokenization.js';
 import { substituteParams } from '../../../../../script.js';
 
 /**
@@ -79,7 +80,7 @@ function normalizeTokenBoundaries(text) {
 }
 
 function extractQueryTokens(query) {
-    return new Set(normalizeTokenBoundaries(String(query || '').toLowerCase()).match(/[a-z]{3,}/g) || []);
+    return new Set(lexicalTokens(normalizeTokenBoundaries(String(query || '')), { minLength: 3 }));
 }
 
 /** Weight increment per frequency count above minimum */
@@ -379,13 +380,13 @@ export function extractTextKeywords(text, options = {}) {
     }
 
     // Step 3: Extract and count words
-    const topicWords = scanArea.toLowerCase().match(/\b[a-z]{4,}\b/g) || [];
+    const topicWords = lexicalTokens(scanArea, { minLength: 2 }).filter(word => Array.from(word).length >= 4 || /[^a-z0-9]/u.test(word));
     const wordCounts = new Map();
 
     for (const word of topicWords) {
         if (stopwords.has(word)) continue;
         // Don't stem proper nouns/names - they should match exactly
-        const stemmed = properNouns.has(word) ? word : porterStemmer(word);
+        const stemmed = properNouns.has(word) || !/^[a-z]+$/.test(word) ? word : porterStemmer(word);
         wordCounts.set(stemmed, (wordCounts.get(stemmed) || 0) + 1);
     }
 
@@ -418,7 +419,7 @@ export function extractTextKeywords(text, options = {}) {
     }
 
     // Step 5.5: Extract simple phrases (bi-grams) for better semantic recall
-    const phraseTokens = normalizeTokenBoundaries(scanArea).toLowerCase().match(/\b[a-z]{4,}\b/g) || [];
+    const phraseTokens = lexicalTokens(normalizeTokenBoundaries(scanArea), { minLength: 2 });
     const phraseCounts = new Map();
     for (let i = 0; i < phraseTokens.length - 1; i++) {
         const a = phraseTokens[i];
@@ -589,14 +590,11 @@ export function extractBM25Keywords(text, options = {}) {
 
     // Tokenize each sentence
     const tokenizeSentence = (s) => {
-        return s
-            .toLowerCase()
-            .replace(/[^\w\s'-]/g, ' ')
-            .split(/\s+/)
-            .filter(t => t.length >= minWordLength && !stopwords.has(t))
+        return lexicalTokens(s, { minLength: Math.min(minWordLength, 2) })
+            .filter(t => (Array.from(t).length >= minWordLength || /[^a-z0-9]/u.test(t)) && !stopwords.has(t))
             .map(t => {
                 // Don't stem proper nouns (names) - preserve them exactly
-                if (properNouns.has(t)) return t;
+                if (properNouns.has(t) || !/^[a-z]+$/.test(t)) return t;
                 return t.length > 3 ? porterStemmer(t) : t;
             });
     };
@@ -803,7 +801,7 @@ export function extractSmartKeywords(text, options = {}) {
             .filter(t => t.length >= 3 && !stopwords.has(t))
             .map(t => {
                 // Don't stem proper nouns (names) - preserve them exactly
-                if (properNouns.has(t)) return t;
+                if (properNouns.has(t) || !/^[a-z]+$/.test(t)) return t;
                 return t.length > 3 ? porterStemmer(t) : t;
             });
     };
@@ -933,7 +931,7 @@ function normalizeKeyword(kw, defaultWeight = DEFAULT_BASE_WEIGHT) {
  */
 function queryHasKeyword(query, keyword) {
     if (!query || !keyword) return false;
-    return query.includes(keyword);
+    return containsLexicalPhrase(query, keyword);
 }
 
 /**
@@ -1067,8 +1065,10 @@ export function applyKeywordBoost(results, query, options = {}) {
  * @returns {number} Amount to actually fetch
  */
 export function getOverfetchAmount(topK) {
-    // Fetch 2x the requested amount (min 10, max 100)
-    return Math.min(100, Math.max(10, topK * 2));
+    // Never overfetch fewer candidates than the requested top-K. 100 is
+    // a soft overfetch target, not a hard cap on user-selected result counts.
+    const count = Number.isFinite(Number(topK)) ? Math.max(1, Math.floor(Number(topK))) : 10;
+    return Math.max(count, Math.min(100, Math.max(10, count * 2)));
 }
 
 /**

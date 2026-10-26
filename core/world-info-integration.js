@@ -43,7 +43,7 @@ export async function getSemanticWorldInfoEntries(recentMessages, activeEntries,
     }
 
     // Build search query from recent messages
-    const query = recentMessages.slice(-settings.world_info_query_depth || -3).join('\n');
+    const query = recentMessages.slice(-Math.max(1, Number(settings.world_info_query_depth) || 3)).join('\n');
     if (!query.trim()) {
         return [];
     }
@@ -339,8 +339,7 @@ export async function applySemanticEntriesToPrompt(chat, settings) {
 
         const recentMessages = chat
             .filter(m => !m.is_system)
-            .reverse()
-            .slice(0, settings.world_info_query_depth || settings.query || 3)
+            .slice(-Math.max(1, Number(settings.world_info_query_depth || settings.query) || 3))
             .map(m => (m.mes || '').toString());
 
         const entries = await getSemanticWorldInfoEntries(recentMessages, [], settings);

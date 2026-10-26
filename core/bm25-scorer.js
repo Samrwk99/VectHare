@@ -22,6 +22,8 @@
  * b: Length normalization parameter (0.75 typical)
  * delta: BM25+ lower bound for term frequency (0.5 typical)
  */
+import { lexicalTokens } from '../utils/lexical-tokenization.js';
+
 const DEFAULT_K1 = 1.5;
 const DEFAULT_B = 0.75;
 const DEFAULT_DELTA = 0.5;
@@ -213,14 +215,9 @@ function tokenize(text, options = {}) {
         minLength = 2
     } = options;
 
-    // Normalize and split
-    let tokens = text
-        .toLowerCase()
-        .replace(/[^\w\s]/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .split(/\s+/)
-        .filter(token => token.length >= minLength);
+    // Preserve occurrences for BM25 term frequency. Unicode normalization is
+    // shared with keyword extraction to keep indexed and queried terms aligned.
+    let tokens = lexicalTokens(text, { minLength });
 
     // Remove stop words
     if (removeStopWords) {
@@ -231,13 +228,12 @@ function tokenize(text, options = {}) {
     if (stem) {
         tokens = tokens.map(token => {
             // Don't stem very short words or numbers
-            if (token.length <= 3 || /^\d+$/.test(token)) return token;
+            if (token.length <= 3 || !/^[a-z]+$/.test(token)) return token;
             return porterStemmer(token);
         });
     }
 
-    // Deduplicate (preserve order)
-    return [...new Set(tokens)];
+    return tokens;
 }
 
 /**
@@ -246,11 +242,7 @@ function tokenize(text, options = {}) {
  */
 function tokenizeSimple(text) {
     if (!text || typeof text !== 'string') return [];
-    return text
-        .toLowerCase()
-        .replace(/[^\w\s]/g, ' ')
-        .split(/\s+/)
-        .filter(token => token.length > 0);
+    return lexicalTokens(text);
 }
 
 /**
