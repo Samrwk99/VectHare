@@ -343,36 +343,53 @@ function evaluateMessageCountCondition(rule, context) {
  * @returns {object} { chunks: processedChunks, hardLinkedHashes: Set }
  */
 export function processChunkLinks(chunks, chunkMetadataMap, softBoost = 0.15) {
-    const resultHashes = new Set(chunks.map(c => c.hash));
+    // The visualizer persists {chunkLinks: [{targetHash, mode: 'force'|'soft'}]},
+    // while older metadata and inclusive groups use {links: [{target, type}]}.
+    // Both formats must work with a Map or a plain metadata lookup object.
+    const resultHashes = new Set(chunks.map(c => String(c.hash)));
     const hardLinkedHashes = new Set();
-    const softBoosts = new Map(); // hash -> total boost
+    const softBoosts = new Map();
+    const defaultBoost = Number.isFinite(Number(softBoost)) && Number(softBoost) >= 0
+        ? Number(softBoost) : 0.15;
 
-    // First pass: collect all hard links and soft boosts
     for (const chunk of chunks) {
-        const meta = chunkMetadataMap[chunk.hash];
-        if (!meta?.links || meta.links.length === 0) continue;
+        const meta = typeof chunkMetadataMap?.get === 'function'
+            ? chunkMetadataMap.get(String(chunk.hash)) ?? chunkMetadataMap.get(chunk.hash)
+            : chunkMetadataMap?.[String(chunk.hash)];
+        if (!meta) continue;
 
-        for (const link of meta.links) {
-            const targetHash = parseInt(link.target);
-
-            if (link.type === 'hard') {
-                // Hard link: target MUST be included
-                hardLinkedHashes.add(targetHash);
-            } else if (link.type === 'soft') {
-                // Soft link: accumulate boost for target
-                const currentBoost = softBoosts.get(targetHash) || 0;
-                softBoosts.set(targetHash, currentBoost + softBoost);
+        // Deduplicate equivalent links stored under both field names, but keep
+        // separate group-generated links (fromGroup) so their boosts can stack.
+        const seen = new Set();
+        const links = [...(Array.isArray(meta.links) ? meta.links : []),
+            ...(Array.isArray(meta.chunkLinks) ? meta.chunkLinks : [])];
+        for (const link of links) {
+            const rawTarget = link?.targetHash ?? link?.target;
+            if (rawTarget === null || rawTarget === undefined || String(rawTarget).trim() === '') continue;
+            const target = String(rawTarget);
+            const mode = link.type ?? link.mode;
+            const kind = mode === 'force' || mode === 'hard' ? 'hard' : mode === 'soft' ? 'soft' : null;
+            if (!kind) continue;
+            const dedupKey = `${kind}:${target}:${link.fromGroup ?? ''}`;
+            if (seen.has(dedupKey)) continue;
+            seen.add(dedupKey);
+            if (kind === 'hard') {
+                hardLinkedHashes.add(target);
+            } else {
+                const customBoost = Number(link.boost);
+                const amount = link.boost !== undefined && link.boost !== null &&
+                    Number.isFinite(customBoost) && customBoost >= 0 ? customBoost : defaultBoost;
+                softBoosts.set(target, (softBoosts.get(target) ?? 0) + amount);
             }
         }
     }
 
-    // Second pass: apply soft boosts to existing chunks
     const processedChunks = chunks.map(chunk => {
-        const boost = softBoosts.get(chunk.hash) || 0;
+        const boost = softBoosts.get(String(chunk.hash)) ?? 0;
         if (boost > 0) {
             return {
                 ...chunk,
-                score: Math.min(1.0, (chunk.score || 0) + boost),
+                score: Math.min(1.0, (chunk.score ?? 0) + boost),
                 softLinked: true,
                 linkBoost: boost
             };
@@ -380,15 +397,9 @@ export function processChunkLinks(chunks, chunkMetadataMap, softBoost = 0.15) {
         return chunk;
     });
 
-    // Hard-linked chunks that aren't in results need to be fetched separately
-    // Return the hashes so caller can fetch them
-    const missingHardLinks = [...hardLinkedHashes].filter(h => !resultHashes.has(h));
-
-    return {
-        chunks: processedChunks,
-        hardLinkedHashes: hardLinkedHashes,
-        missingHardLinks: missingHardLinks
-    };
+    // Loading missing target records is a separate retrieval-planner task (C09).
+    const missingHardLinks = [...hardLinkedHashes].filter(hash => !resultHashes.has(hash));
+    return { chunks: processedChunks, hardLinkedHashes, missingHardLinks };
 }
 
 /**

@@ -980,7 +980,7 @@ function renderGroupDetailPanel() {
                      style="${group.mode !== 'inclusive' || group.linkType !== 'soft' ? 'display:none' : ''}">
                     <label>Score Boost</label>
                     <input type="number" id="vecthare_group_boost" class="vecthare-group-input"
-                           value="${group.boost || 0.15}" min="0" max="1" step="0.05">
+                           value="${group.boost ?? 0.15}" min="0" max="1" step="0.05">
                 </div>
 
                 <div class="vecthare-group-setting-row vecthare-exclusive-settings" style="${group.mode !== 'exclusive' ? 'display:none' : ''}">
@@ -1230,7 +1230,8 @@ function bindGroupDetailEvents() {
 
     // Boost change
     $('#vecthare_group_boost').off('input').on('input', function() {
-        updateGroupSetting('boost', parseFloat($(this).val()) || 0.15);
+        const boost = parseFloat($(this).val());
+        if (Number.isFinite(boost) && boost >= 0 && boost <= 1) updateGroupSetting('boost', boost);
     });
 
     // Mandatory toggle

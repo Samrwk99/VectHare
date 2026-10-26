@@ -39,7 +39,7 @@
  * @param {Set<string>} matchedHashes - Hashes of chunks that matched the search
  * @returns {Map<string, Array>} Map of hash -> virtual links to add
  */
-export function expandInclusiveGroups(groups, matchedHashes) {
+export function expandInclusiveGroups(groups, matchedHashes, defaultBoost = 0.15) {
     const virtualLinks = new Map();
 
     for (const group of groups) {
@@ -65,6 +65,8 @@ export function expandInclusiveGroups(groups, matchedHashes) {
                 virtualLinks.get(String(sourceHash)).push({
                     target: String(targetHash),
                     type: linkType,
+                    boost: Number.isFinite(Number(group.boost)) && group.boost !== undefined && group.boost !== null && Number(group.boost) >= 0
+                        ? Number(group.boost) : defaultBoost,
                     fromGroup: group.id,
                     groupName: group.name
                 });
@@ -220,7 +222,7 @@ export function processChunkGroups(chunks, groups, allChunksMap, options = {}) {
     const matchedHashes = new Set(chunks.map(c => String(c.hash)));
 
     // Step 1: Expand inclusive groups into virtual links
-    const virtualLinks = expandInclusiveGroups(groups, matchedHashes);
+    const virtualLinks = expandInclusiveGroups(groups, matchedHashes, softBoost);
 
     // Step 2: Apply exclusive group filtering
     const exclusionResult = applyExclusiveGroups(chunks, groups);

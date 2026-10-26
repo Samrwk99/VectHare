@@ -26,7 +26,7 @@ import {
     purgeVectorIndex,
 } from './core-vector-api.js';
 import { isBackendAvailable } from '../backends/backend-manager.js';
-import { applyDecayToResults, applySceneAwareDecay } from './temporal-decay.js';
+import { applyDecayToResults, applyNostalgiaToResults, applySceneAwareDecay } from './temporal-decay.js';
 import { isChunkDisabledByScene } from './scenes.js';
 import { registerCollection, getCollectionRegistry } from './collection-loader.js';
 import {
@@ -1327,7 +1327,8 @@ function applyTemporalDecayStage(chunks, chat, settings, threshold, debugData) {
         enabled: true,
         sceneAware: settings.temporal_decay.sceneAware,
         halfLife: settings.temporal_decay.halfLife || settings.temporal_decay.half_life,
-        strength: settings.temporal_decay.strength || settings.temporal_decay.rate
+        strength: settings.temporal_decay.strength ?? settings.temporal_decay.rate,
+        type: settings.temporal_decay.type ?? 'decay'
     });
 
     const currentMessageId = chat.length - 1;
@@ -1340,8 +1341,12 @@ function applyTemporalDecayStage(chunks, chat, settings, threshold, debugData) {
     let decayedChunks;
     let decayType = 'standard';
 
-    // Use scene-aware decay if enabled and scenes exist
-    if (settings.temporal_decay.sceneAware) {
+    // Nostalgia is mutually exclusive with decay. Scene-aware decay is a decay-
+    // only algorithm; do not apply it in nostalgia mode.
+    if (settings.temporal_decay.type === 'nostalgia') {
+        decayedChunks = applyNostalgiaToResults(chunksWithScores, currentMessageId, settings.temporal_decay);
+        decayType = 'nostalgia';
+    } else if (settings.temporal_decay.sceneAware) {
         const sceneChunks = chunks.filter(c => c.metadata?.isScene === true);
         const scenes = sceneChunks.map(c => ({
             start: c.metadata.sceneStart,
@@ -1371,8 +1376,9 @@ function applyTemporalDecayStage(chunks, chat, settings, threshold, debugData) {
     // Map decay results back to chunks and record fate
     let result = chunks.map(chunk => {
         const decayedChunk = decayedChunksMap.get(chunk.hash);
-        if (decayedChunk && (decayedChunk.decayApplied || decayedChunk.sceneAwareDecay)) {
-            const decayMultiplier = decayedChunk.score / (decayedChunk.originalScore || 1);
+        if (decayedChunk && (decayedChunk.decayApplied || decayedChunk.sceneAwareDecay || decayedChunk.nostalgiaApplied)) {
+            const decayMultiplier = decayedChunk.originalScore !== 0
+                ? decayedChunk.score / decayedChunk.originalScore : 1;
             const newScore = decayedChunk.score;
             const stillAboveThreshold = newScore >= threshold;
 
@@ -1381,17 +1387,17 @@ function applyTemporalDecayStage(chunks, chat, settings, threshold, debugData) {
                     originalScore: decayedChunk.originalScore,
                     decayedScore: newScore,
                     decayMultiplier,
-                    messageAge: decayedChunk.messageAge || decayedChunk.effectiveAge,
+                    messageAge: decayedChunk.messageAge ?? decayedChunk.effectiveAge,
                     decayType
                 });
             } else {
                 recordChunkFate(debugData, chunk.hash, 'decay', 'dropped',
-                    `Decayed score ${newScore.toFixed(3)} < threshold ${threshold}`,
+                    `Weighted score ${newScore.toFixed(3)} < threshold ${threshold}`,
                     {
                         originalScore: decayedChunk.originalScore,
                         decayedScore: newScore,
                         decayMultiplier,
-                        messageAge: decayedChunk.messageAge || decayedChunk.effectiveAge,
+                        messageAge: decayedChunk.messageAge ?? decayedChunk.effectiveAge,
                         decayType
                     }
                 );
@@ -1401,14 +1407,15 @@ function applyTemporalDecayStage(chunks, chat, settings, threshold, debugData) {
                 ...chunk,
                 score: newScore,
                 originalScore: decayedChunk.originalScore,
-                messageAge: decayedChunk.messageAge || decayedChunk.effectiveAge,
-                decayApplied: true,
+                messageAge: decayedChunk.messageAge ?? decayedChunk.effectiveAge,
+                decayApplied: decayedChunk.decayApplied === true,
+                nostalgiaApplied: decayedChunk.nostalgiaApplied === true,
                 sceneAwareDecay: decayedChunk.sceneAwareDecay || false,
                 decayMultiplier
             };
         }
 
-        recordChunkFate(debugData, chunk.hash, 'decay', 'passed', 'No decay applied', {
+        recordChunkFate(debugData, chunk.hash, 'decay', 'passed', 'No temporal weighting applied', {
             score: chunk.score
         });
         return chunk;
@@ -1527,7 +1534,7 @@ async function applyGroupsAndLinksStage(chunks, activeCollections, settings, deb
 
         // Process groups
         const groupResult = processChunkGroups(chunks, allGroups, allChunksMap, {
-            softBoost: settings.group_soft_boost || 0.15
+            softBoost: settings.group_soft_boost ?? 0.15
         });
 
         processedChunks = groupResult.chunks;
@@ -1583,7 +1590,7 @@ async function applyGroupsAndLinksStage(chunks, activeCollections, settings, deb
             const mergedMetadata = mergeVirtualLinks(chunkMetadataMap, groupResult.virtualLinks);
 
             // Process links (both explicit and group-generated)
-            const linkResult = processChunkLinks(processedChunks, mergedMetadata, settings.group_soft_boost || 0.15);
+            const linkResult = processChunkLinks(processedChunks, mergedMetadata, settings.group_soft_boost ?? 0.15);
             processedChunks = linkResult.chunks;
 
             // Handle hard-linked chunks that need to be fetched
@@ -1610,13 +1617,13 @@ async function applyGroupsAndLinksStage(chunks, activeCollections, settings, deb
             // Filter to only chunks with explicit links
             const chunksWithLinks = new Map();
             for (const [hash, meta] of chunkMetadataMap) {
-                if (meta.links && meta.links.length > 0) {
+                if ((meta.links && meta.links.length > 0) || (meta.chunkLinks && meta.chunkLinks.length > 0)) {
                     chunksWithLinks.set(hash, meta);
                 }
             }
 
             if (chunksWithLinks.size > 0) {
-                const linkResult = processChunkLinks(processedChunks, chunksWithLinks, settings.group_soft_boost || 0.15);
+                const linkResult = processChunkLinks(processedChunks, chunksWithLinks, settings.group_soft_boost ?? 0.15);
                 processedChunks = linkResult.chunks;
 
                 const boostedByExplicitLinks = processedChunks.filter(c => c.softLinked && !c.groupBoosted);
@@ -1634,13 +1641,13 @@ async function applyGroupsAndLinksStage(chunks, activeCollections, settings, deb
         const chunkMetadataMap = new Map();
         for (const chunk of processedChunks) {
             const meta = getChunkMetadata(chunk.hash) || {};
-            if (meta.links && meta.links.length > 0) {
+            if ((meta.links && meta.links.length > 0) || (meta.chunkLinks && meta.chunkLinks.length > 0)) {
                 chunkMetadataMap.set(String(chunk.hash), meta);
             }
         }
 
         if (chunkMetadataMap.size > 0) {
-            const linkResult = processChunkLinks(processedChunks, chunkMetadataMap, settings.group_soft_boost || 0.15);
+            const linkResult = processChunkLinks(processedChunks, chunkMetadataMap, settings.group_soft_boost ?? 0.15);
             processedChunks = linkResult.chunks;
 
             const boostedByExplicitLinks = processedChunks.filter(c => c.softLinked && !c.groupBoosted);
