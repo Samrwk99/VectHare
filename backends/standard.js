@@ -1,3 +1,4 @@
+import { mergeDefinedChunkMetadata } from '../utils/chunk-record-metadata.js';
 /**
  * ============================================================================
  * STANDARD BACKEND (Vectra - ST Native + Plugin)
@@ -168,18 +169,7 @@ export class StandardBackend extends VectorBackend {
                         text: item.text || '',
                         index: item.index ?? 0,
                         vector: item.vector,
-                        metadata: {
-                            ...item.metadata,
-                            keywords: item.keywords || [],
-                            importance: item.importance,
-                            customWeights: item.customWeights,
-                            disabledKeywords: item.disabledKeywords,
-                            chunkGroup: item.chunkGroup,
-                            conditions: item.conditions,
-                            summary: item.summary,
-                            isSummaryChunk: item.isSummaryChunk,
-                            parentHash: item.parentHash,
-                        },
+                        metadata: mergeDefinedChunkMetadata(item),
                     };
                     // Debug: Log first item's metadata
                     if (item === items[0] && item.keywords?.length > 0) {

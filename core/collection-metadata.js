@@ -101,6 +101,20 @@ const defaultCollectionMeta = {
     xmlTag: '',       // XML tag to wrap this collection's chunks (e.g., "memories")
 };
 
+/** Collections contain nested mutable arrays and objects; never share them across callers. */
+function cloneCollectionSettings(value) {
+    if (Array.isArray(value)) return value.map(cloneCollectionSettings);
+    if (value && typeof value === 'object') {
+        if (Object.prototype.toString.call(value) !== '[object Object]') return value;
+        return Object.fromEntries(Object.entries(value).map(([key, nested]) => [key, cloneCollectionSettings(nested)]));
+    }
+    return value;
+}
+
+function defaultCollectionSettings() {
+    return cloneCollectionSettings(defaultCollectionMeta);
+}
+
 const defaultChatCollectionPolicy = {
     mode: 'normal', // 'normal', 'prefer_selected', 'only_selected'
     selectedCollections: [],
@@ -251,20 +265,20 @@ function resolveStoredCollectionKey(collectionId) {
 export function getCollectionMeta(collectionId) {
     // VEC-26: Add comprehensive null checks
     if (!ensureCollectionsObject()) {
-        return { ...defaultCollectionMeta };
+        return defaultCollectionSettings();
     }
 
     const key = resolveStoredCollectionKey(collectionId);
     const stored = key ? extension_settings.vecthare.collections[key] : null;
 
     if (!stored) {
-        return { ...defaultCollectionMeta };
+        return defaultCollectionSettings();
     }
 
     // Merge with defaults to ensure all fields exist
     return {
-        ...defaultCollectionMeta,
-        ...stored,
+        ...defaultCollectionSettings(),
+        ...cloneCollectionSettings(stored),
     };
 }
 
@@ -285,9 +299,9 @@ export function setCollectionMeta(collectionId, data) {
     const existing = extension_settings.vecthare.collections[key] || {};
 
     extension_settings.vecthare.collections[key] = {
-        ...defaultCollectionMeta,
-        ...existing,
-        ...data,
+        ...defaultCollectionSettings(),
+        ...cloneCollectionSettings(existing),
+        ...cloneCollectionSettings(data),
     };
 
     saveSettingsDebounced();
@@ -314,8 +328,8 @@ export function deleteCollectionMeta(collectionId) {
  * @returns {object} Map of collectionId -> metadata
  */
 export function getAllCollectionMeta() {
-    ensureCollectionsObject();
-    return extension_settings.vecthare.collections;
+    if (!ensureCollectionsObject()) return {};
+    return cloneCollectionSettings(extension_settings.vecthare.collections);
 }
 
 // ============================================================================
@@ -619,7 +633,7 @@ export function migrateOldEnabledKeys() {
             // Only migrate if we don't already have metadata for this collection
             if (!extension_settings.vecthare.collections[collectionId]) {
                 extension_settings.vecthare.collections[collectionId] = {
-                    ...defaultCollectionMeta,
+                    ...defaultCollectionSettings(),
                     enabled: enabled !== false,
                 };
                 console.log(`VectHare: Migrated enabled key for ${collectionId}`);
@@ -912,10 +926,10 @@ export function ensureCollectionMeta(collectionId, initialData = {}) {
         }
 
         extension_settings.vecthare.collections[collectionId] = {
-            ...defaultCollectionMeta,
+            ...defaultCollectionSettings(),
             temporalDecay: getDefaultDecayForType(collectionType),
             createdAt: Date.now(),
-            ...initialData,
+            ...cloneCollectionSettings(initialData),
         };
         saveSettingsDebounced();
         console.log(`VectHare: Created metadata for new collection ${collectionId} (type: ${collectionType})`);

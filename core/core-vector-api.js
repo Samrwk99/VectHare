@@ -1,3 +1,4 @@
+import { completeSavedChunkMetadata } from '../utils/chunk-record-metadata.js';
 /**
  * ============================================================================
  * CORE VECTOR API CLIENT
@@ -711,7 +712,7 @@ export async function getSavedHashes(collectionId, settings, includeMetadata = f
             'Read collection metadata'
         );
         const items = data?.items || data?.chunks || [];
-        const metaByHash = new Map(items.map(item => [String(item.hash), item.metadata || item]));
+        const metaByHash = new Map(items.map(item => [String(item.hash), completeSavedChunkMetadata(item)]));
         return {
             hashes: hashes,
             metadata: hashes.map(h => metaByHash.get(String(h)) || {}),

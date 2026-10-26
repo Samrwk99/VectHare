@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
+import { mergeDefinedChunkMetadata, trustedQueryMetadata } from '../utils/chunk-record-metadata.js';
 import { requireListedItems, requireQueryItems, hybridEndpointUnsupported } from '../utils/backend-response-validation.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -28,6 +29,7 @@ function adapter(file, replies = []) {
         getProviderSpecificParams: () => ({}),
         VECTOR_LIST_LIMIT: 100,
         requireListedItems, requireQueryItems, hybridEndpointUnsupported,
+        mergeDefinedChunkMetadata, trustedQueryMetadata,
         fetch: async (url, opts) => {
             calls.push({ url, opts });
             assert.ok(replies.length > 0, `No fake response for ${url}`);

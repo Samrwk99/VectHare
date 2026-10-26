@@ -1,3 +1,4 @@
+import { mergeDefinedChunkMetadata, trustedQueryMetadata } from '../utils/chunk-record-metadata.js';
 /**
  * ============================================================================
  * QDRANT BACKEND (via Unified Plugin API)
@@ -269,19 +270,7 @@ export class QdrantBackend extends VectorBackend {
                             textWithKeywords += ` [KEYWORDS: ${keywordTexts}]`;
                         }
 
-                        const metadata = {
-                            ...item.metadata,
-                            // Pass through VectHare-specific fields
-                            importance: item.importance,
-                            keywords: item.keywords,
-                            customWeights: item.customWeights,
-                            disabledKeywords: item.disabledKeywords,
-                            chunkGroup: item.chunkGroup,
-                            conditions: item.conditions,
-                            summary: item.summary,
-                            isSummaryChunk: item.isSummaryChunk,
-                            parentHash: item.parentHash,
-                        };
+                        const metadata = mergeDefinedChunkMetadata(item);
 
                         // Add content_type for multitenancy mode
                         if (settings.qdrant_multitenancy) {
@@ -422,12 +411,7 @@ export class QdrantBackend extends VectorBackend {
         // Reject application-level failures even when HTTP returned 200.
         const items = requireQueryItems(data, 'qdrant');
         const hashes = items.map(r => r.hash);
-        const metadata = items.map(r => ({
-            hash: r.hash,
-            text: r.text,
-            score: r.score,
-            ...r.metadata,
-        }));
+        const metadata = items.map(r => trustedQueryMetadata(r));
 
         return { hashes, metadata };
     }
@@ -484,12 +468,7 @@ export class QdrantBackend extends VectorBackend {
 
                     results[collectionId] = {
                         hashes: resultArray.map(r => r.hash),
-                        metadata: resultArray.map(r => ({
-                            hash: r.hash,
-                            text: r.text,
-                            score: r.score,
-                            ...r.metadata,
-                        })),
+                        metadata: resultArray.map(r => trustedQueryMetadata(r)),
                     };
                 } else {
                     const errorBody = await response.text().catch(() => 'No response body');

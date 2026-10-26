@@ -166,71 +166,63 @@ async function saveAllChanges() {
         return;
     }
 
-    try {
-        for (const [hash, updates] of pendingChanges) {
-            // Check what kind of update is needed
-            if (updates.text) {
-                // Text changed - requires re-embedding
+    let savedCount = 0;
+    const errors = [];
+    // Snapshot the work but keep uncommitted updates in pendingChanges.
+    for (const [hash, updates] of [...pendingChanges]) {
+        try {
+            if (updates.text !== undefined) {
                 await updateChunkText(currentCollectionId, hash, updates.text, currentSettings);
             }
 
-            // Handle new summaries - vectorize them
             if (updates._newSummaries?.length > 0) {
                 for (const summaryText of updates._newSummaries) {
                     const summaryHash = getStringHash(summaryText);
-                    const summaryItem = {
+                    await insertVectorItems(currentCollectionId, [{
                         text: summaryText,
                         hash: summaryHash,
                         index: 0,
                         keywords: [],
-                        metadata: {
-                            isSummary: true,
-                            parentHash: hash,
-                            contentType: 'summary',
-                        },
-                    };
-                    await insertVectorItems(currentCollectionId, [summaryItem], currentSettings);
+                        metadata: { isSummary: true, parentHash: hash, contentType: 'summary' },
+                    }], currentSettings);
                 }
             }
 
-            // Handle deleted summaries - remove vectors
             if (updates._deletedSummaries?.length > 0) {
                 const hashesToDelete = updates._deletedSummaries.map(text => getStringHash(text));
                 await deleteVectorItems(currentCollectionId, hashesToDelete, currentSettings);
             }
 
-            // Save to local settings FIRST (without temp tracking fields)
-            const toSave = { ...updates };
-            delete toSave._newSummaries;
-            delete toSave._deletedSummaries;
-            delete toSave.text; // Don't save text to metadata here
-            const existing = getChunkMetadata(hash) || {};
-            saveChunkMetadata(hash, { ...existing, ...toSave });
-
-            // Only call updateChunkMetadata if there are non-metadata changes
-            // (metadata-only updates should skip the API call)
             const metadataUpdates = { ...updates };
             delete metadataUpdates.text;
             delete metadataUpdates._newSummaries;
             delete metadataUpdates._deletedSummaries;
 
-            if (Object.keys(metadataUpdates).length > 0 ) {
-                // Send metadata updates (keywords, conditions, etc.) to backend
-                try {
-                    await updateChunkMetadata(currentCollectionId, hash, metadataUpdates, currentSettings);
-                } catch (e) {
-                    console.warn('VectHare: Failed to update metadata in backend:', e);
-                    // Don't fail - local metadata was already saved
+            // Persist local overrides only after a successful backend update.
+            // This prevents an unsynced edit from being presented as fully saved.
+            if (Object.keys(metadataUpdates).length > 0) {
+                const acknowledged = await updateChunkMetadata(currentCollectionId, hash, metadataUpdates, currentSettings);
+                if (acknowledged === false || acknowledged?.success === false || acknowledged?.error) {
+                    throw new Error('Backend did not accept chunk metadata update');
                 }
             }
+            if (Object.keys(metadataUpdates).length > 0) {
+                const existing = getChunkMetadata(hash) || {};
+                saveChunkMetadata(hash, { ...existing, ...metadataUpdates });
+            }
+            pendingChanges.delete(hash);
+            savedCount++;
+        } catch (error) {
+            errors.push({ hash, reason: error?.message || String(error) });
+            console.warn('VectHare: Chunk changes remain unsaved after backend failure:', error);
         }
+    }
 
-        pendingChanges.clear();
-        hasUnsavedChanges = false;
-        toastr.success(`Saved changes to ${count} chunk(s)`, 'VectHare');
-    } catch (error) {
-        console.error('VectHare: Failed to save changes', error);
-        toastr.error(`Failed to save changes: ${error.message}`, 'VectHare');
+    hasUnsavedChanges = pendingChanges.size > 0;
+    if (errors.length) {
+        toastr.warning(`Saved ${savedCount} of ${count} chunk(s); ${errors.length} still have unsaved changes. Retry after checking the backend.`, 'VectHare');
+    } else {
+        toastr.success(`Saved changes to ${savedCount} chunk(s)`, 'VectHare');
     }
 }
 

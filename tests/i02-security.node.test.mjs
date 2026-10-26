@@ -6,6 +6,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { clearBananaBreadKey } from '../utils/credential-controls.js';
+import { mergeDefinedChunkMetadata, trustedQueryMetadata } from '../utils/chunk-record-metadata.js';
 import { requireListedItems, requireQueryItems, hybridEndpointUnsupported } from '../utils/backend-response-validation.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -130,6 +131,7 @@ async function qdrantWithMock(fetchImpl) {
         './provider-params.js': { getProviderSpecificParams: () => ({}) },
         '../core/constants.js': { VECTOR_LIST_LIMIT: 10000 },
         '../utils/backend-response-validation.js': { requireListedItems, requireQueryItems, hybridEndpointUnsupported },
+        '../utils/chunk-record-metadata.js': { mergeDefinedChunkMetadata, trustedQueryMetadata },
     };
     const mod = new vm.SourceTextModule(source('backends/qdrant.js'), { context });
     await mod.link(spec => {

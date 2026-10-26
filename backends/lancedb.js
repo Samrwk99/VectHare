@@ -1,3 +1,4 @@
+import { mergeDefinedChunkMetadata, trustedQueryMetadata } from '../utils/chunk-record-metadata.js';
 /**
  * ============================================================================
  * LANCEDB BACKEND (via Unified Plugin API)
@@ -128,19 +129,7 @@ export class LanceDBBackend extends VectorBackend {
                     text: item.text,
                     index: item.index,
                     vector: item.vector,
-                    metadata: {
-                        ...item.metadata,
-                        // Pass through VectHare-specific fields
-                        importance: item.importance,
-                        keywords: item.keywords,
-                        customWeights: item.customWeights,
-                        disabledKeywords: item.disabledKeywords,
-                        chunkGroup: item.chunkGroup,
-                        conditions: item.conditions,
-                        summary: item.summary,
-                        isSummaryChunk: item.isSummaryChunk,
-                        parentHash: item.parentHash,
-                    } || {},
+                    metadata: mergeDefinedChunkMetadata(item),
                 })),
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
@@ -202,12 +191,7 @@ export class LanceDBBackend extends VectorBackend {
         // Reject application-level failures even when HTTP returned 200.
         const items = requireQueryItems(data, 'lancedb');
         const hashes = items.map(r => r.hash);
-        const metadata = items.map(r => ({
-            hash: r.hash,
-            text: r.text,
-            score: r.score,
-            ...r.metadata,
-        }));
+        const metadata = items.map(r => trustedQueryMetadata(r));
 
         return { hashes, metadata };
     }
@@ -239,12 +223,7 @@ export class LanceDBBackend extends VectorBackend {
 
                     results[collectionId] = {
                         hashes: resultArray.map(r => r.hash),
-                        metadata: resultArray.map(r => ({
-                            hash: r.hash,
-                            text: r.text,
-                            score: r.score,
-                            ...r.metadata,
-                        })),
+                        metadata: resultArray.map(r => trustedQueryMetadata(r)),
                     };
                 } else {
                     console.error(`VectHare: Query failed for ${collectionId}: ${response.status} ${response.statusText}`);
