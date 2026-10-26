@@ -1490,7 +1490,7 @@ function renderDetailPanel() {
                 </div>
                 <div class="vecthare-detail-keywords" id="vecthare_keywords_container">
                     ${plaintextKeywordMode ? `
-                        <textarea class="vecthare-keyword-plaintext" id="vecthare_keywords_plaintext" placeholder="keyword:1.5x, another:2x, plain">${data.keywords.map(k => k.weight !== 1.0 ? `${k.text}:${k.weight}x` : k.text).join(', ')}</textarea>
+                        <textarea class="vecthare-keyword-plaintext" id="vecthare_keywords_plaintext" placeholder="keyword:1.5x, another:2x, plain">${escapeHtml(data.keywords.map(k => k.weight !== 1.0 ? `${k.text}:${k.weight}x` : k.text).join(', '))}</textarea>
                         <div class="vecthare-keyword-plaintext-hint">Format: keyword:2x for boost, or just keyword (defaults to 1.5x)</div>
                     ` : `
                         <div class="vecthare-keywords-list">
@@ -2272,10 +2272,11 @@ function bulkSetEnabled(enabled) {
 // ============================================================================
 
 function escapeHtml(text) {
-    if (!text) return '';
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    if (text === null || text === undefined) return '';
+    // Escape quotes as well as angle brackets: values are used in attributes
+    // (title, data-*, and input value) in addition to text nodes.
+    const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+    return String(text).replace(/[&<>"']/g, character => entities[character]);
 }
 
 function debounce(func, wait) {

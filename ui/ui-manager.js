@@ -10,7 +10,7 @@
  * ============================================================================
  */
 
-import { saveSettingsDebounced, getCurrentChatId, eventSource, event_types } from '../../../../../script.js';
+import { saveSettingsDebounced, getCurrentChatId, getRequestHeaders, eventSource, event_types } from '../../../../../script.js';
 import { extension_settings, openThirdPartyExtensionMenu } from '../../../../extensions.js';
 import { writeSecret, SECRET_KEYS, secret_state, readSecretState } from '../../../../secrets.js';
 import { getWebLlmProvider as getSharedWebLlmProvider } from '../providers/webllm.js';
@@ -25,6 +25,7 @@ import { getChatCollectionId } from '../core/chat-vectorization.js';
 import { doesChatHaveVectors } from '../core/collection-loader.js';
 import { getModelField } from '../core/providers.js';
 import { getChunkingStrategies } from '../core/content-types.js';
+import { clearBananaBreadKey } from '../utils/credential-controls.js';
 
 /**
  * Applies the current settings snapshot without overwriting collection metadata
@@ -232,6 +233,7 @@ export function renderSettings(containerId, settings, callbacks) {
                                     <small>BananaBread API Key:</small>
                                 </label>
                                 <input type="password" id="vecthare_bananabread_apikey" class="vecthare-input" placeholder="Paste key here to save..." autocomplete="off" />
+                                <button type="button" id="vecthare_bananabread_clear_apikey" class="vecthare-btn-sm" title="Clear the BananaBread key from VectHare and SillyTavern secrets">Clear API Key</button>
                             </div>
 
                             <!-- WebLLM Model -->
@@ -2618,10 +2620,7 @@ function bindSettingsEvents(settings, callbacks) {
         const savedKey = settings.bananabread_api_key;
         if (savedKey) {
             // Mask the key for display (show last 4 chars)
-            const masked = savedKey.length > 4
-                ? '*'.repeat(Math.min(savedKey.length - 4, 8)) + savedKey.slice(-4)
-                : '*'.repeat(savedKey.length);
-            $('#vecthare_bananabread_apikey').attr('placeholder', `Key saved: ${masked}`);
+            $('#vecthare_bananabread_apikey').attr('placeholder', 'API key saved');
         } else {
             $('#vecthare_bananabread_apikey').attr('placeholder', 'Paste key here to save...');
         }
@@ -2629,20 +2628,50 @@ function bindSettingsEvents(settings, callbacks) {
     updateBananaBreadKeyDisplay();
 
     $('#vecthare_bananabread_apikey')
-        .on('change', async function() {
-            const value = String($(this).val()).trim();
-            if (value) {
-                // Store in extension settings (primary storage for this key)
+        .off('change.vecthareBananaBread')
+        .on('change.vecthareBananaBread', async function() {
+            const input = $(this);
+            const value = String(input.val()).trim();
+            if (!value) return; // Clearing is an explicit operation, not a no-op edit.
+            try {
+                // Keep both stores consistent: only update settings after ST accepts the write.
+                await writeSecret('bananabread_api_key', value);
                 settings.bananabread_api_key = value;
                 applySettingsSnapshot(settings);
                 saveSettingsDebounced();
-
-                // Also write to ST secrets for potential future compatibility
-                await writeSecret('bananabread_api_key', value);
-
                 toastr.success('BananaBread API key saved');
-                $(this).val('');
+                input.val('');
                 updateBananaBreadKeyDisplay();
+            } catch (error) {
+                // Never log secrets or server error payloads that may contain them.
+                console.error('VectHare: Could not save BananaBread API key');
+                toastr.error('BananaBread API key could not be saved');
+            }
+        });
+
+    $('#vecthare_bananabread_clear_apikey')
+        .off('click.vecthareBananaBread')
+        .on('click.vecthareBananaBread', async function() {
+            const button = $(this);
+            button.prop('disabled', true);
+            try {
+                // Confirm the server revoked the secret before clearing local state.
+                await clearBananaBreadKey(settings, fetch, getRequestHeaders(), () => {
+                    applySettingsSnapshot(settings);
+                    saveSettingsDebounced();
+                });
+                // The ST UI caches a boolean for this custom secret when available.
+                if (secret_state && Object.hasOwn(secret_state, 'bananabread_api_key')) {
+                    secret_state.bananabread_api_key = false;
+                }
+                $('#vecthare_bananabread_apikey').val('');
+                updateBananaBreadKeyDisplay();
+                toastr.success('BananaBread API key cleared');
+            } catch (error) {
+                console.error('VectHare: Could not clear BananaBread secret');
+                toastr.error('Could not clear BananaBread API key in secret storage; saved settings were preserved');
+            } finally {
+                button.prop('disabled', false);
             }
         });
 

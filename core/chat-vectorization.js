@@ -1691,8 +1691,8 @@ function deduplicateChunks(chunks, chat, settings, debugData) {
         if (isInChat) {
             const matchedMsg = chatHashMap.get(chunk.hash);
             console.debug(`[VectHare Dedup] ❌ SKIPPING chunk (hash: ${chunk.hash})`);
-            console.debug(`  Chunk text: "${chunk.text?.substring(0, 80)}..."`);
-            console.debug(`  Matches chat message #${matchedMsg.index} from ${matchedMsg.name}: "${matchedMsg.preview}..."`);
+            // Do not log private conversation text.
+            console.debug(`  Matches chat message #${matchedMsg.index}`);
             console.debug(`  Score: ${chunk.score?.toFixed(4)}, Collection: ${chunk.collectionId}`);
 
             skipped.push(chunk);
@@ -1702,7 +1702,7 @@ function deduplicateChunks(chunks, chat, settings, debugData) {
             );
         } else {
             console.debug(`[VectHare Dedup] ✅ KEEPING chunk (hash: ${chunk.hash}, score: ${chunk.score?.toFixed(4)})`);
-            console.debug(`  Text: "${chunk.text?.substring(0, 80)}..."`);
+            // Do not log private conversation text.
 
             toInject.push(chunk);
             recordChunkFate(debugData, chunk.hash, 'injection', 'passed',
@@ -1853,7 +1853,7 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
         console.log(`      Score: ${chunk.score?.toFixed(4)}`);
         console.log(`      Collection: ${chunk.collectionId}`);
         console.log(`      Text length: ${textLength} chars ${!hasValidText ? '⚠️' : '✓'}`);
-        console.log(`      Text preview: "${chunk.text?.substring(0, 120)}${textLength > 120 ? '...' : ''}"`);
+        // Do not log private chunk text.
         console.log('      ─────────────────────────────────────────────────────────────────');
     });
     if (emptyTextCount > 0) {
@@ -1880,7 +1880,7 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
         const insertedText = buildNestedInjectionText(group.chunks, settings);
 
         console.log(`[VectHare Injection Control] Single position injection: position="${group.position}", depth=${group.depth}, chunks=${group.chunks.length}, textLength=${insertedText.length}`);
-        console.log(`[VectHare Injection Control] Injection text preview: "${insertedText.substring(0, 200)}${insertedText.length > 200 ? '...' : ''}"`);
+        // Do not log prompt contents.
 
         setExtensionPrompt(EXTENSION_PROMPT_TAG, insertedText, group.position, group.depth, false);
 
@@ -1894,13 +1894,12 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
             valueLength: verifiedPrompt?.value?.length,
             position: verifiedPrompt?.position,
             depth: verifiedPrompt?.depth,
-            valuePreview: verifiedPrompt?.value?.substring(0, 100)
         });
 
         if (!injectionVerified) {
             console.warn('VectHare: ⚠️ Injection verification failed!', {
-                expected: insertedText.substring(0, 100) + '...',
-                actual: verifiedPrompt?.value?.substring(0, 100) + '...',
+                expectedLength: insertedText.length,
+                actualLength: verifiedPrompt?.value?.length,
                 promptExists: !!verifiedPrompt
             });
         }
@@ -1950,8 +1949,8 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
         if (!verified) {
             console.warn(`VectHare: ⚠️ Injection verification failed for position ${key}`, {
                 tag,
-                expected: groupText.substring(0, 100) + '...',
-                actual: verifiedPrompt?.value?.substring(0, 100) + '...'
+                expectedLength: groupText.length,
+                actualLength: verifiedPrompt?.value?.length
             });
             allVerified = false;
         }
@@ -2054,7 +2053,7 @@ export async function rearrangeChat(chat, settings, type) {
             baseWeight: settings.keyword_boost_base_weight || 1.5
         });
         const queryKeywordTexts = queryKeywords.map(kw => kw.text.toLowerCase());
-        console.log(`VectHare: Extracted ${queryKeywords.length} keywords from query:`, queryKeywordTexts);
+        console.log(`VectHare: Extracted ${queryKeywords.length} keywords from query`);
 
         // === STAGE 3: Filter by activation conditions ===
         let activeCollections = [];
@@ -2889,7 +2888,7 @@ export async function repairChatVectors(settings, batchSize = 5) {
             console.log(`  [stale] hash ${hash} (msgIds: ${extractMessageIds(meta).join(',') || '?'})`);
         }
         for (const item of replacements) {
-            console.log(`  [replace] hash ${item.hash} (msgIds: ${extractMessageIds(item.metadata).join(',') || '?'}) text: "${String(item.text).substring(0, 60)}..."`);
+            console.log(`  [replace] hash ${item.hash} (msgIds: ${extractMessageIds(item.metadata).join(',') || '?'})`);
         }
 
         if (hashesToDelete.length === 0 && replacements.length === 0) {

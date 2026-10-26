@@ -73,7 +73,7 @@ export class QdrantBackend extends VectorBackend {
                 host: null,
                 port: null,
             };
-            console.log('VectHare: Initializing Qdrant Cloud:', config.url);
+            console.log('VectHare: Initializing Qdrant Cloud');
         } else {
             // Local mode: use host and port
             config = {
@@ -86,7 +86,7 @@ export class QdrantBackend extends VectorBackend {
             console.log('VectHare: Initializing local Qdrant:', `${config.host}:${config.port}`);
         }
 
-        console.log('VectHare: Sending Qdrant config to Similharity plugin:', JSON.stringify(config));
+        // Never log initialization payloads: they may contain Qdrant credentials.
 
         const response = await fetch('/api/plugins/similharity/backend/init/qdrant', {
             method: 'POST',
@@ -95,12 +95,11 @@ export class QdrantBackend extends VectorBackend {
         });
 
         if (!response.ok) {
-            const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`[Qdrant] Failed to initialize Qdrant: ${response.status} ${response.statusText} - ${errorBody}`);
+            // Backend responses may echo API keys or authenticated URLs. Do not log the body.
+            throw new Error(`[Qdrant] Failed to initialize Qdrant (HTTP ${response.status})`);
         }
 
-        const responseData = await response.json().catch(() => ({}));
-        console.log('VectHare: Qdrant initialization response:', responseData);
+        // Do not log arbitrary backend response fields; they may echo credentials.
         console.log('VectHare: Using Qdrant backend (production-grade vector search)');
     }
 

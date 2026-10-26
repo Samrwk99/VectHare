@@ -148,7 +148,7 @@ export function setLastSearchDebug(data) {
     }
 
     console.log('VectHare Debug: Stored search debug data', {
-        query: data.query?.substring(0, 50) + '...',
+        queryLength: data.query?.length || 0,
         stages: {
             initial: data.stages.initial.length,
             afterDecay: data.stages.afterDecay.length,
@@ -264,7 +264,7 @@ function createModalHtml(data, historyIndex = 0) {
                         <div class="vecthare-debug-card-header vecthare-debug-clickable" id="vecthare_query_header">
                             <i class="fa-solid fa-magnifying-glass"></i>
                             <span>Query</span>
-                            <span class="vecthare-debug-timestamp">${timeAgo}</span>
+                            <span class="vecthare-debug-timestamp">${escapeHtml(timeAgo)}</span>
                             <i class="fa-solid fa-chevron-down vecthare-debug-expand-icon"></i>
                         </div>
                         <div class="vecthare-debug-card-body">
@@ -306,11 +306,11 @@ function createModalHtml(data, historyIndex = 0) {
                             <div class="vecthare-debug-settings-grid">
                                 <div class="vecthare-debug-setting">
                                     <span class="vecthare-debug-setting-label">Threshold</span>
-                                    <span class="vecthare-debug-setting-value">${data.settings.threshold || 'N/A'}</span>
+                                    <span class="vecthare-debug-setting-value">${escapeHtml(data.settings.threshold || 'N/A')}</span>
                                 </div>
                                 <div class="vecthare-debug-setting">
                                     <span class="vecthare-debug-setting-label">Top K</span>
-                                    <span class="vecthare-debug-setting-value">${data.settings.topK || 'N/A'}</span>
+                                    <span class="vecthare-debug-setting-value">${escapeHtml(data.settings.topK || 'N/A')}</span>
                                 </div>
                                 <div class="vecthare-debug-setting">
                                     <span class="vecthare-debug-setting-label">Temporal Decay</span>
@@ -318,7 +318,7 @@ function createModalHtml(data, historyIndex = 0) {
                                 </div>
                                 <div class="vecthare-debug-setting">
                                     <span class="vecthare-debug-setting-label">Collection</span>
-                                    <span class="vecthare-debug-setting-value vecthare-debug-setting-mono">${data.collectionId || 'Unknown'}</span>
+                                    <span class="vecthare-debug-setting-value vecthare-debug-setting-mono">${escapeHtml(data.collectionId || 'Unknown')}</span>
                                 </div>
                             </div>
                         </div>
@@ -510,7 +510,7 @@ function renderStageChunks(chunks, stageName, data) {
 
         // Show matched query keywords badge
         const keywordMatchInfo = chunk.matchedQueryKeywords && chunk.matchedQueryKeywords.length > 0
-            ? `<span class="vecthare-debug-keyword-match-badge" title="Matched query keywords: ${chunk.matchedQueryKeywords.join(', ')}">
+            ? `<span class="vecthare-debug-keyword-match-badge" title="Matched query keywords: ${escapeHtml(chunk.matchedQueryKeywords.join(', '))}">
                    🔑 ${chunk.matchedQueryKeywords.length} keyword${chunk.matchedQueryKeywords.length > 1 ? 's' : ''}
                </span>`
             : '';
@@ -580,7 +580,7 @@ function renderStageChunks(chunks, stageName, data) {
                     ${scoreDisplay}
                     ${keywordMatchInfo}
                     ${decayInfo}
-                    ${wasExcluded ? `<span class="vecthare-debug-excluded-badge">${wasExcluded}</span>` : ''}
+                    ${wasExcluded ? `<span class="vecthare-debug-excluded-badge">${escapeHtml(wasExcluded)}</span>` : ''}
                     <i class="fa-solid fa-chevron-down vecthare-debug-chunk-expand-icon"></i>
                 </div>
                 ${scoreBreakdown}
@@ -596,52 +596,52 @@ function renderStageChunks(chunks, stageName, data) {
                         <div class="vecthare-debug-meta-grid">
                             <div class="vecthare-debug-meta-item">
                                 <span class="meta-label">Hash</span>
-                                <span class="meta-value">${chunk.hash}</span>
+                                <span class="meta-value">${escapeHtml(chunk.hash)}</span>
                             </div>
                             ${chunk.index !== undefined ? `
                             <div class="vecthare-debug-meta-item">
                                 <span class="meta-label">Message #</span>
-                                <span class="meta-value">${chunk.index}</span>
+                                <span class="meta-value">${escapeHtml(chunk.index)}</span>
                             </div>` : ''}
                             ${chunk.messageAge !== undefined ? `
                             <div class="vecthare-debug-meta-item">
                                 <span class="meta-label">Age</span>
-                                <span class="meta-value">${chunk.messageAge} messages</span>
+                                <span class="meta-value">${escapeHtml(chunk.messageAge)} messages</span>
                             </div>` : ''}
                             ${chunk.collection || chunk.collectionId ? `
                             <div class="vecthare-debug-meta-item">
                                 <span class="meta-label">Collection</span>
-                                <span class="meta-value">${chunk.collection || chunk.collectionId}</span>
+                                <span class="meta-value">${escapeHtml(chunk.collection || chunk.collectionId)}</span>
                             </div>` : ''}
                             ${chunk.metadata?.keywords?.length ? `
                             <div class="vecthare-debug-meta-item">
                                 <span class="meta-label">Keywords</span>
-                                <span class="meta-value">${chunk.metadata.keywords.map(k => typeof k === 'object' ? `${k.text}(${k.weight}x)` : k).join(', ')}</span>
+                                <span class="meta-value">${escapeHtml(chunk.metadata.keywords.map(k => typeof k === 'object' ? `${k.text}(${k.weight}x)` : k).join(', '))}</span>
                             </div>` : ''}
                             ${chunk.matchedQueryKeywords?.length ? `
                             <div class="vecthare-debug-meta-item">
                                 <span class="meta-label">Matched Query Keywords</span>
-                                <span class="meta-value vecthare-matched-keywords">${chunk.matchedQueryKeywords.join(', ')}</span>
+                                <span class="meta-value vecthare-matched-keywords">${escapeHtml(chunk.matchedQueryKeywords.join(', '))}</span>
                             </div>` : ''}
                             ${chunk.vectorRank !== undefined ? `
                             <div class="vecthare-debug-meta-item">
                                 <span class="meta-label">Vector Rank</span>
-                                <span class="meta-value">#${chunk.vectorRank}</span>
+                                <span class="meta-value">#${escapeHtml(chunk.vectorRank)}</span>
                             </div>` : ''}
                             ${chunk.keywordRank !== undefined && chunk.keywordRank !== Infinity ? `
                             <div class="vecthare-debug-meta-item">
                                 <span class="meta-label">Keyword Rank</span>
-                                <span class="meta-value">#${chunk.keywordRank}</span>
+                                <span class="meta-value">#${escapeHtml(chunk.keywordRank)}</span>
                             </div>` : ''}
                             ${chunk.matchedKeywords !== undefined ? `
                             <div class="vecthare-debug-meta-item">
                                 <span class="meta-label">Keywords Matched</span>
-                                <span class="meta-value">${chunk.matchedKeywords} keyword${chunk.matchedKeywords !== 1 ? 's' : ''}</span>
+                                <span class="meta-value">${escapeHtml(chunk.matchedKeywords)} keyword${chunk.matchedKeywords !== 1 ? 's' : ''}</span>
                             </div>` : ''}
                             ${chunk.fusionMethod ? `
                             <div class="vecthare-debug-meta-item">
                                 <span class="meta-label">Fusion Method</span>
-                                <span class="meta-value">${chunk.fusionMethod.toUpperCase()}</span>
+                                <span class="meta-value">${escapeHtml(String(chunk.fusionMethod).toUpperCase())}</span>
                             </div>` : ''}
                         </div>
                     </div>
@@ -649,8 +649,8 @@ function renderStageChunks(chunks, stageName, data) {
 
                 <!-- Collapsed meta (shown when collapsed) -->
                 <div class="vecthare-debug-chunk-meta">
-                    <span>Hash: ${String(chunk.hash).substring(0, 12)}...</span>
-                    ${chunk.index !== undefined ? `<span>Msg #${chunk.index}</span>` : ''}
+                    <span>Hash: ${escapeHtml(String(chunk.hash).substring(0, 12))}...</span>
+                    ${chunk.index !== undefined ? `<span>Msg #${escapeHtml(chunk.index)}</span>` : ''}
                     ${hasMoreText ? `<span class="vecthare-debug-click-hint">Click to expand</span>` : ''}
                 </div>
             </div>
@@ -764,7 +764,7 @@ function buildScoreBreakdown(chunk) {
                 ${matchIndicator}
             </div>
             <div class="vecthare-score-math">
-                <span class="vecthare-score-fusion">${fusionMethod.toUpperCase()}</span>
+                <span class="vecthare-score-fusion">${escapeHtml(String(fusionMethod).toUpperCase())}</span>
                 <span class="vecthare-score-operator">→</span>
                 <span class="vecthare-score-final">${finalDisplay}</span>
             </div>
@@ -805,12 +805,12 @@ function buildScoreBreakdown(chunk) {
             boostTitle = `Matched: ${chunk.matchedKeywords.join(', ')}`;
         }
         mathParts.push(`<span class="vecthare-score-operator">×</span>`);
-        mathParts.push(`<span class="vecthare-score-boost" title="${boostTitle}">${keywordBoost.toFixed(2)}x</span>`);
+        mathParts.push(`<span class="vecthare-score-boost" title="${escapeHtml(boostTitle)}">${keywordBoost.toFixed(2)}x</span>`);
     }
 
     if (hasDecay) {
         mathParts.push(`<span class="vecthare-score-operator">×</span>`);
-        mathParts.push(`<span class="vecthare-score-decay" title="Age: ${chunk.messageAge || '?'} msgs">${decayMultiplier.toFixed(2)}↓</span>`);
+        mathParts.push(`<span class="vecthare-score-decay" title="Age: ${escapeHtml(chunk.messageAge ?? '?')} msgs">${decayMultiplier.toFixed(2)}↓</span>`);
     }
 
     mathParts.push(`<span class="vecthare-score-operator">=</span>`);
@@ -822,9 +822,9 @@ function buildScoreBreakdown(chunk) {
         const kwStr = chunk.matchedKeywordsWithWeights.map(k =>
             k.weight !== 1.5 ? `${k.text} (${k.weight}x)` : k.text
         ).join(', ');
-        keywordInfo = `<div class="vecthare-score-keywords">Keywords: ${kwStr}</div>`;
+        keywordInfo = `<div class="vecthare-score-keywords">Keywords: ${escapeHtml(kwStr)}</div>`;
     } else if (chunk.matchedKeywords?.length > 0) {
-        keywordInfo = `<div class="vecthare-score-keywords">Keywords: ${chunk.matchedKeywords.join(', ')}</div>`;
+        keywordInfo = `<div class="vecthare-score-keywords">Keywords: ${escapeHtml(chunk.matchedKeywords.join(', '))}</div>`;
     }
 
     return `<div class="vecthare-debug-score-breakdown">
@@ -875,7 +875,7 @@ function renderInjectionVerification(data) {
                 <div class="vecthare-verification-summary">
                     <div class="vecthare-verification-stat">
                         <span class="stat-label">Position</span>
-                        <span class="stat-value">${positionLabel}</span>
+                        <span class="stat-value">${escapeHtml(positionLabel)}</span>
                     </div>
                     <div class="vecthare-verification-stat">
                         <span class="stat-label">Depth</span>
@@ -917,7 +917,7 @@ function renderCriticalFailure(data) {
                     <i class="fa-solid fa-triangle-exclamation"></i>
                 </div>
                 <div>
-                    <div class="vecthare-debug-critical-title">No Chunks Injected — ${failureSummary}</div>
+                    <div class="vecthare-debug-critical-title">No Chunks Injected — ${escapeHtml(failureSummary)}</div>
                     <div class="vecthare-debug-critical-subtitle">
                         ${data.stages.initial.length === 0
                             ? 'Vector search returned no results'
@@ -937,15 +937,15 @@ function renderCriticalFailure(data) {
                         <div class="vecthare-debug-diagnosis-number">${idx + 1}</div>
                         <div class="vecthare-debug-diagnosis-content">
                             <div class="vecthare-debug-diagnosis-label">
-                                ${item.label}
+                                ${escapeHtml(item.label)}
                                 <span class="vecthare-debug-diagnosis-status ${item.isOk ? 'status-ok' : 'status-fail'}">
                                     ${item.isOk ? '✓ OK' : '✗ FAILED'}
                                 </span>
                             </div>
-                            <div class="vecthare-debug-diagnosis-detail">${item.detail}</div>
+                            <div class="vecthare-debug-diagnosis-detail">${escapeHtml(item.detail)}</div>
                             ${item.fix ? `
                                 <div class="vecthare-debug-diagnosis-fix">
-                                    <strong>Fix:</strong> ${item.fix}
+                                    <strong>Fix:</strong> ${escapeHtml(item.fix)}
                                 </div>
                             ` : ''}
                         </div>
@@ -1288,7 +1288,7 @@ function renderExcludedAnalysis(data) {
                             </div>
                             <div class="vecthare-debug-exclusion-info">
                                 <strong>${belowThreshold.length}</strong> below threshold
-                                <small>Score < ${data.settings.threshold}</small>
+                                <small>Score &lt; ${escapeHtml(data.settings.threshold)}</small>
                             </div>
                         </div>
                     ` : ''}
@@ -1356,10 +1356,11 @@ function getTimeAgo(timestamp) {
  * Escapes HTML special characters
  */
 function escapeHtml(text) {
-    if (!text) return '';
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    if (text === null || text === undefined) return '';
+    // Escape quotes as well as angle brackets: values are used in attributes
+    // (title, data-*, and input value) in addition to text nodes.
+    const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+    return String(text).replace(/[&<>"']/g, character => entities[character]);
 }
 
 // ============================================================================
@@ -1448,9 +1449,9 @@ function renderChunkFates(data) {
                         return `
                             <div class="vecthare-debug-fate-entry ${isDropped ? 'fate-dropped' : 'fate-injected'}">
                                 <div class="vecthare-debug-fate-header">
-                                    <span class="vecthare-debug-fate-hash" title="${fate.hash}">${hashShort}...</span>
+                                    <span class="vecthare-debug-fate-hash" title="${escapeHtml(fate.hash)}">${escapeHtml(hashShort)}...</span>
                                     <span class="vecthare-debug-fate-result ${isDropped ? 'result-dropped' : 'result-injected'}">
-                                        ${isDropped ? `✗ Dropped at ${fate.droppedAt}` : '✓ Injected'}
+                                        ${isDropped ? `✗ Dropped at ${escapeHtml(fate.droppedAt)}` : '✓ Injected'}
                                     </span>
                                 </div>
                                 ${isDropped && fate.finalReason ? `
@@ -1459,7 +1460,7 @@ function renderChunkFates(data) {
                                 <div class="vecthare-debug-fate-journey">
                                     ${fate.stages.map(s => `
                                         <span class="vecthare-fate-stage ${s.fate === 'dropped' ? 'stage-dropped' : s.fate === 'injected' ? 'stage-injected' : 'stage-passed'}">
-                                            ${s.stage}${s.fate === 'dropped' ? ' ✗' : s.fate === 'injected' ? ' ✓' : ''}
+                                            ${escapeHtml(s.stage)}${s.fate === 'dropped' ? ' ✗' : s.fate === 'injected' ? ' ✓' : ''}
                                         </span>
                                     `).join('<span class="vecthare-fate-arrow">→</span>')}
                                 </div>

@@ -820,20 +820,20 @@ function renderCollectionCard(collection) {
     }[collection.backend] || collection.backend;
 
   const backendBadge = collection.backend
-    ? `<span class="vecthare-badge vecthare-badge-backend" title="Vector backend">${backendDisplayName}</span>`
+    ? `<span class="vecthare-badge vecthare-badge-backend" title="Vector backend">${escapeHtml(backendDisplayName)}</span>`
     : "";
 
   // Source badge - shows embedding source (transformers, palm, openai, etc.)
   const sourceBadge =
     collection.source && collection.source !== "unknown"
-      ? `<span class="vecthare-badge vecthare-badge-source" title="Embedding source">${collection.source}</span>`
+      ? `<span class="vecthare-badge vecthare-badge-source" title="Embedding source">${escapeHtml(collection.source)}</span>`
       : "";
 
   // Model info - show current model and count if multiple
   const hasMultipleModels = collection.models && collection.models.length > 1;
   const currentModelName = collection.model || "(default)";
   const modelBadge = hasMultipleModels
-    ? `<span class="vecthare-badge vecthare-badge-model" title="Current model: ${currentModelName} (${collection.models.length} available)">📐 ${currentModelName}</span>`
+    ? `<span class="vecthare-badge vecthare-badge-model" title="Current model: ${escapeHtml(currentModelName)} (${collection.models.length} available)">📐 ${escapeHtml(currentModelName)}</span>`
     : "";
 
   // Temporal decay badge
@@ -844,7 +844,7 @@ function renderCollectionCard(collection) {
     const decayTitle = decaySummary.isCustom
       ? `Custom decay: ${decaySummary.description}`
       : `Default decay: ${decaySummary.description}`;
-    decayBadge = `<span class="vecthare-badge vecthare-badge-decay ${decaySummary.isCustom ? "vecthare-badge-decay-custom" : ""}" title="${decayTitle}">${decayIcon}</span>`;
+    decayBadge = `<span class="vecthare-badge vecthare-badge-decay ${decaySummary.isCustom ? "vecthare-badge-decay-custom" : ""}" title="${escapeHtml(decayTitle)}">${decayIcon}</span>`;
   }
 
   // Lock badge - shows if collection is locked and to how many chats
@@ -852,17 +852,17 @@ function renderCollectionCard(collection) {
   let lockBadge = "";
   if (lockCount > 0) {
     const lockTitle = `Locked to ${lockCount} chat${lockCount !== 1 ? "s" : ""}`;
-    lockBadge = `<span class="vecthare-badge vecthare-badge-lock" title="${lockTitle}">🔒 ${lockCount}</span>`;
+    lockBadge = `<span class="vecthare-badge vecthare-badge-lock" title="${escapeHtml(lockTitle)}">🔒 ${lockCount}</span>`;
   }
 
   // Use registryKey for unique identification (source:id format)
   const uniqueKey = collection.registryKey || collection.id;
 
   return `
-        <div class="vecthare-collection-card" data-collection-key="${uniqueKey}" data-status="${collection.enabled ? "active" : "paused"}">
+        <div class="vecthare-collection-card" data-collection-key="${escapeHtml(uniqueKey)}" data-status="${collection.enabled ? "active" : "paused"}">
             <div class="vecthare-collection-header">
                 <span class="vecthare-collection-title">
-                    ${typeIcon} ${collection.name}
+                    ${typeIcon} ${escapeHtml(collection.name)}
                 </span>
                 <div class="vecthare-collection-badges">
                     ${scopeBadge}
@@ -876,24 +876,24 @@ function renderCollectionCard(collection) {
             </div>
 
             <div class="vecthare-collection-meta">
-                <span>${collection.chunkCount} chunks</span>
-                <span>ID: ${collection.id}</span>
+                <span>${escapeHtml(collection.chunkCount)} chunks</span>
+                <span>ID: ${escapeHtml(collection.id)}</span>
             </div>
 
             <div class="vecthare-collection-actions">
                 <button class="vecthare-btn-sm vecthare-action-toggle"
-                        data-collection-key="${uniqueKey}"
+                        data-collection-key="${escapeHtml(uniqueKey)}"
                         data-enabled="${collection.enabled}">
                     ${collection.enabled ? icons.pause(16) + " Pause" : icons.play(16) + " Enable"}
                 </button>
                 <button class="vecthare-btn-sm vecthare-action-rename"
-                        data-collection-key="${uniqueKey}"
-                        data-current-name="${collection.name.replace(/"/g, "&quot;")}"
+                        data-collection-key="${escapeHtml(uniqueKey)}"
+                        data-current-name="${escapeHtml(collection.name)}"
                         title="Rename this collection">
                     ${icons.pencil(16)} Rename
                 </button>
                 <button class="vecthare-btn-sm vecthare-action-activation ${activationSummary.mode !== "auto" || decaySummary.isCustom ? "vecthare-has-settings" : ""}"
-                        data-collection-key="${uniqueKey}"
+                        data-collection-key="${escapeHtml(uniqueKey)}"
                         title="Configure activation, triggers, conditions, and temporal decay">
                     ${icons.settings(16)} Settings
                 </button>
@@ -901,7 +901,7 @@ function renderCollectionCard(collection) {
                   hasMultipleModels
                     ? `
                 <button class="vecthare-btn-sm vecthare-action-switch-model"
-                        data-collection-key="${uniqueKey}"
+                        data-collection-key="${escapeHtml(uniqueKey)}"
                         title="Switch embedding model (${collection.models.length} available)">
                     <i class="fa-solid fa-code-branch"></i> Model
                 </button>
@@ -909,16 +909,16 @@ function renderCollectionCard(collection) {
                     : ""
                 }
                 <button class="vecthare-btn-sm vecthare-action-open-folder"
-                        data-collection-key="${uniqueKey}"
-                        data-backend="${collection.backend}"
-                        data-source="${collection.source || "transformers"}"
+                        data-collection-key="${escapeHtml(uniqueKey)}"
+                        data-backend="${escapeHtml(collection.backend)}"
+                        data-source="${escapeHtml(collection.source || "transformers")}"
                         title="Open in file explorer">
                     ${icons.folderOpen(16)} Open Folder
                 </button>
                 <button class="vecthare-btn-sm vecthare-action-visualize"
-                        data-collection-key="${uniqueKey}"
-                        data-backend="${collection.backend}"
-                        data-source="${collection.source || "transformers"}"
+                        data-collection-key="${escapeHtml(uniqueKey)}"
+                        data-backend="${escapeHtml(collection.backend)}"
+                        data-source="${escapeHtml(collection.source || "transformers")}"
                         title="View and edit chunks in this collection">
                     ${icons.eye(16)} View Chunks
                 </button>
@@ -929,27 +929,27 @@ function renderCollectionCard(collection) {
                     </button>
                     <div class="vecthare-export-options">
                         <button class="vecthare-btn-sm vecthare-btn-json vecthare-action-export"
-                                data-collection-key="${uniqueKey}"
-                                data-collection-id="${collection.id}"
-                                data-backend="${collection.backend}"
-                                data-source="${collection.source || "transformers"}"
-                                data-model="${collection.model || ""}"
+                                data-collection-key="${escapeHtml(uniqueKey)}"
+                                data-collection-id="${escapeHtml(collection.id)}"
+                                data-backend="${escapeHtml(collection.backend)}"
+                                data-source="${escapeHtml(collection.source || "transformers")}"
+                                data-model="${escapeHtml(collection.model || "")}"
                                 title="Export as JSON (includes vectors)">
                             ${icons.fileExport(16)} JSON
                         </button>
                         <button class="vecthare-btn-sm vecthare-btn-png vecthare-action-export-png"
-                                data-collection-key="${uniqueKey}"
-                                data-collection-id="${collection.id}"
-                                data-backend="${collection.backend}"
-                                data-source="${collection.source || "transformers"}"
-                                data-model="${collection.model || ""}"
+                                data-collection-key="${escapeHtml(uniqueKey)}"
+                                data-collection-id="${escapeHtml(collection.id)}"
+                                data-backend="${escapeHtml(collection.backend)}"
+                                data-source="${escapeHtml(collection.source || "transformers")}"
+                                data-model="${escapeHtml(collection.model || "")}"
                                 title="Export as PNG (shareable image)">
                             ${icons.image(16)} PNG
                         </button>
                     </div>
                 </div>
                 <button class="vecthare-btn-sm vecthare-btn-danger vecthare-action-delete"
-                        data-collection-key="${uniqueKey}">
+                        data-collection-key="${escapeHtml(uniqueKey)}">
                     ${icons.trash(16)} Delete
                 </button>
             </div>
@@ -1042,10 +1042,11 @@ function formatBytes(bytes) {
  * @returns {string} Escaped text
  */
 function escapeHtml(text) {
-  if (!text) return "";
-  const div = document.createElement("div");
-  div.textContent = text;
-  return div.innerHTML;
+    if (text === null || text === undefined) return '';
+    // Escape quotes as well as angle brackets: values are used in attributes
+    // (title, data-*, and input value) in addition to text nodes.
+    const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+    return String(text).replace(/[&<>"']/g, character => entities[character]);
 }
 
 /**
@@ -3339,9 +3340,9 @@ function renderSearchResults(results, query, originalResults = null) {
                 </div>
 
                 <button class="vecthare-btn-sm vecthare-action-visualize"
-                        data-collection-key="${uniqueKey}"
-                        data-backend="${collection.backend}"
-                        data-source="${collection.source || "transformers"}"
+                        data-collection-key="${escapeHtml(uniqueKey)}"
+                        data-backend="${escapeHtml(collection.backend)}"
+                        data-source="${escapeHtml(collection.source || "transformers")}"
                         title="View and edit chunks in this collection">
                     ${icons.eye(16)} View Chunks
                 </button>
