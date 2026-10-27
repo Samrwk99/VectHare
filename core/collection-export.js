@@ -102,6 +102,7 @@ const EXPORTED_CHUNK_FIELDS = [
     'disabledKeywords', 'keywordLevel', 'keywordBaseWeight', 'importance', 'conditions',
     'chunkGroup', 'summary', 'isSummaryChunk', 'parentHash', 'speaker', 'isUser',
     'messageId', 'messageIds', 'messageHashes', 'startIndex', 'endIndex', 'strategy',
+    'recordId', 'logicalGroupIds', 'contentFingerprint', 'messageRef', 'messageRefs', 'speakers', 'sceneStartRef', 'sceneEndRef',
     'chunkingStrategy', 'isScene', 'sceneStart', 'sceneEnd', 'sceneId', 'sceneIndex',
     'groupId', 'parentId', 'linkedChunks', 'linkedHashes', 'isGrouped',
 ];

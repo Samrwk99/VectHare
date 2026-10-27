@@ -93,7 +93,7 @@ export async function getSemanticWorldInfoEntries(recentMessages, activeEntries,
                     if (score >= threshold) {
                         // Extract WI entry data from metadata
                         const entry = {
-                            uid: meta.uid || meta.hash,
+                            uid: meta.entryUid ?? meta.uid ?? meta.hash,
                             key: meta.keywords || meta.entryName || [],
                             content: meta.text || '',
                             score: score,

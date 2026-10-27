@@ -1,3 +1,4 @@
+import {recordId, fingerprint, stampMessageUids, messageReference, groupRecordLocalId, checkCollision, MESSAGE_UID_FIELD} from '../utils/record-identity.js';
 import {hasVerifiedCapability} from '../utils/backend-contracts.js';
 import {chatJobs, anyJobSignal,currentChatIdentity} from './chat-job-runtime.js';
 import {scopedActivationHistory} from '../utils/activation-history.js';
@@ -64,6 +65,7 @@ import { EXTENSION_PROMPT_TAG, LEGACY_WORLD_INFO_PROMPT_TAG, HASH_CACHE_SIZE } f
 // Import from collection-ids.js - single source of truth for collection ID operations
 import {
     getChatUUID,
+    getVerifiedChatOriginId,
     buildChatCollectionId,
     buildLegacyChatCollectionId,
     getAllChatCollectionIds,
@@ -72,6 +74,40 @@ import {
 } from './collection-ids.js';
 
 // Hash cache for performance
+/** Save stamped UIDs with the chat before considering them durable. If the host has
+ * no verified chat ID or save API, preserve legacy positional behavior instead.
+ * A failed save rolls back the in-memory stamps rather than implying persistence.
+ */
+async function ensureDurableMessageUids(chat, context, job) {
+    const chatId = getVerifiedChatOriginId();
+    if (!chatId || typeof context?.saveChat !== 'function') return false;
+    const oldExtras = chat.map(msg => msg && typeof msg === 'object' ? msg.extra : undefined);
+    let saveAccepted = false;
+    try {
+        const result = stampMessageUids(chat);
+        if (result.changed) {
+            const receipt = await context.saveChat();
+            if (receipt === false) throw new Error('Host rejected chat save');
+        }
+        saveAccepted = true;
+    } catch (error) {
+        // Do not leave newly created, unpersisted IDs on in-memory messages.
+        if (!saveAccepted) {
+            for (let i = 0; i < chat.length; i++) {
+                if (!chat[i] || typeof chat[i] !== 'object') continue;
+                if (oldExtras[i] === undefined) delete chat[i].extra;
+                else chat[i].extra = oldExtras[i];
+            }
+        }
+        console.warn('VectHare C07: stable chat identities unavailable; using legacy positions:', error.message);
+        return false;
+    }
+    // The save may have succeeded immediately before a chat switch. Never
+    // roll back a potentially persisted UID or continue using a stale chat.
+    job.assertCurrent();
+    return true;
+}
+
 const hashCache = new LRUCache(HASH_CACHE_SIZE);
 
 // Synchronization state
@@ -320,11 +356,14 @@ function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel
                 grouped.push({
                     text: combinedText,
                     hash: getStringHash(combinedRaw),
+                    raw: combinedRaw,
                     index: pair[0].index,
                     keywords: getKeywords(combinedText),
                     metadata: {
                         strategy: 'conversation_turns',
                         messageIds: pair.map(m => m.index),
+                        messageRefs: pair.map(m => m.messageRef).filter(Boolean),
+                        speakers: pair.map(m => m.speaker),
                         messageHashes: pair.map(m => m.hash), // Store individual hashes for injection lookup
                         startIndex: pair[0].index,
                         endIndex: pair[pair.length - 1].index
@@ -353,12 +392,15 @@ function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel
                 grouped.push({
                     text: combinedText,
                     hash: getStringHash(combinedRaw),
+                    raw: combinedRaw,
                     index: batch[0].index,
                     keywords: getKeywords(combinedText),
                     metadata: {
                         strategy: 'message_batch',
                         batchSize: batch.length,
                         messageIds: batch.map(m => m.index),
+                        messageRefs: batch.map(m => m.messageRef).filter(Boolean),
+                        speakers: batch.map(m => m.speaker),
                         messageHashes: batch.map(m => m.hash), // Store individual hashes for injection lookup
                         startIndex: batch[0].index,
                         endIndex: batch[batch.length - 1].index
@@ -374,12 +416,16 @@ function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel
             return messages.map(m => ({
                 text: m.text,
                 hash: m.hash,
+                raw: rawOf(m),
                 index: m.index,
                 is_user: m.is_user,
                 keywords: getKeywords(m.text),
                 metadata: {
                     strategy: 'per_message',
                     messageId: m.index,
+                    ...(m.messageRef ? {messageRef:m.messageRef, messageRefs:[m.messageRef]} : {}),
+                    speaker: m.speaker,
+                    isUser: m.is_user,
                     messageHashes: [m.hash] // Consistent with grouped strategies
                 }
             }));
@@ -395,7 +441,7 @@ function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel
  * @param {object} settings VectHare settings
  * @returns {object[]} Grouped items
  */
-function collectGroupedItems(chat, settings) {
+function collectGroupedItems(chat, settings, collectionId = null, durableUids = false) {
     const strategy = settings.chunking_strategy || 'per_message';
     const strategyBatchSize = settings.batch_size || 4;
     const keywordLevel = settings.keyword_extraction_level || 'balanced';
@@ -411,11 +457,43 @@ function collectGroupedItems(chat, settings) {
             raw: getTextWithoutAttachments(msg), // R22: unsubstituted, consumed by grouped strategies' stable hashing
             hash: getStringHash(getTextWithoutAttachments(msg)), // R22: raw text, not substituted - stable identity across reloads
             index: i,
-            is_user: msg.is_user
+            is_user: msg.is_user,
+            speaker: msg.name || (msg.is_user ? 'User' : 'Character'),
+            messageRef: durableUids ? messageReference(getVerifiedChatOriginId(), msg) : null
         });
     }
 
-    return groupMessagesByStrategy(allMessages, strategy, strategyBatchSize, keywordLevel, settings.conversation_turn_order);
+    const items = groupMessagesByStrategy(allMessages, strategy, strategyBatchSize, keywordLevel, settings.conversation_turn_order);
+    const collision = checkCollision(items);
+    if (!collision.safe) throw new Error('C07: distinct chat content shares a backend hash; write blocked pending safe migration');
+    // Standard's physical key is a text hash. Merge same-text records while
+    // retaining all message memberships; never send two conflicting writes.
+    const merged = new Map();
+    const qualifiedKey = collectionId ? `${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}` : null;
+    for (const item of items) {
+        const key = String(item.hash);
+        if (!merged.has(key)) {
+            const refs = item.metadata.messageRefs || [];
+            item.metadata = {...item.metadata,
+                ...(qualifiedKey ? {recordId: recordId(qualifiedKey, `hash:${key}`)} : {}),
+                ...(refs.length ? {logicalGroupIds: [groupRecordLocalId(refs, strategy)]} : {}),
+                contentFingerprint: fingerprint(item.raw),
+            };
+            merged.set(key, item);
+            continue;
+        }
+        const prior = merged.get(key);
+        const combined = [...new Set([...(prior.metadata.messageRefs || []), ...(item.metadata.messageRefs || [])])];
+        const indices = [...new Set([...(prior.metadata.messageIds || [prior.metadata.messageId]), ...(item.metadata.messageIds || [item.metadata.messageId])])].filter(Number.isInteger);
+        prior.metadata = {...prior.metadata,
+            messageRefs: combined, messageIds: indices,
+            messageHashes: [...new Set([...(prior.metadata.messageHashes || []), ...(item.metadata.messageHashes || [])])],
+            speakers: [...new Set([...(prior.metadata.speakers || [prior.metadata.speaker]), ...(item.metadata.speakers || [item.metadata.speaker])].filter(Boolean))],
+            startIndex: Math.min(...indices), endIndex: Math.max(...indices),
+            logicalGroupIds: [...new Set([...(prior.metadata.logicalGroupIds || []), ...(item.metadata.messageRefs?.length ? [groupRecordLocalId(item.metadata.messageRefs, strategy)] : [])])],
+        };
+    }
+    return [...merged.values()];
 }
 
 /**
@@ -721,7 +799,9 @@ async function synchronizeChatScoped(settings,batchSize,bypassAutoSync,job) {
         const strategy = settings.chunking_strategy || 'per_message';
 
         // R12: gathering extracted to collectGroupedItems (shared with repairChatVectors)
-        const groupedItems = collectGroupedItems(context.chat, settings);
+        const durableUids = await ensureDurableMessageUids(context.chat, context, job);
+        job.assertCurrent();
+        const groupedItems = collectGroupedItems(context.chat, settings, collectionId, durableUids);
 
         // ========================================================================
         // VectHare+ Step 1.5: Reverse sync (ghost vector cleanup)
@@ -1096,11 +1176,13 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
                     matchedKeywords: meta.matchedKeywords,
                     textSource,
                     textLength: text?.length || 0,
-                    collectionId
+                    collectionId,
+                    recordId: (typeof meta.recordId === 'string' && meta.recordId.startsWith(`${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}#`) ? meta.recordId : `${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}#hash%3A${encodeURIComponent(String(hash))}`)
                 });
 
                 return {
                     hash: hash,
+                    recordId: (typeof meta.recordId === 'string' && meta.recordId.startsWith(`${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}#`) ? meta.recordId : `${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}#hash%3A${encodeURIComponent(String(hash))}`),
                     metadata: meta,
                     score: meta.score ?? 1.0,
                     originalScore: meta.originalScore,
@@ -3022,7 +3104,9 @@ export async function repairChatVectors(settings, batchSize = 5) {
         };
 
         // Current chat, grouped EXACTLY like sync (shared helper)
-        const groupedItems = collectGroupedItems(context.chat, settings);
+        const durableUids = await ensureDurableMessageUids(context.chat, context, job);
+        job.assertCurrent();
+        const groupedItems = collectGroupedItems(context.chat, settings, collectionId, durableUids);
         const groupByHash = new Map(groupedItems.map(it => [String(it.hash), it]));
         const currentHashSet = new Set(groupByHash.keys());
 

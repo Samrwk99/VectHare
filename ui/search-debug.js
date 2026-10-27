@@ -107,30 +107,31 @@ export function addTrace(debugData, stage, action, details = {}) {
  */
 export function recordChunkFate(debugData, hash, stage, fate, reason = null, data = {}) {
     if (!debugData.chunkFates) debugData.chunkFates = {};
-    if (!debugData.chunkFates[hash]) {
-        debugData.chunkFates[hash] = {
-            hash,
-            stages: [],
-            finalFate: null,
-            finalReason: null
+    const logicalKey = typeof data.recordId === 'string' && data.recordId.includes('#')
+        && (!data.collectionId || data.recordId.startsWith(`${data.collectionId}#`) || data.recordId.includes(`:${data.collectionId}#`))
+        ? data.recordId
+        : data.collectionId ? `${data.collectionId}#hash:${String(hash)}` : null;
+    let key = logicalKey;
+    if (!key) {
+        const matches = Object.keys(debugData.chunkFates).filter(k =>
+            debugData.chunkFates[k]?.hash === hash || String(debugData.chunkFates[k]?.hash) === String(hash));
+        // Never attribute an unqualified event to one of multiple same-hash records.
+        key = matches.length === 1 ? matches[0] : `unresolved#hash:${String(hash)}`;
+    }
+    if (!debugData.chunkFates[key]) {
+        debugData.chunkFates[key] = {
+            hash, recordId: key, collectionId: data.collectionId || null,
+            ambiguous: key.startsWith('unresolved#'),
+            stages: [], finalFate: null, finalReason: null
         };
     }
-
-    debugData.chunkFates[hash].stages.push({
-        stage,
-        fate,
-        reason,
-        ...data
-    });
-
-    // Update final fate if dropped
+    const entry = debugData.chunkFates[key];
+    entry.stages.push({stage, fate, reason, ...data});
     if (fate === 'dropped') {
-        debugData.chunkFates[hash].finalFate = 'dropped';
-        debugData.chunkFates[hash].finalReason = reason;
-        debugData.chunkFates[hash].droppedAt = stage;
-    } else if (fate === 'injected') {
-        debugData.chunkFates[hash].finalFate = 'injected';
-    }
+        entry.finalFate = 'dropped';
+        entry.finalReason = reason;
+        entry.droppedAt = stage;
+    } else if (fate === 'injected') entry.finalFate = 'injected';
 }
 
 /**

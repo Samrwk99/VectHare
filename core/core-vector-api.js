@@ -719,13 +719,20 @@ export async function getSavedHashes(collectionId, settings, includeMetadata = f
             'Read collection metadata'
         );
         const items = data?.items || data?.chunks || [];
-        const metaByHash = new Map(items.map(item => [String(item.hash), completeSavedChunkMetadata(item)]));
+        // A hash cannot safely address two distinct stored records. Never
+        // overwrite the first row's metadata with the second row's metadata.
+        const metaByHash = new Map();
+        const ambiguousHashes = new Set();
+        for (const item of items) {
+            const hash = String(item.hash);
+            if (metaByHash.has(hash)) ambiguousHashes.add(hash);
+            else metaByHash.set(hash, completeSavedChunkMetadata(item));
+        }
         return {
             hashes: hashes,
-            metadata: hashes.map(h => metaByHash.get(String(h)) || null),
-            // A record legitimately containing {} is distinct from metadata
-            // whose presence the adapter could not establish.
-            metadataStatus: data?.metadataStatus === 'unavailable' ? 'unavailable'
+            metadata: hashes.map(h => ambiguousHashes.has(String(h)) ? null : (metaByHash.get(String(h)) || null)),
+            ambiguousHashes: [...ambiguousHashes],
+            metadataStatus: ambiguousHashes.size ? 'ambiguous' : data?.metadataStatus === 'unavailable' ? 'unavailable'
                 : data?.metadataStatus === 'available' ? 'available' : 'unknown',
         };
     } catch (error) {

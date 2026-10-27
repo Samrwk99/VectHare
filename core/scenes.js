@@ -1,3 +1,5 @@
+import {messageReference, fingerprint, reconcileSceneBoundaries} from '../utils/record-identity.js';
+import {getVerifiedChatOriginId} from './collection-ids.js';
 /**
  * ============================================================================
  * VECTHARE SCENE MANAGEMENT
@@ -164,6 +166,13 @@ export async function createSceneChunk(start, end, sceneData, settings) {
 
     const sceneHash = computeSceneHash(messages, start, end);
     const containedHashes = getContainedChunkHashes(messages, start, end);
+    const stableChatId = getVerifiedChatOriginId();
+    const boundaryRef = (index) => {
+        if (!stableChatId) return null;
+        try {return messageReference(stableChatId, messages[index]);} catch (_) {return null;}
+    };
+    const sceneStartRef = boundaryRef(start), sceneEndRef = boundaryRef(end);
+
 
     // Build chunk for insertion
     const sceneChunk = {
@@ -173,6 +182,8 @@ export async function createSceneChunk(start, end, sceneData, settings) {
             isScene: true,
             sceneStart: start,
             sceneEnd: end,
+            ...(sceneStartRef && sceneEndRef ? {sceneStartRef,sceneEndRef} : {}),
+            contentFingerprint: fingerprint(getTextWithoutAttachments({mes:buildSceneText(messages, start, end, false)})),
             containedHashes: containedHashes,
             title: sceneData.title || `Scene ${start}-${end}`,
             summary: sceneData.summary || '',
@@ -331,11 +342,24 @@ export function filterDisabledChunks(chunks) {
  * @returns {object|null}
  */
 export function findSceneAtMessage(sceneChunks, messageId) {
-    return sceneChunks.find(chunk =>
-        chunk.metadata?.isScene &&
-        messageId >= chunk.metadata.sceneStart &&
-        messageId <= chunk.metadata.sceneEnd
-    ) || null;
+    return sceneChunks.find(chunk => {
+        if (!chunk.metadata?.isScene) return false;
+        const bounds = resolveSceneBounds(chunk);
+        return bounds && messageId >= bounds.sceneStart && messageId <= bounds.sceneEnd;
+    }) || null;
+}
+
+function resolveSceneBounds(chunk) {
+    const meta = chunk?.metadata;
+    if (!meta) return null;
+    if (!meta.sceneStartRef && !meta.sceneEndRef) return meta; // legacy
+    // Half-migrated scenes never fall back to stale positional markers.
+    if (!meta.sceneStartRef || !meta.sceneEndRef) return null;
+    const chatId = getVerifiedChatOriginId();
+    const chat = getContext()?.chat;
+    if (!chatId || !Array.isArray(chat)) return null;
+    const outcome = reconcileSceneBoundaries([chunk], chatId, chat)[0];
+    return outcome.status === 'ready' ? outcome.metadata : null;
 }
 
 /**
@@ -348,10 +372,12 @@ export function getMessageSceneStatus(sceneChunks, messageId) {
     for (const chunk of sceneChunks) {
         if (!chunk.metadata?.isScene) continue;
 
-        if (chunk.metadata.sceneStart === messageId) {
+        const bounds = resolveSceneBounds(chunk);
+        if (!bounds) continue;
+        if (bounds.sceneStart === messageId) {
             return { isStart: true, isEnd: false, scene: chunk };
         }
-        if (chunk.metadata.sceneEnd === messageId) {
+        if (bounds.sceneEnd === messageId) {
             return { isStart: false, isEnd: true, scene: chunk };
         }
     }
