@@ -1906,7 +1906,7 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
     chunksToInject = chunksToInject.filter(hasInjectableText);
     if (chunksToInject.length === 0) {
         clearVectHarePrompts(settings);
-        return { verified: false, text: '' };
+        return { verified: false, text: '', groups: [] };
     }
     // Control print: Log chunks QUEUED for injection (not yet injected)
     console.log(`[VectHare Injection Control] Preparing to inject ${chunksToInject.length} chunks`);
@@ -1981,7 +1981,19 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
             });
         });
 
-        return { verified: injectionVerified, text: insertedText };
+        return {
+            verified: Boolean(injectionVerified),
+            text: insertedText,
+            groups: [{
+                tag: EXTENSION_PROMPT_TAG,
+                position: group.position,
+                depth: group.depth,
+                text: insertedText,
+                charCount: insertedText.length,
+                chunkHashes: group.chunks.map(chunk => chunk.hash),
+                verified: Boolean(injectionVerified)
+            }]
+        };
     }
 
     // Multiple injection positions - create separate extension prompts for each
@@ -1992,6 +2004,7 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
 
     let allVerified = true;
     const allTexts = [];
+    const registeredGroups = [];
     let groupIndex = 0;
 
     for (const [key, group] of positionGroups) {
@@ -2035,6 +2048,15 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
         });
 
         allTexts.push(groupText);
+        registeredGroups.push({
+            tag,
+            position: group.position,
+            depth: group.depth,
+            text: groupText,
+            charCount: groupText.length,
+            chunkHashes: group.chunks.map(chunk => chunk.hash),
+            verified: Boolean(verified)
+        });
         groupIndex++;
     }
 
@@ -2042,6 +2064,7 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
 
     return {
         verified: allVerified,
+        groups: registeredGroups,
         text: allTexts.join('\n\n---\n\n') // Combine for debug output
     };
 }
@@ -2092,6 +2115,18 @@ export async function rearrangeChat(chat, settings, type) {
         if (!hasCollections && !canQueryWI) {
             console.warn('⚠️ VectHare: No enabled collections to query and World Info disabled - chunks cannot be injected!');
             console.log('   💡 Make sure you have enabled at least one collection in VectHare settings, or enable World Info');
+            const noEnabledDebug = createDebugData();
+            noEnabledDebug.query = buildSearchQuery(chat, settings);
+            noEnabledDebug.collectionId = 'none';
+            noEnabledDebug.settings = {
+                threshold: settings.score_threshold,
+                topK: settings.top_k ?? settings.insert,
+                temporal_decay: settings.temporal_decay,
+                chatLength: chat.length
+            };
+            noEnabledDebug.stopReason = 'no_active_collections';
+            addTrace(noEnabledDebug, 'activation', 'No enabled collections; vector search skipped');
+            setLastSearchDebug(noEnabledDebug);
             return;
         }
         if (hasCollections) {
@@ -2142,6 +2177,26 @@ export async function rearrangeChat(chat, settings, type) {
         if (activeCollections.length === 0 && !canQueryWI) {
             console.log('⚠️ VectHare: No collections passed activation conditions and World Info disabled - chunks cannot be injected!');
             console.log('   💡 Check your collection activation conditions in VectHare settings');
+            // A search was attempted, but every candidate was rejected by activation.
+            // Do not leave the debugger showing the previous generation's results.
+            const noActiveDebug = createDebugData();
+            noActiveDebug.query = queryText;
+            noActiveDebug.queryKeywords = queryKeywordTexts;
+            noActiveDebug.collectionId = 'none';
+            noActiveDebug.collectionsQueried = [];
+            noActiveDebug.collectionDecisions = collectionDecisions;
+            noActiveDebug.settings = {
+                threshold: settings.score_threshold,
+                topK: settings.top_k ?? settings.insert,
+                temporal_decay: settings.temporal_decay,
+                chatLength: chat.length
+            };
+            noActiveDebug.stopReason = 'no_active_collections';
+            addTrace(noActiveDebug, 'activation', 'No collections passed activation; vector search skipped', {
+                candidates: collectionsToQuery.length,
+                rejected: collectionDecisions.length
+            });
+            setLastSearchDebug(noActiveDebug);
             return;
         }
         if (activeCollections.length > 0) {
@@ -2174,6 +2229,10 @@ export async function rearrangeChat(chat, settings, type) {
 
         // === STAGE 4: Query all collections and merge results ===
         let chunks = await queryAndMergeCollections(activeCollections, queryText, settings, chat, debugData);
+        // Keep the actual vector-query results before any filtering, keyword boost
+        // or semantic World Info merge. Keyword boosts mutate chunk objects.
+        debugData.stages.initial = chunks.map(chunk => ({ ...chunk }));
+        debugData.stats.retrievedFromVector = chunks.length;
 
         // === STAGE 4.1: Filter disabled chunks ===
         const beforeDisabledFilter = chunks.length;
@@ -2241,7 +2300,6 @@ export async function rearrangeChat(chat, settings, type) {
 
             if (keywordMatchCount > 0) {
                 console.log(`VectHare: Applied bounded keyword boosts to ${keywordMatchCount}/${chunks.length} chunks`);
-                debugData.stages.afterKeywordBoost = [...chunks];
                 debugData.stats.keywordBoosted = keywordMatchCount;
                 addTrace(debugData, 'keyword_boost', `Boosted ${keywordMatchCount} chunks with keyword matches`, {
                     totalChunks: chunks.length,
@@ -2251,6 +2309,11 @@ export async function rearrangeChat(chat, settings, type) {
                 console.log(`VectHare: No chunks matched query keywords, all ${chunks.length} chunks keep original scores`);
             }
         }
+
+        // Distinguish post-keyword collection hits from raw vector results.
+        // Record this stage even when no keyword matched.
+        debugData.stages.afterKeywordBoost = chunks.map(chunk => ({ ...chunk }));
+        debugData.stats.afterKeywordBoost = chunks.length;
 
         // === WORLD INFO: Semantic WI entries ===
         try {
@@ -2294,9 +2357,9 @@ export async function rearrangeChat(chat, settings, type) {
             addTrace(debugData, 'world_info', 'WorldInfo query failed', { error: wiError.message });
         }
         console.log(`VectHare: Retrieved ${chunks.length} total chunks from ${activeCollections.length} collections`);
-
-        debugData.stages.initial = [...chunks];
-        debugData.stats.retrievedFromVector = chunks.length;
+        // This is the combined retrieval stage, not the raw vector stage.
+        debugData.stages.afterWorldInfo = chunks.map(chunk => ({ ...chunk }));
+        debugData.stats.afterWorldInfo = chunks.length;
 
         // === STAGE 4.5: Expand summary chunks to parent chunks (dual-vector) ===
         const chunksBeforeExpansion = chunks.length;
@@ -2411,7 +2474,8 @@ export async function rearrangeChat(chat, settings, type) {
             text: injection.text,
             position: settings.position,
             depth: settings.depth,
-            promptTag: EXTENSION_PROMPT_TAG,
+            promptTag: injection.groups?.length === 1 ? injection.groups[0].tag : null,
+            groups: injection.groups || [],
             charCount: injection.text.length
         };
 

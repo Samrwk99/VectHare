@@ -19,6 +19,7 @@
 // ============================================================================
 
 let lastDebugData = null;
+let selectedHistoryData = null; // Modal-only view; never replaces the newest search.
 const queryHistory = []; // Store last N queries
 const MAX_QUERY_HISTORY = 13;
 
@@ -191,6 +192,8 @@ export function openSearchDebugModal() {
     // Remove existing modal
     $('#vecthare_search_debug_modal').remove();
 
+    selectedHistoryData = null;
+    currentHistoryIndex = 0;
     const html = createModalHtml(lastDebugData);
     $('body').append(html);
 
@@ -286,7 +289,9 @@ function createModalHtml(data, historyIndex = 0) {
                             <div class="vecthare-debug-pipeline-arrow">→</div>
                             ${createKeywordBoostStage(data)}
                             <div class="vecthare-debug-pipeline-arrow">→</div>
-                            ${createPipelineStage('Threshold', data.stages.afterThreshold?.length ?? data.stages.initial.filter(c => c.score >= (data.settings.threshold || 0)).length, data.stages.initial.length, 'fa-filter', 'info', false)}
+                            ${createPipelineStage('WI Merge', data.stages.afterWorldInfo?.length ?? data.stages.afterKeywordBoost?.length ?? data.stages.initial.length, data.stages.afterKeywordBoost?.length ?? data.stages.initial.length, 'fa-book', 'info', false)}
+                            <div class="vecthare-debug-pipeline-arrow">→</div>
+                            ${createPipelineStage('Threshold', data.stages.afterThreshold?.length ?? 0, data.stages.afterWorldInfo?.length ?? data.stages.initial.length, 'fa-filter', 'info', false)}
                             <div class="vecthare-debug-pipeline-arrow">→</div>
                             ${createPipelineStage('Decay', data.stages.afterDecay.length, data.stages.afterThreshold?.length ?? 0, 'fa-clock', 'warning', !data.settings.temporal_decay?.enabled)}
                             <div class="vecthare-debug-pipeline-arrow">→</div>
@@ -336,7 +341,13 @@ function createModalHtml(data, historyIndex = 0) {
                             <!-- Stage Tabs -->
                             <div class="vecthare-debug-stage-tabs">
                                 <button class="vecthare-debug-stage-tab active" data-stage="initial">
-                                    Initial (${data.stages.initial.length})
+                                    Raw Vector (${data.stages.initial.length})
+                                </button>
+                                <button class="vecthare-debug-stage-tab" data-stage="afterKeywordBoost">
+                                    Post-Keyword (${data.stages.afterKeywordBoost?.length ?? 0})
+                                </button>
+                                <button class="vecthare-debug-stage-tab" data-stage="afterWorldInfo">
+                                    With World Info (${data.stages.afterWorldInfo?.length ?? 0})
                                 </button>
                                 <button class="vecthare-debug-stage-tab" data-stage="afterDecay">
                                     After Decay (${data.stages.afterDecay.length})
@@ -408,7 +419,7 @@ function createPipelineStage(label, count, fromCount, icon, colorClass, disabled
  * Shows how many chunks had keywords matched
  */
 function createKeywordBoostStage(data) {
-    const chunks = data.stages.initial || [];
+    const chunks = data.stages.afterKeywordBoost || data.stages.initial || [];
     const boostedCount = chunks.filter(c => c.keywordMatched || c.keywordBoosted || (c.keywordBoost && c.keywordBoost > 1)).length;
 
     // Count total matched query keywords across all chunks
@@ -847,9 +858,10 @@ function renderInjectionVerification(data) {
     }
 
     const { verified, text, position, depth, charCount } = data.injection;
+    const groups = Array.isArray(data.injection.groups) ? data.injection.groups : [];
     const statusClass = verified ? 'vecthare-verification-success' : 'vecthare-verification-failed';
     const statusIcon = verified ? 'fa-circle-check' : 'fa-circle-xmark';
-    const statusText = verified ? 'VERIFIED' : 'VERIFICATION FAILED';
+    const statusText = verified ? 'PROMPT REGISTERED' : 'REGISTRATION FAILED';
 
     // Position label
     const positionLabels = {
@@ -862,6 +874,15 @@ function renderInjectionVerification(data) {
         6: 'Before AN/Author\'s Note'
     };
     const positionLabel = positionLabels[position] || `Position ${position}`;
+    const groupPlacement = groups.length ? groups.map(group => {
+        const label = positionLabels[group.position] ?? `Position ${group.position}`;
+        return `<div class="vecthare-verification-placement">
+            <strong>${escapeHtml(group.tag)}</strong> · ${escapeHtml(label)} · depth ${escapeHtml(group.depth)} ·
+            ${escapeHtml(group.chunkHashes?.length ?? 0)} chunks · ${escapeHtml(group.charCount)} chars ·
+            ${group.verified ? 'registered' : 'registration failed'}
+            <pre class="vecthare-verification-text">${escapeHtml(group.text)}</pre>
+        </div>`;
+    }).join('') : '';
 
     return `
         <div class="vecthare-debug-card vecthare-debug-verification ${statusClass}">
@@ -875,11 +896,11 @@ function renderInjectionVerification(data) {
                 <div class="vecthare-verification-summary">
                     <div class="vecthare-verification-stat">
                         <span class="stat-label">Position</span>
-                        <span class="stat-value">${escapeHtml(positionLabel)}</span>
+                        <span class="stat-value">${groups.length > 1 ? `${groups.length} separate placements` : escapeHtml(groups[0] ? (positionLabels[groups[0].position] ?? `Position ${groups[0].position}`) : positionLabel)}</span>
                     </div>
                     <div class="vecthare-verification-stat">
                         <span class="stat-label">Depth</span>
-                        <span class="stat-value">${depth}</span>
+                        <span class="stat-value">${groups.length > 1 ? 'Per placement' : escapeHtml(groups[0]?.depth ?? depth)}</span>
                     </div>
                     <div class="vecthare-verification-stat">
                         <span class="stat-label">Characters</span>
@@ -887,8 +908,8 @@ function renderInjectionVerification(data) {
                     </div>
                 </div>
                 <div class="vecthare-verification-text-wrapper" style="display: none;">
-                    <div class="vecthare-verification-text-label">Actual Injected Text:</div>
-                    <pre class="vecthare-verification-text">${escapeHtml(text)}</pre>
+                    <div class="vecthare-verification-text-label">Registered prompt blocks (not final host inclusion):</div>
+                    ${groupPlacement || `<pre class="vecthare-verification-text">${escapeHtml(text)}</pre>`}
                 </div>
             </div>
         </div>
@@ -901,6 +922,15 @@ function renderCriticalFailure(data) {
         return '';
     }
 
+    if (data.stopReason === 'no_active_collections') {
+        return `<div class="vecthare-debug-critical-failure">
+            <div class="vecthare-debug-critical-header">
+                <i class="fa-solid fa-circle-info"></i>
+                <div><div class="vecthare-debug-critical-title">No collections passed activation</div>
+                <div class="vecthare-debug-critical-subtitle">Vector search was not run. See Collection Decisions for activation reasons.</div></div>
+            </div>
+        </div>`;
+    }
     // Diagnose the pipeline step by step
     const diagnosis = diagnosePipeline(data);
 
@@ -1540,7 +1570,9 @@ SETTINGS
   Temporal Decay: ${s.temporal_decay?.enabled ? `ON (half-life: ${s.temporal_decay.halfLife || s.temporal_decay.half_life})` : 'OFF'}
 
 PIPELINE RESULTS
-  Vector Search: ${st.initial?.length || 0} chunks retrieved
+  Raw Vector Search: ${st.initial?.length || 0} chunks retrieved
+  After Keyword Boost: ${st.afterKeywordBoost?.length ?? st.initial?.length ?? 0}
+  After Semantic World Info: ${st.afterWorldInfo?.length ?? st.initial?.length ?? 0}
   After Threshold: ${st.afterThreshold?.length || 0} passed (threshold: ${s.threshold})
   After Decay: ${st.afterDecay?.length || 0} survived
   After Conditions: ${st.afterConditions?.length || 0} passed
@@ -1575,6 +1607,7 @@ INJECTION STATUS
 ${injectionInfo}
   Skipped: ${skippedCount} chunks (already in context)
   Injected: ${st.injected?.length || 0} chunks
+  Prompt placements: ${(d.injection?.groups || []).map(g => `${g.tag} position=${g.position} depth=${g.depth} chunks=${g.chunkHashes?.length ?? 0} registered=${g.verified}`).join('; ') || 'none'}
 
 CHUNK FATES
 ${fatesSummary.join('\n\n') || '  none'}
@@ -1593,13 +1626,14 @@ ${'='.repeat(50)}`;
  * Copies diagnostic dump to clipboard
  */
 async function copyDiagnosticDump() {
-    if (!lastDebugData) {
+    const displayedData = selectedHistoryData || lastDebugData;
+    if (!displayedData) {
         toastr.warning('No debug data available');
         return;
     }
 
     try {
-        const dump = generateDiagnosticDump(lastDebugData);
+        const dump = generateDiagnosticDump(displayedData);
         await navigator.clipboard.writeText(dump);
         toastr.success('Diagnostic dump copied to clipboard');
     } catch (err) {
@@ -1639,9 +1673,9 @@ function bindEvents() {
         const historyIndex = parseInt($(this).data('history-index'));
         if (queryHistory[historyIndex]) {
             currentHistoryIndex = historyIndex;
-            lastDebugData = queryHistory[historyIndex];
-            // Refresh the modal content
-            const newHtml = createModalHtml(lastDebugData, historyIndex);
+            selectedHistoryData = queryHistory[historyIndex];
+            // Refresh the modal view without changing the last-search pointer.
+            const newHtml = createModalHtml(selectedHistoryData, historyIndex);
             $('#vecthare_search_debug_modal').replaceWith(newHtml);
             $('#vecthare_search_debug_modal').show();
             bindEvents();
@@ -1694,7 +1728,7 @@ function bindEvents() {
         $('.vecthare-debug-stage-tab').removeClass('active');
         $(this).addClass('active');
 
-        const data = lastDebugData;
+        const data = selectedHistoryData || lastDebugData;
         if (data && data.stages[stage]) {
             $('#vecthare_debug_stage_content').html(
                 renderStageChunks(data.stages[stage], stage, data)
