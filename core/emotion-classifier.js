@@ -97,11 +97,33 @@ export function isCottonTalesUsingVectHare() {
 /** Cache for classifier results */
 let classifierCache = new Map();
 const CACHE_MAX_SIZE = 100;
+// Also protects against requests completing after a settings change/cache clear.
+let cacheGeneration = 0;
+
+/**
+ * Use an unambiguous representation of the entire text and the configured
+ * classifier behavior. A prefix or short content hash can alias different
+ * messages; JSON encoding also avoids delimiter collisions and works on
+ * non-secure (plain HTTP) SillyTavern installations without Web Crypto.
+ *
+ * The current classify endpoint selects its model server-side. We still
+ * partition by requested model/mode/labels so changes never reuse results
+ * across configurations; honoring those settings is separate C14 work.
+ */
+function classifierCacheKey(text, settings, options = {}) {
+    return JSON.stringify([
+        text,
+        options.model ?? settings.model,
+        options.useEmbeddingSimilarity ?? settings.useEmbeddingSimilarity,
+        options.customLabels ?? settings.customLabels,
+    ]);
+}
 
 /**
  * Clear the classifier cache
  */
 export function clearClassifierCache() {
+    cacheGeneration++;
     classifierCache.clear();
     console.log(`[${MODULE_NAME}] Classifier cache cleared`);
 }
@@ -127,7 +149,8 @@ export async function classifyEmotion(text, options = {}) {
     }
 
     // Check cache
-    const cacheKey = text.substring(0, 100);
+    const cacheKey = classifierCacheKey(text, settings, options);
+    const requestGeneration = cacheGeneration;
     if (classifierCache.has(cacheKey)) {
         return classifierCache.get(cacheKey);
     }
@@ -160,13 +183,16 @@ export async function classifyEmotion(text, options = {}) {
             allLabels: data.classification,
         };
 
-        // Cache result
-        if (classifierCache.size >= CACHE_MAX_SIZE) {
-            // Remove oldest entry
-            const firstKey = classifierCache.keys().next().value;
-            classifierCache.delete(firstKey);
+        // An older request may finish after a settings change or explicit
+        // cache clear. Do not reintroduce a now-invalid result into the cache.
+        if (requestGeneration === cacheGeneration) {
+            if (classifierCache.size >= CACHE_MAX_SIZE) {
+                // Remove oldest entry
+                const firstKey = classifierCache.keys().next().value;
+                classifierCache.delete(firstKey);
+            }
+            classifierCache.set(cacheKey, result);
         }
-        classifierCache.set(cacheKey, result);
 
         console.log(`[${MODULE_NAME}] Classified as "${result.label}" (${(result.score * 100).toFixed(1)}%)`);
         return result;
@@ -298,8 +324,12 @@ export function updateClassifierSetting(key, value) {
     const settingKey = keyMap[key] || key;
     extension_settings.vecthare[settingKey] = value;
 
-    // Clear cache if model changes
-    if (key === 'model') {
+    // Enabled state, classifier mode, selected model, and label set all
+    // change classification semantics. Keep existing cached responses isolated
+    // even when the settings UI is changed while a request is in flight.
+    if (['enabled', 'model', 'useEmbeddingSimilarity', 'customLabels'].includes(key) ||
+        ['emotion_classifier_enabled', 'emotion_classifier_model',
+            'emotion_use_similarity', 'emotion_custom_labels'].includes(settingKey)) {
         clearClassifierCache();
     }
 
