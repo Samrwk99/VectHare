@@ -24,7 +24,7 @@ export const BUILTIN_PATTERNS = {
     strip_font_tags: {
         id: 'strip_font_tags',
         name: 'Strip Font Tags (keep text)',
-        pattern: '<font[^>]*>(.*?)</font>',
+        pattern: '<font[^>]*>([\\s\\S]*?)</font>',
         replacement: '$1',
         flags: 'gi',
         builtin: true,
@@ -32,7 +32,7 @@ export const BUILTIN_PATTERNS = {
     strip_color_spans: {
         id: 'strip_color_spans',
         name: 'Strip Color Spans (keep text)',
-        pattern: '<span[^>]*style="[^"]*color[^"]*"[^>]*>(.*?)</span>',
+        pattern: '<span[^>]*style="[^"]*color[^"]*"[^>]*>([\\s\\S]*?)</span>',
         replacement: '$1',
         flags: 'gi',
         builtin: true,
@@ -356,80 +356,112 @@ export function exportPatterns() {
 }
 
 /**
- * Imports patterns from JSON (supports both pattern arrays and full templates)
- * @param {string} json - JSON string of patterns or template
- * @returns {{success: boolean, count: number, isTemplate?: boolean, templateName?: string, error?: string}}
+ * Validates and merges an imported pattern list into a detached settings draft.
+ * No caller settings or persisted state are mutated on success or failure.
+ * @param {string} json
+ * @param {object} baseSettings Current settings or an unsaved modal draft
+ * @returns {{success:boolean,count:number,settings?:object,isTemplate?:boolean,templateName?:string,error?:string}}
  */
-export function importPatterns(json) {
+export function preparePatternImport(json, baseSettings) {
     try {
         const data = JSON.parse(json);
-        const settings = getCleaningSettings();
-        settings.customPatterns = settings.customPatterns || [];
-
-        // Check if this is a full template (has preset/enabledBuiltins/customPatterns)
-        if (data.customPatterns && !Array.isArray(data)) {
-            // Template format
-            if (data.preset) {
-                settings.selectedPreset = data.preset;
-            }
-            if (Array.isArray(data.enabledBuiltins)) {
-                settings.enabledBuiltins = data.enabledBuiltins;
-            }
-
-            let count = 0;
-            for (const pattern of (data.customPatterns || [])) {
-                if (!pattern.pattern) continue;
-
-                const exists = settings.customPatterns.some(p => p.pattern === pattern.pattern);
-                if (!exists) {
-                    settings.customPatterns.push({
-                        id: uuidv4(),
-                        name: pattern.name || 'Imported Pattern',
-                        pattern: pattern.pattern,
-                        replacement: pattern.replacement || '',
-                        flags: pattern.flags || 'g',
-                        enabled: pattern.enabled !== false,
-                        builtin: false,
-                    });
-                    count++;
-                }
-            }
-
-            saveCleaningSettings(settings);
-            return { success: true, count, isTemplate: true, templateName: data.name || 'Unnamed Template' };
+        const isTemplate = data !== null && typeof data === 'object' && !Array.isArray(data);
+        if (!Array.isArray(data) && !isTemplate) {
+            throw new Error('Expected a pattern array or a template object');
+        }
+        if (isTemplate && !Array.isArray(data.customPatterns)) {
+            throw new Error('Template must contain a customPatterns array');
+        }
+        if (!baseSettings || typeof baseSettings !== 'object' || Array.isArray(baseSettings)) {
+            throw new Error('Invalid current cleaning settings');
         }
 
-        // Array format (just patterns)
-        if (!Array.isArray(data)) {
-            return { success: false, count: 0, error: 'Invalid format - expected array or template object' };
+        const rawPatterns = isTemplate ? data.customPatterns : data;
+        const validatedPatterns = rawPatterns.map((pattern, index) => {
+            if (!pattern || typeof pattern !== 'object' || Array.isArray(pattern)) {
+                throw new Error(`Pattern ${index + 1} must be an object`);
+            }
+            if (typeof pattern.pattern !== 'string' || !pattern.pattern) {
+                throw new Error(`Pattern ${index + 1} must have a non-empty regex`);
+            }
+            if (pattern.flags !== undefined && typeof pattern.flags !== 'string') {
+                throw new Error(`Pattern ${index + 1} has invalid flags`);
+            }
+            if (pattern.name !== undefined && typeof pattern.name !== 'string') {
+                throw new Error(`Pattern ${index + 1} has an invalid name`);
+            }
+            if (pattern.replacement !== undefined && typeof pattern.replacement !== 'string') {
+                throw new Error(`Pattern ${index + 1} has an invalid replacement`);
+            }
+            if (pattern.enabled !== undefined && typeof pattern.enabled !== 'boolean') {
+                throw new Error(`Pattern ${index + 1} has an invalid enabled value`);
+            }
+            const flags = pattern.flags ?? 'g';
+            try {
+                new RegExp(pattern.pattern, flags);
+            } catch (e) {
+                throw new Error(`Pattern ${index + 1} has invalid regex: ${e.message}`);
+            }
+            return {
+                name: pattern.name || 'Imported Pattern',
+                pattern: pattern.pattern,
+                replacement: pattern.replacement ?? '',
+                flags,
+                enabled: isTemplate ? pattern.enabled !== false : true,
+            };
+        });
+
+        if (isTemplate && data.preset !== undefined &&
+            (typeof data.preset !== 'string' ||
+             (data.preset !== 'custom' && !Object.hasOwn(CLEANING_PRESETS, data.preset)))) {
+            throw new Error('Template has an unknown cleaning preset');
+        }
+        if (isTemplate && data.enabledBuiltins !== undefined &&
+            (!Array.isArray(data.enabledBuiltins) ||
+             !data.enabledBuiltins.every(id => typeof id === 'string' && Object.hasOwn(BUILTIN_PATTERNS, id)))) {
+            throw new Error('Template has invalid built-in pattern IDs');
+        }
+        if (isTemplate && data.name !== undefined && typeof data.name !== 'string') {
+            throw new Error('Template has an invalid name');
         }
 
+        const settings = {
+            ...baseSettings,
+            customPatterns: Array.isArray(baseSettings.customPatterns)
+                ? baseSettings.customPatterns.map(pattern => ({ ...pattern })) : [],
+            enabledBuiltins: Array.isArray(baseSettings.enabledBuiltins)
+                ? [...baseSettings.enabledBuiltins] : [],
+        };
+        if (isTemplate && data.preset !== undefined) settings.selectedPreset = data.preset;
+        if (isTemplate && data.enabledBuiltins !== undefined) {
+            settings.enabledBuiltins = [...data.enabledBuiltins];
+        }
+
+        // Validate every record before generating IDs or changing the draft.
+        const known = new Set(settings.customPatterns.map(pattern => pattern.pattern));
         let count = 0;
-        for (const pattern of data) {
-            if (!pattern.pattern) continue;
-
-            // Check for duplicates by pattern string
-            const exists = settings.customPatterns.some(p => p.pattern === pattern.pattern);
-            if (!exists) {
-                settings.customPatterns.push({
-                    id: uuidv4(),
-                    name: pattern.name || 'Imported Pattern',
-                    pattern: pattern.pattern,
-                    replacement: pattern.replacement || '',
-                    flags: pattern.flags || 'g',
-                    enabled: true,
-                    builtin: false,
-                });
-                count++;
-            }
+        for (const pattern of validatedPatterns) {
+            if (known.has(pattern.pattern)) continue;
+            known.add(pattern.pattern);
+            settings.customPatterns.push({ id: uuidv4(), ...pattern, builtin: false });
+            count++;
         }
-
-        saveCleaningSettings(settings);
-        return { success: true, count };
-
+        return {
+            success: true, count, settings, isTemplate,
+            ...(isTemplate ? { templateName: data.name || 'Unnamed Template' } : {}),
+        };
     } catch (e) {
         return { success: false, count: 0, error: e.message };
     }
+}
+
+/** Import patterns atomically for callers outside the Text Cleaning Manager. */
+export function importPatterns(json) {
+    const result = preparePatternImport(json, getCleaningSettings());
+    if (result.success) {
+        saveCleaningSettings(result.settings);
+    }
+    return result;
 }
 
 /**

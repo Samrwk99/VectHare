@@ -11,27 +11,82 @@
  */
 
 import { saveSettingsDebounced } from '../../../../../script.js';
+import { uuidv4 } from '../../../../utils.js';
 import {
     BUILTIN_PATTERNS,
     CLEANING_PRESETS,
     getCleaningSettings,
     saveCleaningSettings,
-    addCustomPattern,
-    updateCustomPattern,
-    removeCustomPattern,
-    exportPatterns,
-    importPatterns,
+    preparePatternImport,
     testPattern,
 } from '../core/text-cleaning.js';
 
 /**
  * Opens the Text Cleaning Manager modal
  */
+let cleaningManagerDraft = null;
+let cleaningManagerSession = 0;
+
+function copyCleaningSettings(settings) {
+    return {
+        ...settings,
+        customPatterns: (settings.customPatterns || []).map(p => ({ ...p })),
+        enabledBuiltins: [...(settings.enabledBuiltins || [])],
+    };
+}
+
+/** Read and validate the entire modal without modifying stored settings. */
+function collectCleaningDraft() {
+    const draft = copyCleaningSettings(cleaningManagerDraft);
+    draft.selectedPreset = $('#vecthare_tcm_preset').val();
+    if (draft.selectedPreset !== 'custom' && !Object.hasOwn(CLEANING_PRESETS, draft.selectedPreset)) {
+        return { success: false, error: 'Select a valid cleaning preset' };
+    }
+    draft.enabledBuiltins = [];
+    $('#vecthare_tcm_builtin_patterns input:checked').each(function() {
+        draft.enabledBuiltins.push($(this).data('id'));
+    });
+    const updates = [];
+    let error = null;
+    $('#vecthare_tcm_custom_patterns .vecthare-tcm-custom-item').each(function() {
+        const field = $(this).find('.vecthare-tcm-custom-pattern');
+        const rawPattern = field.val();
+        const enabled = $(this).find('.vecthare-tcm-custom-enabled').is(':checked');
+        const parsed = parseRegexString(rawPattern);
+        const validation = parsed ? validateRegex(parsed.pattern, parsed.flags) : { valid: !enabled, error: 'Enabled patterns cannot be empty' };
+        if (!validation.valid || (enabled && !parsed?.pattern)) {
+            field.css('border-color', 'var(--vecthare-danger)');
+            error = `Invalid regex: ${validation.error || 'Enabled patterns cannot be empty'}`;
+            return false;
+        }
+        field.css('border-color', '');
+        updates.push({
+            id: $(this).data('id'),
+            enabled,
+            name: $(this).find('.vecthare-tcm-custom-name').val(),
+            pattern: parsed?.pattern || '',
+            replacement: $(this).find('.vecthare-tcm-custom-replacement').val(),
+            flags: parsed?.flags || 'gi',
+        });
+    });
+    if (error) return { success: false, error };
+    const existing = new Map(draft.customPatterns.map(pattern => [String(pattern.id), pattern]));
+    draft.customPatterns = updates.map(update => ({ ...existing.get(String(update.id)), ...update }));
+    return { success: true, settings: draft };
+}
+
+function refreshDraftPatterns() {
+    $('#vecthare_tcm_custom_patterns').html(renderCustomPatterns(cleaningManagerDraft.customPatterns));
+    rebindDeleteHandlers();
+}
+
 export function openTextCleaningManager() {
     // Remove existing modal if present
     $('#vecthare_text_cleaning_modal').remove();
 
-    const settings = getCleaningSettings();
+    const settings = copyCleaningSettings(getCleaningSettings());
+    cleaningManagerDraft = settings;
+    cleaningManagerSession++;
 
     const html = `
         <div id="vecthare_text_cleaning_modal" class="vecthare-modal">
@@ -204,10 +259,9 @@ function renderCustomPatterns(patterns) {
  * Escapes HTML entities
  */
 function escapeHtml(text) {
-    if (!text) return '';
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    return String(text ?? '').replace(/[&<>"']/g, char => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    })[char]);
 }
 
 /**
@@ -220,7 +274,7 @@ function parseRegexString(input) {
     if (!input) return null;
 
     // Try to parse /pattern/flags format
-    const match = input.match(/^\/(.+)\/([gimsuy]*)$/);
+    const match = input.match(/^\/([\s\S]*)\/([a-z]*)$/i);
     if (match) {
         return { pattern: match[1], flags: match[2] || 'g' };
     }
@@ -248,16 +302,17 @@ function validateRegex(pattern, flags) {
  * Rebinds delete handlers for custom patterns (scoped to modal, not document)
  */
 function rebindDeleteHandlers() {
-    // Remove old handlers and bind new ones scoped to the modal
     $('#vecthare_tcm_custom_patterns [data-action="delete"]').off('click').on('click', function() {
-        const id = $(this).closest('.vecthare-tcm-custom-item').data('id');
-        removeCustomPattern(id);
-
-        // Refresh the list
-        const settings = getCleaningSettings();
-        $('#vecthare_tcm_custom_patterns').html(renderCustomPatterns(settings.customPatterns));
-        rebindDeleteHandlers();
-        saveSettingsDebounced();
+        // First preserve any unsaved field edits, then remove from the draft only.
+        const current = collectCleaningDraft();
+        if (!current.success) {
+            toastr.error(current.error, 'VectHare');
+            return;
+        }
+        cleaningManagerDraft = current.settings;
+        const id = String($(this).closest('.vecthare-tcm-custom-item').data('id'));
+        cleaningManagerDraft.customPatterns = cleaningManagerDraft.customPatterns.filter(p => String(p.id) !== id);
+        refreshDraftPatterns();
     });
 }
 
@@ -280,20 +335,19 @@ function bindEvents() {
         $('#vecthare_tcm_preset_desc').text(getPresetDescription(presetId));
     });
 
-    // Add custom pattern
+    // Add pattern to modal draft. Close/Cancel discards it.
     $('#vecthare_tcm_add_pattern').on('click', () => {
-        addCustomPattern({
-            name: 'New Pattern',
-            pattern: '',
-            replacement: '',
-            flags: 'gi',
+        const current = collectCleaningDraft();
+        if (!current.success) {
+            toastr.error(current.error, 'VectHare');
+            return;
+        }
+        cleaningManagerDraft = current.settings;
+        cleaningManagerDraft.customPatterns.push({
+            id: uuidv4(), name: 'New Pattern', pattern: '', replacement: '',
+            flags: 'gi', enabled: false, builtin: false,
         });
-
-        // Refresh the list
-        const settings = getCleaningSettings();
-        $('#vecthare_tcm_custom_patterns').html(renderCustomPatterns(settings.customPatterns));
-        rebindDeleteHandlers();
-        saveSettingsDebounced();
+        refreshDraftPatterns();
     });
 
     // Initial bind for delete handlers
@@ -307,41 +361,32 @@ function bindEvents() {
     $('#vecthare_tcm_import_file').on('change', function(e) {
         const file = e.target.files[0];
         if (!file) return;
-
         const reader = new FileReader();
+        const session = cleaningManagerSession;
         reader.onload = (event) => {
-            const result = importPatterns(event.target.result);
-            if (result.success) {
-                // Check if modal still exists before updating DOM
-                if ($('#vecthare_text_cleaning_modal').length) {
-                    const settings = getCleaningSettings();
-
-                    // If template was imported, also update preset and built-in checkboxes
-                    if (result.isTemplate) {
-                        toastr.success(`Template "${result.templateName}" loaded (${result.count} new patterns)`, 'VectHare');
-
-                        // Update preset dropdown
-                        $('#vecthare_tcm_preset').val(settings.selectedPreset);
-                        $('#vecthare_tcm_preset_desc').text(getPresetDescription(settings.selectedPreset));
-
-                        // Update built-in pattern checkboxes
-                        $('#vecthare_tcm_builtin_patterns input').each(function() {
-                            const id = $(this).data('id');
-                            $(this).prop('checked', settings.enabledBuiltins?.includes(id));
-                        });
-                    } else {
-                        toastr.success(`Imported ${result.count} patterns`, 'VectHare');
-                    }
-
-                    // Update custom patterns list
-                    $('#vecthare_tcm_custom_patterns').html(renderCustomPatterns(settings.customPatterns));
-                    rebindDeleteHandlers();
-                }
-                saveSettingsDebounced();
-            } else {
-                toastr.error(`Import failed: ${result.error}`, 'VectHare');
+            if (session !== cleaningManagerSession || !$('#vecthare_text_cleaning_modal').length) return;
+            const current = collectCleaningDraft();
+            if (!current.success) {
+                toastr.error(current.error, 'VectHare');
+                return;
             }
+            const result = preparePatternImport(event.target.result, current.settings);
+            if (!result.success) {
+                toastr.error(`Import failed: ${result.error}`, 'VectHare');
+                return;
+            }
+            cleaningManagerDraft = result.settings;
+            $('#vecthare_tcm_preset').val(cleaningManagerDraft.selectedPreset);
+            $('#vecthare_tcm_preset_desc').text(getPresetDescription(cleaningManagerDraft.selectedPreset));
+            $('#vecthare_tcm_builtin_patterns input').each(function() {
+                $(this).prop('checked', cleaningManagerDraft.enabledBuiltins.includes($(this).data('id')));
+            });
+            refreshDraftPatterns();
+            toastr.success(result.isTemplate
+                ? `Template "${result.templateName}" staged (${result.count} new patterns)`
+                : `Staged ${result.count} patterns. Save Changes to apply.`, 'VectHare');
         };
+        reader.onerror = () => toastr.error('Unable to read the pattern file', 'VectHare');
         reader.readAsText(file);
         $(this).val('');
     });
@@ -351,14 +396,14 @@ function bindEvents() {
         const templateName = prompt('Enter a name for this template:', 'My Cleaning Template');
         if (!templateName) return;
 
-        const settings = getCleaningSettings();
-
-        // Gather current UI state
-        const currentPreset = $('#vecthare_tcm_preset').val();
-        const enabledBuiltins = [];
-        $('#vecthare_tcm_builtin_patterns input:checked').each(function() {
-            enabledBuiltins.push($(this).data('id'));
-        });
+        const current = collectCleaningDraft();
+        if (!current.success) {
+            toastr.error(current.error, 'VectHare');
+            return;
+        }
+        const settings = current.settings;
+        const currentPreset = settings.selectedPreset;
+        const enabledBuiltins = settings.enabledBuiltins;
 
         const template = {
             name: templateName,
@@ -382,7 +427,12 @@ function bindEvents() {
 
     // Export patterns (custom patterns only)
     $('#vecthare_tcm_export').on('click', () => {
-        const json = exportPatterns();
+        const current = collectCleaningDraft();
+        if (!current.success) {
+            toastr.error(current.error, 'VectHare');
+            return;
+        }
+        const json = JSON.stringify(current.settings.customPatterns, null, 2);
         const blob = new Blob([json], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -429,60 +479,15 @@ function bindEvents() {
         }
     });
 
-    // Save changes
+    // One validated settings commit. A failed field leaves stored settings untouched.
     $('#vecthare_tcm_save').on('click', () => {
-        const settings = getCleaningSettings();
-
-        // Get selected preset
-        settings.selectedPreset = $('#vecthare_tcm_preset').val();
-
-        // Get enabled built-ins
-        settings.enabledBuiltins = [];
-        $('#vecthare_tcm_builtin_patterns input:checked').each(function() {
-            settings.enabledBuiltins.push($(this).data('id'));
-        });
-
-        // Validate and get custom pattern updates
-        let hasInvalidPattern = false;
-        $('#vecthare_tcm_custom_patterns .vecthare-tcm-custom-item').each(function() {
-            const id = $(this).data('id');
-            const rawPattern = $(this).find('.vecthare-tcm-custom-pattern').val();
-            const enabled = $(this).find('.vecthare-tcm-custom-enabled').is(':checked');
-
-            // Parse /pattern/flags format
-            const parsed = parseRegexString(rawPattern);
-
-            // Validate regex if pattern is enabled and has content
-            if (enabled && parsed) {
-                const validation = validateRegex(parsed.pattern, parsed.flags);
-                if (!validation.valid) {
-                    hasInvalidPattern = true;
-                    $(this).find('.vecthare-tcm-custom-pattern').css('border-color', 'var(--vecthare-danger)');
-                    toastr.error(`Invalid regex: ${validation.error}`, 'VectHare');
-                    return false; // break out of .each()
-                }
-            }
-
-            // Reset border
-            $(this).find('.vecthare-tcm-custom-pattern').css('border-color', '');
-
-            const update = {
-                enabled: enabled,
-                name: $(this).find('.vecthare-tcm-custom-name').val(),
-                pattern: parsed?.pattern || '',
-                replacement: $(this).find('.vecthare-tcm-custom-replacement').val(),
-                flags: parsed?.flags || 'gi',
-            };
-            updateCustomPattern(id, update);
-        });
-
-        if (hasInvalidPattern) {
-            return; // Don't save if there's an invalid pattern
+        const current = collectCleaningDraft();
+        if (!current.success) {
+            toastr.error(current.error, 'VectHare');
+            return;
         }
-
-        saveCleaningSettings(settings);
+        saveCleaningSettings(current.settings);
         saveSettingsDebounced();
-
         toastr.success('Text cleaning settings saved', 'VectHare');
         closeModal();
     });
@@ -492,6 +497,8 @@ function bindEvents() {
  * Closes the modal
  */
 function closeModal() {
+    cleaningManagerDraft = null;
+    cleaningManagerSession++;
     $('#vecthare_text_cleaning_modal').fadeOut(200, function() {
         $(this).remove();
     });
