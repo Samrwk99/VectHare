@@ -138,6 +138,7 @@ let browserState = {
 // Event binding flags (module-level for proper reset on modal close)
 let searchEventsBound = false;
 let bulkEventsBound = false;
+let activationChatListenerBound = false;
 
 /**
  * Initializes the database browser
@@ -166,6 +167,9 @@ export async function openDatabaseBrowser() {
   if ($("#vecthare_database_browser_modal").length === 0) {
     createBrowserModal();
   }
+
+  // Rebind only the browser-owned document shortcut on every open.
+  bindBrowserKeyboard();
 
   // Show/hide plugin warning banner
   updatePluginWarningBanner();
@@ -196,18 +200,10 @@ function updatePluginWarningBanner() {
 export function closeDatabaseBrowser() {
   $("#vecthare_database_browser_modal").fadeOut(200);
   browserState.isOpen = false;
-  // Reset event bound flags for clean rebind on next open
-  resetEventFlags();
+  // The modal remains in the DOM: its search/bulk handlers must remain bound.
+  // Only the document-level shortcut is detached on close.
+  $(document).off('keydown.vecthare_browser');
   console.log("VectHare Database Browser: Closed");
-}
-
-/**
- * Resets event bound flags (called on modal close)
- */
-function resetEventFlags() {
-  // Reset flags so events rebind properly on next modal open
-  bulkEventsBound = false;
-  searchEventsBound = false;
 }
 
 /**
@@ -523,14 +519,7 @@ function bindBrowserEvents() {
     }
   });
 
-  // Keyboard shortcuts
-  $(document).on("keydown.vecthare_browser", function (e) {
-    if (!browserState.isOpen) return;
-
-    if (e.key === "Escape") {
-      closeDatabaseBrowser();
-    }
-  });
+  // Keyboard shortcuts are bound by openDatabaseBrowser(), never here.
 
   // Import button
   $("#vecthare_import_collection").on("click", function (e) {
@@ -641,6 +630,13 @@ function bindBrowserEvents() {
   });
 }
 
+
+/** Register the browser shortcut without duplicating handlers on reopen. */
+function bindBrowserKeyboard() {
+  $(document).off('keydown.vecthare_browser').on('keydown.vecthare_browser', function(e) {
+    if (browserState.isOpen && e.key === 'Escape') closeDatabaseBrowser();
+  });
+}
 
 /**
  * Switches active tab
@@ -2209,10 +2205,11 @@ function bindActivationEditorEvents() {
     }
   });
 
-  // Refresh lock button when chat changes
-  eventSource.on(event_types.CHAT_CHANGED, () => {
-    refreshActivationLockButton();
-  });
+  // One host listener for all activation-editor opens (not one per dialog).
+  if (!activationChatListenerBound) {
+    eventSource.on(event_types.CHAT_CHANGED, refreshActivationLockButton);
+    activationChatListenerBound = true;
+  }
 
   // Injection position toggle shows/hides depth row
   $("#vecthare_collection_position").on("change", function (e) {

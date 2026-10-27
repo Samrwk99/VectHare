@@ -11,7 +11,7 @@
     "test:i01": "node --experimental-vm-modules --test tests/i01-safety.node.test.mjs",
     "test:i02": "node --experimental-vm-modules --test tests/i02-security.node.test.mjs",
     "test:i03": "node --experimental-vm-modules --test tests/i03-chat-sync.node.test.mjs",
-    "test:repair": "node --experimental-vm-modules --test tests/i01-safety.node.test.mjs tests/i02-security.node.test.mjs tests/i03-chat-sync.node.test.mjs tests/i04-backend-errors.node.test.mjs tests/i05-metadata.node.test.mjs tests/i06-conditions.node.test.mjs tests/i07-backup.node.test.mjs tests/i08-provider-compat.node.test.mjs tests/i09-search-relevance.node.test.mjs tests/i10-prompt-correctness.node.test.mjs tests/i11-links-temporal.node.test.mjs tests/i12-content-vectorizer.node.test.mjs tests/i13-numeric-zero.node.test.mjs tests/i14-text-cleaning.node.test.mjs tests/i15-search-debugger.node.test.mjs tests/i16-diagnostics.node.test.mjs tests/i17-emotion-cache.node.test.mjs",
+    "test:repair": "node --experimental-vm-modules --test tests/i01-safety.node.test.mjs tests/i02-security.node.test.mjs tests/i03-chat-sync.node.test.mjs tests/i04-backend-errors.node.test.mjs tests/i05-metadata.node.test.mjs tests/i06-conditions.node.test.mjs tests/i07-backup.node.test.mjs tests/i08-provider-compat.node.test.mjs tests/i09-search-relevance.node.test.mjs tests/i10-prompt-correctness.node.test.mjs tests/i11-links-temporal.node.test.mjs tests/i12-content-vectorizer.node.test.mjs tests/i13-numeric-zero.node.test.mjs tests/i14-text-cleaning.node.test.mjs tests/i15-search-debugger.node.test.mjs tests/i16-diagnostics.node.test.mjs tests/i17-emotion-cache.node.test.mjs tests/i18-ui-lifecycle.node.test.mjs",
     "test:i04": "node --experimental-vm-modules --test tests/i04-backend-errors.node.test.mjs",
     "test:i05": "node --experimental-vm-modules --test tests/i05-metadata.node.test.mjs",
     "test:i06": "node --experimental-vm-modules --test tests/i06-conditions.node.test.mjs",
@@ -25,7 +25,8 @@
     "test:i14": "node --experimental-vm-modules --test tests/i14-text-cleaning.node.test.mjs",
     "test:i15": "node --experimental-vm-modules --test tests/i15-search-debugger.node.test.mjs",
     "test:i16": "node --experimental-vm-modules --test tests/i16-diagnostics.node.test.mjs",
-    "test:i17": "node --experimental-vm-modules --test tests/i17-emotion-cache.node.test.mjs"
+    "test:i17": "node --experimental-vm-modules --test tests/i17-emotion-cache.node.test.mjs",
+    "test:i18": "node --experimental-vm-modules --test tests/i18-ui-lifecycle.node.test.mjs"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^2.1.0",

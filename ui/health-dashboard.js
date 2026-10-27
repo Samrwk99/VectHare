@@ -316,21 +316,26 @@ export function getHealthModalHtml() {
 /**
  * Initialize health dashboard event handlers
  */
+let healthDashboardInitialized = false;
+let healthIndicatorInterval = null;
+
 export function initializeHealthDashboard() {
+    if (healthDashboardInitialized) return;
+    healthDashboardInitialized = true;
     // Health indicator click
-    $(document).on('click', '#vecthare_health_indicator', openHealthDashboard);
+    $(document).on('click.vecthareHealth', '#vecthare_health_indicator', openHealthDashboard);
 
     // Close button
-    $(document).on('click', '#vecthare_health_close', closeHealthDashboard);
+    $(document).on('click.vecthareHealth', '#vecthare_health_close', closeHealthDashboard);
 
     // Overlay click
-    $(document).on('click', '#vecthare_health_modal .vecthare-modal-overlay', closeHealthDashboard);
+    $(document).on('click.vecthareHealth', '#vecthare_health_modal .vecthare-modal-overlay', closeHealthDashboard);
 
     // Refresh button
-    $(document).on('click', '#vecthare_health_refresh', updateDashboard);
+    $(document).on('click.vecthareHealth', '#vecthare_health_refresh', updateDashboard);
 
     // Update health indicator periodically
-    setInterval(() => {
+    healthIndicatorInterval = setInterval(() => {
         const indicator = document.getElementById('vecthare_health_indicator');
         if (indicator) {
             const metrics = getBackendMetrics();
@@ -342,6 +347,17 @@ export function initializeHealthDashboard() {
             indicator.className = `vecthare-health-indicator ${getHealthClass(healthy, errors)}`;
         }
     }, 10000);
+}
+
+/** Detach dashboard handlers and timers when a host reinitializes the panel. */
+export function disposeHealthDashboard() {
+    closeHealthDashboard();
+    $(document).off('.vecthareHealth');
+    if (healthIndicatorInterval !== null) {
+        clearInterval(healthIndicatorInterval);
+        healthIndicatorInterval = null;
+    }
+    healthDashboardInitialized = false;
 }
 
 /**

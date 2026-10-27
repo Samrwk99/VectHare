@@ -1729,7 +1729,7 @@ function bindDetailEvents() {
     const originalText = chunk.data.text;
 
     // Chunk name input
-    $('#vecthare_chunk_name').on('input', debounce(function() {
+    $('#vecthare_chunk_name').off('input.vecthareDetail').on('input.vecthareDetail', debounce(function() {
         const name = $(this).val().trim();
         chunk.data.name = name || null;
         updateChunkData(chunk.hash, { name: chunk.data.name });
@@ -1737,7 +1737,7 @@ function bindDetailEvents() {
     }, 300));
 
     // Inline text editing - track changes
-    $('#vecthare_chunk_text').on('input', function() {
+    $('#vecthare_chunk_text').off('input.vecthareDetail').on('input.vecthareDetail', function() {
         const newText = $(this).text().trim();
         if (newText !== originalText) {
             hasUnsavedChanges = true;
@@ -1749,7 +1749,7 @@ function bindDetailEvents() {
     });
 
     // Save text changes
-    $('#vecthare_save_text').on('click', async function() {
+    $('#vecthare_save_text').off('click.vecthareDetail').on('click.vecthareDetail', async function() {
         const newText = $('#vecthare_chunk_text').text().trim();
         if (!newText) return;
 
@@ -1791,7 +1791,7 @@ function bindDetailEvents() {
     });
 
     // Enabled toggle - save immediately (no pending changes, direct write)
-    $('#vecthare_detail_enabled').on('change', function() {
+    $('#vecthare_detail_enabled').off('change.vecthareDetail').on('change.vecthareDetail', function() {
         const enabled = $(this).is(':checked');
         const existing = getChunkMetadata(chunk.hash) || {};
         saveChunkMetadata(chunk.hash, { ...existing, disabled: !enabled, enabled });
@@ -1800,7 +1800,7 @@ function bindDetailEvents() {
     });
 
     // Blind toggle
-    $('#vecthare_detail_blind').on('change', function() {
+    $('#vecthare_detail_blind').off('change.vecthareDetail').on('change.vecthareDetail', function() {
         const blind = $(this).is(':checked');
         setChunkTemporallyBlind(chunk.hash, blind);
         chunk.data.temporallyBlind = blind;
@@ -1808,14 +1808,14 @@ function bindDetailEvents() {
     });
 
     // Prompt context input
-    $('#vecthare_chunk_context').on('input', debounce(function() {
+    $('#vecthare_chunk_context').off('input.vecthareDetail').on('input.vecthareDetail', debounce(function() {
         const context = $(this).val();
         chunk.data.context = context || '';
         updateChunkData(chunk.hash, { context: chunk.data.context });
     }, 300));
 
     // XML tag input (sanitize to alphanumeric + underscore/hyphen)
-    $('#vecthare_chunk_xmltag').on('input', debounce(function() {
+    $('#vecthare_chunk_xmltag').off('input.vecthareDetail').on('input.vecthareDetail', debounce(function() {
         const sanitized = $(this).val().replace(/[^a-zA-Z0-9_-]/g, '');
         $(this).val(sanitized);
         chunk.data.xmlTag = sanitized || '';
@@ -1823,7 +1823,7 @@ function bindDetailEvents() {
     }, 300));
 
     // Injection position select
-    $('#vecthare_chunk_position').on('change', function() {
+    $('#vecthare_chunk_position').off('change.vecthareDetail').on('change.vecthareDetail', function() {
         const val = $(this).val();
         const position = val === '' ? null : parseInt(val);
         chunk.data.position = position;
@@ -1833,7 +1833,7 @@ function bindDetailEvents() {
     });
 
     // Injection depth slider
-    $('#vecthare_chunk_depth').on('input', function() {
+    $('#vecthare_chunk_depth').off('input.vecthareDetail').on('input.vecthareDetail', function() {
         const parsedDepth = Number.parseInt($(this).val(), 10);
         const depth = Number.isFinite(parsedDepth) ? parsedDepth : 2;
         $('#vecthare_chunk_depth_value').text(depth);
@@ -1842,10 +1842,10 @@ function bindDetailEvents() {
     });
 
     // Delete chunk
-    $('#vecthare_delete_chunk').on('click', () => deleteChunk(chunk));
+    $('#vecthare_delete_chunk').off('click.vecthareDetail').on('click.vecthareDetail', () => deleteChunk(chunk));
 
     // Keyword mode toggle (plaintext vs badge)
-    $('#vecthare_keyword_mode').on('click', function() {
+    $('#vecthare_keyword_mode').off('click.vecthareDetail').on('click.vecthareDetail', function() {
         // If in plaintext mode, parse and save before switching
         if (plaintextKeywordMode) {
             const plaintext = $('#vecthare_keywords_plaintext').val();
@@ -1857,14 +1857,14 @@ function bindDetailEvents() {
     });
 
     // Plaintext keywords - save on blur
-    $('#vecthare_keywords_plaintext').on('blur', function() {
+    $('#vecthare_keywords_plaintext').off('blur.vecthareDetail').on('blur.vecthareDetail', function() {
         const plaintext = $(this).val();
         chunk.data.keywords = parsePlaintextKeywords(plaintext);
         updateChunkData(chunk.hash, { keywords: chunk.data.keywords });
     });
 
     // Keywords - add new
-    $('#vecthare_add_keyword').on('click', function() {
+    $('#vecthare_add_keyword').off('click.vecthareDetail').on('click.vecthareDetail', function() {
         $(this).replaceWith('<input type="text" class="vecthare-keyword-input" id="vecthare_keyword_input" placeholder="Enter keyword...">');
         $('#vecthare_keyword_input').focus().on('keydown', function(e) {
             if (e.key === 'Enter') {
@@ -1877,13 +1877,13 @@ function bindDetailEvents() {
             } else if (e.key === 'Escape') {
                 renderDetailPanel();
             }
-        }).on('blur', function() {
+        }).off('blur.vecthareDetail').on('blur.vecthareDetail', function() {
             renderDetailPanel();
         });
     });
 
     // Keyword remove button
-    $('.vecthare-keyword-remove').on('click', function() {
+    $('.vecthare-keyword-remove').off('click.vecthareDetail').on('click.vecthareDetail', function() {
         const index = $(this).data('index');
         chunk.data.keywords.splice(index, 1);
         updateChunkData(chunk.hash, { keywords: chunk.data.keywords });
@@ -1891,12 +1891,12 @@ function bindDetailEvents() {
     });
 
     // Conditions
-    $('#vecthare_conditions_enabled').on('change', function() {
+    $('#vecthare_conditions_enabled').off('change.vecthareDetail').on('change.vecthareDetail', function() {
         chunk.data.conditions.enabled = $(this).is(':checked');
         updateChunkData(chunk.hash, { conditions: chunk.data.conditions });
     });
 
-    $('.vecthare-logic-btn').on('click', function() {
+    $('.vecthare-logic-btn').off('click.vecthareDetail').on('click.vecthareDetail', function() {
         const logic = $(this).data('logic');
         chunk.data.conditions.logic = logic;
         updateChunkData(chunk.hash, { conditions: chunk.data.conditions });
@@ -1904,7 +1904,7 @@ function bindDetailEvents() {
         $(this).addClass('active');
     });
 
-    $('.vecthare-condition-item-remove').on('click', function() {
+    $('.vecthare-condition-item-remove').off('click.vecthareDetail').on('click.vecthareDetail', function() {
         const index = $(this).closest('.vecthare-condition-item').data('index');
         chunk.data.conditions.rules.splice(index, 1);
         updateChunkData(chunk.hash, { conditions: chunk.data.conditions });
@@ -1913,16 +1913,16 @@ function bindDetailEvents() {
     });
 
     // Add condition rule
-    $('#vecthare_add_condition').on('click', function() {
+    $('#vecthare_add_condition').off('click.vecthareDetail').on('click.vecthareDetail', function() {
         openConditionEditor(chunk);
     });
 
     // Chunk links
-    $('#vecthare_add_link').on('click', function() {
+    $('#vecthare_add_link').off('click.vecthareDetail').on('click.vecthareDetail', function() {
         openLinkEditor(chunk);
     });
 
-    $('.vecthare-link-item-remove').on('click', function() {
+    $('.vecthare-link-item-remove').off('click.vecthareDetail').on('click.vecthareDetail', function() {
         const index = $(this).closest('.vecthare-link-item').data('index');
         chunk.data.chunkLinks.splice(index, 1);
         updateChunkData(chunk.hash, { chunkLinks: chunk.data.chunkLinks });
@@ -1930,7 +1930,7 @@ function bindDetailEvents() {
     });
 
     // Summaries
-    $('.vecthare-summary-item-remove').on('click', function() {
+    $('.vecthare-summary-item-remove').off('click.vecthareDetail').on('click.vecthareDetail', function() {
         const index = $(this).closest('.vecthare-summary-item').data('index');
         const summaryText = chunk.data.summaries[index];
 
@@ -1944,7 +1944,7 @@ function bindDetailEvents() {
         renderDetailPanel();
     });
 
-    $('#vecthare_add_summary').on('click', function() {
+    $('#vecthare_add_summary').off('click.vecthareDetail').on('click.vecthareDetail', function() {
         const summary = prompt('Enter summary text:');
         if (summary && summary.trim()) {
             const summaryText = summary.trim();

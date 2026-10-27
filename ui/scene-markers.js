@@ -454,9 +454,15 @@ async function handleEndClick(messageId) {
 // INITIALIZATION
 // ============================================================================
 
+let sceneMarkersInitialized = false;
+let observedChatElement = null;
+let sceneChatObserver = null;
+
 export function initializeSceneMarkers() {
+    if (sceneMarkersInitialized) return;
+    sceneMarkersInitialized = true;
     // Watch for new messages via MutationObserver
-    const chatObserver = new MutationObserver((mutations) => {
+    sceneChatObserver = new MutationObserver((mutations) => {
         for (const mutation of mutations) {
             for (const node of mutation.addedNodes) {
                 if (node.nodeType === Node.ELEMENT_NODE) {
@@ -473,12 +479,16 @@ export function initializeSceneMarkers() {
     // Start observing chat element (may not exist yet at startup)
     const startObserving = () => {
         const chat = document.getElementById('chat');
-        if (chat) {
-            chatObserver.observe(chat, { childList: true, subtree: true });
-            // Attach to any existing messages
-            attachAllMarkers();
-            console.log('VectHare Scenes: Chat observer started');
+        if (chat !== observedChatElement) {
+            // Disconnect first: an old #chat node may still exist after navigation.
+            if (observedChatElement) sceneChatObserver.disconnect();
+            observedChatElement = chat;
+            if (chat) {
+                sceneChatObserver.observe(chat, { childList: true, subtree: true });
+                console.log('VectHare Scenes: Chat observer started');
+            }
         }
+        if (chat) attachAllMarkers();
     };
 
     // Try immediately

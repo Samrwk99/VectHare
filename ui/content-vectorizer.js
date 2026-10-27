@@ -61,6 +61,8 @@ export function openContentVectorizer(initialType = null) {
     }
     clearSelectedSource();
 
+    // Reopening must not retain delegated listeners from the previous modal.
+    $(document).off('.vecthareContentVectorizer');
     createModal();
     bindEvents();
 
@@ -85,7 +87,8 @@ export function openContentVectorizer(initialType = null) {
  */
 export function closeContentVectorizer() {
     clearSelectedSource();
-    $('#vecthare_content_vectorizer_modal').fadeOut(200, function() {
+    $(document).off('.vecthareContentVectorizer');
+    $('#vecthare_content_vectorizer_modal').stop(true, true).fadeOut(200, function() {
         $(this).remove();
     });
 }
@@ -1194,37 +1197,37 @@ function bindEvents() {
     });
 
     // Scope selection
-    $(document).on('change', 'input[name="vecthare_cv_scope"]', function() {
+    $(document).on('change.vecthareContentVectorizer', 'input[name="vecthare_cv_scope"]', function() {
         currentSettings.scope = $(this).val();
         $('.vecthare-cv-scope-option').removeClass('selected');
         $(this).closest('.vecthare-cv-scope-option').addClass('selected');
     });
 
     // Character fields are job-specific, not immutable type defaults.
-    $(document).on('change', 'input[name="vecthare_cv_field"]', function() {
+    $(document).on('change.vecthareContentVectorizer', 'input[name="vecthare_cv_field"]', function() {
         if (!currentSettings.fields) currentSettings.fields = {};
         currentSettings.fields[$(this).val()] = $(this).prop('checked');
     });
 
     // Include disabled World Info entries only if explicitly selected.
-    $(document).on('change', '#vecthare_cv_include_disabled', function() {
+    $(document).on('change.vecthareContentVectorizer', '#vecthare_cv_include_disabled', function() {
         currentSettings.includeDisabled = $(this).prop('checked');
     });
 
     // Keyword level dropdown
-    $(document).on('change', '#vecthare_cv_keyword_level', function() {
+    $(document).on('change.vecthareContentVectorizer', '#vecthare_cv_keyword_level', function() {
         currentSettings.keywordLevel = $(this).val();
     });
 
     // Keyword base weight
-    $(document).on('change', '#vecthare_cv_keyword_weight', function() {
+    $(document).on('change.vecthareContentVectorizer', '#vecthare_cv_keyword_weight', function() {
         const value = parseFloat($(this).val());
         currentSettings.keywordBaseWeight = isNaN(value) ? 1.5 : Math.min(3.0, Math.max(0.01, value));
         $(this).val(currentSettings.keywordBaseWeight);
     });
 
     // Temporal weighting enable/disable
-    $(document).on('change', '#vecthare_cv_temporal_decay', function() {
+    $(document).on('change.vecthareContentVectorizer', '#vecthare_cv_temporal_decay', function() {
         const isEnabled = $(this).prop('checked');
         if (!currentSettings.temporalDecay) {
             currentSettings.temporalDecay = { enabled: false, type: 'decay', mode: 'exponential' };
@@ -1236,7 +1239,7 @@ function bindEvents() {
     });
 
     // Temporal weighting type toggle (decay vs nostalgia)
-    $(document).on('change', 'input[name="vecthare_cv_decay_type"]', function() {
+    $(document).on('change.vecthareContentVectorizer', 'input[name="vecthare_cv_decay_type"]', function() {
         const type = $(this).val();
         if (!currentSettings.temporalDecay) {
             currentSettings.temporalDecay = { enabled: true, type: 'decay', mode: 'exponential' };
@@ -1251,7 +1254,7 @@ function bindEvents() {
     });
 
     // Temporal weighting curve toggle (exponential vs linear)
-    $(document).on('change', 'input[name="vecthare_cv_decay_mode"]', function() {
+    $(document).on('change.vecthareContentVectorizer', 'input[name="vecthare_cv_decay_mode"]', function() {
         const mode = $(this).val();
         if (!currentSettings.temporalDecay) {
             currentSettings.temporalDecay = { enabled: true, type: 'decay', mode: 'exponential' };
@@ -1266,25 +1269,25 @@ function bindEvents() {
     });
 
     // Temporal weighting numeric inputs
-    $(document).on('change', '#vecthare_cv_decay_halflife', function() {
+    $(document).on('change.vecthareContentVectorizer', '#vecthare_cv_decay_halflife', function() {
         if (!currentSettings.temporalDecay) currentSettings.temporalDecay = {};
         currentSettings.temporalDecay.halfLife = parseInt($(this).val()) || 50;
     });
-    $(document).on('change', '#vecthare_cv_decay_rate', function() {
+    $(document).on('change.vecthareContentVectorizer', '#vecthare_cv_decay_rate', function() {
         if (!currentSettings.temporalDecay) currentSettings.temporalDecay = {};
         currentSettings.temporalDecay.linearRate = parseFloat($(this).val()) || 0.01;
     });
-    $(document).on('change', '#vecthare_cv_decay_min', function() {
+    $(document).on('change.vecthareContentVectorizer', '#vecthare_cv_decay_min', function() {
         if (!currentSettings.temporalDecay) currentSettings.temporalDecay = {};
         currentSettings.temporalDecay.minRelevance = parseFloat($(this).val()) || 0.3;
     });
-    $(document).on('change', '#vecthare_cv_decay_max_boost', function() {
+    $(document).on('change.vecthareContentVectorizer', '#vecthare_cv_decay_max_boost', function() {
         if (!currentSettings.temporalDecay) currentSettings.temporalDecay = {};
         currentSettings.temporalDecay.maxBoost = parseFloat($(this).val()) || 1.2;
     });
 
     // Cleaning preset dropdown
-    $(document).on('change', '#vecthare_cv_cleaning_preset', function() {
+    $(document).on('change.vecthareContentVectorizer', '#vecthare_cv_cleaning_preset', function() {
         const presetId = $(this).val();
         currentSettings.cleaningPreset = presetId;
 

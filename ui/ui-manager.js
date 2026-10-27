@@ -945,6 +945,8 @@ export function renderSettings(containerId, settings, callbacks) {
         console.warn('VectHare: renderSettings pre-append debug failed', e);
     }
 
+    // A settings re-render replaces old controls, instead of stacking duplicate IDs.
+    $('#vecthare_settings').remove();
     $(`#${containerId}`).append(html);
 
     // Debug: log presence of lock button after rendering and observe for later appearance
@@ -1003,7 +1005,7 @@ function initializeDiagnosticsModal() {
     });
 
     // ESC key to close
-    $(document).on('keydown', function(e) {
+    $(document).off('keydown.vecthareDiagnostics').on('keydown.vecthareDiagnostics', function(e) {
         if (e.key === 'Escape' && $('#vecthare_diagnostics_modal').is(':visible')) {
             closeDiagnosticsModal();
         }

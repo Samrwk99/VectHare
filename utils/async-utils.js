@@ -78,12 +78,13 @@ const AsyncUtils = {
    * @returns {Promise<*>} Promise that rejects on timeout
    */
   timeout(promise, ms, message = 'Operation timed out') {
+    let timeoutId;
     return Promise.race([
-      promise,
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error(message)), ms)
-      )
-    ]);
+      Promise.resolve(promise),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error(message)), ms);
+      })
+    ]).finally(() => clearTimeout(timeoutId));
   },
 
   /**

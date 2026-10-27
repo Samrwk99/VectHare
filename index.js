@@ -182,7 +182,7 @@ window['vecthare_rearrangeChat'] = vecthare_rearrangeChat;
  */
 async function onRepairClick() {
     await repairChatVectors(settings, getBatchSize());
-    offerResumeOfUnfinishedVectorization(); // refresh status line + button
+    await offerResumeOfUnfinishedVectorization(); // refresh status line + button
 }
 
 /**
@@ -195,7 +195,7 @@ async function onVectorizeAllClick() {
     // CURRENT chat's state. Previously the check only fired on CHAT_CHANGED,
     // so stopping mid-run and staying in the same chat left no resume
     // affordance at all until the user switched chats or reloaded.
-    offerResumeOfUnfinishedVectorization();
+    await offerResumeOfUnfinishedVectorization();
     return result;
 }
 
@@ -447,7 +447,7 @@ jQuery(async () => {
 
     // Load saved settings
     if (!extension_settings.vecthare) {
-        extension_settings.vecthare = defaultSettings;
+        extension_settings.vecthare = structuredClone(defaultSettings);
     }
 
     // Merge saved settings with defaults
@@ -463,6 +463,12 @@ jQuery(async () => {
             ...extension_settings.vecthare.collections
         }
     };
+
+    // All runtime modules and the UI must refer to the same current settings.
+    // Keep the saved object identity; copying it into a detached snapshot causes
+    // background jobs to use stale values after UI changes.
+    Object.assign(extension_settings.vecthare, settings);
+    settings = extension_settings.vecthare;
 
     // Retire the inert legacy recent-message protection setting. Deduplication uses
     // the separately configured deduplication_depth; this had no effect.
