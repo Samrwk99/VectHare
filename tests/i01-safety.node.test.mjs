@@ -87,6 +87,8 @@ async function loadCollectionLoader({ registry = [], purge = async () => true } 
         '../utils/c01-deletion.js': {deleteCollectionSafely:async()=>({success:false,status:'blocked',reason:'destructive-server-contract-unverified'}),recoverTombstones:()=>[]},
         '../utils/c01-inventory.js': {collectScopedInventory:async()=>({complete:false,status:'unavailable'})},
         '../utils/backend-contracts.js': {hasVerifiedCapability:()=>false},
+        '../backends/backend-manager.js': {getBackendForCollection:async()=>null},
+        '../utils/c11-adapter-inventory.js': {inspectAdapterInventory:async()=>({complete:false,status:'unavailable'})},
         '../../../../extensions.js': { extension_settings, getContext: () => ({}) },
         '../../../../../script.js': {
             characters: [], substituteParams: x => x,

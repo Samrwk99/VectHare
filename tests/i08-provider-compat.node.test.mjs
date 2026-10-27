@@ -1,3 +1,4 @@
+import {adapterCollectionId} from '../utils/tenant-route.js';
 /** I08 regression tests: provider-model compatibility and Standard plugin insert fallback. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -38,7 +39,7 @@ function makeStandard(replies, getProviderSpecificParams = () => ({ apiUrl: 'htt
         console: quiet,
         VectorBackend: class {}, getRequestHeaders: () => ({}),
         getModelField: src => ({ ollama: 'ollama_model', vllm: 'vllm_model', openai: 'openai_model' })[src] || null,
-        getProviderSpecificParams, hybridEndpointUnsupported, mergeDefinedChunkMetadata,
+        getProviderSpecificParams, hybridEndpointUnsupported, mergeDefinedChunkMetadata, adapterCollectionId, hasVerifiedCapability:()=>false,
         VECTOR_LIST_LIMIT: 100,
         fetch: async (url, options) => {
             calls.push({ url, body: JSON.parse(options.body) });
@@ -69,6 +70,8 @@ async function makeExportHarness() {
     });
     const extensionStubs = {
         '../utils/security.js': {redactSecrets:value=>value},
+    '../utils/c04-ownership.js': {quarantineImportedOwnership:(meta)=>({...meta,enabled:false,ownershipReviewRequired:true})},
+    '../utils/tenant-route.js': {adapterCollectionId:(key)=>key},
         '../../../../extensions.js': { extension_settings: { vecthare: {} } },
         '../../../../../script.js': { getRequestHeaders: () => ({}), saveSettingsDebounced() {} },
         './core-vector-api.js': { getSavedHashes: async () => [], insertVectorItems: async (id, records) => written.push({ id, records }), purgeVectorIndex: async () => true },

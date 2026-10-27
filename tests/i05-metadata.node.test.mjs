@@ -1,3 +1,4 @@
+import {adapterCollectionId, rejectUnscopedPointOperation} from '../utils/tenant-route.js';
 /** I05: collection isolation and metadata integrity tests; no live backend required. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -20,6 +21,7 @@ function makeAdapter(file, results) {
         getRequestHeaders: () => ({}), getModelField: () => null, getProviderSpecificParams: () => ({}),
         VECTOR_LIST_LIMIT: 100, requireListedItems, requireQueryItems, hybridEndpointUnsupported,
         mergeDefinedChunkMetadata, trustedQueryMetadata,
+        adapterCollectionId, rejectUnscopedPointOperation, requireTenantScope: () => {}, hasVerifiedCapability: () => false,
         fetch: async (url, options) => { calls.push({ url, body: JSON.parse(options.body) }); return response(results.shift()); },
     });
     const className = { standard: 'StandardBackend', qdrant: 'QdrantBackend', milvus: 'MilvusBackend', lancedb: 'LanceDBBackend' }[file];
@@ -109,6 +111,8 @@ async function collectionSettingsModule() {
             '../../../../../script.js': { saveSettingsDebounced: () => saves++ },
             './collection-ids.js': { parseRegistryKey: id => ({ collectionId: String(id).split(':').pop() }) },
             '../utils/c01-inventory.js': {planOrphanCollectionMetadataRemoval:()=>({allowed:false,reason:'no authoritative inventory',remove:[]})},
+            '../utils/c04-registry-migration.js': {inspectRegistryMigration:()=>({status:'requires-remap'})},
+            '../utils/c04-ownership.js': {verifyCollectionOwner:()=>({allowed:true})},
             '../utils/collection-keys.js': {parseCollectionKey:()=>null},
         };
         assert.ok(dependencies[spec], `Unexpected dependency ${spec}`);
@@ -148,9 +152,11 @@ test('#175: setCollectionMeta does not share input objects and legacy migration 
     assert.deepEqual(Array.from(meta.getCollectionMeta('X').tags),['hello']);
     assert.equal(meta.getCollectionMeta('X').conditions.rules[0].test,1);
     data.vecthare.vecthare_collection_enabled_old = false;
-    meta.migrateOldEnabledKeys();
-    assert.equal(meta.getCollectionMeta('old').enabled,false);
-    data.vecthare.collections.old.conditions.rules.push('old');
+    const migration=meta.migrateOldEnabledKeys();
+    assert.equal(migration.migrated,0);
+    assert.equal(migration.blocked,1);
+    assert.equal(data.vecthare.vecthare_collection_enabled_old,false);
+    assert.equal(data.vecthare.collections.old,undefined); // cannot infer owner from old flag
     assert.equal(meta.getCollectionMeta('X').conditions.rules.length,1);
 });
 

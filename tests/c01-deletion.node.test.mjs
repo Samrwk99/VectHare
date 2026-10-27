@@ -177,6 +177,8 @@ test('C01 #158/#220: real metadata module never deletes B for A or through a bar
    './collection-ids.js':{parseRegistryKey:k=>({collectionId:String(k).split(':').at(-1)})},
    '../utils/c01-inventory.js':{planOrphanCollectionMetadataRemoval:()=>({allowed:false,reason:'incomplete'})},
    '../utils/collection-keys.js':{parseCollectionKey},
+   '../utils/c04-registry-migration.js':{inspectRegistryMigration:()=>({status:'ready'})},
+   '../utils/c04-ownership.js':{verifyCollectionOwner:()=>({allowed:true})},
  };
  await module.link(spec=>{const exports=stubs[spec];assert.ok(exports,spec);
    return new vm.SyntheticModule(Object.keys(exports),function(){for(const [k,v] of Object.entries(exports))this.setExport(k,v);},{context});

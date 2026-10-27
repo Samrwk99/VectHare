@@ -72,8 +72,17 @@ export async function deleteCollectionSafely({key,store,persist,inventory,purge,
         const oldMeta=store.collections[key];
         const oldRecords=store.recordMetadata && own(store.recordMetadata,key) ? store.recordMetadata[key] : undefined;
         const oldRegistry=[...store.registry];
+        // C04-B: remove dangling chat selections as part of the SAME durable
+        // finalization; rollback them if durable persistence fails.
+        const oldPolicies=store.chatCollectionPolicies && JSON.parse(JSON.stringify(store.chatCollectionPolicies));
         delete store.collections[key];
         if (store.recordMetadata) delete store.recordMetadata[key];
+        if (store.chatCollectionPolicies) {
+            for(const policy of Object.values(store.chatCollectionPolicies)) {
+                if (Array.isArray(policy?.selectedCollections))
+                    policy.selectedCollections=policy.selectedCollections.filter(x=>x!==key);
+            }
+        }
         const registryIndex=store.registry.indexOf(key);
         if (registryIndex>=0) store.registry.splice(registryIndex,1);
         tombstone.stage='finalized';
@@ -83,6 +92,10 @@ export async function deleteCollectionSafely({key,store,persist,inventory,purge,
             store.collections[key]=oldMeta;
             if (oldRecords!==undefined) store.recordMetadata[key]=oldRecords;
             store.registry.splice(0,store.registry.length,...oldRegistry);
+            if(oldPolicies) {
+                for(const field of Object.keys(store.chatCollectionPolicies)) delete store.chatCollectionPolicies[field];
+                Object.assign(store.chatCollectionPolicies,oldPolicies);
+            }
             tombstone.stage='purged';
             return fail('needs-retry','finalization-persist-failed');
         }

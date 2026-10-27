@@ -1,3 +1,4 @@
+import {adapterCollectionId,requireTenantScope,rejectUnscopedPointOperation} from '../utils/tenant-route.js';
 import {hasVerifiedCapability} from '../utils/backend-contracts.js';
 import { mergeDefinedChunkMetadata, trustedQueryMetadata } from '../utils/chunk-record-metadata.js';
 /**
@@ -130,28 +131,8 @@ export class MilvusBackend extends VectorBackend {
      * 
      * Legacy format: vecthare_{type}_{sourceId}
      */
-    _parseCollectionId(collectionId) {
-        if (!collectionId || typeof collectionId !== 'string') {
-            return { type: 'unknown', sourceId: 'unknown' };
-        }
-
-        // Strip registry key prefix if present (backend:source:collectionId)
-        const knownBackends = ['standard', 'lancedb', 'vectra', 'milvus', 'qdrant'];
-        const knownSources = ['transformers', 'openai', 'cohere', 'ollama', 'llamacpp',
-            'vllm', 'koboldcpp', 'webllm', 'bananabread', 'openrouter'];
-        
-        const parts = collectionId.split(':');
-        
-        // Check if it starts with backend:source: prefix
-        if (parts.length >= 3 && knownBackends.includes(parts[0]) && knownSources.includes(parts[1])) {
-            // Strip the backend:source: prefix and work with just the collection ID
-            collectionId = parts.slice(2).join(':');
-        }
-        // Check if it starts with source: prefix (old format)
-        else if (parts.length >= 2 && knownSources.includes(parts[0])) {
-            // Strip the source: prefix
-            collectionId = parts.slice(1).join(':');
-        }
+    _parseCollectionId(collectionId, settings) {
+        collectionId = adapterCollectionId(collectionId, BACKEND_TYPE, settings?.source || 'transformers');
 
         // Now parse the actual collection ID
         const idParts = collectionId.split(':');
@@ -182,7 +163,8 @@ export class MilvusBackend extends VectorBackend {
     }
 
     async getSavedHashes(collectionId, settings) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+        requireTenantScope(BACKEND_TYPE, 'getSavedHashes');
+        const { type, sourceId } = this._parseCollectionId(collectionId, settings);
 
         const response = await fetch('/api/plugins/similharity/chunks/list', {
             method: 'POST',
@@ -207,9 +189,10 @@ export class MilvusBackend extends VectorBackend {
     }
 
     async insertVectorItems(collectionId, items, settings) {
+        requireTenantScope(BACKEND_TYPE, 'insertVectorItems');
         if (items.length === 0) return;
 
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+        const { type, sourceId } = this._parseCollectionId(collectionId, settings);
 
         const response = await fetch('/api/plugins/similharity/chunks/insert', {
             method: 'POST',
@@ -239,7 +222,9 @@ export class MilvusBackend extends VectorBackend {
     }
 
     async deleteVectorItems(collectionId, hashes, settings) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+        if (!hasVerifiedCapability('milvus','deleteAcknowledgement')) throw new Error('milvus: targeted deletion blocked; server acknowledgement unverified');
+        requireTenantScope(BACKEND_TYPE, 'deleteVectorItems');
+        const { type, sourceId } = this._parseCollectionId(collectionId, settings);
 
         const response = await fetch('/api/plugins/similharity/chunks/delete', {
             method: 'POST',
@@ -261,7 +246,8 @@ export class MilvusBackend extends VectorBackend {
     }
 
     async queryCollection(collectionId, searchText, topK, settings) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+        requireTenantScope(BACKEND_TYPE, 'queryCollection');
+        const { type, sourceId } = this._parseCollectionId(collectionId, settings);
 
         const response = await fetch('/api/plugins/similharity/chunks/query', {
             method: 'POST',
@@ -294,11 +280,12 @@ export class MilvusBackend extends VectorBackend {
     }
 
     async queryMultipleCollections(collectionIds, searchText, topK, threshold, settings) {
+        requireTenantScope(BACKEND_TYPE, 'queryMultipleCollections');
         const results = {};
 
         for (const collectionId of collectionIds) {
             try {
-                const { type, sourceId } = this._parseCollectionId(collectionId);
+                const { type, sourceId } = this._parseCollectionId(collectionId, settings);
 
                 const response = await fetch('/api/plugins/similharity/chunks/query', {
                     method: 'POST',
@@ -337,7 +324,9 @@ export class MilvusBackend extends VectorBackend {
     }
 
     async purgeVectorIndex(collectionId, settings) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+        requireTenantScope(BACKEND_TYPE, 'purgeVectorIndex');
+        if (!hasVerifiedCapability(BACKEND_TYPE,'purgeAcknowledgement')) throw new Error('Milvus purge acknowledgement unverified');
+        const { type, sourceId } = this._parseCollectionId(collectionId, settings);
 
         const response = await fetch('/api/plugins/similharity/chunks/purge', {
             method: 'POST',
@@ -363,25 +352,10 @@ export class MilvusBackend extends VectorBackend {
         return this.purgeVectorIndex(collectionId, settings);
     }
 
-    async purgeAllVectorIndexes(settings) {
-        // Purge the entire main collection
-        const response = await fetch('/api/plugins/similharity/chunks/purge', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-            body: JSON.stringify({
-                backend: BACKEND_TYPE,
-                collectionId: 'vecthare_main',
-                source: settings.source || 'transformers',
-                model: getModelFromSettings(settings),
-                // No filters = purge everything
-            }),
-        });
-
-        if (!response.ok) {
-            const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`[Milvus] Failed to purge all collections: ${response.status} ${response.statusText} - ${errorBody}`);
-        }
+    async purgeAllVectorIndexes(_settings) {
+        throw new Error('Global Milvus purge disabled: physical collection may contain unrelated tenants');
     }
+
 
     // ========================================================================
     // EXTENDED API METHODS (for UI components)
@@ -391,7 +365,8 @@ export class MilvusBackend extends VectorBackend {
      * Get a single chunk by hash
      */
     async getChunk(collectionId, hash, settings) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+        rejectUnscopedPointOperation(BACKEND_TYPE, 'getChunk');
+        const { type, sourceId } = this._parseCollectionId(collectionId, settings);
 
         const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}?` + new URLSearchParams({
             backend: BACKEND_TYPE,
@@ -416,7 +391,8 @@ export class MilvusBackend extends VectorBackend {
      * List chunks with pagination
      */
     async listChunks(collectionId, settings, options = {}) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+        requireTenantScope(BACKEND_TYPE, 'listChunks');
+        const { type, sourceId } = this._parseCollectionId(collectionId, settings);
 
         const response = await fetch('/api/plugins/similharity/chunks/list', {
             method: 'POST',
@@ -445,7 +421,8 @@ export class MilvusBackend extends VectorBackend {
      * Update chunk text (triggers re-embedding)
      */
     async updateChunkText(collectionId, hash, newText, settings) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+        requireTenantScope(BACKEND_TYPE, 'updateChunkText');
+        const { type, sourceId } = this._parseCollectionId(collectionId, settings);
 
         const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}/text`, {
             method: 'PATCH',
@@ -472,7 +449,8 @@ export class MilvusBackend extends VectorBackend {
      * Update chunk metadata (no re-embedding)
      */
     async updateChunkMetadata(collectionId, hash, metadata, settings) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+        requireTenantScope(BACKEND_TYPE, 'updateChunkMetadata');
+        const { type, sourceId } = this._parseCollectionId(collectionId, settings);
 
         const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}/metadata`, {
             method: 'PATCH',
@@ -500,7 +478,7 @@ export class MilvusBackend extends VectorBackend {
      */
     async getStats(collectionId, settings) {
         if (!hasVerifiedCapability(BACKEND_TYPE,'tenantFilter')) throw new Error('Tenant statistics unavailable: server tenant filter unverified');
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+        const { type, sourceId } = this._parseCollectionId(collectionId, settings);
 
         const response = await fetch('/api/plugins/similharity/chunks/stats', {
             method: 'POST',
@@ -548,6 +526,7 @@ export class MilvusBackend extends VectorBackend {
      * @returns {Promise<{hashes: number[], metadata: object[]}>}
      */
     async hybridQuery(collectionId, searchText, topK, settings, hybridOptions = {}) {
+        requireTenantScope(BACKEND_TYPE, 'hybridQuery');
         const {
             vectorWeight = 0.5,
             textWeight = 0.5,
@@ -555,7 +534,7 @@ export class MilvusBackend extends VectorBackend {
             rrfK = 60
         } = hybridOptions;
 
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+        const { type, sourceId } = this._parseCollectionId(collectionId, settings);
 
         const body = {
             backend: BACKEND_TYPE,

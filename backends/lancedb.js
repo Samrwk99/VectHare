@@ -1,3 +1,4 @@
+import {adapterCollectionId} from '../utils/tenant-route.js';
 import {hasVerifiedCapability} from '../utils/backend-contracts.js';
 import { mergeDefinedChunkMetadata, trustedQueryMetadata } from '../utils/chunk-record-metadata.js';
 /**
@@ -37,28 +38,8 @@ export class LanceDBBackend extends VectorBackend {
      * @param {string} collectionId - May be plain ID or prefixed registry key
      * @returns {string} - Just the collection ID part
      */
-    _stripRegistryPrefix(collectionId) {
-        if (!collectionId || typeof collectionId !== 'string') {
-            return collectionId;
-        }
-
-        const knownBackends = ['standard', 'lancedb', 'vectra', 'milvus', 'qdrant'];
-        const knownSources = ['transformers', 'openai', 'cohere', 'ollama', 'llamacpp',
-            'vllm', 'koboldcpp', 'webllm', 'bananabread', 'openrouter', 'togetherai', 'mistral'];
-
-        const parts = collectionId.split(':');
-
-        // Check if it starts with backend:source: prefix
-        if (parts.length >= 3 && knownBackends.includes(parts[0]) && knownSources.includes(parts[1])) {
-            return parts.slice(2).join(':');
-        }
-        // Check if it starts with source: prefix (old format)
-        else if (parts.length >= 2 && knownSources.includes(parts[0])) {
-            return parts.slice(1).join(':');
-        }
-
-        // Already plain collection ID
-        return collectionId;
+    _stripRegistryPrefix(collectionId, settings) {
+        return adapterCollectionId(collectionId, BACKEND_TYPE, settings?.source || 'transformers');
     }
 
     async initialize(settings) {
@@ -93,7 +74,7 @@ export class LanceDBBackend extends VectorBackend {
     }
 
     async getSavedHashes(collectionId, settings) {
-        const actualCollectionId = this._stripRegistryPrefix(collectionId);
+        const actualCollectionId = this._stripRegistryPrefix(collectionId, settings);
         const response = await fetch('/api/plugins/similharity/chunks/list', {
             method: 'POST',
             headers: getRequestHeaders(),
@@ -118,7 +99,7 @@ export class LanceDBBackend extends VectorBackend {
     async insertVectorItems(collectionId, items, settings) {
         if (items.length === 0) return;
 
-        const actualCollectionId = this._stripRegistryPrefix(collectionId);
+        const actualCollectionId = this._stripRegistryPrefix(collectionId, settings);
         const response = await fetch('/api/plugins/similharity/chunks/insert', {
             method: 'POST',
             headers: getRequestHeaders(),
@@ -146,7 +127,8 @@ export class LanceDBBackend extends VectorBackend {
     }
 
     async deleteVectorItems(collectionId, hashes, settings) {
-        const actualCollectionId = this._stripRegistryPrefix(collectionId);
+        if (!hasVerifiedCapability('lancedb','deleteAcknowledgement')) throw new Error('lancedb: targeted deletion blocked; server acknowledgement unverified');
+        const actualCollectionId = this._stripRegistryPrefix(collectionId, settings);
         const response = await fetch('/api/plugins/similharity/chunks/delete', {
             method: 'POST',
             headers: getRequestHeaders(),
@@ -166,7 +148,7 @@ export class LanceDBBackend extends VectorBackend {
     }
 
     async queryCollection(collectionId, searchText, topK, settings) {
-        const actualCollectionId = this._stripRegistryPrefix(collectionId);
+        const actualCollectionId = this._stripRegistryPrefix(collectionId, settings);
         console.log(`[LanceDB] queryCollection: original=${collectionId}, stripped=${actualCollectionId}`);
         const response = await fetch('/api/plugins/similharity/chunks/query', {
             method: 'POST',
@@ -202,7 +184,7 @@ export class LanceDBBackend extends VectorBackend {
         const results = {};
 
         for (const collectionId of collectionIds) {
-            const actualCollectionId = this._stripRegistryPrefix(collectionId);
+            const actualCollectionId = this._stripRegistryPrefix(collectionId, settings);
             try {
                 const response = await fetch('/api/plugins/similharity/chunks/query', {
                     method: 'POST',
@@ -240,7 +222,8 @@ export class LanceDBBackend extends VectorBackend {
     }
 
     async purgeVectorIndex(collectionId, settings) {
-        const actualCollectionId = this._stripRegistryPrefix(collectionId);
+        if (!hasVerifiedCapability(BACKEND_TYPE,'purgeAcknowledgement')) throw new Error('LanceDB purge blocked: server acknowledgement unverified');
+        const actualCollectionId = this._stripRegistryPrefix(collectionId, settings);
         const response = await fetch('/api/plugins/similharity/chunks/purge', {
             method: 'POST',
             headers: getRequestHeaders(),
@@ -262,31 +245,10 @@ export class LanceDBBackend extends VectorBackend {
         return this.purgeVectorIndex(collectionId, settings);
     }
 
-    async purgeAllVectorIndexes(settings) {
-        // Get all collections and purge ALL of them - no filtering
-        const response = await fetch('/api/plugins/similharity/collections', {
-            headers: getRequestHeaders(),
-        });
-
-        if (!response.ok) {
-            const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`[LanceDB] Failed to get collections: ${response.status} ${response.statusText} - ${errorBody}`);
-        }
-
-        const data = await response.json();
-
-        // Purge ALL collections - don't filter by backend
-        for (const collection of data.collections || []) {
-            try {
-                await this.purgeVectorIndex(collection.id, {
-                    ...settings,
-                    source: collection.source,
-                });
-            } catch (e) {
-                console.error(`Failed to purge ${collection.id}:`, e);
-            }
-        }
+    async purgeAllVectorIndexes(_settings) {
+        throw new Error('Global LanceDB purge disabled: enumeration does not prove backend ownership');
     }
+
 
     // ========================================================================
     // EXTENDED API METHODS (for UI components)
@@ -296,7 +258,7 @@ export class LanceDBBackend extends VectorBackend {
      * Get a single chunk by hash
      */
     async getChunk(collectionId, hash, settings) {
-        const actualCollectionId = this._stripRegistryPrefix(collectionId);
+        const actualCollectionId = this._stripRegistryPrefix(collectionId, settings);
         const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}?` + new URLSearchParams({
             backend: BACKEND_TYPE,
             collectionId: actualCollectionId,
@@ -320,7 +282,7 @@ export class LanceDBBackend extends VectorBackend {
      * List chunks with pagination
      */
     async listChunks(collectionId, settings, options = {}) {
-        const actualCollectionId = this._stripRegistryPrefix(collectionId);
+        const actualCollectionId = this._stripRegistryPrefix(collectionId, settings);
         const response = await fetch('/api/plugins/similharity/chunks/list', {
             method: 'POST',
             headers: getRequestHeaders(),
@@ -347,7 +309,7 @@ export class LanceDBBackend extends VectorBackend {
      * Update chunk text (triggers re-embedding)
      */
     async updateChunkText(collectionId, hash, newText, settings) {
-        const actualCollectionId = this._stripRegistryPrefix(collectionId);
+        const actualCollectionId = this._stripRegistryPrefix(collectionId, settings);
         const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}/text`, {
             method: 'PATCH',
             headers: getRequestHeaders(),
@@ -372,7 +334,7 @@ export class LanceDBBackend extends VectorBackend {
      * Update chunk metadata (no re-embedding)
      */
     async updateChunkMetadata(collectionId, hash, metadata, settings) {
-        const actualCollectionId = this._stripRegistryPrefix(collectionId);
+        const actualCollectionId = this._stripRegistryPrefix(collectionId, settings);
         const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}/metadata`, {
             method: 'PATCH',
             headers: getRequestHeaders(),
@@ -398,7 +360,7 @@ export class LanceDBBackend extends VectorBackend {
      */
     async getStats(collectionId, settings) {
         if (!hasVerifiedCapability(BACKEND_TYPE,'tenantFilter')) throw new Error('Tenant statistics unavailable: server tenant filter unverified');
-        const actualCollectionId = this._stripRegistryPrefix(collectionId);
+        const actualCollectionId = this._stripRegistryPrefix(collectionId, settings);
         const response = await fetch('/api/plugins/similharity/chunks/stats', {
             method: 'POST',
             headers: getRequestHeaders(),

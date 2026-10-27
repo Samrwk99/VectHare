@@ -1,3 +1,5 @@
+import {adapterCollectionId} from '../utils/tenant-route.js';
+import {hasVerifiedCapability} from '../utils/backend-contracts.js';
 import { mergeDefinedChunkMetadata } from '../utils/chunk-record-metadata.js';
 /**
  * ============================================================================
@@ -91,6 +93,7 @@ export class StandardBackend extends VectorBackend {
      * Uses native ST API
      */
     async getSavedHashes(collectionId, settings) {
+        collectionId = adapterCollectionId(collectionId, 'standard', settings?.source || 'transformers');
         const providerParams = getProviderSpecificParams(settings, false);
         const model = getModelFromSettings(settings);
 
@@ -122,6 +125,7 @@ export class StandardBackend extends VectorBackend {
      * Uses plugin API if available (for metadata support), falls back to native ST API
      */
     async insertVectorItems(collectionId, items, settings) {
+        collectionId = adapterCollectionId(collectionId, 'standard', settings?.source || 'transformers');
         if (items.length === 0) return;
 
         const providerParams = getProviderSpecificParams(settings, false);
@@ -242,6 +246,8 @@ export class StandardBackend extends VectorBackend {
      * Uses native ST API
      */
     async deleteVectorItems(collectionId, hashes, settings) {
+        if (!hasVerifiedCapability('standard','deleteAcknowledgement')) throw new Error('standard: targeted deletion blocked; server acknowledgement unverified');
+        collectionId = adapterCollectionId(collectionId, 'standard', settings?.source || 'transformers');
         const response = await fetch('/api/vector/delete', {
             method: 'POST',
             headers: getRequestHeaders(),
@@ -263,6 +269,7 @@ export class StandardBackend extends VectorBackend {
      * Uses native ST API
      */
     async queryCollection(collectionId, searchText, topK, settings, queryVector = null) {
+        collectionId = adapterCollectionId(collectionId, 'standard', settings?.source || 'transformers');
         const providerParams = getProviderSpecificParams(settings, true);
         const model = getModelFromSettings(settings);
 
@@ -366,6 +373,8 @@ export class StandardBackend extends VectorBackend {
      * Uses native ST API
      */
     async purgeVectorIndex(collectionId, settings) {
+        if (!hasVerifiedCapability('standard','purgeAcknowledgement')) throw new Error('Standard purge blocked: native acknowledgement contract unverified');
+        collectionId = adapterCollectionId(collectionId, 'standard', settings?.source || 'transformers');
         const response = await fetch('/api/vector/purge', {
             method: 'POST',
             headers: getRequestHeaders(),
@@ -388,17 +397,10 @@ export class StandardBackend extends VectorBackend {
      * Purge all vector indexes
      * Uses native ST API
      */
-    async purgeAllVectorIndexes(settings) {
-        const response = await fetch('/api/vector/purge-all', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-        });
-
-        if (!response.ok) {
-            const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`Failed to purge all: ${response.status} ${response.statusText} - ${errorBody}`);
-        }
+    async purgeAllVectorIndexes(_settings) {
+        throw new Error('Global Standard purge disabled: unverified ownership and durable safety checkpoint');
     }
+
 
     // ========================================================================
     // EXTENDED API METHODS (plugin-only, graceful fallback)
@@ -409,6 +411,7 @@ export class StandardBackend extends VectorBackend {
      * Falls back to basic hash list if plugin unavailable
      */
     async listChunks(collectionId, settings, options = {}) {
+        collectionId = adapterCollectionId(collectionId, 'standard', settings?.source || 'transformers');
         if (this.pluginAvailable) {
             try {
                 const response = await fetch('/api/plugins/similharity/chunks/list', {
@@ -448,6 +451,7 @@ export class StandardBackend extends VectorBackend {
      * Returns null if plugin unavailable
      */
     async getChunk(collectionId, hash, settings) {
+        collectionId = adapterCollectionId(collectionId, 'standard', settings?.source || 'transformers');
         if (!this.pluginAvailable) return null;
 
         try {
@@ -475,6 +479,7 @@ export class StandardBackend extends VectorBackend {
      * Update chunk text (plugin-only feature)
      */
     async updateChunkText(collectionId, hash, newText, settings) {
+        collectionId = adapterCollectionId(collectionId, 'standard', settings?.source || 'transformers');
         if (!this.pluginAvailable) {
             throw new Error('Chunk text editing requires the Similharity plugin');
         }
@@ -503,6 +508,7 @@ export class StandardBackend extends VectorBackend {
      * Update chunk metadata (plugin-only feature)
      */
     async updateChunkMetadata(collectionId, hash, metadata, settings) {
+        collectionId = adapterCollectionId(collectionId, 'standard', settings?.source || 'transformers');
         if (!this.pluginAvailable) {
             throw new Error('Chunk metadata editing requires the Similharity plugin');
         }
@@ -532,6 +538,7 @@ export class StandardBackend extends VectorBackend {
      * Falls back to basic count if plugin unavailable
      */
     async getStats(collectionId, settings) {
+        collectionId = adapterCollectionId(collectionId, 'standard', settings?.source || 'transformers');
         if (this.pluginAvailable) {
             try {
                 const response = await fetch('/api/plugins/similharity/chunks/stats', {

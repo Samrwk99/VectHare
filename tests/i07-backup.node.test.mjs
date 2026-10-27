@@ -21,6 +21,8 @@ const tracker = Object.fromEntries(['show','updateCurrentItem','updateProgress',
 const settings={source:'transformers',model:'test-model',vector_backend:'qdrant'};
 const exportedModules={
     '../utils/security.js': {redactSecrets:value=>value},
+    '../utils/c04-ownership.js': {quarantineImportedOwnership:(meta)=>({...meta,enabled:false,ownershipReviewRequired:true})},
+    '../utils/tenant-route.js': {adapterCollectionId:(key)=>key},
     '../../../../extensions.js': {extension_settings:state},
     '../../../../../script.js': {getRequestHeaders:()=>({}),saveSettingsDebounced:()=>{}},
     './core-vector-api.js':{getSavedHashes:async()=>({hashes:[]}),insertVectorItems:async(id,items)=>imports.push({id,items,reembed:true}),purgeVectorIndex:async()=>true},

@@ -136,6 +136,12 @@ async function qdrantWithMock(fetchImpl) {
     const mod = new vm.SourceTextModule(source('backends/qdrant.js'), { context });
     await mod.link(spec => {
         const values = exports[spec];
+        if (spec === '../utils/tenant-route.js') {
+            return new vm.SyntheticModule(['adapterCollectionId','requireTenantScope','rejectUnscopedPointOperation'], function() {
+                this.setExport('adapterCollectionId',(id)=>id);this.setExport('requireTenantScope',()=>{});
+                this.setExport('rejectUnscopedPointOperation',()=>{});
+            },{context});
+        }
         if (spec === '../utils/backend-contracts.js') {
             return new vm.SyntheticModule(['hasVerifiedCapability'],function(){this.setExport('hasVerifiedCapability',()=>false);},{context});
         }

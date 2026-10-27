@@ -1,3 +1,4 @@
+import {adapterCollectionId, rejectUnscopedPointOperation} from '../utils/tenant-route.js';
 /** I04: real adapter methods against a fake fetch; no SillyTavern server required. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -30,6 +31,7 @@ function adapter(file, replies = []) {
         VECTOR_LIST_LIMIT: 100,
         requireListedItems, requireQueryItems, hybridEndpointUnsupported,
         mergeDefinedChunkMetadata, trustedQueryMetadata,
+        adapterCollectionId, rejectUnscopedPointOperation, requireTenantScope: () => {}, hasVerifiedCapability: () => false,
         fetch: async (url, opts) => {
             calls.push({ url, opts });
             assert.ok(replies.length > 0, `No fake response for ${url}`);

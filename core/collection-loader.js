@@ -1,7 +1,8 @@
+import {getBackendForCollection} from '../backends/backend-manager.js';
+import {inspectAdapterInventory} from '../utils/c11-adapter-inventory.js';
 import {withCollectionLock} from '../utils/keyed-mutex.js';
 import {guardDelete} from './destructive-safety.js';
 import {deleteCollectionSafely, recoverTombstones as inspectDeletionTombstones} from '../utils/c01-deletion.js';
-import {collectScopedInventory} from '../utils/c01-inventory.js';
 import {hasVerifiedCapability} from '../utils/backend-contracts.js';
 /**
  * ============================================================================
@@ -122,10 +123,19 @@ export async function deleteCollection(collectionId, settings, registryKey = nul
     const ext=extension_settings.vecthare;
     const store={registry,collections:ext.collections,
         tombstones:(ext.vecthare_delete_tombstones ||= {}),
-        recordMetadata:ext.vecthare_chunk_meta_by_collection};
+        recordMetadata:ext.vecthare_chunk_meta_by_collection,chatCollectionPolicies:ext.chatCollectionPolicies};
     const result=await deleteCollectionSafely({
         key:resolved.key,store,contractVerified:capabilityVerified,
-        inventory:key=>collectScopedInventory({key,contractVerified:false}),
+        inventory:async key=>{
+            // Only reached if independently verified capabilities are enabled.
+            // A plugin response without explicit scope and end evidence stays partial.
+            try {
+                const backend=await getBackendForCollection(target.backend,settings);
+                return await inspectAdapterInventory({key,adapter:backend,settings});
+            } catch (_) {
+                return {status:'unavailable',complete:false,scope:key,errors:['adapter-inventory-unavailable']};
+            }
+        },
         // No pinned provider currently proves that a debounced ST save reached
         // durable storage. Do not issue a purge based on that assumption.
         persist:async()=>{saveSettingsDebounced();return false;},
@@ -353,7 +363,12 @@ async function discoverViaPlugin(settings) {
             const uniqueKeys = [];
 
             for (const collection of data.collections) {
-                const backend = collection.backend || 'standard';
+                // A plugin catalogue is untrusted/advisory: never guess a
+                // missing backend or silently coalesce two physical owners.
+                const backend = collection?.backend;
+                if (!['standard','qdrant','milvus','lancedb'].includes(backend) ||
+                    typeof collection.id !== 'string' || !collection.id ||
+                    typeof collection.source !== 'string') continue;
 
                 // Strip backend prefix from collection.id if it's already there
                 // Some backends (like Qdrant) may return IDs with backend prefix
@@ -375,90 +390,17 @@ async function discoverViaPlugin(settings) {
 
                 // Cache by "backend:source:id" to uniquely identify each collection
                 const cacheKey = `${backend}:${collection.source}:${collectionId}`;
+                if (!parseCollectionKey(cacheKey)) continue;
                 pluginCollectionData[cacheKey] = collectionData;
                 uniqueKeys.push(cacheKey);
 
-                // Also cache by sanitized version (for LanceDB lookups)
-                const sanitized = collectionId.replace(/[^a-zA-Z0-9_.-]/g, '_');
-                if (sanitized !== collectionId) {
-                    pluginCollectionData[`${backend}:${collection.source}:${sanitized}`] = collectionData;
-                }
             }
 
-            // IMPORTANT: Replace registry with what plugin found (removes stale entries)
-            // This ensures the registry matches actual disk state
-            const currentRegistry = getCollectionRegistry();
-            const pluginKeySet = new Set(uniqueKeys);
-
-            console.debug(`\n📋 VectHare: Updating registry...`);
-            console.debug(`   Current registry has ${currentRegistry.length} entries`);
-            console.debug(`   Plugin discovered ${uniqueKeys.length} collections`);
-
-            // Migrate old registry entries (source:id or plain id) to new format (backend:source:id)
-            // Match them to plugin-discovered collections
-            const migratedEntries = [];
-            for (const oldKey of [...currentRegistry]) {
-                const parsed = parseRegistryKey(oldKey);
-
-                // If already in new format (has backend), keep it
-                if (parsed.backend) {
-                    continue;
-                }
-
-                // Old format - try to find matching collection from plugin
-                const collectionId = parsed.collectionId;
-                const oldSource = parsed.source;
-
-                // Find all plugin collections matching this ID
-                const matchingPluginKeys = uniqueKeys.filter(key => {
-                    const parts = key.split(':');
-                    const pluginId = parts.slice(2).join(':');  // backend:source:id -> id
-                    const pluginSource = parts[1];
-
-                    // Match by ID and source (if source was known)
-                    return pluginId === collectionId && (!oldSource || pluginSource === oldSource);
-                });
-
-                if (matchingPluginKeys.length > 0) {
-                    console.debug(`   🔄 Migrating: ${oldKey} -> ${matchingPluginKeys.join(', ')}`);
-                    unregisterCollection(oldKey);
-                    migratedEntries.push(oldKey);
-                    // Don't register here - will be registered in the main loop below
-                } else {
-                    console.debug(`   ❓ No matching plugin collection for old entry: ${oldKey}`);
-                }
-            }
-
-            if (migratedEntries.length > 0) {
-                console.log(`   ✅ Migrated ${migratedEntries.length} old registry entries to new format`);
-            }
-
-            // Remove entries that no longer exist on disk
-            const updatedRegistry = getCollectionRegistry();
-            const staleEntries = updatedRegistry.filter(key => !pluginKeySet.has(key));
-            if (staleEntries.length > 0) {
-                console.debug(`   🗑️  Removing ${staleEntries.length} stale registry entries:`);
-                for (const staleKey of staleEntries) {
-                    console.debug(`      - ${staleKey}`);
-                    unregisterCollection(staleKey);
-                }
-            }
-
-            // Register all discovered collections with backend:source:id format
-            let newRegistrations = 0;
-            for (const key of uniqueKeys) {
-                if (!getCollectionRegistry().includes(key)) {
-                    newRegistrations++;
-                    console.debug(`   ➕ Registering: ${key}`);
-                } else {
-                    console.debug(`   ⏭️  Already registered: ${key}`);
-                }
-                registerCollection(key);
-            }            if (newRegistrations > 0) {
-                console.log(`   ✅ Registered ${newRegistrations} new collections`);
-            }
-
-            console.log(`   Final registry size: ${getCollectionRegistry().length}\n`);
+            // C04-B/C11-B: plugin discovery is advisory. It is neither an
+            // authoritative exhaustive inventory nor ownership proof. Never
+            // delete, remap or enable registry entries based on this response.
+            // Legacy mappings require reviewed C04 migration with durable backup.
+            console.debug(`VectHare: Discovered ${uniqueKeys.length} candidate collections; registry unchanged pending verification`);
 
             return uniqueKeys;
         }
@@ -524,9 +466,9 @@ async function discoverViaFallback(settings) {
             }
             console.log(`VectHare: Verified registry entry: ${collectionId} (${result.count} chunks)`);
         } else {
-            // Remove stale entry
-            unregisterCollection(registryKey);
-            console.log(`VectHare: Removed stale registry entry: ${registryKey}`);
+            // Failed/empty probes cannot prove absence. Leave the registry
+            // untouched and make the missing result visible to diagnostics.
+            console.warn(`VectHare: Registry entry not proven by fallback probe (preserved): ${registryKey}`);
         }
     }
 
@@ -538,7 +480,7 @@ async function discoverViaFallback(settings) {
             probed.add(newFormatId);
             const result = await probeCollection(newFormatId, settings);
             if (result.exists) {
-                registerCollection(newFormatId);
+                // Discovery is not authorization to create/enable an owner.
                 discovered.push(newFormatId);
                 console.log(`VectHare: Discovered current chat collection: ${newFormatId} (${result.count} chunks)`);
             }
@@ -550,7 +492,7 @@ async function discoverViaFallback(settings) {
             probed.add(legacyFormatId);
             const result = await probeCollection(legacyFormatId, settings);
             if (result.exists) {
-                registerCollection(legacyFormatId);
+                // Legacy origin IDs remain advisory until owner remapping.
                 discovered.push(legacyFormatId);
                 console.log(`VectHare: Discovered legacy chat collection: ${legacyFormatId} (${result.count} chunks)`);
             }
@@ -569,7 +511,6 @@ async function discoverViaFallback(settings) {
             probed.add(charCollectionId);
             const result = await probeCollection(charCollectionId, settings);
             if (result.exists) {
-                registerCollection(charCollectionId);
                 discovered.push(charCollectionId);
                 console.log(`VectHare: Discovered character collection: ${charCollectionId} (${result.count} chunks)`);
             }

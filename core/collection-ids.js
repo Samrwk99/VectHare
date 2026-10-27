@@ -66,6 +66,14 @@ export const COLLECTION_SCOPES = {
  * This is the authoritative identifier for a chat.
  * @returns {string|null} Chat UUID or null if no chat
  */
+/** Stable ownership may only use an ID persisted with chat metadata, not a
+ * filename or UI chat index. A missing integrity ID requires user remapping.
+ */
+export function getVerifiedChatOriginId() {
+    const value = chat_metadata?.integrity;
+    return typeof value === 'string' && value.trim() ? value : null;
+}
+
 export function getChatUUID() {
     const integrity = chat_metadata?.integrity;
     if (integrity) {

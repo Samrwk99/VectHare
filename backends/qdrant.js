@@ -1,3 +1,4 @@
+import {adapterCollectionId,requireTenantScope,rejectUnscopedPointOperation} from '../utils/tenant-route.js';
 import {hasVerifiedCapability} from '../utils/backend-contracts.js';
 import { mergeDefinedChunkMetadata, trustedQueryMetadata } from '../utils/chunk-record-metadata.js';
 /**
@@ -127,28 +128,8 @@ export class QdrantBackend extends VectorBackend {
      * @param {string} collectionId - May be plain ID or prefixed registry key
      * @returns {string} - Just the collection ID part
      */
-    _stripRegistryPrefix(collectionId) {
-        if (!collectionId || typeof collectionId !== 'string') {
-            return collectionId;
-        }
-
-        const knownBackends = ['standard', 'lancedb', 'vectra', 'milvus', 'qdrant'];
-        const knownSources = ['transformers', 'openai', 'cohere', 'ollama', 'llamacpp',
-            'vllm', 'koboldcpp', 'webllm', 'bananabread', 'openrouter'];
-
-        const parts = collectionId.split(':');
-
-        // Check if it starts with backend:source: prefix
-        if (parts.length >= 3 && knownBackends.includes(parts[0]) && knownSources.includes(parts[1])) {
-            return parts.slice(2).join(':');
-        }
-        // Check if it starts with source: prefix (old format)
-        else if (parts.length >= 2 && knownSources.includes(parts[0])) {
-            return parts.slice(1).join(':');
-        }
-
-        // Already plain collection ID
-        return collectionId;
+    _stripRegistryPrefix(collectionId, settings) {
+        return adapterCollectionId(collectionId, BACKEND_TYPE, settings?.source || 'transformers');
     }
 
     /**
@@ -164,9 +145,9 @@ export class QdrantBackend extends VectorBackend {
      *
      * Legacy format: vecthare_{type}_{sourceId}
      */
-    _parseCollectionId(collectionId) {
+    _parseCollectionId(collectionId, settings) {
         // First strip any registry prefix
-        collectionId = this._stripRegistryPrefix(collectionId);
+        collectionId = this._stripRegistryPrefix(collectionId, settings);
         if (!collectionId || typeof collectionId !== 'string') {
             return { type: 'unknown', sourceId: 'unknown' };
         }
@@ -200,7 +181,8 @@ export class QdrantBackend extends VectorBackend {
     }
 
     async getSavedHashes(collectionId, settings) {
-        const strippedCollectionId = this._stripRegistryPrefix(collectionId);
+        if (settings?.qdrant_multitenancy) requireTenantScope(BACKEND_TYPE, 'getSavedHashes');
+        const strippedCollectionId = this._stripRegistryPrefix(collectionId, settings);
         const actualCollectionId = getActualCollectionId(strippedCollectionId, settings);
 
         const body = {
@@ -236,10 +218,11 @@ export class QdrantBackend extends VectorBackend {
     }
 
     async insertVectorItems(collectionId, items, settings) {
+        if (settings?.qdrant_multitenancy) requireTenantScope(BACKEND_TYPE, 'insertVectorItems');
         if (items.length === 0) return;
 
         // Strip registry key prefix to get the actual collection ID for Qdrant
-        const strippedCollectionId = this._stripRegistryPrefix(collectionId);
+        const strippedCollectionId = this._stripRegistryPrefix(collectionId, settings);
         const actualCollectionId = getActualCollectionId(strippedCollectionId, settings);
 
         // Batch items to avoid exceeding Qdrant's 32MB payload limit
@@ -330,7 +313,9 @@ export class QdrantBackend extends VectorBackend {
     }
 
     async deleteVectorItems(collectionId, hashes, settings) {
-        const strippedCollectionId = this._stripRegistryPrefix(collectionId);
+        if (!hasVerifiedCapability('qdrant','deleteAcknowledgement')) throw new Error('qdrant: targeted deletion blocked; server acknowledgement unverified');
+        if (settings?.qdrant_multitenancy) requireTenantScope(BACKEND_TYPE, 'deleteVectorItems');
+        const strippedCollectionId = this._stripRegistryPrefix(collectionId, settings);
         const actualCollectionId = getActualCollectionId(strippedCollectionId, settings);
 
         const body = {
@@ -363,7 +348,8 @@ export class QdrantBackend extends VectorBackend {
     }
 
     async queryCollection(collectionId, searchText, topK, settings, queryVector = null) {
-        const strippedCollectionId = this._stripRegistryPrefix(collectionId);
+        if (settings?.qdrant_multitenancy) requireTenantScope(BACKEND_TYPE, 'queryCollection');
+        const strippedCollectionId = this._stripRegistryPrefix(collectionId, settings);
         const actualCollectionId = getActualCollectionId(strippedCollectionId, settings);
 
         const body = {
@@ -418,11 +404,12 @@ export class QdrantBackend extends VectorBackend {
     }
 
     async queryMultipleCollections(collectionIds, searchText, topK, threshold, settings, queryVector = null) {
+        if (settings?.qdrant_multitenancy) requireTenantScope(BACKEND_TYPE, 'queryMultipleCollections');
         const results = {};
 
         for (const collectionId of collectionIds) {
             try {
-                const strippedCollectionId = this._stripRegistryPrefix(collectionId);
+                const strippedCollectionId = this._stripRegistryPrefix(collectionId, settings);
                 const actualCollectionId = getActualCollectionId(strippedCollectionId, settings);
 
                 const body = {
@@ -487,7 +474,9 @@ export class QdrantBackend extends VectorBackend {
     }
 
     async purgeVectorIndex(collectionId, settings) {
-        const actualCollectionId = this._stripRegistryPrefix(collectionId);
+        if (settings?.qdrant_multitenancy) throw new Error('Qdrant shared physical collection purge disabled: verified tenant-only delete required');
+        if (!hasVerifiedCapability(BACKEND_TYPE,'purgeAcknowledgement')) throw new Error('Qdrant purge blocked: server acknowledgement unverified');
+        const actualCollectionId = this._stripRegistryPrefix(collectionId, settings);
         const response = await fetch('/api/plugins/similharity/chunks/purge', {
             method: 'POST',
             headers: getRequestHeaders(),
@@ -504,7 +493,7 @@ export class QdrantBackend extends VectorBackend {
             throw new Error(`[Qdrant] Failed to purge collection ${collectionId}: ${response.status} ${response.statusText} - ${errorBody}`);
         }
 
-         console.log(`VectHare Qdrant: Purged (type: ${type}, sourceId: ${sourceId})`);
+         console.log(`VectHare Qdrant: purge request acknowledged for ${actualCollectionId}`);
     }
 
     async purgeFileVectorIndex(collectionId, settings) {
@@ -525,7 +514,8 @@ export class QdrantBackend extends VectorBackend {
      * Get a single chunk by hash
      */
     async getChunk(collectionId, hash, settings) {
-        const actualCollectionId = this._stripRegistryPrefix(collectionId);
+        if (settings?.qdrant_multitenancy) rejectUnscopedPointOperation(BACKEND_TYPE, 'getChunk');
+        const actualCollectionId = this._stripRegistryPrefix(collectionId, settings);
         const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}?` + new URLSearchParams({
             backend: BACKEND_TYPE,
             collectionId: actualCollectionId, // Use separate collection per content type
@@ -549,12 +539,13 @@ export class QdrantBackend extends VectorBackend {
      * List chunks with pagination
      */
     async listChunks(collectionId, settings, options = {}) {
+        if (settings?.qdrant_multitenancy) requireTenantScope(BACKEND_TYPE, 'listChunks');
         // R19 FIX: listChunks previously ignored multitenancy mode entirely -
         // it read the per-chat collection name even when all data lives in the
         // shared multitenancy collection, and never applied the content_type
         // filter (so even in separate mode it could return other sources'
         // chunks if IDs ever overlapped). Now mirrors getSavedHashes exactly.
-        const strippedCollectionId = this._stripRegistryPrefix(collectionId);
+        const strippedCollectionId = this._stripRegistryPrefix(collectionId, settings);
         const actualCollectionId = getActualCollectionId(strippedCollectionId, settings);
 
         const body = {
@@ -593,7 +584,8 @@ export class QdrantBackend extends VectorBackend {
      * Update chunk text (triggers re-embedding)
      */
     async updateChunkText(collectionId, hash, newText, settings) {
-        const actualCollectionId = this._stripRegistryPrefix(collectionId);
+        if (settings?.qdrant_multitenancy) rejectUnscopedPointOperation(BACKEND_TYPE, 'updateChunkText');
+        const actualCollectionId = this._stripRegistryPrefix(collectionId, settings);
         const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}/text`, {
             method: 'PATCH',
             headers: getRequestHeaders(),
@@ -619,7 +611,8 @@ export class QdrantBackend extends VectorBackend {
      * Update chunk metadata (no re-embedding)
      */
     async updateChunkMetadata(collectionId, hash, metadata, settings) {
-        const actualCollectionId = this._stripRegistryPrefix(collectionId);
+        if (settings?.qdrant_multitenancy) rejectUnscopedPointOperation(BACKEND_TYPE, 'updateChunkMetadata');
+        const actualCollectionId = this._stripRegistryPrefix(collectionId, settings);
         const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}/metadata`, {
             method: 'PATCH',
             headers: getRequestHeaders(),
@@ -645,7 +638,7 @@ export class QdrantBackend extends VectorBackend {
      */
     async getStats(collectionId, settings) {
         if (!hasVerifiedCapability(BACKEND_TYPE,'tenantFilter')) throw new Error('Tenant statistics unavailable: server tenant filter unverified');
-        const actualCollectionId = this._stripRegistryPrefix(collectionId);
+        const actualCollectionId = this._stripRegistryPrefix(collectionId, settings);
         const response = await fetch('/api/plugins/similharity/chunks/stats', {
             method: 'POST',
             headers: getRequestHeaders(),
@@ -691,6 +684,7 @@ export class QdrantBackend extends VectorBackend {
      * @returns {Promise<{hashes: number[], metadata: object[]}>}
      */
     async hybridQuery(collectionId, searchText, topK, settings, hybridOptions = {}) {
+        if (settings?.qdrant_multitenancy) requireTenantScope(BACKEND_TYPE, 'hybridQuery');
         const {
             vectorWeight = 0.5,
             textWeight = 0.5,
@@ -698,7 +692,7 @@ export class QdrantBackend extends VectorBackend {
             rrfK = 60
         } = hybridOptions;
 
-        const strippedCollectionId = this._stripRegistryPrefix(collectionId);
+        const strippedCollectionId = this._stripRegistryPrefix(collectionId, settings);
         const actualCollectionId = getActualCollectionId(strippedCollectionId, settings);
 
         const body = {

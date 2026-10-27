@@ -20,6 +20,7 @@ import { getBackend } from '../backends/backend-manager.js';
 // Import from collection-ids.js - single source of truth for collection ID operations
 import {
     buildChatCollectionId,
+    getVerifiedChatOriginId,
     buildLorebookCollectionId,
     buildCharacterCollectionId,
     buildDocumentCollectionId,
@@ -30,6 +31,7 @@ import { cleanText, cleanMessages } from './text-cleaning.js';
 import { progressTracker } from '../ui/progress-tracker.js';
 import { extension_settings, getContext } from '../../../../extensions.js';
 import { getStringHash } from '../../../../utils.js';
+import {formatCollectionKey} from '../utils/collection-keys.js';
 
 /**
  * Main entry point for content vectorization
@@ -81,6 +83,9 @@ export async function vectorizeContent({ contentType, source, settings }) {
         // Step 3: Enrich and hash
         progressTracker.updateProgress(3, 'Processing chunks...');
         const collectionId = generateCollectionId(contentType, source, settings);
+        const activeBackend = extension_settings.vecthare?.vector_backend || 'standard';
+        const activeSource = extension_settings.vecthare?.source || 'transformers';
+        const collectionKey=formatCollectionKey({backend:activeBackend,source:activeSource,collectionId});
         
         // Get full extension settings for keyword extraction (includes custom_stopwords)
         const vecthareSettings = extension_settings.vecthare;
@@ -132,10 +137,15 @@ export async function vectorizeContent({ contentType, source, settings }) {
         }
 
         // Save collection metadata
-        setCollectionMeta(collectionId, {
+        const trustedChatId = contentType === 'chat' ? getVerifiedChatOriginId() : null;
+        const ownerNeedsReview = (contentType === 'chat' && !trustedChatId) || contentType === 'character';
+        setCollectionMeta(collectionKey, {
             contentType,
             sourceName,
-            scope: settings.scope || 'global',
+            scope: contentType === 'chat' ? 'chat' : contentType === 'character' ? 'character' : (settings.scope || 'global'),
+            ...(trustedChatId ? {originChatId: trustedChatId} : {}),
+            enabled: !ownerNeedsReview,
+            ...(ownerNeedsReview ? {ownerStatus:'unverified',ownershipReviewRequired:true} : {}),
             chunkCount: hashedChunks.length,
             createdAt: new Date().toISOString(),
             settings: {
@@ -150,8 +160,8 @@ export async function vectorizeContent({ contentType, source, settings }) {
         });
 
         // Register collection in the registry so it's discoverable
-        registerCollection(collectionId);
-        console.log(`VectHare: Registered collection ${collectionId}`);
+        registerCollection(collectionKey);
+        console.log(`VectHare: Registered qualified collection ${collectionKey}`);
 
         progressTracker.complete(true, `Vectorized ${hashedChunks.length} chunks`);
 
@@ -159,6 +169,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
             success: true,
             chunkCount: hashedChunks.length,
             collectionId,
+            collectionKey,
         };
     } catch (error) {
         progressTracker.addError(error.message);

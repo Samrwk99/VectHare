@@ -14,6 +14,8 @@ import { saveSettingsDebounced } from '../../../../../script.js';
 import { parseRegistryKey } from './collection-ids.js';
 import { planOrphanCollectionMetadataRemoval } from '../utils/c01-inventory.js';
 import { parseCollectionKey } from '../utils/collection-keys.js';
+import { inspectRegistryMigration } from '../utils/c04-registry-migration.js';
+import { verifyCollectionOwner } from '../utils/c04-ownership.js';
 
 // ============================================================================
 // COLLECTION METADATA CRUD
@@ -271,15 +273,22 @@ export function getCollectionMeta(collectionId) {
     const key = resolveStoredCollectionKey(collectionId);
     const stored = key ? extension_settings.vecthare.collections[key] : null;
 
-    if (!stored) {
-        return defaultCollectionSettings();
-    }
-
-    // Merge with defaults to ensure all fields exist
-    return {
+    // Never infer activation from a legacy registry or scattered enabled flag.
+    // Keep its original settings for the explicit C04 migration dry run, while
+    // making unresolved legacy ownership inert during normal retrieval.
+    const registry = extension_settings.vecthare.vecthare_collection_registry;
+    const unresolvedLegacy = !parseCollectionKey(key || collectionId) && (
+        (Array.isArray(registry) && registry.includes(key || collectionId)) ||
+        Object.prototype.hasOwnProperty.call(extension_settings.vecthare, `vecthare_collection_enabled_${collectionId}`));
+    const merged = {
         ...defaultCollectionSettings(),
-        ...cloneCollectionSettings(stored),
+        ...(stored ? cloneCollectionSettings(stored) : {}),
     };
+    if (unresolvedLegacy) {
+        merged.enabled = false;
+        merged.ownershipReviewRequired = true;
+    }
+    return merged;
 }
 
 /**
@@ -372,9 +381,21 @@ function normalizeCollectionKey(collectionId) {
     return parsed.collectionId || collectionId;
 }
 
+/** Only a registry-proven single qualified collection may satisfy a legacy selection.
+ * Never match two qualified backends solely by their physical collection ID.
+ */
 function collectionKeysMatch(a, b) {
     if (!a || !b) return false;
-    return String(a) === String(b) || normalizeCollectionKey(a) === normalizeCollectionKey(b);
+    if (String(a) === String(b)) return true;
+    const pa=parseCollectionKey(String(a)), pb=parseCollectionKey(String(b));
+    if (pa && pb) return false;
+    const registry=extension_settings?.vecthare?.vecthare_collection_registry || [];
+    const qualified=pa ? String(a) : pb ? String(b) : null;
+    const alias=pa ? String(b) : pb ? String(a) : null;
+    if (!qualified || !registry.includes(qualified) || registry.includes(alias)) return false;
+    const bare=normalizeCollectionKey(alias);
+    const candidates=registry.filter(key=>parseCollectionKey(key) && normalizeCollectionKey(key)===bare);
+    return candidates.length===1 && candidates[0]===qualified;
 }
 
 function ensureChatCollectionPoliciesObject() {
@@ -494,8 +515,7 @@ export function applyChatCollectionPolicy(collectionIds, chatId, options = {}) {
 
     if (mode === 'prefer_selected') {
         const selected = collectionIds.filter(id => inScope(id) && isSelected(id));
-        const selectedKeys = new Set(selected.map(id => normalizeCollectionKey(id)));
-        const rest = collectionIds.filter(id => !selectedKeys.has(normalizeCollectionKey(id)));
+        const rest = collectionIds.filter(id => !selected.some(chosen => collectionKeysMatch(chosen, id)));
         return [...selected, ...rest];
     }
 
@@ -649,45 +669,14 @@ export function deleteScopedChunkMetadata(collectionKey, recordId) {
  * New format: collections[collectionId].enabled = true/false
  */
 export function migrateOldEnabledKeys() {
-    if (!extension_settings.vecthare) {
-        return { migrated: 0 };
-    }
-
-    ensureCollectionsObject();
-
-    let migrated = 0;
-    const keysToDelete = [];
-
-    for (const key in extension_settings.vecthare) {
-        if (key.startsWith('vecthare_collection_enabled_')) {
-            const collectionId = key.replace('vecthare_collection_enabled_', '');
-            const enabled = extension_settings.vecthare[key];
-
-            // Only migrate if we don't already have metadata for this collection
-            if (!extension_settings.vecthare.collections[collectionId]) {
-                extension_settings.vecthare.collections[collectionId] = {
-                    ...defaultCollectionSettings(),
-                    enabled: enabled !== false,
-                };
-                console.log(`VectHare: Migrated enabled key for ${collectionId}`);
-            }
-
-            keysToDelete.push(key);
-            migrated++;
-        }
-    }
-
-    // Delete old keys
-    for (const key of keysToDelete) {
-        delete extension_settings.vecthare[key];
-    }
-
-    if (migrated > 0) {
-        saveSettingsDebounced();
-        console.log(`VectHare: Migrated ${migrated} old enabled keys to new collections structure`);
-    }
-
-    return { migrated };
+    if (!extension_settings?.vecthare) return {migrated:0, blocked:0};
+    // Legacy enable flags are ambiguous without a qualified owner. Do not
+    // delete them, create active bare records or presume that a debounce is
+    // durable persistence. Present an explicit migration report instead.
+    const ext=extension_settings.vecthare;
+    const legacy=Object.keys(ext).filter(key=>key.startsWith('vecthare_collection_enabled_'));
+    const report=inspectRegistryMigration(ext);
+    return {migrated:0,blocked:legacy.length,needsReview:legacy.length>0 || report.status!=='ready',report};
 }
 
 /**
@@ -1108,7 +1097,18 @@ async function evaluateAdvancedConditions(meta, context, collectionId) {
  * @returns {Promise<boolean>} Whether the collection should be queried
  */
 export async function shouldCollectionActivate(collectionId, context) {
+    // Collections quarantined by an unresolved migration cannot be activated
+    // by force, locks, triggers or 'always active'.
     const meta = getCollectionMeta(collectionId);
+    const registry = extension_settings?.vecthare?.vecthare_collection_registry;
+    // The old settings registry may contain unresolved bare or source-only
+    // records. They cannot establish which physical backend owns the data.
+    if (Array.isArray(registry) && registry.includes(collectionId) && !parseCollectionKey(collectionId)) return false;
+    if (meta.ownershipReviewRequired === true || meta.ownerStatus === 'unverified') return false;
+    if (parseCollectionKey(collectionId) &&
+        (meta.originChatId || meta.originCharacterId || meta.scope === 'chat' || meta.scope === 'character') &&
+        !verifyCollectionOwner({collectionKey:collectionId,metadata:meta,chatId:context?.currentChatId,
+            characterId:context?.currentCharacterId}).allowed) return false;
     const currentChatId = context?.currentChatId;
     const currentCharacterId = context?.currentCharacterId;
     const chatLocks = getCollectionLocks(collectionId);

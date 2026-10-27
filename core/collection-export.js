@@ -1,4 +1,6 @@
 import {redactSecrets} from '../utils/security.js';
+import {quarantineImportedOwnership} from '../utils/c04-ownership.js';
+import {adapterCollectionId} from '../utils/tenant-route.js';
 /**
  * ============================================================================
  * VECTHARE COLLECTION EXPORT/IMPORT
@@ -61,12 +63,15 @@ const EXPORT_BATCH_SIZE = 100;
  */
 async function fetchChunksWithVectors(collectionId, settings) {
     const backendName = settings.vector_backend || 'standard';
+    // A qualified key must never be forwarded as a physical collection name,
+    // and cannot be silently re-routed to a different backend.
+    const physicalId=adapterCollectionId(collectionId,backendName,settings.source || 'transformers');
     const response = await fetch('/api/plugins/similharity/chunks/list', {
         method: 'POST',
         headers: getRequestHeaders(),
         body: JSON.stringify({
             backend: backendName === 'standard' ? 'vectra' : backendName,
-            collectionId: collectionId,
+            collectionId: physicalId,
             source: settings.source || 'transformers',
             model: settings.model || getConfiguredEmbeddingModel(settings),
             limit: 50000, // High limit to get all chunks
@@ -79,10 +84,15 @@ async function fetchChunksWithVectors(collectionId, settings) {
     }
 
     const data = await response.json();
-    if (!data.success || !data.items) {
+    if (data?.success !== true || !Array.isArray(data.items)) {
         throw new Error('Invalid response from chunks API');
     }
-
+    // A server that hits the legacy cap may have silently truncated an export.
+    // Refuse to create a purported backup from capped data. The full paginated
+    // exporter (C11 final) will replace this path after its server contract is pinned.
+    if (data.items.length >= 50000) {
+        throw new Error('Collection export refused: reached 50,000-record API cap; complete paginated export is not yet available');
+    }
     return data.items;
 }
 
@@ -104,6 +114,7 @@ function exportChunkMetadata(meta) {
 const BACKUP_SETTINGS_FIELDS = [
     'enabled', 'lockMode', 'forceMode', 'exclusiveWhenActive', 'exclusiveScope',
     'alwaysActive', 'triggers', 'triggerMatchMode', 'triggerCaseSensitive',
+    'lockedToChatIds','lockedToChatId','lockedToCharacterIds','originChatId','originCharacterId',
     'triggerScanDepth', 'conditions', 'temporalDecay', 'groups', 'context', 'xmlTag',
 ];
 function exportBehaviorSettings(meta) {
@@ -242,13 +253,15 @@ export async function exportCollection(collectionId, settings, collectionInfo = 
             // Stats
             stats: {
                 chunkCount: chunks.length,
+                inventoryComplete: false, // legacy uncapped API has no verified end-of-list receipt
+                inventoryStatus: 'unverified',
                 chunksWithVectors,
                 hasText: chunks.filter(c => c.text).length,
                 hasKeywords: chunks.filter(c => c.metadata?.keywords?.length > 0).length,
             },
         };
 
-        if (!silent) progressTracker.complete(true, `Exported ${chunks.length} chunks`);
+        if (!silent) progressTracker.complete(true, `Exported ${chunks.length} listed chunks (completeness unverified)`);
         return exportData;
 
     } catch (error) {
@@ -313,6 +326,10 @@ export function downloadExport(exportData, filename = null) {
 
     const finalFilename = (filename || defaultName) + EXPORT_FILE_EXTENSION;
 
+    if (exportData?.stats?.inventoryComplete === false ||
+        exportData?.collections?.some(c=>c?.stats?.inventoryComplete===false)) {
+        console.warn('VectHare: export inventory completeness is unverified; do not use this as a complete backup');
+    }
     const blob = new Blob([JSON.stringify(redactSecrets(exportData), null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
 
@@ -554,7 +571,11 @@ export async function importCollection(exportData, settings, options = {}) {
             Object.assign(importedMeta, importBehaviorSettings(exportData.settings));
         }
 
-        setCollectionMeta(collectionId, importedMeta);
+        // C04-B: file-supplied identity, locks and enabled flags are not
+        // verified authorization. Restore disabled until explicit owner remap.
+        setCollectionMeta(collectionId, quarantineImportedOwnership(importedMeta, {
+            ...options.verifiedOwnershipRemap, requireRemapApproval:true,
+        }));
 
         // Per-chunk metadata
         for (const chunk of validChunks) {
@@ -719,7 +740,9 @@ async function importCollectionSilent(exportData, settings, options = {}) {
         Object.assign(importedMeta, importBehaviorSettings(exportData.settings));
     }
 
-    setCollectionMeta(collectionId, importedMeta);
+    setCollectionMeta(collectionId, quarantineImportedOwnership(importedMeta, {
+        ...options.verifiedOwnershipRemap, requireRemapApproval:true,
+    }));
 
     for (const chunk of validChunks) {
         if (chunk.chunkMeta) {
