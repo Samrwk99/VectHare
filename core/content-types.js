@@ -1,3 +1,4 @@
+import {validateChunkStrategy} from '../utils/feature-support.js';
 /**
  * ============================================================================
  * VECTHARE CONTENT TYPES REGISTRY
@@ -426,7 +427,8 @@ export function getChunkingStrategies(typeId) {
 
     return type.chunkingStrategies
         .map(id => CHUNKING_STRATEGIES[id])
-        .filter(Boolean);
+        .filter(Boolean)
+        .filter(strategy => validateChunkStrategy(strategy.id, typeId, {kind:'upload'}).supported);
 }
 
 /**

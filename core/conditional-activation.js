@@ -271,17 +271,14 @@ function evaluatePatternCondition(rule, context) {
  */
 function evaluateSpeakerCondition(rule, context) {
     const settings = rule.settings || { values: [rule.value || ''], matchType: 'any' };
-    const targetSpeakers = settings.values || [];
-    const matchType = settings.matchType || 'any';
-
-    if (matchType === 'all') {
-        // All speakers must be in recent messages
-        const speakers = context.messageSpeakers || [];
-        return targetSpeakers.every(target => speakers.includes(target));
-    } else {
-        // Any speaker matches (default)
-        return targetSpeakers.includes(context.lastSpeaker);
-    }
+    const targets = settings.values || [];
+    const depth = Number.isSafeInteger(settings.lookback) && settings.lookback > 0 ? settings.lookback : 10;
+    const recent = (context.messageSpeakers || []).slice(-depth);
+    if (recent.length && context.lastSpeaker) recent[recent.length-1] = context.lastSpeaker;
+    if (!targets.length || !recent.length) return false;
+    const normalized = new Set(recent.map(s => String(s).trim().toLocaleLowerCase()));
+    const matches = t => normalized.has(String(t).trim().toLocaleLowerCase());
+    return settings.matchType === 'all' ? targets.every(matches) : targets.some(matches);
 }
 
 /**
@@ -665,7 +662,8 @@ function evaluateCharacterPresentCondition(rule, context) {
     const settings = rule.settings || { values: [rule.value || ''], matchType: 'any', lookback: 10 };
     const targetCharacters = settings.values || [];
     const matchType = settings.matchType || 'any';
-    const speakers = context.messageSpeakers || [];
+    const depth = Number.isSafeInteger(settings.lookback) && settings.lookback > 0 ? settings.lookback : 10;
+    const speakers = (context.messageSpeakers || []).slice(-depth);
     const normalizedSpeakers = new Set(speakers.map(s => String(s ?? '').trim().toLocaleLowerCase()).filter(Boolean));
     const matches = name => normalizedSpeakers.has(String(name ?? '').trim().toLocaleLowerCase());
     return matchType === 'all' ? targetCharacters.length > 0 && targetCharacters.every(matches)

@@ -1,0 +1,90 @@
+{
+  "backend": "standard",
+  "verifiedVersion": null,
+  "evidence": {
+    "kind": "local-client-source-only",
+    "clientFiles": [
+      "backends/standard.js"
+    ],
+    "serverSource": null,
+    "liveFixture": null
+  },
+  "endpoints": [
+    {
+      "url": "/api/vector/list",
+      "method": "POST",
+      "contractStatus": "unknown",
+      "request": null,
+      "response": null
+    },
+    {
+      "url": "/api/vector/insert",
+      "method": "POST",
+      "contractStatus": "unknown",
+      "request": null,
+      "response": null
+    },
+    {
+      "url": "/api/vector/delete",
+      "method": "POST",
+      "contractStatus": "unknown",
+      "request": null,
+      "response": null
+    },
+    {
+      "url": "/api/vector/purge",
+      "method": "POST",
+      "contractStatus": "unknown",
+      "request": null,
+      "response": null
+    }
+  ],
+  "capabilities": {
+    "listPagination": "unknown",
+    "completeInventory": "unknown",
+    "count": "unknown",
+    "getByIds": "unknown",
+    "updatePayload": "unknown",
+    "clientVectors": "unknown",
+    "tenantFilter": "unknown",
+    "purgeAcknowledgement": "unknown",
+    "insertAcknowledgement": "unknown",
+    "deleteAcknowledgement": "unknown"
+  },
+  "negativeCases": [
+    {
+      "name": "http-200-success-false",
+      "httpStatus": 200,
+      "payload": {
+        "success": false
+      }
+    },
+    {
+      "name": "http-500",
+      "httpStatus": 500
+    },
+    {
+      "name": "partial-count",
+      "httpStatus": 200,
+      "payload": {
+        "accepted": 1
+      },
+      "expectedCount": 2
+    },
+    {
+      "name": "unsupported-pagination",
+      "capability": "listPagination",
+      "status": "unknown"
+    },
+    {
+      "name": "unsupported-client-vectors",
+      "capability": "clientVectors",
+      "status": "unknown"
+    },
+    {
+      "name": "tenant-filter-negative",
+      "capability": "tenantFilter",
+      "status": "unknown"
+    }
+  ]
+}

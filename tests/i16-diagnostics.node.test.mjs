@@ -19,7 +19,8 @@ function extracted(file,name,context={},deps={}) {
   let code=src.slice(start,end+2).replace(/^export\s+/,'');
   // Substitute module imports only in an isolated test fixture; production code is unchanged.
   code=code.replace(/await import\((['"])([^'"]+)\1\)/g,(_,q,spec)=>`__mocks[${JSON.stringify(spec)}]`);
-  const scope=vm.createContext({console:silent,Date,Math,Set,Map,JSON,Object,RegExp,Number,String,Promise,__mocks:deps,...context});
+  const scope=vm.createContext({console:silent,Date,Math,Set,Map,JSON,Object,RegExp,Number,String,Promise,__mocks:{'../core/collection-ids.js':{parseRegistryKey:(value)=>({collectionId: value.startsWith('source:') ? value.slice(7) : value.split(':').slice(2).join(':') || value})},...deps},
+    parseRegistryKey: (value)=>({collectionId: value.startsWith('source:') ? value.slice(7) : value.split(':').slice(2).join(':') || value}),...context});
   return vm.runInContext(`${code}\n${name}`,scope);
 }
 const prod='diagnostics/production-tests.js',config='diagnostics/configuration.js';

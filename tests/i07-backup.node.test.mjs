@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
-import { deflateRawSync } from 'node:zlib';
+import { deflateRawSync, crc32 } from 'node:zlib';
+import {parseSafePng,readLimitedStream,MAX_PNG_TEXT_BYTES} from '../utils/safe-png.js';
 import { fileURLToPath } from 'node:url';
 import { embedDataInPNG, extractDataFromPNG } from '../core/png-export.js';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -19,6 +20,7 @@ const state={ vecthare:{ collections:{} } };
 const tracker = Object.fromEntries(['show','updateCurrentItem','updateProgress','updateChunks','complete','addError'].map(x=>[x,()=>{}]));
 const settings={source:'transformers',model:'test-model',vector_backend:'qdrant'};
 const exportedModules={
+    '../utils/security.js': {redactSecrets:value=>value},
     '../../../../extensions.js': {extension_settings:state},
     '../../../../../script.js': {getRequestHeaders:()=>({}),saveSettingsDebounced:()=>{}},
     './core-vector-api.js':{getSavedHashes:async()=>({hashes:[]}),insertVectorItems:async(id,items)=>imports.push({id,items,reembed:true}),purgeVectorIndex:async()=>true},
@@ -50,7 +52,7 @@ async function mod() {
     return modPromise;
 }
 const json=o=>JSON.parse(JSON.stringify(o));
-const pngBase=new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+HiZkAAAAASUVORK5CYII=', 'base64'));
+const pngBase=new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=', 'base64'));
 
 test('#212 malformed backup validation does not throw',async()=>{
  const m=await mod();
@@ -117,8 +119,8 @@ test('#117/#210 PNG zlib is interoperable and preserves UTF-8',async()=>{
 });
 
 test('#117 fallback tEXt Base64 Unicode survives large text without argument-spread overflow',async()=>{
- const src=source('core/png-export.js').replaceAll('export async function','async function').replaceAll('export function','function');
- const context=vm.createContext({console:quiet,CompressionStream:undefined,DecompressionStream,TextDecoder,TextEncoder,Uint8Array,DataView,Blob,Response,URL,Image:class{},document:{},btoa,atob});
+ const src=source('core/png-export.js').replace(/^import .*\n/gm,'').replaceAll('export async function','async function').replaceAll('export function','function');
+ const context=vm.createContext({parseSafePng,readLimitedStream,MAX_PNG_TEXT_BYTES,console:quiet,CompressionStream:undefined,DecompressionStream,TextDecoder,TextEncoder,Uint8Array,DataView,Blob,Response,URL,Image:class{},document:{},btoa,atob});
  const fn=vm.runInContext(`${src}\n({embedDataInPNG,extractDataFromPNG})`,context);
  const payload={generator:'VectHare',text:'漢字 🐇'.repeat(30000)};
  const png=await fn.embedDataInPNG(payload,pngBase);
@@ -135,7 +137,7 @@ test('#123 repeat export replaces obsolete PNG metadata',async()=>{
 test('#210 existing raw-DEFLATE PNG files remain readable',async()=>{
  // Construct legacy zTXt chunk in a PNG by reusing the module's CRC routine from source.
  const s=source('core/png-export.js');
- const defs=s.slice(0,s.indexOf('// ============================================================================\n// COMPRESSION UTILITIES'));
+ const defs=s.slice(0,s.indexOf('// ============================================================================\n// COMPRESSION UTILITIES')).replace(/^import .*\n/gm,'');
  const ctx=vm.createContext({Uint8Array,Uint32Array,DataView,TextEncoder,TextDecoder,console:quiet});
  const crc=vm.runInContext(`${defs}\ncrc32`,ctx);
  const jsonPayload=JSON.stringify({generator:'VectHare',marker:'legacy'});
@@ -152,12 +154,13 @@ test('#154 character-card PNG loader decodes UTF-8 instead of Latin-1 byte strin
  const start=src.indexOf('function extractCharaFromPng(bytes) {');
  const end=src.indexOf('\n}\n',start);
  assert.ok(start>=0&&end>start);
- const fn=vm.runInNewContext(`${src.slice(start,end+2)}\nextractCharaFromPng`,{TextDecoder,Uint8Array,atob,console:quiet});
+ const fn=vm.runInNewContext(`${src.slice(start,end+2)}\nextractCharaFromPng`,{parseSafePng,MAX_PNG_TEXT_BYTES,TextDecoder,Uint8Array,atob,console:quiet});
  const payload={spec:'chara_card_v2',data:{name:'月の狐 🦊',description:'café Привет'}};
  const base64=Buffer.from(JSON.stringify(payload),'utf8').toString('base64');
  const content=Buffer.concat([Buffer.from('chara\0'),Buffer.from(base64)]);
  const type=Buffer.from('tEXt');const len=Buffer.alloc(4);len.writeUInt32BE(content.length,0);
- const image=Buffer.concat([Buffer.from(pngBase).subarray(0,8),len,type,content,Buffer.alloc(4),Buffer.from(pngBase).subarray(-12)]);
+ const c=Buffer.alloc(4);c.writeUInt32BE(crc32(Buffer.concat([type,content]))>>>0);
+ const image=Buffer.concat([Buffer.from(pngBase).subarray(0,8),len,type,content,c,Buffer.from(pngBase).subarray(-12)]);
  assert.deepEqual(JSON.parse(JSON.stringify(fn(new Uint8Array(image)))),payload.data);
 });
 

@@ -1,3 +1,5 @@
+import {hasVerifiedCapability} from '../utils/backend-contracts.js';
+import {planReplacement} from '../utils/replacement-safety.js';
 /**
  * ============================================================================
  * VECTHARE CHAT VECTORIZATION
@@ -776,36 +778,19 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                     const duplicateHashes = [...dupCounts.entries()]
                         .filter(([h, c]) => c > 1 && !isProtected(h, metaByHash.get(h) || null))
                         .map(([h]) => h);
-                    if (duplicateHashes.length > 0) {
-                        const deleted = await deleteVectorItems(collectionId, duplicateHashes, settings);
-                        if (deleted === false || deleted?.success === false) throw new Error('Reverse-sync deletion was rejected');
-                        console.warn(`VectHare: Removed ${duplicateHashes.length} duplicated vector(s); re-vectorizing them cleanly this pass`);
-                        for (const h of duplicateHashes) {
-                            existingHashes.delete(Number(h));
-                            existingHashes.delete(h);
-                        }
-                    }
-
-                    const ghostHashes = [];
-                    for (const [hash, meta] of metaByHash) {
-                        if (isProtected(hash, meta)) continue;
-                        if (!keepHashes.has(hash)) ghostHashes.push(hash);
-                    }
-
-                    if (ghostHashes.length > 0) {
-                        const deleted = await deleteVectorItems(collectionId, ghostHashes, settings);
-                        if (deleted === false || deleted?.success === false) throw new Error('Reverse-sync deletion was rejected');
-                        console.log(`VectHare: Reverse sync removed ${ghostHashes.length} obsolete vector(s) (changed/deleted sources)`);
-                        // VectHare+ FIX: do NOT deleteChunkMetadata(ghost) here.
-                        // Chunk metadata is stored GLOBALLY by hash (shared across
-                        // ALL collections), so a hash removed from this collection
-                        // may still be a live chunk in another collection - deleting
-                        // its metadata would destroy that collection's settings.
-                        // Orphaned metadata for genuinely dead hashes is harmless.
+                    if (duplicateHashes.length > 0 || metaByHash.size > 0) {
+                        // No verified complete inventory/tenant ownership is available
+                        // from these adapters: preserve originals instead of doing
+                        // a pre-insert cleanup (C01/C11 will provide evidence).
+                        console.warn('VectHare: Reverse-sync destructive cleanup deferred until backend inventory and ownership can be proven');
                     }
                     // Only a metadata-backed, successfully completed pass is
                     // eligible for throttling. Otherwise the next sync retries.
-                    reverseSyncThrottle.markSuccessful(throttleKey);
+                    // A clean, metadata-backed pass may throttle; any deferred
+                    // cleanup must be retried on the next synchronization.
+                    if (duplicateHashes.length === 0 && [...metaByHash].every(([h,meta]) => isProtected(h,meta) || keepHashes.has(h))) {
+                        reverseSyncThrottle.markSuccessful(throttleKey);
+                    }
                 } else {
                     console.debug('VectHare: Reverse sync skipped - chunk metadata unavailable from backend');
                 }
@@ -3123,26 +3108,15 @@ export async function repairChatVectors(settings, batchSize = 5) {
             progressTracker.updateProgress(done, `Repairing... ${totalUnits - done} remaining`);
         }
 
-        // Phase 2: delete stale vectors (cheap, safe, always finished even if
-        // stopped mid-phase-1: pure cleanup that only removes wrong data).
-        // R20 FIX (design contradiction): hashes of FAILED replacements were
-        // still deleted here, violating the documented insert-before-delete
-        // guarantee - a failed embed + delete = temporary recall hole (the
-        // next sync's hash-diff backfills it, but the contract promised the
-        // stale vector would REMAIN until the replacement exists). Failed
-        // replacements' ghosts are now deferred to the next pass.
-        const safeDeletes = hashesToDelete.filter(h => !failedHashes.has(h));
-        if (safeDeletes.length > 0) {
-            try {
-                // R17: abortable+timed delete
-                await deleteVectorItems(collectionId, safeDeletes, settings, getStopSignal());
-                console.log(`VectHare: Repair removed ${safeDeletes.length} stale/duplicate vector(s)${failedHashes.size > 0 ? ` (${failedHashes.size} ghost(s) of failed replacements deferred to the next pass)` : ''}`);
-            } catch (delError) {
-                console.warn('VectHare: Repair - deletion failed (will retry next pass):', delError.message);
-                failed += safeDeletes.length;
-            }
-            done += safeDeletes.length;
-            progressTracker.updateProgress(Math.min(done, totalUnits), `Repairing... cleaned ${safeDeletes.length} stale vector(s)`);
+        // Phase 0: never remove a stale hash until its mapped replacement is
+        // positively verified AND the backend can prove scoped inventory and
+        // deletion acknowledgement. We cannot prove those contracts yet.
+        const proposedPlan = planReplacement(hashesToDelete, replacements);
+        const candidateDeletes = proposedPlan.toDelete.filter(h => !failedHashes.has(h));
+        const safeDeletes = []; // Filled only by a verified follow-up, never by an assumption.
+        const deferredDeletes = [...candidateDeletes];
+        if (deferredDeletes.length) {
+            console.warn(`VectHare: Repair deferred ${deferredDeletes.length} obsolete hash(es): backend contract/ownership verification required`);
         }
 
         // R15: VERIFY the work. Re-read the collection and confirm every
@@ -3150,12 +3124,14 @@ export async function repairChatVectors(settings, batchSize = 5) {
         // fail (backend accepts then drops, embeds nothing, etc.) and until
         // now repair reported success based on "no exception thrown" alone.
         let confirmed = 0;
+        let readbackVerified = false;
         const unconfirmed = [];
         if (replacements.length > 0) {
             try {
-                const verifyHashes = new Set(
-                    (await getSavedHashes(collectionId, settings, false, getStopSignal())).map(h => String(h))
-                );
+                const hashes = await getSavedHashes(collectionId, settings, false, getStopSignal());
+                if (!Array.isArray(hashes)) throw new Error('Read-back inventory was not an array');
+                readbackVerified = hasVerifiedCapability(settings?.vector_backend || 'standard','getByIds');
+                const verifyHashes = new Set(hashes.map(h => String(h))); 
                 for (const item of replacements) {
                     if (verifyHashes.has(String(item.hash))) {
                         confirmed++;
@@ -3168,27 +3144,26 @@ export async function repairChatVectors(settings, batchSize = 5) {
                     console.warn(`VectHare: Repair verification FAILED for hash ${item.hash} (message index ${item.metadata?.messageId ?? item.metadata?.messageIds?.join(',')}): "${String(item.text).substring(0, 80)}..."`);
                 }
             } catch (verifyError) {
-                console.warn('VectHare: Repair verification read failed (cannot confirm inserts):', verifyError.message);
+                unconfirmed.push(...replacements); // A failed read is not an empty successful result.
+                console.warn('VectHare: Repair verification read failed (cannot confirm inserts)');
             }
         }
 
         vectorizeRunActive = false;
         resetControlState();
         const unconfirmedCount = unconfirmed.length;
-        // R21: report ACTUAL deletions (safeDeletes), not planned (hashesToDelete) -
-        // deferred ghosts of failed replacements were being counted as removed
-        progressTracker.complete(true, `Repair complete: ${confirmed}/${inserted} re-vectorized & verified, ${safeDeletes.length} stale removed${failedHashes.size > 0 ? `, ${failedHashes.size} deferred (failed replacements)` : ''}${unconfirmedCount > 0 ? `, ${unconfirmedCount} NOT confirmed in DB` : ''}${failed > 0 ? `, ${failed} failed` : ''}`);
-        if (unconfirmedCount > 0) {
-            // Honest failure report: inserts were attempted but did not land.
-            toastr.warning(
-                `Repair finished but ${unconfirmedCount} updated chunk(s) did NOT appear in the database (details in console). They will be retried automatically on the next Sync Chat.`,
-                'Repair: verification failed',
-                { timeOut: 15000 }
-            );
+        // An unverified read-back cannot authorize deletion, and a missing
+        // old→new mapping must never be silently inferred from a hash alone.
+        const fullyVerified = failed === 0 && unconfirmedCount === 0 && deferredDeletes.length === 0
+            && (replacements.length === 0 || readbackVerified);
+        if (fullyVerified) {
+            progressTracker.complete(true, `Repair verified: ${confirmed} replacement(s), no destructive cleanup needed`);
+            toastr.success('Repair verified; no destructive cleanup needed.', 'Repair');
         } else {
-            toastr.success(
-                `Repair complete: ${confirmed} chunk(s) updated & verified in DB, ${safeDeletes.length} stale/duplicate vector(s) removed.${failedHashes.size > 0 ? ` ${failedHashes.size} stale vector(s) kept as fallback (their replacements failed; retry next pass).` : ''}`,
-                'Repair'
+            progressTracker.complete(false, `Repair incomplete: ${confirmed} observed, ${unconfirmedCount} not observed, ${deferredDeletes.length} deletion(s) deferred; requires reconciliation`);
+            toastr.warning(
+                `Repair requires reconciliation: ${deferredDeletes.length} old vector(s) preserved, ${unconfirmedCount} new record(s) not observed, ${failed} operation(s) failed. No destructive follow-up was authorized.`,
+                'Repair incomplete', {timeOut: 15000}
             );
         }
     } catch (error) {

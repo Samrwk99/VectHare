@@ -28,7 +28,7 @@ test('I01 #215: HTTP error retains settings and skips persistence', async () => 
     const settings = { enabled: true, collections: { chat: { important: true } }, vector_backend: 'qdrant' };
     let persists = 0;
     await assert.rejects(
-        purgeAllAndResetSettings({ requestPurge: async () => fakeResponse(500), settings, persistSettings: () => persists++ }),
+        purgeAllAndResetSettings({ requestPurge: async () => fakeResponse(500), contractVerified:true, settings, persistSettings: () => persists++ }),
         /not accepted/,
     );
     assert.equal(settings.collections.chat.important, true);
@@ -44,7 +44,7 @@ test('I01 #215: application-level failures and malformed JSON retain settings', 
     ]) {
         const settings = { enabled: false, collections: { keep: true } };
         let persists = 0;
-        await assert.rejects(purgeAllAndResetSettings({ requestPurge: async () => response, settings, persistSettings: () => persists++ }));
+        await assert.rejects(purgeAllAndResetSettings({ requestPurge: async () => response, contractVerified:true, settings, persistSettings: () => persists++ }));
         assert.deepEqual(settings, { enabled: false, collections: { keep: true } });
         assert.equal(persists, 0);
     }
@@ -53,7 +53,7 @@ test('I01 #215: application-level failures and malformed JSON retain settings', 
 test('I01 #215: only acknowledged purge clears settings; enabled is preserved', async () => {
     const settings = { enabled: false, collections: { some: 'data' }, qdrant_api_key: 'secret' };
     let persists = 0;
-    await purgeAllAndResetSettings({ requestPurge: async () => fakeResponse(204), settings, persistSettings: () => persists++ });
+    await purgeAllAndResetSettings({ requestPurge: async () => fakeResponse(204), contractVerified:true, settings, persistSettings: () => persists++ });
     assert.deepEqual(settings, { enabled: false });
     assert.equal(persists, 1);
     await assert.doesNotReject(assertFullPurgeAcknowledged(fakeResponse(200, { success: true })));
@@ -77,12 +77,13 @@ test('I01 #170: only recognized diagnostic ID shapes qualify', () => {
 // Evaluate the real collection-loader module with isolated SillyTavern stubs.
 // This tests its actual registry/deletion logic, not a copied implementation.
 async function loadCollectionLoader({ registry = [], purge = async () => true } = {}) {
-    const settings = { vecthare_collection_registry: [...registry], vecthare_diagnostic_test_ids: [] };
+    const settings = { vecthare_collection_registry: [...registry], vecthare_diagnostic_test_ids: [], collections:Object.fromEntries(registry.filter(k=>k.split(':').length>=3).map(k=>[k,{}])) }; 
     const extension_settings = { vecthare: settings };
     const calls = { saves: 0, metadataDeletes: [], purges: [] };
     const context = vm.createContext({ console: { log() {}, warn() {}, error() {} }, setTimeout, clearTimeout });
     const cache = new Map();
     const stubs = {
+        '../utils/keyed-mutex.js': {withCollectionLock: async (_key,fn)=>fn(),writeBarrier:{closeAndDrain:async()=>({verified:true}),reopen:()=>{}}},
         '../../../../extensions.js': { extension_settings, getContext: () => ({}) },
         '../../../../../script.js': {
             characters: [], substituteParams: x => x,
@@ -103,6 +104,7 @@ async function loadCollectionLoader({ registry = [], purge = async () => true } 
     };
     const actual = new Map([
         ['./destructive-safety.js', 'core/destructive-safety.js'],
+        ['../utils/collection-keys.js', 'utils/collection-keys.js'],
         ['./collection-ids.js', 'core/collection-ids.js'],
     ]);
     function synthetic(specifier) {
@@ -148,29 +150,29 @@ test('I01 #170: refuse to mark user IDs as diagnostic-owned', async () => {
 });
 
 test('I01 #6: failed purge retains collection registry and metadata', async () => {
-    const { api, settings, calls } = await loadCollectionLoader({ registry: ['openai:my_chat'], purge: async () => false });
-    const result = await api.deleteCollection('my_chat', {}, 'openai:my_chat');
+    const { api, settings, calls } = await loadCollectionLoader({ registry: ['standard:openai:my_chat'], purge: async () => false });
+    const result = await api.deleteCollection('my_chat', {}, 'standard:openai:my_chat');
     assert.equal(result.success, false);
     assert.equal(result.vectorsDeleted, false);
     assert.equal(result.registryDeleted, false);
     assert.equal(result.metadataDeleted, false);
     assert.equal(result.errors.length, 1);
-    assert.deepEqual(settings.vecthare_collection_registry, ['openai:my_chat']);
+    assert.deepEqual(settings.vecthare_collection_registry, ['standard:openai:my_chat']);
     assert.deepEqual(calls.metadataDeletes, []);
 });
 
 test('I01 #6: purge exceptions retain collection registry and metadata', async () => {
-    const { api, settings, calls } = await loadCollectionLoader({ registry: ['my_chat'], purge: async () => { throw Error('unavailable'); } });
+    const { api, settings, calls } = await loadCollectionLoader({ registry: ['standard:openai:my_chat'], purge: async () => { throw Error('unavailable'); } });
     const result = await api.deleteCollection('my_chat', {});
     assert.equal(result.success, false);
-    assert.deepEqual(settings.vecthare_collection_registry, ['my_chat']);
+    assert.deepEqual(settings.vecthare_collection_registry, ['standard:openai:my_chat']);
     assert.deepEqual(calls.metadataDeletes, []);
 });
 
 test('I01 #6: acknowledged purge removes registry and metadata', async () => {
-    const { api, settings, calls } = await loadCollectionLoader({ registry: ['openai:my_chat', 'my_chat'] });
-    const result = await api.deleteCollection('my_chat', {}, 'openai:my_chat');
+    const { api, settings, calls } = await loadCollectionLoader({ registry: ['standard:openai:my_chat', 'my_chat'] });
+    const result = await api.deleteCollection('my_chat', {}, 'standard:openai:my_chat');
     assert.equal(result.success, true);
-    assert.deepEqual(settings.vecthare_collection_registry, []);
+    assert.deepEqual(settings.vecthare_collection_registry, ['my_chat']); // legacy aliases are never removed by a different identity
     assert.deepEqual(calls.metadataDeletes, ['my_chat']);
 });

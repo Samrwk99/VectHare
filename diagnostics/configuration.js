@@ -11,7 +11,7 @@
 
 import { getCurrentChatId, chat_metadata } from '../../../../../script.js';
 import { getSavedHashes } from '../core/core-vector-api.js';
-import { getChatCollectionId, getChatUUID, parseCollectionId } from '../core/chat-vectorization.js';
+import { getChatCollectionId, getChatUUID, parseCollectionId, parseRegistryKey } from '../core/chat-vectorization.js';
 import { VALID_EMOTIONS, VALID_GENERATION_TYPES, validateConditionRule } from '../core/conditional-activation.js';
 import { getTemporallyBlindCount, getTemporallyBlindChunks, isChunkTemporallyBlind, isCollectionEnabled } from '../core/collection-metadata.js';
 import { getCollectionRegistry } from '../core/collection-loader.js';
@@ -33,10 +33,7 @@ export function checkChatEnabled(settings) {
 
     for (const registryKey of registry) {
         // Parse registry key to get collection ID
-        let collectionId = registryKey;
-        if (registryKey.includes(':')) {
-            collectionId = registryKey.substring(registryKey.indexOf(':') + 1);
-        }
+        const collectionId = parseRegistryKey(registryKey).collectionId;
 
         // Skip current chat collection (handled separately)
         if (collectionId === chatCollectionId) {
@@ -784,10 +781,7 @@ export async function checkChunkGroupsValidity(settings) {
         const invalidDetails = [];
 
         for (const registryKey of registry) {
-            let collectionId = registryKey;
-            if (registryKey.includes(':')) {
-                collectionId = registryKey.substring(registryKey.indexOf(':') + 1);
-            }
+            const collectionId = parseRegistryKey(registryKey).collectionId;
 
             const meta = getCollectionMeta(collectionId);
             const groups = meta?.groups || [];
@@ -865,10 +859,7 @@ export async function checkChunkGroupMemberIntegrity(settings) {
         const orphanedDetails = [];
 
         for (const registryKey of registry) {
-            let collectionId = registryKey;
-            if (registryKey.includes(':')) {
-                collectionId = registryKey.substring(registryKey.indexOf(':') + 1);
-            }
+            const collectionId = parseRegistryKey(registryKey).collectionId;
 
             const meta = getCollectionMeta(collectionId);
             const groups = meta?.groups || [];
@@ -965,10 +956,7 @@ export async function checkPromptContextConfig(settings) {
         let collectionsWithXmlTag = 0;
 
         for (const registryKey of registry) {
-            let collectionId = registryKey;
-            if (registryKey.includes(':')) {
-                collectionId = registryKey.substring(registryKey.indexOf(':') + 1);
-            }
+            const collectionId = parseRegistryKey(registryKey).collectionId;
 
             const meta = getCollectionMeta(collectionId);
             if (meta?.context && meta.context.trim()) collectionsWithContext++;

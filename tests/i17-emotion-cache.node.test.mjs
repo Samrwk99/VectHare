@@ -42,6 +42,9 @@ async function setup(handler = async (text) => ({label: text, score: 0.8})) {
                 this.setExport('extension_settings', settings);
             }, {context});
         }
+        if (specifier.endsWith('feature-support.js')) {
+            return new vm.SyntheticModule(['requireSupportedClassifierMode'],function(){this.setExport('requireSupportedClassifierMode',()=>{});},{context});
+        }
         throw new Error(`Unmocked import ${specifier}`);
     });
     await script.evaluate();

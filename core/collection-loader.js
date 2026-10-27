@@ -1,3 +1,5 @@
+import {withCollectionLock} from '../utils/keyed-mutex.js';
+import {guardDelete} from './destructive-safety.js';
 /**
  * ============================================================================
  * VECTHARE COLLECTION LOADER
@@ -35,6 +37,8 @@ import {
     buildChatSearchPatterns,
     matchesPatterns,
     parseRegistryKey,
+    resolveCollectionKey,
+    parseCollectionKey,
     COLLECTION_PREFIXES,
 } from './collection-ids.js';
 
@@ -100,6 +104,17 @@ export function unregisterCollection(collectionId) {
  * @returns {Promise<{success: boolean, errors: string[], vectorsDeleted: boolean, registryDeleted: boolean, metadataDeleted: boolean}>}
  */
 export async function deleteCollection(collectionId, settings, registryKey = null) {
+    const registry = getCollectionRegistry();
+    const resolved = resolveCollectionKey(registryKey || collectionId, {registry});
+    if (resolved.status !== 'unique') return {success:false,errors:[`Destructive delete blocked: ${resolved.status} or legacy/unqualified identity`],vectorsDeleted:false,registryDeleted:false,metadataDeleted:false};
+    const target = parseCollectionKey(resolved.key);
+    if (!target || target.collectionId !== collectionId) return {success:false,errors:['Collection identity mismatch'],vectorsDeleted:false,registryDeleted:false,metadataDeleted:false};
+    return withCollectionLock(resolved.key, async () => {
+      const fresh = resolveCollectionKey(registryKey || collectionId, {registry:getCollectionRegistry()});
+      if(fresh.status!=='unique' || fresh.key!==resolved.key) return {success:false,errors:['Collection registry changed while waiting for lock'],vectorsDeleted:false,registryDeleted:false,metadataDeleted:false};
+      const collections = extension_settings.vecthare?.collections;
+      const proof = guardDelete({key:resolved.key,operation:'targeted-delete',ownership:{verified:true,key:resolved.key},metadata:{available:!!collections && Object.prototype.hasOwnProperty.call(collections,resolved.key)}});
+      if(!proof.allowed) return {success:false,errors:[`Destructive delete blocked: ${proof.reason}`],vectorsDeleted:false,registryDeleted:false,metadataDeleted:false};
     const errors = [];
     let vectorsDeleted = false;
     let registryDeleted = false;
@@ -126,13 +141,10 @@ export async function deleteCollection(collectionId, settings, registryKey = nul
 
     // Step 2: Unregister from registry (try both formats)
     try {
-        const keyToUnregister = registryKey || collectionId;
+        const keyToUnregister = resolved.key;
         unregisterCollection(keyToUnregister);
 
-        // Also try the other format if they differ
-        if (registryKey && registryKey !== collectionId) {
-            unregisterCollection(collectionId);
-        }
+        // Do not unregister a separate legacy alias; ownership is not proven.
 
         registryDeleted = true;
         console.log(`VectHare: ✓ Unregistered ${collectionId}`);
@@ -172,6 +184,7 @@ export async function deleteCollection(collectionId, settings, registryKey = nul
         registryDeleted,
         metadataDeleted,
     };
+    });
 }
 
 /**

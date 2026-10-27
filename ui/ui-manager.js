@@ -1,3 +1,4 @@
+import {redactSecrets} from '../utils/security.js';
 /**
  * ============================================================================
  * VECTHARE UI MANAGER
@@ -2904,6 +2905,13 @@ async function initializeCottonTalesIntegration(settings) {
         return 'disabled';
     }
 
+    // Phase 0: preserve legacy similarity setting, but do not execute or offer it.
+    $('#vecthare_emotion_method option[value="similarity"]').prop('disabled', true).text('Embedding similarity (not implemented)');
+    $('#vecthare_emotion_classifier_model').prop('disabled', true).attr('title', 'Classifier model is controlled by the server endpoint');
+    if (settings.emotion_use_similarity) {
+        $('#vecthare_similarity_settings').append('<small>Saved similarity mode is unavailable; select Classifier or Disabled.</small>');
+    }
+
     // Classification method dropdown
     $('#vecthare_emotion_method')
         .val(getCurrentMethod())
@@ -2922,6 +2930,9 @@ async function initializeCottonTalesIntegration(settings) {
                 emotionClassifier.updateClassifierSetting('enabled', true);
                 emotionClassifier.updateClassifierSetting('useEmbeddingSimilarity', false);
             } else if (method === 'similarity') {
+                toastr.warning('Embedding similarity classification has not been implemented.');
+                $(this).val(getCurrentMethod());
+                return;
                 settings.emotion_classifier_enabled = true; // Still enabled, but uses similarity
                 settings.emotion_use_similarity = true;
                 emotionClassifier.updateClassifierSetting('enabled', true);
@@ -3417,7 +3428,7 @@ ${categoryNames[category] || category.toUpperCase()}  ${catStats}
 
     // Copy to clipboard
     const filterMsg = isFiltered ? ` (${filterNames[filter]})` : '';
-    navigator.clipboard.writeText(report).then(() => {
+    navigator.clipboard.writeText(redactSecrets(report)).then(() => {
         toastr.success(`Diagnostics report${filterMsg} copied to clipboard`, 'VectHare');
     }).catch(err => {
         console.error('Failed to copy:', err);
@@ -3637,26 +3648,11 @@ async function showQdrantDimensionFixDialog() {
         });
 
         if (confirmed) {
-            toastr.info('Purging Qdrant collection...');
-            try {
-                const { getRequestHeaders } = await import('../../../../../script.js');
-                const response = await fetch('/api/plugins/similharity/backend/qdrant/purge-collection', {
-                    method: 'POST',
-                    headers: getRequestHeaders(),
-                    body: JSON.stringify({ collectionName: 'vecthare_main' })
-                });
-
-                if (response.ok) {
-                    toastr.success('Qdrant collection purged! You can now re-vectorize your content.');
-                    closeDiagnosticsModal();
-                } else {
-                    const error = await response.text();
-                    toastr.error(`Failed to purge: ${error}`);
-                }
-            } catch (e) {
-                toastr.error(`Purge failed: ${e.message}`);
-            }
+            // Phase 0: direct raw backend purge bypasses identity and ACK verification.
+            // No live, version-pinned tenant-scoped purge contract is available.
+            toastr.warning('Purge is disabled until the backend identity, scope, and acknowledgement are verified. Your vectors were not deleted.');
         }
+
     });
 
     $('#vecthare_dim_fix_switch').off('click').on('click', () => {

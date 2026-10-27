@@ -1,3 +1,4 @@
+import {parseSafePng, readLimitedStream, MAX_PNG_TEXT_BYTES} from '../utils/safe-png.js';
 /**
  * ============================================================================
  * VECTHARE PNG EXPORT/IMPORT
@@ -107,7 +108,7 @@ async function decompressZlib(data) {
     for (const format of ['deflate', 'deflate-raw']) {
         try {
             const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream(format));
-            return new Uint8Array(await new Response(stream).arrayBuffer());
+            return await readLimitedStream(stream, MAX_PNG_TEXT_BYTES);
         } catch (_) { /* Try the legacy raw format. */ }
     }
     throw new Error('Unsupported or corrupt VectHare zTXt compression');
@@ -152,30 +153,7 @@ function createChunk(type, data) {
  * @returns {Array<{type: string, data: Uint8Array, offset: number}>} Array of chunks
  */
 function parseChunks(pngData) {
-    // Verify PNG signature
-    for (let i = 0; i < 8; i++) {
-        if (pngData[i] !== PNG_SIGNATURE[i]) {
-            throw new Error('Invalid PNG signature');
-        }
-    }
-
-    const chunks = [];
-    let offset = 8; // Skip signature
-
-    while (offset < pngData.length) {
-        const view = new DataView(pngData.buffer, pngData.byteOffset + offset);
-        const length = view.getUint32(0, false);
-        const type = new TextDecoder().decode(pngData.slice(offset + 4, offset + 8));
-        const data = pngData.slice(offset + 8, offset + 8 + length);
-
-        chunks.push({ type, data, offset });
-
-        offset += 4 + 4 + length + 4; // length + type + data + crc
-
-        if (type === 'IEND') break;
-    }
-
-    return chunks;
+    return parseSafePng(pngData);
 }
 
 /**
@@ -288,6 +266,7 @@ async function readTextChunk(chunk) {
 
         // Check if it's base64 encoded (our fallback format)
         try {
+            if (text.length > MAX_PNG_TEXT_BYTES * 2) throw new Error('PNG text exceeds safe limit');
             const decoded = atob(text);
             const bytes = Uint8Array.from(decoded, c => c.charCodeAt(0));
             return { keyword, text: new TextDecoder('utf-8', { fatal: true }).decode(bytes) };

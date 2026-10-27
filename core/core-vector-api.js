@@ -1,3 +1,8 @@
+import {beginOperation,settleOperation} from '../utils/operation-outcomes.js';
+import {writeBarrier,withCollectionLock} from '../utils/keyed-mutex.js';
+import {resolveCollectionKey,parseCollectionKey,formatCollectionKey} from '../utils/collection-keys.js';
+import {hasVerifiedCapability} from '../utils/backend-contracts.js';
+import {requireConfirmedDeleteAck} from './destructive-safety.js';
 import { completeSavedChunkMetadata } from '../utils/chunk-record-metadata.js';
 import { recordCollectionUsage } from './collection-metadata.js';
 /**
@@ -744,6 +749,12 @@ export async function getSavedHashes(collectionId, settings, includeMetadata = f
  * @returns {Promise<void>}
  */
 export async function insertVectorItems(collectionId, items, settings, onProgress = null, abortSignal = null) {
+    const parsed=parseCollectionKey(collectionId);
+    const key=parsed ? formatCollectionKey(parsed) : formatCollectionKey({backend:settings?.vector_backend||'standard',source:settings?.source,collectionId});
+    const ticket=writeBarrier.enter();
+    let uncertain=false;
+    const operation=beginOperation('insert',key);
+    try {return await withCollectionLock(key,async()=>{
     // R17: getBackend was previously an UNABORTABLE, UNTIMED await executed
     // once per item - the exact place a run could hang forever with Stop
     // unable to free it (user symptom: "stopping hangs on embedding" while
@@ -817,6 +828,12 @@ export async function insertVectorItems(collectionId, items, settings, onProgres
         recordError(settings?.vector_backend || 'standard', error);
         throw error;
     }
+    // Client adapter methods do not currently return verified acceptance counts.
+    // Preserve legacy write behavior but never authorize a dependent delete.
+    uncertain=true;
+    settleOperation(operation,{status:'uncertain',reason:'missing-acknowledgement'});
+    return {status:'uncertain',operationId:operation.operationId,requiresReconciliation:true};
+    }); } catch(error) {uncertain=true;settleOperation(operation,{status:'uncertain',reason:'transport-after-send'});throw error;} finally {writeBarrier.leave(ticket,{uncertain});}
 }
 
 /**
@@ -927,6 +944,16 @@ async function streamEmbeddingsAndWrite(backend, collectionId, items, textString
  * @returns {Promise<void>}
  */
 export async function deleteVectorItems(collectionId, hashes, settings, abortSignal = null) {
+    const registry=extension_settings.vecthare?.vecthare_collection_registry || [];
+    const resolved=resolveCollectionKey(collectionId,{registry});
+    const key=resolved.key;
+    if (resolved.status!=='unique' || !hasVerifiedCapability(settings?.vector_backend||'standard','deleteAcknowledgement')) {
+        throw new Error('Targeted deletion blocked: unqualified identity or unverified backend delete contract');
+    }
+    const ticket=writeBarrier.enter();
+    let uncertain=false;
+    try { return await withCollectionLock(key,async()=>{
+    if(resolveCollectionKey(collectionId,{registry:extension_settings.vecthare?.vecthare_collection_registry || []}).key!==key) throw new Error('Registry changed during deletion');
     // R17: guarded - deletes during a run were unabortable+untimed awaits
     const backend = await withOpGuard(() => getBackend(settings), abortSignal, 'Backend initialization (delete)');
     try {
@@ -939,6 +966,7 @@ export async function deleteVectorItems(collectionId, hashes, settings, abortSig
             abortSignal,
             'Delete vectors'
         );
+        requireConfirmedDeleteAck(result);
         // VEC-18: Record successful delete operation
         recordDelete(settings?.vector_backend || 'standard', hashes.length);
         notifyDatabaseChanged(collectionId);
@@ -948,6 +976,7 @@ export async function deleteVectorItems(collectionId, hashes, settings, abortSig
         recordError(settings?.vector_backend || 'standard', error);
         throw error;
     }
+    }); } catch(error) {uncertain=true;throw error;} finally {writeBarrier.leave(ticket,{uncertain});}
 }
 
 /**
@@ -1248,8 +1277,10 @@ export async function queryActiveCollections(collectionIds, searchText, topK, th
  */
 export async function purgeVectorIndex(collectionId, settings) {
     try {
+        if (!hasVerifiedCapability(settings?.vector_backend || 'standard','purgeAcknowledgement')) throw new Error('Purge blocked: server acknowledgement contract unverified');
         const backend = await getBackend(settings);
         const purgeResult = await backend.purgeVectorIndex(collectionId, settings);
+        requireConfirmedDeleteAck(purgeResult);
         // Some adapters may explicitly return false rather than throwing.
         if (purgeResult === false || purgeResult?.success === false) {
             throw new Error('Backend reported that the collection purge failed');
@@ -1272,17 +1303,10 @@ export async function purgeVectorIndex(collectionId, settings) {
  * @returns {Promise<void>}
  */
 export async function purgeFileVectorIndex(collectionId, settings) {
-    try {
-        console.log(`VectHare: Purging file vector index for collection ${collectionId}`);
-        const backend = await getBackend(settings);
-        await backend.purgeFileVectorIndex(collectionId, settings);
-        console.log(`VectHare: Purged vector index for collection ${collectionId}`);
-        notifyDatabaseChanged(collectionId);
-    } catch (error) {
-        // VEC-33: Invalidate health cache on operation error
-        invalidateBackendHealth(settings?.vector_backend || 'standard', error);
-        console.error('VectHare: Failed to purge file', error);
+    if (await purgeVectorIndex(collectionId, settings) !== true) {
+        throw new Error('File purge blocked or unverified; existing vectors retained');
     }
+    return true;
 }
 
 /**
@@ -1292,8 +1316,11 @@ export async function purgeFileVectorIndex(collectionId, settings) {
  */
 export async function purgeAllVectorIndexes(settings) {
     try {
+        if (!hasVerifiedCapability(settings?.vector_backend || 'standard','purgeAcknowledgement')) throw new Error('Global purge blocked: unverified backend contract');
+        const drain = await writeBarrier.closeAndDrain({timeoutMs:15000});
+        if (!drain.verified) throw new Error('Global purge blocked: uncertain or pending writes');
         const backend = await getBackend(settings);
-        await backend.purgeAllVectorIndexes(settings);
+        requireConfirmedDeleteAck(await backend.purgeAllVectorIndexes(settings));
         console.log('VectHare: Purged all vector indexes');
         notifyDatabaseChanged();
         toastr.success('All vector indexes purged', 'Purge successful');
@@ -1302,7 +1329,7 @@ export async function purgeAllVectorIndexes(settings) {
         invalidateBackendHealth(settings?.vector_backend || 'standard', error);
         console.error('VectHare: Failed to purge all', error);
         toastr.error('Failed to purge all vector indexes', 'Purge failed');
-    }
+    } finally {writeBarrier.reopen();}
 }
 
 /**

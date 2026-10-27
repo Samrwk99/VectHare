@@ -228,7 +228,7 @@ test('I03 #114: cleanup cooldown is recorded only on successful metadata-backed 
     assert.ok(begin > 0 && end > begin);
     assert.ok(block.indexOf('reverseSyncThrottle.markSuccessful(throttleKey)') > block.indexOf('if (metaByHash)'));
     assert.ok(block.indexOf('reverseSyncThrottle.markSuccessful(throttleKey)') < block.indexOf('} else {\n                    console.debug'));
-    assert.match(block, /deleted === false \|\| deleted\?\.success === false/);
+    assert.match(block, /destructive cleanup deferred/i);
 });
 
 test('I03 #25: switching chat before auto-sync confirmation returns cannot persist the old request', async () => {

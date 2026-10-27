@@ -1,3 +1,4 @@
+import {requireSupportedClassifierMode} from '../utils/feature-support.js';
 /**
  * ============================================================================
  * VECTHARE EMOTION CLASSIFIER
@@ -149,6 +150,7 @@ export async function classifyEmotion(text, options = {}) {
     }
 
     // Check cache
+    requireSupportedClassifierMode({useEmbeddingSimilarity: options.useEmbeddingSimilarity ?? settings.useEmbeddingSimilarity});
     const cacheKey = classifierCacheKey(text, settings, options);
     const requestGeneration = cacheGeneration;
     if (classifierCache.has(cacheKey)) {

@@ -567,6 +567,7 @@ jQuery(async () => {
     eventSource.on(event_types.MESSAGE_SENT, onChatEvent);
     eventSource.on(event_types.MESSAGE_RECEIVED, onChatEvent);
     eventSource.on(event_types.MESSAGE_SWIPED, onChatEvent);
+    eventSource.on(event_types.MESSAGE_SWIPED, () => flagImmediateReverseSync(getChatCollectionId(), settings));
     // When a chat is deleted, purge its vectors (not full purge, just that chat)
     eventSource.on(event_types.CHAT_DELETED, async (chatId) => {
         if (chatId) {

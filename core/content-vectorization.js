@@ -1,3 +1,4 @@
+import {requireSupportedChunkStrategy} from '../utils/feature-support.js';
 /**
  * ============================================================================
  * VECTHARE CONTENT VECTORIZATION
@@ -44,6 +45,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
         throw new Error(`Unknown content type: ${contentType}`);
     }
 
+    requireSupportedChunkStrategy(settings.strategy || type.defaultStrategy, contentType, {uploaded:true});
     const sourceName = source.name || source.filename || source.id || contentType;
     progressTracker.show(`Vectorizing ${type.label || contentType}`, 4, 'Steps');
     progressTracker.updateCurrentItem(sourceName);
@@ -791,6 +793,8 @@ function enrichChunks(chunks, contentType, source, settings, preparedContent, ve
  */
 export async function deleteContentCollection(collectionId) {
     const vecthareSettings = extension_settings.vecthare;
-    await purgeVectorIndex(collectionId, vecthareSettings);
+    if (await purgeVectorIndex(collectionId, vecthareSettings) !== true) {
+        throw new Error('Content collection delete blocked: no verified backend acknowledgement; collection preserved');
+    }
     console.log(`VectHare: Deleted collection: ${collectionId}`);
 }

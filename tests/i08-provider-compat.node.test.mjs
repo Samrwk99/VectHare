@@ -68,6 +68,7 @@ async function makeExportHarness() {
         },
     });
     const extensionStubs = {
+        '../utils/security.js': {redactSecrets:value=>value},
         '../../../../extensions.js': { extension_settings: { vecthare: {} } },
         '../../../../../script.js': { getRequestHeaders: () => ({}), saveSettingsDebounced() {} },
         './core-vector-api.js': { getSavedHashes: async () => [], insertVectorItems: async (id, records) => written.push({ id, records }), purgeVectorIndex: async () => true },

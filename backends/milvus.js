@@ -1,3 +1,4 @@
+import {hasVerifiedCapability} from '../utils/backend-contracts.js';
 import { mergeDefinedChunkMetadata, trustedQueryMetadata } from '../utils/chunk-record-metadata.js';
 /**
  * ============================================================================
@@ -498,6 +499,7 @@ export class MilvusBackend extends VectorBackend {
      * Get collection statistics
      */
     async getStats(collectionId, settings) {
+        if (!hasVerifiedCapability(BACKEND_TYPE,'tenantFilter')) throw new Error('Tenant statistics unavailable: server tenant filter unverified');
         const { type, sourceId } = this._parseCollectionId(collectionId);
 
         const response = await fetch('/api/plugins/similharity/chunks/stats', {

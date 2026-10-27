@@ -1,3 +1,5 @@
+import {writeBarrier} from '../utils/keyed-mutex.js';
+import {parseCollectionKey} from '../utils/collection-keys.js';
 /**
  * Safety checks for destructive operations. These functions do not perform
  * deletions and deliberately fail closed on explicit backend errors.
@@ -46,12 +48,36 @@ export async function assertFullPurgeAcknowledged(response) {
  * Keep the destructive network action and settings reset in one testable
  * sequence. A failed request never mutates the caller's settings object.
  */
-export async function purgeAllAndResetSettings({ requestPurge, settings, persistSettings }) {
-    const response = await requestPurge();
-    await assertFullPurgeAcknowledged(response);
+export async function purgeAllAndResetSettings({ requestPurge, settings, persistSettings, contractVerified = false }) {
+    if (contractVerified !== true) throw new Error('Global purge blocked: no verified backend purge contract (no request sent)');
+    try {
+        const drain = await writeBarrier.closeAndDrain({timeoutMs:15000});
+        if (!drain.verified) throw new Error('Global purge blocked: writes in flight or unverified write completion; reconciliation required');
+        const response = await requestPurge();
+        await assertFullPurgeAcknowledged(response);
+        for (const key of Object.keys(settings)) {
+            if (key !== 'enabled') delete settings[key];
+        }
+        persistSettings();
+    } finally { writeBarrier.reopen(); }
+}
 
-    for (const key of Object.keys(settings)) {
-        if (key !== 'enabled') delete settings[key];
+/** Phase 0 fail-closed deletion decision. Must run again inside the collection lock. */
+export function guardDelete({key, operation='orphan-cleanup', inventory, metadata, ownership, outcome}={}) {
+    const fail=reason=>({allowed:false,reason,evidence:{operation}});
+    if (!parseCollectionKey(key)) return fail('invalid-or-unqualified-key');
+    if (ownership?.verified!==true || ownership?.key!==key) return fail('ownership-unverified');
+    if (operation==='orphan-cleanup' || operation==='reconciliation' || operation==='overwrite') {
+        if (inventory?.complete!==true || inventory?.scope!==key) return fail('incomplete-inventory');
+        if (metadata?.available!==true) return fail('metadata-unavailable');
     }
-    persistSettings();
+    if (operation==='targeted-delete' && metadata?.available!==true) return fail('metadata-unavailable');
+    if (outcome && outcome.status!=='confirmed') return fail('unconfirmed-operation');
+    return {allowed:true,reason:'verified-guard',evidence:{operation,key}};
+}
+
+/** False/undefined/status-unknown are not deletion acknowledgements. */
+export function requireConfirmedDeleteAck(result) {
+    if (result === true || result?.status === 'confirmed') return true;
+    throw new Error('Delete/purge acknowledgement is unverified; preserve registry and metadata (reconciliation required)');
 }

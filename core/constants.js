@@ -109,3 +109,5 @@ export const DEFAULT_QUERY_COUNT = 5;
 
 /** Default number of messages to protect from vectorization */
 export const DEFAULT_PROTECT_COUNT = 5;
+
+export {phase0Flags, isFeatureEnabled} from '../utils/phase0-rollout.js';

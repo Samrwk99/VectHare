@@ -57,7 +57,8 @@ export async function chunkText(text, options = {}) {
     }
 
     // Select strategy
-    const strategyFn = STRATEGIES[strategy] || STRATEGIES.adaptive;
+    const strategyFn = STRATEGIES[strategy];
+    if (!strategyFn) throw new Error(`Unsupported chunking strategy: ${strategy}`);
     const chunks = strategyFn(text, { chunkSize, chunkOverlap, batchSize, conversationTurnOrder });
 
     // Add metadata to each chunk

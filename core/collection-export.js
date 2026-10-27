@@ -1,3 +1,4 @@
+import {redactSecrets} from '../utils/security.js';
 /**
  * ============================================================================
  * VECTHARE COLLECTION EXPORT/IMPORT
@@ -312,7 +313,7 @@ export function downloadExport(exportData, filename = null) {
 
     const finalFilename = (filename || defaultName) + EXPORT_FILE_EXTENSION;
 
-    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify(redactSecrets(exportData), null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
 
     const a = document.createElement('a');
@@ -494,13 +495,7 @@ export async function importCollection(exportData, settings, options = {}) {
         progressTracker.updateProgress(1, 'Preparing collection...');
 
         if (options.overwrite) {
-            try {
-                await purgeVectorIndex(collectionId, settings);
-                console.log(`VectHare Import: Purged existing collection ${collectionId}`);
-            } catch (e) {
-                // Collection might not exist, that's fine - log at debug level
-                console.debug(`VectHare Import: Could not purge ${collectionId} (may not exist):`, e.message);
-            }
+            throw new Error('Overwrite blocked: full collection inventory and verified purge acknowledgement unavailable; originals preserved');
         }
 
         // Step 2: Prepare chunks
@@ -685,12 +680,7 @@ async function importCollectionSilent(exportData, settings, options = {}) {
 
     // Handle existing collection
     if (options.overwrite) {
-        try {
-            await purgeVectorIndex(collectionId, settings);
-        } catch (e) {
-            // Collection might not exist - log at debug level
-            console.debug(`VectHare Import: Could not purge ${collectionId} (may not exist):`, e.message);
-        }
+        throw new Error('Overwrite blocked: full collection inventory and verified purge acknowledgement unavailable; originals preserved');
     }
 
     // Prepare chunks

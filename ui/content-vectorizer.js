@@ -1,3 +1,4 @@
+import {parseSafePng, MAX_PNG_TEXT_BYTES} from '../utils/safe-png.js';
 /**
  * ============================================================================
  * VECTHARE CONTENT VECTORIZER UI
@@ -1727,72 +1728,20 @@ async function handleCharacterPngUpload(file) {
  * @returns {object|null} Parsed character data or null
  */
 function extractCharaFromPng(bytes) {
-    // PNG signature: 89 50 4E 47 0D 0A 1A 0A
-    const pngSignature = [137, 80, 78, 71, 13, 10, 26, 10];
-    for (let i = 0; i < 8; i++) {
-        if (bytes[i] !== pngSignature[i]) {
-            throw new Error('Not a valid PNG file');
-        }
+    for (const chunk of parseSafePng(bytes)) {
+        if (chunk.type !== 'tEXt') continue;
+        const zero = chunk.data.indexOf(0);
+        if (zero < 0 || zero > 79) throw new Error('Invalid PNG text keyword');
+        if (new TextDecoder().decode(chunk.data.subarray(0,zero)) !== 'chara') continue;
+        const encoded = chunk.data.subarray(zero+1);
+        if (encoded.length > MAX_PNG_TEXT_BYTES * 2) throw new Error('Character data exceeds safe limit');
+        try {
+            const raw = atob(new TextDecoder().decode(encoded));
+            if (raw.length > MAX_PNG_TEXT_BYTES) throw new Error('Character data exceeds safe limit');
+            const data = JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(Uint8Array.from(raw,c=>c.charCodeAt(0))));
+            return data.spec === 'chara_card_v2' && data.data ? data.data : data;
+        } catch(error) { throw new Error('Invalid or excessive character data in PNG'); }
     }
-
-    // Read chunks
-    let offset = 8; // Skip signature
-
-    while (offset < bytes.length) {
-        // Read chunk length (4 bytes, big endian)
-        const length = (bytes[offset] << 24) | (bytes[offset + 1] << 16) |
-                       (bytes[offset + 2] << 8) | bytes[offset + 3];
-        offset += 4;
-
-        // Read chunk type (4 bytes ASCII)
-        const type = String.fromCharCode(bytes[offset], bytes[offset + 1],
-                                         bytes[offset + 2], bytes[offset + 3]);
-        offset += 4;
-
-        if (type === 'tEXt') {
-            // tEXt chunk: keyword (null-terminated) + text data
-            const dataStart = offset;
-            const dataEnd = offset + length;
-
-            // Find null terminator for keyword
-            let nullPos = dataStart;
-            while (nullPos < dataEnd && bytes[nullPos] !== 0) {
-                nullPos++;
-            }
-
-            const keyword = new TextDecoder().decode(bytes.slice(dataStart, nullPos));
-
-            if (keyword === 'chara') {
-                // Get the base64 data after the null terminator
-                const base64Data = new TextDecoder().decode(bytes.slice(nullPos + 1, dataEnd));
-
-                // Decode base64 to JSON
-                try {
-                    const binary = atob(base64Data);
-                    const jsonStr = new TextDecoder('utf-8', { fatal: true }).decode(
-                        Uint8Array.from(binary, c => c.charCodeAt(0)));
-                    const charData = JSON.parse(jsonStr);
-
-                    // Handle V2 format (data wrapped in 'data' object)
-                    if (charData.spec === 'chara_card_v2' && charData.data) {
-                        return charData.data;
-                    }
-
-                    return charData;
-                } catch (e) {
-                    console.error('VectHare: Failed to decode character data:', e);
-                    throw new Error('Invalid character data in PNG');
-                }
-            }
-        }
-
-        // Skip chunk data and CRC (4 bytes)
-        offset += length + 4;
-
-        // Safety check for IEND
-        if (type === 'IEND') break;
-    }
-
     return null;
 }
 
@@ -2550,7 +2499,10 @@ async function startVectorization() {
                 // User wants to replace - purge existing first
                 const { purgeVectorIndex } = await import('../core/core-vector-api.js');
                 const { unregisterCollection } = await import('../core/collection-loader.js');
-                await purgeVectorIndex(existing.collectionId, currentSettings);
+                if (await purgeVectorIndex(existing.collectionId, currentSettings) !== true) {
+                    toastr.warning('Replace All blocked: backend purge could not be verified; existing vectors and registry were preserved.');
+                    return;
+                }
                 // R8 FIX: unregister with the registry key (backend:source:id)
                 // when available - the bare collectionId never matched a registry
                 // entry, leaving a stale key behind.
@@ -2566,8 +2518,9 @@ async function startVectorization() {
                 toastr.info('Cleared existing vectors', 'VectHare');
             }
         } catch (e) {
-            console.warn('VectHare: Could not check for existing vectors:', e);
-            // Continue anyway
+            console.warn('VectHare: Could not verify existing vectors:', e);
+            toastr.warning('Replacement blocked: could not verify existing vectors. No deletion or replacement started.');
+            return;
         }
     }
 

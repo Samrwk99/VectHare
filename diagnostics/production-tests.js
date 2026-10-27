@@ -664,80 +664,18 @@ export async function testDuplicateHashes(settings, collectionId) {
  * Strategy: Query to get chunk text, delete all instances, re-insert one copy
  */
 export async function fixDuplicateHashes(duplicates, collectionId, settings) {
-    try {
-        const { deleteVectorItems, insertVectorItems, queryCollection } = await import('../core/core-vector-api.js');
-
-        let fixed = 0;
-        const chunksToReinsert = [];
-
-        // First, query to get the chunk data for each duplicate hash
-        // We query with minimal text to find chunks by hash
-        for (const { hash } of duplicates) {
-            try {
-                // Query with a broad search to find chunks - we'll filter by hash
-                const result = await queryCollection(collectionId, '', 1000, settings);
-
-                if (result?.metadata) {
-                    // Find chunk with this hash
-                    const chunk = result.metadata.find(m => String(m.hash) === String(hash));
-                    if (chunk) {
-                        chunksToReinsert.push({
-                            hash: chunk.hash,
-                            text: chunk.text,
-                            index: chunk.index || 0,
-                            metadata: {
-                                source: chunk.source,
-                                messageId: chunk.messageId,
-                                chunkIndex: chunk.chunkIndex,
-                                totalChunks: chunk.totalChunks,
-                                originalMessageHash: chunk.originalMessageHash
-                            }
-                        });
-                    }
-                }
-            } catch (e) {
-                console.warn(`VectHare: Failed to get data for hash ${hash}:`, e);
-            }
-        }
-
-        // Delete ALL instances of duplicate hashes
-        const hashesToDelete = duplicates.map(d => d.hash);
-        try {
-            await deleteVectorItems(collectionId, hashesToDelete, settings);
-            console.log(`VectHare: Deleted ${hashesToDelete.length} duplicate hashes`);
-        } catch (e) {
-            console.warn('VectHare: Delete failed:', e);
-            return {
-                success: false,
-                message: `Failed to delete duplicates: ${e.message}`
-            };
-        }
-
-        // Re-insert ONE copy of each
-        if (chunksToReinsert.length > 0) {
-            try {
-                await insertVectorItems(collectionId, chunksToReinsert, settings);
-                fixed = chunksToReinsert.length;
-                console.log(`VectHare: Re-inserted ${fixed} chunks (deduplicated)`);
-            } catch (e) {
-                console.warn('VectHare: Re-insert failed:', e);
-                return {
-                    success: false,
-                    message: `Deleted duplicates but failed to re-insert: ${e.message}. Re-vectorize chat to restore.`
-                };
-            }
-        }
-
-        return {
-            success: true,
-            message: `Fixed ${fixed} duplicate hashes (deleted extras, kept one copy each)`
-        };
-    } catch (error) {
-        return {
-            success: false,
-            message: `Failed to fix duplicates: ${error.message}`
-        };
+    // Identical content hashes do not identify individual duplicate records.
+    // Deleting by hash removes the source and replacement together. Neither a
+    // complete scoped inventory nor authoritative record IDs can be proven
+    // from the current adapters; do not perform the historical delete-first fix.
+    if (!Array.isArray(duplicates) || duplicates.length === 0) {
+        return {success:true, message:'No duplicate hashes require repair'};
     }
+    return {
+        success:false,
+        requiresReconciliation:true,
+        message:'Duplicate hash repair is unavailable: backend record IDs, complete scoped inventory and delete acknowledgements are unverified. Existing vectors are preserved.'
+    };
 }
 
 /**

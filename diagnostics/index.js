@@ -393,10 +393,8 @@ async function fixOrphanedGroupMembers() {
         let collectionsSkipped = 0;
 
         for (const registryKey of registry) {
-            let collectionId = registryKey;
-            if (registryKey.includes(':')) {
-                collectionId = registryKey.substring(registryKey.indexOf(':') + 1);
-            }
+            const {parseRegistryKey} = await import('../core/collection-ids.js');
+            const collectionId = parseRegistryKey(registryKey).collectionId;
 
             const meta = getCollectionMeta(collectionId);
             const groups = meta?.groups || [];
