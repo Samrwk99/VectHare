@@ -229,6 +229,7 @@ export const CONTENT_TYPES = {
         defaults: {
             chunkSize: 600,
             autoKeywords: true,
+            includeDisabled: false,
             scope: 'global',
         },
 
@@ -435,7 +436,7 @@ export function getContentTypeDefaults(typeId) {
     const type = CONTENT_TYPES[typeId];
     if (!type) return {};
     return {
-        ...type.defaults,
+        ...structuredClone(type.defaults),
         strategy: type.defaultStrategy,
     };
 }

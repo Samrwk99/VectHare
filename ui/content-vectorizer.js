@@ -37,6 +37,13 @@ import { openTextCleaningManager } from './text-cleaning-manager.js';
 let currentContentType = 'lorebook';
 let currentSettings = {};
 let sourceData = null;
+let sourceRevision = 0;
+
+function clearSelectedSource() {
+    sourceRevision++;
+    sourceData = null;
+}
+
 
 // ============================================================================
 // MODAL CREATION
@@ -48,11 +55,11 @@ let sourceData = null;
  */
 export function openContentVectorizer(initialType = null) {
     currentContentType = initialType;
-    currentSettings = initialType ? { ...getContentTypeDefaults(initialType) } : {};
+    currentSettings = initialType ? getContentTypeDefaults(initialType) : {};
     if (initialType === 'chat') {
         currentSettings.conversation_turn_order = extension_settings.vecthare?.conversation_turn_order || 'user_character';
     }
-    sourceData = null;
+    clearSelectedSource();
 
     createModal();
     bindEvents();
@@ -77,6 +84,7 @@ export function openContentVectorizer(initialType = null) {
  * Closes the modal
  */
 export function closeContentVectorizer() {
+    clearSelectedSource();
     $('#vecthare_content_vectorizer_modal').fadeOut(200, function() {
         $(this).remove();
     });
@@ -165,6 +173,10 @@ function createModal() {
 
                             <!-- Size/Overlap controls - only shown for text-based strategies -->
                             <div class="vecthare-cv-size-controls" id="vecthare_cv_size_controls">
+                                <div class="vecthare-cv-slider-row" id="vecthare_cv_batch_size_row" style="display:none;">
+                                    <label>Messages per batch <span id="vecthare_cv_batch_size_val">4</span></label>
+                                    <input type="number" id="vecthare_cv_batch_size" min="1" max="100" step="1" value="4">
+                                </div>
                                 <div class="vecthare-cv-slider-row" id="vecthare_cv_chunk_size_row">
                                     <label>
                                         Chunk Size
@@ -716,6 +728,9 @@ function updateChunkingSection(type) {
     $('#vecthare_cv_chunk_size_val').text(chunkSize);
     $('#vecthare_cv_overlap').val(chunkOverlap);
     $('#vecthare_cv_overlap_val').text(chunkOverlap === 0 ? 'Off' : chunkOverlap);
+    const batchSize = currentSettings.batchSize ?? defaults.batchSize ?? 4;
+    $('#vecthare_cv_batch_size').val(batchSize);
+    $('#vecthare_cv_batch_size_val').text(batchSize);
 
     $('#vecthare_cv_turn_order').val(currentSettings.conversation_turn_order || 'user_character');
 
@@ -737,7 +752,8 @@ function updateSizeControlsVisibility() {
 
     // Show/hide the entire size controls section
     const hasAnyControls = needsSize || needsOverlap;
-    $('#vecthare_cv_size_controls').toggle(hasAnyControls);
+    $('#vecthare_cv_size_controls').toggle(hasAnyControls || strategyId === 'message_batch');
+    $('#vecthare_cv_batch_size_row').toggle(strategyId === 'message_batch');
     $('#vecthare_cv_turn_order_row').toggle(strategyId === 'conversation_turns');
 
     // Show/hide individual controls
@@ -823,7 +839,7 @@ function updateOptionsSection(type) {
                 <label class="vecthare-cv-toggle-label">
                     <span>Include Disabled Entries</span>
                     <label class="vecthare-toggle-switch">
-                        <input type="checkbox" id="vecthare_cv_include_disabled">
+                        <input type="checkbox" id="vecthare_cv_include_disabled" ${currentSettings.includeDisabled ? 'checked' : ''}>
                         <span class="vecthare-toggle-slider"></span>
                     </label>
                 </label>
@@ -919,7 +935,7 @@ function renderFieldSelection() {
                     <label class="vecthare-cv-field-option">
                         <input type="checkbox" name="vecthare_cv_field"
                                value="${field.id}"
-                               ${defaults.fields?.[field.id] ? 'checked' : ''}>
+                               ${(currentSettings.fields ?? defaults.fields)?.[field.id] ? 'checked' : ''}>
                         <span class="vecthare-cv-field-name">${field.name}</span>
                     </label>
                 `).join('')}
@@ -1109,13 +1125,15 @@ function bindEvents() {
             // No selection - hide subsequent sections
             currentContentType = null;
             currentSettings = {};
+            clearSelectedSource();
             $('.vecthare-cv-subsequent').slideUp(200);
             $('#vecthare_cv_type_hint').text('Select a content type to continue');
             return;
         }
 
+        clearSelectedSource();
         currentContentType = type;
-        currentSettings = { ...getContentTypeDefaults(type) };
+        currentSettings = getContentTypeDefaults(type);
         if (type === 'chat') {
             currentSettings.conversation_turn_order = extension_settings.vecthare?.conversation_turn_order || 'user_character';
         }
@@ -1168,11 +1186,29 @@ function bindEvents() {
         currentSettings.chunkOverlap = val;
     });
 
+    $('#vecthare_cv_batch_size').on('input change', function() {
+        const value = Number($(this).val());
+        if (!Number.isInteger(value) || value < 1 || value > 100) return;
+        currentSettings.batchSize = value;
+        $('#vecthare_cv_batch_size_val').text(value);
+    });
+
     // Scope selection
     $(document).on('change', 'input[name="vecthare_cv_scope"]', function() {
         currentSettings.scope = $(this).val();
         $('.vecthare-cv-scope-option').removeClass('selected');
         $(this).closest('.vecthare-cv-scope-option').addClass('selected');
+    });
+
+    // Character fields are job-specific, not immutable type defaults.
+    $(document).on('change', 'input[name="vecthare_cv_field"]', function() {
+        if (!currentSettings.fields) currentSettings.fields = {};
+        currentSettings.fields[$(this).val()] = $(this).prop('checked');
+    });
+
+    // Include disabled World Info entries only if explicitly selected.
+    $(document).on('change', '#vecthare_cv_include_disabled', function() {
+        currentSettings.includeDisabled = $(this).prop('checked');
     });
 
     // Keyword level dropdown
@@ -1264,8 +1300,7 @@ function bindEvents() {
         };
         $('#vecthare_cv_cleaning_hint').text(hints[presetId] || '');
 
-        // Save to extension settings
-        saveCleaningPresetToSettings(presetId);
+        // This preset belongs to this Content Vectorizer job, not the global cleaner.
     });
 
     // Manage cleaning patterns button - opens the standalone Text Cleaning Manager
@@ -1296,7 +1331,7 @@ function bindSourceEvents(type) {
         $(`.vecthare-cv-source-panel[data-panel="${source}"]`).show();
 
         // Clear sourceData when switching tabs
-        sourceData = null;
+        clearSelectedSource();
     });
 
     // Input method tabs (for document type)
@@ -1306,6 +1341,7 @@ function bindSourceEvents(type) {
         $(this).addClass('active');
         $('.vecthare-cv-input-panel').hide();
         $(`.vecthare-cv-input-panel[data-panel="${method}"]`).show();
+        clearSelectedSource();
     });
 
     // Upload zone click (all upload zones)
@@ -1354,6 +1390,10 @@ function bindSourceEvents(type) {
     // Clear upload
     $('#vecthare_cv_upload_clear').on('click', clearUpload);
     $('#vecthare_cv_chat_upload_clear').on('click', clearChatUpload);
+
+    // Editing a source address invalidates a previously fetched preview.
+    $('#vecthare_cv_url_input, #vecthare_cv_wiki_url, #vecthare_cv_wiki_filter, #vecthare_cv_youtube_url, #vecthare_cv_youtube_lang')
+        .on('input change', clearSelectedSource);
 
     // Fetch URL
     $('#vecthare_cv_fetch_url').on('click', fetchUrl);
@@ -1533,6 +1573,8 @@ function handleFileUpload(e) {
     const file = e.target.files[0];
     if (!file) return;
 
+    const revision = sourceRevision;
+    const typeAtStart = currentContentType;
     const ext = file.name.split('.').pop().toLowerCase();
 
     // PNG character cards need special handling (embedded JSON in tEXt chunk)
@@ -1543,6 +1585,7 @@ function handleFileUpload(e) {
 
     const reader = new FileReader();
     reader.onload = function(event) {
+        if (revision !== sourceRevision || typeAtStart !== currentContentType) return;
         const content = event.target.result;
 
         // For lorebook JSON, parse and validate
@@ -1553,6 +1596,7 @@ function handleFileUpload(e) {
                 if (data.entries) {
                     const entries = Object.values(data.entries).filter(e => e.content);
                     sourceData = {
+                        __contentType: currentContentType,
                         type: 'file',
                         filename: file.name,
                         content: entries,
@@ -1583,6 +1627,7 @@ function handleFileUpload(e) {
                 // Look for character data fields
                 if (data.name || data.description || data.personality) {
                     sourceData = {
+                        __contentType: currentContentType,
                         type: 'file',
                         filename: file.name,
                         content: data,
@@ -1605,6 +1650,7 @@ function handleFileUpload(e) {
         } else {
             // Generic file upload
             sourceData = {
+                __contentType: currentContentType,
                 type: 'file',
                 filename: file.name,
                 content: content,
@@ -1631,6 +1677,7 @@ function handleFileUpload(e) {
  * PNG character cards have JSON data embedded in the tEXt chunk with keyword "chara"
  */
 async function handleCharacterPngUpload(file) {
+    const sourceAtStart = { revision: sourceRevision, type: currentContentType };
     try {
         // Read PNG as ArrayBuffer
         const arrayBuffer = await file.arrayBuffer();
@@ -1643,7 +1690,9 @@ async function handleCharacterPngUpload(file) {
             throw new Error('No character data found in PNG');
         }
 
+        if (sourceAtStart.revision !== sourceRevision || sourceAtStart.type !== currentContentType) return;
         sourceData = {
+            __contentType: currentContentType,
             type: 'file',
             filename: file.name,
             content: characterData,
@@ -1748,7 +1797,7 @@ function extractCharaFromPng(bytes) {
  * Clears uploaded file
  */
 function clearUpload() {
-    sourceData = null;
+    clearSelectedSource();
     $('#vecthare_cv_upload_zone').show();
     $('#vecthare_cv_upload_info').hide();
     $('#vecthare_cv_file_input, #vecthare_cv_doc_file_input').val('');
@@ -1758,6 +1807,7 @@ function clearUpload() {
  * Fetches content from URL
  */
 async function fetchUrl() {
+    const sourceAtStart = { revision: sourceRevision, type: currentContentType };
     const url = $('#vecthare_cv_url_input').val().trim();
     if (!url) {
         toastr.warning('Please enter a URL');
@@ -1796,7 +1846,9 @@ async function fetchUrl() {
             throw new Error('No meaningful content found on page');
         }
 
+        if (sourceAtStart.revision !== sourceRevision || sourceAtStart.type !== currentContentType) return;
         sourceData = {
+            __contentType: currentContentType,
             type: 'url',
             url: url,
             content: content,
@@ -1881,6 +1933,7 @@ async function isWikiPluginAvailable(wikiType) {
  * Scrapes wiki content using ST's fandom scraper plugin
  */
 async function scrapeWiki() {
+    const sourceAtStart = { revision: sourceRevision, type: currentContentType };
     const wikiType = $('#vecthare_cv_wiki_type').val();
     const url = $('#vecthare_cv_wiki_url').val().trim();
     const filter = $('#vecthare_cv_wiki_filter').val().trim();
@@ -1935,7 +1988,9 @@ async function scrapeWiki() {
             `# ${String(page.title).trim()}\n\n${String(page.content).trim()}`
         ).join('\n\n---\n\n');
 
+        if (sourceAtStart.revision !== sourceRevision || sourceAtStart.type !== currentContentType) return;
         sourceData = {
+            __contentType: currentContentType,
             type: 'wiki',
             wikiType: wikiType,
             url: url,
@@ -2001,6 +2056,7 @@ function extractWikiName(url, wikiType) {
  * Fetches YouTube transcript
  */
 async function fetchYouTubeTranscript() {
+    const sourceAtStart = { revision: sourceRevision, type: currentContentType };
     const url = $('#vecthare_cv_youtube_url').val().trim();
     const lang = $('#vecthare_cv_youtube_lang').val().trim();
 
@@ -2041,7 +2097,9 @@ async function fetchYouTubeTranscript() {
             throw new Error('No transcript available for this video');
         }
 
+        if (sourceAtStart.revision !== sourceRevision || sourceAtStart.type !== currentContentType) return;
         sourceData = {
+            __contentType: currentContentType,
             type: 'youtube',
             videoId: videoId,
             url: `https://youtube.com/watch?v=${videoId}`,
@@ -2096,9 +2154,12 @@ function parseYouTubeId(url) {
 function handleChatFileUpload(e) {
     const file = e.target.files[0];
     if (!file) return;
+    const revision = sourceRevision;
+    const typeAtStart = currentContentType;
 
     const reader = new FileReader();
     reader.onload = function(event) {
+        if (revision !== sourceRevision || typeAtStart !== currentContentType) return;
         const content = event.target.result;
         const ext = file.name.split('.').pop().toLowerCase();
 
@@ -2203,6 +2264,7 @@ function handleChatFileUpload(e) {
 
         // Store as sourceData
         sourceData = {
+            __contentType: currentContentType,
             type: 'file',
             filename: file.name,
             content: messages,
@@ -2248,7 +2310,7 @@ function handleChatFileUpload(e) {
  * Clears chat upload
  */
 function clearChatUpload() {
-    sourceData = null;
+    clearSelectedSource();
     $('#vecthare_cv_chat_upload_zone').show();
     $('#vecthare_cv_chat_upload_info').hide();
     $('#vecthare_cv_chat_upload_stats').hide();
@@ -2293,7 +2355,8 @@ async function previewChunks() {
         const chunks = await chunkText(contentText, {
             strategy: currentSettings.strategy || type.defaultStrategy,
             chunkSize: currentSettings.chunkSize || type.defaults.chunkSize,
-            chunkOverlap: currentSettings.chunkOverlap || type.defaults.chunkOverlap,
+            chunkOverlap: currentSettings.chunkOverlap ?? type.defaults.chunkOverlap,
+            batchSize: currentSettings.batchSize ?? type.defaults.batchSize ?? 4,
             conversationTurnOrder: currentSettings.conversation_turn_order || 'user_character',
         });
 
@@ -2341,8 +2404,11 @@ function getSourceData() {
     const type = getContentType(currentContentType);
 
     // If we already have sourceData from file upload or URL fetch, use it
-    if (sourceData) {
-        return sourceData;
+    if (sourceData && sourceData.__contentType === currentContentType) {
+        const activeTab = $('.vecthare-cv-source-tab.active').data('source');
+        if (sourceData.type !== 'file' || !activeTab || activeTab === 'upload') {
+            return sourceData;
+        }
     }
 
     switch (type.id) {
@@ -2549,17 +2615,6 @@ function escapeHtml(text) {
 // ============================================================================
 // TEXT CLEANING MANAGEMENT
 // ============================================================================
-
-/**
- * Saves the cleaning preset to extension settings
- */
-async function saveCleaningPresetToSettings(presetId) {
-    const { saveCleaningSettings, getCleaningSettings } = await import('../core/text-cleaning.js');
-    const settings = getCleaningSettings();
-    settings.selectedPreset = presetId;
-    saveCleaningSettings(settings);
-    saveSettingsDebounced();
-}
 
 // Note: Text cleaning management is now handled by the standalone Text Cleaning Manager
 // accessible from the Actions panel. The openTextCleaningManager() function is imported

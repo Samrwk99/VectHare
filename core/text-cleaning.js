@@ -166,13 +166,14 @@ export function saveCleaningSettings(settings) {
  * Gets all active patterns (builtin + custom)
  * @returns {Array<object>} Array of active pattern objects
  */
-export function getActivePatterns() {
+export function getActivePatterns(presetOverride = undefined) {
     const settings = getCleaningSettings();
     const patterns = [];
 
     // If using a preset, get its patterns
-    if (settings.selectedPreset && settings.selectedPreset !== 'custom') {
-        const preset = CLEANING_PRESETS[settings.selectedPreset];
+    const selectedPreset = presetOverride ?? settings.selectedPreset;
+    if (selectedPreset && selectedPreset !== 'custom') {
+        const preset = CLEANING_PRESETS[selectedPreset];
         if (preset) {
             for (const patternId of preset.patterns) {
                 if (BUILTIN_PATTERNS[patternId]) {
@@ -222,10 +223,10 @@ function applyPattern(text, pattern) {
  * @param {string} text - Text to clean
  * @returns {string} Cleaned text
  */
-export function cleanText(text) {
+export function cleanText(text, presetOverride = undefined) {
     if (!text || typeof text !== 'string') return text;
 
-    const patterns = getActivePatterns();
+    const patterns = getActivePatterns(presetOverride);
     if (patterns.length === 0) return text;
 
     let result = text;
@@ -244,16 +245,16 @@ export function cleanText(text) {
  * @param {Array<object>} messages - Messages with .mes or .text property
  * @returns {Array<object>} Messages with cleaned text
  */
-export function cleanMessages(messages) {
+export function cleanMessages(messages, presetOverride = undefined) {
     if (!Array.isArray(messages)) return messages;
 
     return messages.map(msg => {
         const cleaned = { ...msg };
         if (cleaned.mes) {
-            cleaned.mes = cleanText(cleaned.mes);
+            cleaned.mes = cleanText(cleaned.mes, presetOverride);
         }
         if (cleaned.text) {
-            cleaned.text = cleanText(cleaned.text);
+            cleaned.text = cleanText(cleaned.text, presetOverride);
         }
         return cleaned;
     });

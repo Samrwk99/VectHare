@@ -11,7 +11,7 @@
     "test:i01": "node --experimental-vm-modules --test tests/i01-safety.node.test.mjs",
     "test:i02": "node --experimental-vm-modules --test tests/i02-security.node.test.mjs",
     "test:i03": "node --experimental-vm-modules --test tests/i03-chat-sync.node.test.mjs",
-    "test:repair": "node --experimental-vm-modules --test tests/i01-safety.node.test.mjs tests/i02-security.node.test.mjs tests/i03-chat-sync.node.test.mjs tests/i04-backend-errors.node.test.mjs tests/i05-metadata.node.test.mjs tests/i06-conditions.node.test.mjs tests/i07-backup.node.test.mjs tests/i08-provider-compat.node.test.mjs tests/i09-search-relevance.node.test.mjs tests/i10-prompt-correctness.node.test.mjs tests/i11-links-temporal.node.test.mjs",
+    "test:repair": "node --experimental-vm-modules --test tests/i01-safety.node.test.mjs tests/i02-security.node.test.mjs tests/i03-chat-sync.node.test.mjs tests/i04-backend-errors.node.test.mjs tests/i05-metadata.node.test.mjs tests/i06-conditions.node.test.mjs tests/i07-backup.node.test.mjs tests/i08-provider-compat.node.test.mjs tests/i09-search-relevance.node.test.mjs tests/i10-prompt-correctness.node.test.mjs tests/i11-links-temporal.node.test.mjs tests/i12-content-vectorizer.node.test.mjs",
     "test:i04": "node --experimental-vm-modules --test tests/i04-backend-errors.node.test.mjs",
     "test:i05": "node --experimental-vm-modules --test tests/i05-metadata.node.test.mjs",
     "test:i06": "node --experimental-vm-modules --test tests/i06-conditions.node.test.mjs",
@@ -19,7 +19,8 @@
     "test:i08": "node --experimental-vm-modules --test tests/i08-provider-compat.node.test.mjs",
     "test:i09": "node --experimental-vm-modules --test tests/i09-search-relevance.node.test.mjs",
     "test:i10": "node --experimental-vm-modules --test tests/i10-prompt-correctness.node.test.mjs",
-    "test:i11": "node --experimental-vm-modules --test tests/i11-links-temporal.node.test.mjs"
+    "test:i11": "node --experimental-vm-modules --test tests/i11-links-temporal.node.test.mjs",
+    "test:i12": "node --experimental-vm-modules --test tests/i12-content-vectorizer.node.test.mjs"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^2.1.0",

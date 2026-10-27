@@ -59,7 +59,8 @@ export async function vectorizeContent({ contentType, source, settings }) {
         const chunks = await chunkText(preparedContent.text || preparedContent, {
             strategy: settings.strategy || type.defaultStrategy,
             chunkSize: settings.chunkSize || type.defaults.chunkSize,
-            chunkOverlap: settings.chunkOverlap || type.defaults.chunkOverlap,
+            chunkOverlap: settings.chunkOverlap ?? type.defaults.chunkOverlap,
+            batchSize: settings.batchSize ?? type.defaults.batchSize ?? 4,
             conversationTurnOrder: settings.conversation_turn_order || 'user_character',
         });
 
@@ -139,6 +140,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
                 strategy: settings.strategy,
                 conversation_turn_order: settings.conversation_turn_order,
                 chunkSize: settings.chunkSize,
+                batchSize: settings.batchSize,
             },
             temporalDecay: hasFeature(contentType, 'temporalDecay')
                 ? (settings.temporalDecay || getDefaultDecayForType(contentType))
@@ -377,8 +379,8 @@ function prepareLorebookContent(rawContent, settings) {
 
     // Filter to entries that have content, and apply text cleaning
     const validEntries = entries
-        .filter(e => e && e.content)
-        .map(e => ({ ...e, content: cleanText(e.content) }));
+        .filter(e => e && e.content && (settings.includeDisabled === true || !e.disable))
+        .map(e => ({ ...e, content: cleanText(e.content, settings.cleaningPreset ?? 'none') }));
 
     if (settings.strategy === 'per_entry') {
         // Each entry becomes its own chunk - return array of content strings
@@ -423,7 +425,7 @@ function prepareCharacterContent(rawContent, settings) {
         const fields = {};
         for (const [fieldId, enabled] of Object.entries(selectedFields)) {
             if (enabled && FIELD_MAP[fieldId] && character[FIELD_MAP[fieldId].key]) {
-                fields[FIELD_MAP[fieldId].label] = cleanText(character[FIELD_MAP[fieldId].key]);
+                fields[FIELD_MAP[fieldId].label] = cleanText(character[FIELD_MAP[fieldId].key], settings.cleaningPreset ?? 'none');
             }
         }
         return { text: fields, type: 'fields', character: character };
@@ -435,7 +437,7 @@ function prepareCharacterContent(rawContent, settings) {
         .map(([fieldId]) => {
             const field = FIELD_MAP[fieldId];
             if (field && character[field.key]) {
-                return `## ${field.label}\n${cleanText(character[field.key])}`;
+                return `## ${field.label}\n${cleanText(character[field.key], settings.cleaningPreset ?? 'none')}`;
             }
             return null;
         })
@@ -453,14 +455,14 @@ function prepareChatContent(rawContent, settings) {
     const messages = rawContent.messages || rawContent.content;
 
     if (!Array.isArray(messages)) {
-        return { text: cleanText(String(messages)), type: 'text' };
+        return { text: cleanText(String(messages), settings.cleaningPreset ?? 'none'), type: 'text' };
     }
 
     // Filter out system messages and empty messages
     const validMessages = messages.filter(m => m.mes && !m.is_system);
 
     // Apply text cleaning to messages
-    const cleanedMessages = cleanMessages(validMessages);
+    const cleanedMessages = cleanMessages(validMessages, settings.cleaningPreset ?? 'none');
 
     // Normalize messages to have consistent properties for chunking.js
     const normalizedMessages = cleanedMessages.map((m, idx) => ({
@@ -517,7 +519,7 @@ function prepareUrlContent(rawContent, settings) {
     // Basic text cleaning for web content
     if (typeof text === 'string') {
         // Apply user's cleaning patterns first
-        text = cleanText(text);
+        text = cleanText(text, settings.cleaningPreset ?? 'none');
         // Remove excessive whitespace
         text = text.replace(/\n{3,}/g, '\n\n');
         // Remove common web artifacts
@@ -539,7 +541,7 @@ function prepareDocumentContent(rawContent, settings) {
     // Basic text cleaning
     if (typeof text === 'string') {
         // Apply user's cleaning patterns first
-        text = cleanText(text);
+        text = cleanText(text, settings.cleaningPreset ?? 'none');
         // Remove excessive whitespace
         text = text.replace(/\n{3,}/g, '\n\n');
         // Trim
@@ -558,7 +560,7 @@ function prepareWikiContent(rawContent, settings) {
     // Wiki content is already formatted with headers from scraper
     if (typeof text === 'string') {
         // Apply user's cleaning patterns first
-        text = cleanText(text);
+        text = cleanText(text, settings.cleaningPreset ?? 'none');
         // Remove excessive whitespace
         text = text.replace(/\n{3,}/g, '\n\n');
         // Trim
@@ -569,7 +571,7 @@ function prepareWikiContent(rawContent, settings) {
     if (settings.strategy === 'per_page' && rawContent.pages) {
         return {
             text: rawContent.pages.map(p => ({
-                text: cleanText(`# ${p.title}\n\n${p.content}`),
+                text: cleanText(`# ${p.title}\n\n${p.content}`, settings.cleaningPreset ?? 'none'),
                 metadata: {
                     pageTitle: p.title,
                 },
@@ -598,7 +600,7 @@ function prepareYouTubeContent(rawContent, settings) {
     // Clean up transcript text
     if (typeof text === 'string') {
         // Apply user's cleaning patterns first
-        text = cleanText(text);
+        text = cleanText(text, settings.cleaningPreset ?? 'none');
         // Remove excessive whitespace
         text = text.replace(/\n{3,}/g, '\n\n');
         // Trim

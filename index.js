@@ -90,7 +90,7 @@ const defaultSettings = {
     conversation_turn_order: 'user_character', // Pairing order for conversation_turns
     depth: 2,
     position: extension_prompt_types.IN_PROMPT,
-    protect: 5,
+    // I12: Legacy protect setting was never applied; removed rather than exposing a false safeguard.
     insert: 3,
     min_chat_length: 0, // Minimum number of messages in chat before injection starts (0 = no minimum)
     // Number of top results to retrieve from vector DB (top-K)
@@ -463,6 +463,14 @@ jQuery(async () => {
             ...extension_settings.vecthare.collections
         }
     };
+
+    // Retire the inert legacy recent-message protection setting. Deduplication uses
+    // the separately configured deduplication_depth; this had no effect.
+    if (Object.hasOwn(settings, 'protect') || Object.hasOwn(extension_settings.vecthare, 'protect')) {
+        delete settings.protect;
+        delete extension_settings.vecthare.protect;
+        saveSettingsDebounced();
+    }
 
     // Migrate old scattered enabled keys to new collections structure
     const migrationResult = migrateOldEnabledKeys();
