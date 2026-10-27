@@ -1064,8 +1064,8 @@ function scoreResults(resultsForBoost, searchText, topK, settings, overfetchAmou
     if (scoringMethod === 'bm25') {
         // Use BM25 scoring only
         const bm25Results = applyBM25Scoring(resultsForBoost, searchText, {
-            k1: settings.bm25_k1 || 1.5,
-            b: settings.bm25_b || 0.75,
+            k1: settings.bm25_k1 ?? 1.5,
+            b: settings.bm25_b ?? 0.75,
             alpha: 0.5,
             beta: 0.5
         });
@@ -1076,8 +1076,8 @@ function scoreResults(resultsForBoost, searchText, topK, settings, overfetchAmou
         const keywordBoostLimit = safeOverfetchAmount;
         const keywordBoosted = applyKeywordBoosts(resultsForBoost, searchText, keywordBoostLimit);
         const hybridResults = applyBM25Scoring(keywordBoosted, searchText, {
-            k1: settings.bm25_k1 || 1.5,
-            b: settings.bm25_b || 0.75,
+            k1: settings.bm25_k1 ?? 1.5,
+            b: settings.bm25_b ?? 0.75,
             alpha: 0.6,
             beta: 0.4
         });

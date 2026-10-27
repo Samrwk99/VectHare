@@ -52,7 +52,7 @@ export async function getSemanticWorldInfoEntries(recentMessages, activeEntries,
 
     const semanticEntries = [];
     // Lower threshold for hybrid search since RRF fusion produces lower absolute scores
-    const baseThreshold = settings.world_info_threshold || 0.3;
+    const baseThreshold = settings.world_info_threshold ?? 0.3;
     const threshold = settings.hybrid_search_enabled ? baseThreshold * 0.8 : baseThreshold;
     const topK = settings.world_info_top_k || 3;
 

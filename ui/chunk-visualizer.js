@@ -127,8 +127,8 @@ function getChunkData(chunk) {
         hash: chunk.hash,
         index: chunk.index,
         text: chunk.text,
-        score: chunk.score || 1,
-        similarity: chunk.similarity || 1,
+        score: chunk.score ?? 1,
+        similarity: chunk.similarity ?? 1,
         messageAge: chunk.messageAge,
         enabled: stored.enabled !== false,
         keywords: normalizeKeywords(keywords),
@@ -1834,7 +1834,8 @@ function bindDetailEvents() {
 
     // Injection depth slider
     $('#vecthare_chunk_depth').on('input', function() {
-        const depth = parseInt($(this).val()) || 2;
+        const parsedDepth = Number.parseInt($(this).val(), 10);
+        const depth = Number.isFinite(parsedDepth) ? parsedDepth : 2;
         $('#vecthare_chunk_depth_value').text(depth);
         chunk.data.depth = depth;
         updateChunkData(chunk.hash, { depth: chunk.data.depth });

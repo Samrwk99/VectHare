@@ -721,7 +721,7 @@ function updateChunkingSection(type) {
     // Get strategy-specific defaults if available
     const strategyDefaults = currentStrategy || {};
     const chunkSize = currentSettings.chunkSize || strategyDefaults.defaultSize || defaults.chunkSize;
-    const chunkOverlap = currentSettings.chunkOverlap || strategyDefaults.defaultOverlap || defaults.chunkOverlap;
+    const chunkOverlap = currentSettings.chunkOverlap ?? strategyDefaults.defaultOverlap ?? defaults.chunkOverlap;
 
     // Update size controls values
     $('#vecthare_cv_chunk_size').val(chunkSize);

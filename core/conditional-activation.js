@@ -410,9 +410,11 @@ export function processChunkLinks(chunks, chunkMetadataMap, softBoost = 0.15) {
  * @returns {boolean} Whether condition is met
  */
 function evaluateScoreThresholdCondition(rule, context) {
-    const settings = rule.settings || { threshold: parseFloat(rule.value) || 0.5 };
-    const threshold = settings.threshold || 0.5;
-    const chunkScore = context.currentChunkScore || 0;
+    // Legacy normalized rules may carry the user value in settings.value.
+    const configured = rule.settings?.threshold ?? rule.settings?.value ?? rule.value;
+    const parsedThreshold = configured == null || configured === '' ? NaN : Number(configured);
+    const threshold = Number.isFinite(parsedThreshold) ? parsedThreshold : 0.5;
+    const chunkScore = context.currentChunkScore ?? 0;
 
     const passes = chunkScore >= threshold;
 
@@ -432,11 +434,10 @@ function evaluateScoreThresholdCondition(rule, context) {
  * @returns {boolean} Whether condition is met
  */
 function evaluateRecencyCondition(rule, context) {
-    const settings = rule.settings || {
-        messagesAgo: parseInt(rule.value) || 50,
-        operator: 'gte' // 'gte' = older than X messages ago, 'lte' = newer than X
-    };
-    const targetAge = settings.messagesAgo || 50;
+    const settings = rule.settings ?? {};
+    const configured = settings.messagesAgo ?? settings.value ?? rule.value;
+    const parsedAge = configured == null || configured === '' ? NaN : Number(configured);
+    const targetAge = Number.isFinite(parsedAge) ? parsedAge : 50;
     const operator = settings.operator || 'gte';
 
     // Calculate how many messages ago this chunk's source is
@@ -454,7 +455,7 @@ function evaluateRecencyCondition(rule, context) {
             // Chunk is at most X messages old (recent)
             return messagesAgo <= targetAge;
         case 'between':
-            const upperBound = settings.upperBound || 100;
+            const upperBound = settings.upperBound ?? 100;
             return messagesAgo >= targetAge && messagesAgo <= upperBound;
         default:
             return messagesAgo >= targetAge;
@@ -678,10 +679,13 @@ function evaluateCharacterPresentCondition(rule, context) {
  * @returns {boolean} Whether condition is met
  */
 function evaluateRandomChanceCondition(rule, context) {
-    const settings = rule.settings || { probability: parseInt(rule.value) || 50 };
+    const legacyChance = Number.parseInt(rule.value, 10);
+    const settings = rule.settings ?? { probability: Number.isFinite(legacyChance) ? legacyChance : 50 };
     const chance = settings.probability ?? 50;
-    const roll = Math.random() * 100;
-    return roll <= chance;
+    // A 0% condition must never pass, even if the random source returns exactly zero.
+    if (chance <= 0) return false;
+    if (chance >= 100) return true;
+    return Math.random() * 100 < chance;
 }
 
 /**
@@ -909,7 +913,7 @@ export function filterChunksByConditions(chunks, baseContext) {
         // Build chunk-specific context for chunk-only conditions
         const chunkContext = {
             ...baseContext,
-            currentChunkScore: chunk.score || chunk.similarity || 0,
+            currentChunkScore: chunk.score ?? chunk.similarity ?? 0,
             currentChunkMessageIndex: chunk.metadata?.messageIndex || chunk.index || 0,
             currentChunkHash: chunk.hash,
             activeChunks: chunks // Pass all chunks for dependency checking
@@ -967,7 +971,7 @@ export function buildSearchContext(chat, contextWindow = 10, activeChunks = [], 
         currentChatId: metadata.currentChatId || null,               // FIX: Pass chat ID for chat lock checks
 
         // Context for chunk-only conditionals (set per-chunk during evaluation)
-        currentChunkScore: metadata.currentChunkScore || 0,          // For similarity condition
+        currentChunkScore: metadata.currentChunkScore ?? 0,          // For similarity condition
         currentChunkMessageIndex: metadata.currentChunkMessageIndex || 0, // For recency condition
         currentChunkHash: metadata.currentChunkHash || null,         // For frequency condition
         activationHistory: metadata.activationHistory || {}          // Chunk activation history for frequency
@@ -983,7 +987,7 @@ export function buildSearchContext(chat, contextWindow = 10, activeChunks = [], 
 export function buildChunkContext(baseContext, chunk) {
     return {
         ...baseContext,
-        currentChunkScore: chunk.score || chunk.similarity || 0,
+        currentChunkScore: chunk.score ?? chunk.similarity ?? 0,
         currentChunkMessageIndex: chunk.metadata?.messageIndex || chunk.index || 0,
         currentChunkHash: chunk.hash
     };

@@ -2064,7 +2064,7 @@ function bindSettingsEvents(settings, callbacks) {
 
     // BM25 k1 parameter
     $('#vecthare_bm25_k1')
-        .val(settings.bm25_k1 || 1.5)
+        .val(settings.bm25_k1 ?? 1.5)
         .on('input', function() {
             const value = parseFloat($(this).val());
             const safeValue = isNaN(value) ? 1.5 : value;
@@ -2073,11 +2073,11 @@ function bindSettingsEvents(settings, callbacks) {
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
-    $('#vecthare_bm25_k1_value').text((settings.bm25_k1 || 1.5).toFixed(1));
+    $('#vecthare_bm25_k1_value').text((settings.bm25_k1 ?? 1.5).toFixed(1));
 
     // BM25 b parameter
     $('#vecthare_bm25_b')
-        .val(settings.bm25_b || 0.75)
+        .val(settings.bm25_b ?? 0.75)
         .on('input', function() {
             const value = parseFloat($(this).val());
             const safeValue = isNaN(value) ? 0.75 : value;
@@ -2086,7 +2086,7 @@ function bindSettingsEvents(settings, callbacks) {
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
-    $('#vecthare_bm25_b_value').text((settings.bm25_b || 0.75).toFixed(2));
+    $('#vecthare_bm25_b_value').text((settings.bm25_b ?? 0.75).toFixed(2));
 
     // ========== Hybrid Search Settings ==========
 

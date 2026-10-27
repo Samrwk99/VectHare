@@ -2396,7 +2396,9 @@ function saveActivation() {
   const position = positionRaw === "" ? null : parseInt(positionRaw);
   const depth =
     position === 1
-      ? parseInt($("#vecthare_collection_depth").val()) || 2
+      ? (Number.isFinite(Number.parseInt($("#vecthare_collection_depth").val(), 10))
+          ? Number.parseInt($("#vecthare_collection_depth").val(), 10)
+          : 2)
       : null;
 
   // Update metadata (all in one call)
