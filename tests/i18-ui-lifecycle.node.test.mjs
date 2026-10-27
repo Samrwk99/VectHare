@@ -161,10 +161,11 @@ test('#24: scene markers observe only the current chat DOM node, even after repe
     const ctx=vm.createContext({MutationObserver:Observer,eventSource:{on:(type,handler)=>{const arr=listeners.get(type)||[];arr.push(handler);listeners.set(type,arr);}},
         event_types:{CHAT_CHANGED:'change',APP_READY:'ready'},
         document:{getElementById:()=>chat},console:quiet,
+        currentChatIdentity:()=>({chatId:chat.id}),
         attachAllMarkers:()=>attached++,refreshSceneCache:async()=>{},updateAllMarkerStates:()=>{},setTimeout:()=>{},
         Node:{ELEMENT_NODE:1},attachMarkersToMessage:()=>{},
     });
-    vm.runInContext(`${init.replace('export function','function')}\nthis.init=initializeSceneMarkers`,ctx);
+    vm.runInContext(`let sceneCacheRefreshVersion=0;let cachedSceneChunks=[];let pendingSceneStart=null;${init.replace('export function','function')}\nthis.init=initializeSceneMarkers`,ctx);
     ctx.init();ctx.init();
     assert.equal(instances.length,1);assert.equal(listeners.get('change').length,1);
     assert.equal(listeners.get('ready').length,1);

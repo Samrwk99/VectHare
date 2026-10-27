@@ -25,6 +25,8 @@ function coreScope(options={}) {
  const debugEntries=[];
  const scope={
   console:quiet,
+  chatJobs: {startJob: () => ({assertCurrent(){},finish(){},signal:{aborted:false}})},
+  StaleJobError: class StaleJobError extends Error {},
   EXTENSION_PROMPT_TAG:'3_vecthare',LEGACY_WORLD_INFO_PROMPT_TAG:'vecthare_world_info',extension_prompts:{},
   getCurrentChatId:()=> 'chat-1',
   gatherCollectionsToQuery:()=> ['collection-A'],

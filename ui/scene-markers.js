@@ -23,6 +23,7 @@ import {
 import { getSavedHashes } from '../core/core-vector-api.js';
 import { eventSource, event_types } from '../../../../../script.js';
 import { getContext } from '../../../../extensions.js';
+import {currentChatIdentity} from '../core/chat-job-runtime.js';
 
 // ============================================================================
 // CONSTANTS
@@ -40,6 +41,7 @@ const BOOKMARK_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height=
 let cachedSceneChunks = [];
 let pendingSceneStart = null;
 let currentSettings = null;
+let sceneCacheRefreshVersion = 0;
 
 // ============================================================================
 // CACHE MANAGEMENT
@@ -50,8 +52,12 @@ let currentSettings = null;
  */
 export async function refreshSceneCache(settings) {
     if (settings) currentSettings = settings;
-
+    const version = ++sceneCacheRefreshVersion;
+    const identity = JSON.stringify(currentChatIdentity());
     const collectionId = getCurrentCollectionId();
+    const isCurrent = () => version === sceneCacheRefreshVersion &&
+        identity === JSON.stringify(currentChatIdentity()) &&
+        collectionId === getCurrentCollectionId();
     if (!collectionId || !currentSettings) {
         cachedSceneChunks = [];
         return;
@@ -59,6 +65,7 @@ export async function refreshSceneCache(settings) {
 
     try {
         const result = await getSavedHashes(collectionId, currentSettings, true);
+        if (!isCurrent()) return; // never paint chat B with results from chat A
         if (result.metadata) {
             cachedSceneChunks = result.metadata
                 .filter(m => m.isScene === true)
@@ -74,6 +81,7 @@ export async function refreshSceneCache(settings) {
         }
         console.log(`VectHare Scenes: Cached ${cachedSceneChunks.length} scenes`);
     } catch (error) {
+        if (!isCurrent()) return;
         console.error('VectHare Scenes: Failed to refresh cache', error);
         cachedSceneChunks = [];
     }
@@ -496,11 +504,16 @@ export function initializeSceneMarkers() {
 
     // Update states on chat change
     eventSource.on(event_types.CHAT_CHANGED, async () => {
+        ++sceneCacheRefreshVersion;
+        cachedSceneChunks = [];
         pendingSceneStart = null; // Clear pending on chat change
         // Ensure observer is running (in case chat element was recreated)
         startObserving();
+        const identityAtSchedule = JSON.stringify(currentChatIdentity());
         setTimeout(async () => {
+            if (identityAtSchedule !== JSON.stringify(currentChatIdentity())) return;
             await refreshSceneCache();
+            if (identityAtSchedule !== JSON.stringify(currentChatIdentity())) return;
             attachAllMarkers();
             updateAllMarkerStates();
         }, 100);

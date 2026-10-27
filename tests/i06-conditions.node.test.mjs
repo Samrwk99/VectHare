@@ -98,7 +98,8 @@ test('#141: required scan depths include triggers, collection and chunk rules in
     assert.match(text,/getRequiredConditionDepth\(c\.conditions, depth\)/);
     const make = getFunction('core/chat-vectorization.js','applyChunkConditions',{
         filterSceneDisabledChunks: items=>items, getChunkMetadata: ()=>({conditions}), buildSearchContext,
-        filterChunksByConditions, getRequiredConditionDepth, trackChunkActivation:()=>{}, window:{VectHare_ActivationHistory:{}},
+        filterChunksByConditions, getRequiredConditionDepth, currentChatIdentity:()=>({chatId:"chat-A"}),
+        scopedActivationHistory:{snapshot:()=>({}),record:()=>true}, trackChunkActivation:()=>{}, window:{VectHare_ActivationHistory:{}},
     });
     const chat=Array.from({length:60},(_,i)=>({mes:i===8?'old memory':'other text',is_user:true}));
     const result = make([{hash:1,score:1}],chat,{query:2});
@@ -133,7 +134,8 @@ test('#136 #143 #144: stage uses real generation type, group flag and character,
                 {type:'isGroupChat',settings:{isGroup:true}},
             ]}}),
         buildSearchContext:(chat,depth,items,metadata)=>{observed=metadata;return buildSearchContext(chat,depth,items,metadata);},
-        filterChunksByConditions,getRequiredConditionDepth,trackChunkActivation:()=>{},window:{VectHare_ActivationHistory:{}},
+        filterChunksByConditions,getRequiredConditionDepth,currentChatIdentity:()=>({chatId:"chat-A"}),
+        scopedActivationHistory:{snapshot:()=>({}),record:()=>true},trackChunkActivation:()=>{},window:{VectHare_ActivationHistory:{}},
     });
     const chunks=await make([{hash:1,score:0.8}],[{mes:'Hello',name:'Alice'}],{
         generationType:'swipe',isGroupChat:true,currentCharacter:'Alice',query:2,

@@ -48,9 +48,13 @@ export async function assertFullPurgeAcknowledged(response) {
  * Keep the destructive network action and settings reset in one testable
  * sequence. A failed request never mutates the caller's settings object.
  */
-export async function purgeAllAndResetSettings({ requestPurge, settings, persistSettings, contractVerified = false }) {
+export async function purgeAllAndResetSettings({ requestPurge, settings, persistSettings, contractVerified = false, cancelJobs = () => {}, awaitTrackedWrites = async () => ({uncertain:false}) }) {
     if (contractVerified !== true) throw new Error('Global purge blocked: no verified backend purge contract (no request sent)');
     try {
+        writeBarrier.close(); // block new admission BEFORE aborting queued jobs
+        cancelJobs('purge');
+        const tracked = await awaitTrackedWrites();
+        if (tracked?.uncertain) throw new Error('Global purge blocked: chat jobs have uncertain writes');
         const drain = await writeBarrier.closeAndDrain({timeoutMs:15000});
         if (!drain.verified) throw new Error('Global purge blocked: writes in flight or unverified write completion; reconciliation required');
         const response = await requestPurge();

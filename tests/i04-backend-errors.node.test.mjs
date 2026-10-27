@@ -174,6 +174,8 @@ test('I04 #105: manual vectorization with a failed insert ends incomplete, not s
     ];
     const context = vm.createContext({
         console: silent,
+        chatJobs: {startJob: () => ({assertCurrent(){},finish(){},signal:{aborted:false}})},
+        StaleJobError: class StaleJobError extends Error {},
         tryAcquireVectorizationRun: () => true,
         getCurrentChatId: () => 'chat-A',
         getContext: () => ({ chat: [{ mes: 'one' }, { mes: 'two' }] }),
@@ -212,6 +214,8 @@ test('I04 #105: manual vectorization with fully successful batches reports succe
     const completions = [], notifications = [];
     const context = vm.createContext({
         console: silent,
+        chatJobs: {startJob: () => ({assertCurrent(){},finish(){},signal:{aborted:false}})},
+        StaleJobError: class StaleJobError extends Error {},
         tryAcquireVectorizationRun: () => true, getCurrentChatId: () => 'chat-A',
         getContext: () => ({ chat: [{ mes: 'one' }] }), isBackendAvailable: async () => true,
         getChatCollectionId: () => null,

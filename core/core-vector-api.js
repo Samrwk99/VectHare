@@ -1,5 +1,6 @@
 import {beginOperation,settleOperation} from '../utils/operation-outcomes.js';
 import {writeBarrier,withCollectionLock} from '../utils/keyed-mutex.js';
+import {chatJobs} from './chat-job-runtime.js';
 import {resolveCollectionKey,parseCollectionKey,formatCollectionKey} from '../utils/collection-keys.js';
 import {hasVerifiedCapability} from '../utils/backend-contracts.js';
 import {requireConfirmedDeleteAck} from './destructive-safety.js';
@@ -838,7 +839,7 @@ export async function insertVectorItems(collectionId, items, settings, onProgres
     uncertain=true;
     settleOperation(operation,{status:'uncertain',reason:'missing-acknowledgement'});
     return {status:'uncertain',operationId:operation.operationId,requiresReconciliation:true};
-    }); } catch(error) {uncertain=true;settleOperation(operation,{status:'uncertain',reason:'transport-after-send'});throw error;} finally {writeBarrier.leave(ticket,{uncertain});}
+    }, {signal:abortSignal}); } catch(error) {uncertain=true;settleOperation(operation,{status:'uncertain',reason:'transport-after-send'});throw error;} finally {writeBarrier.leave(ticket,{uncertain});}
 }
 
 /**
@@ -981,7 +982,7 @@ export async function deleteVectorItems(collectionId, hashes, settings, abortSig
         recordError(settings?.vector_backend || 'standard', error);
         throw error;
     }
-    }); } catch(error) {uncertain=true;throw error;} finally {writeBarrier.leave(ticket,{uncertain});}
+    }, {signal:abortSignal}); } catch(error) {uncertain=true;throw error;} finally {writeBarrier.leave(ticket,{uncertain});}
 }
 
 /**
@@ -1329,6 +1330,10 @@ export async function purgeAllVectorIndexes(settings) {
         if (!hasVerifiedCapability(settings?.vector_backend || 'standard','globalDeleteGate'))
             throw new Error('Global purge blocked: C01/C02 transaction coordination unavailable');
         if (!hasVerifiedCapability(settings?.vector_backend || 'standard','purgeAcknowledgement')) throw new Error('Global purge blocked: unverified backend contract');
+        writeBarrier.close();
+        chatJobs.cancelAll('purge');
+        const jobs = await chatJobs.awaitInFlightWrites();
+        if (jobs.uncertain) throw new Error('Global purge blocked: uncertain chat jobs');
         const drain = await writeBarrier.closeAndDrain({timeoutMs:15000});
         if (!drain.verified) throw new Error('Global purge blocked: uncertain or pending writes');
         const backend = await getBackend(settings);

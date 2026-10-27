@@ -59,6 +59,7 @@ export function createWriteBarrier() {
         markUncertain(){uncertain=true;},
         get inFlight(){return active.size;},
         get closed(){return closed;},
+        close(){closed=true;},
         async closeAndDrain({timeoutMs=15000}={}) {
             closed=true;
             const deadline=Date.now()+timeoutMs;

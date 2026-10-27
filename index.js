@@ -30,6 +30,8 @@ import { getDefaultDecaySettings } from './core/temporal-decay.js';
 import { migrateOldEnabledKeys } from './core/collection-metadata.js';
 import { clearCollectionRegistry, discoverExistingCollections, getCollectionRegistry, getPendingCollectionDeletions } from './core/collection-loader.js';
 import AsyncUtils from './utils/async-utils.js';
+import {chatJobs,currentChatIdentity} from './core/chat-job-runtime.js';
+import {stopVectorization,resetControlState} from './core/vectorization-control.js';
 import { purgeAllAndResetSettings } from './core/destructive-safety.js';
 
 // VectHare modules - UI
@@ -163,12 +165,17 @@ const moduleWorker = new ModuleWorkerWrapper(() => synchronizeChat(settings, get
 const getBatchSize = () => ['transformers', 'ollama'].includes(settings.source) ? 1 : 5;
 
 // Chat event handler (debounced)
-const onChatEvent = debounce(async () => await moduleWorker.update(), debounce_timeout.relaxed);
+const debouncedChatEvent = debounce(async (identityAtEvent) => {
+    if (JSON.stringify(identityAtEvent) !== JSON.stringify(currentChatIdentity())) return;
+    await moduleWorker.update();
+}, debounce_timeout.relaxed);
+const onChatEvent = () => debouncedChatEvent(currentChatIdentity());
 
 /**
  * Generation interceptor - searches and injects relevant messages
  */
 async function vecthare_rearrangeChat(chat, _contextSize, _abort, type) {
+    chatJobs.bumpGeneration('new-generation');
     await rearrangeChat(chat, settings, type);
 }
 
@@ -268,6 +275,7 @@ function refreshVectorizationStatusDisplay(result = null) {
 async function refreshSavedDatabaseStatus() {
     const requestId = ++dbStatusRequestId;
     const collectionId = getChatCollectionId();
+    const identityAtStart = JSON.stringify(currentChatIdentity());
     let result = null;
     try {
         result = await checkUnfinishedVectorization(settings);
@@ -275,7 +283,8 @@ async function refreshSavedDatabaseStatus() {
         console.warn('VectHare: Status refresh failed:', error);
     }
     // Ignore replies from a previous chat or a superseded DB read.
-    if (requestId !== dbStatusRequestId || collectionId !== getChatCollectionId()) return;
+    if (requestId !== dbStatusRequestId || collectionId !== getChatCollectionId() ||
+        identityAtStart !== JSON.stringify(currentChatIdentity())) return;
     lastDbStatus = result ? { ...result, collectionId } : null;
 
     if (isVectorizationActive() && result && progressTracker.currentOperation === 'Vectorizing Chat') {
@@ -298,18 +307,21 @@ function scheduleSavedDatabaseRefresh() {
 
 // R10: light interval keeps the status line live during runs without the core
 // needing UI hooks. Only active while a run is in flight (cheap no-op otherwise).
-setInterval(() => {
-    if (isVectorizationActive()) {
-        refreshVectorizationStatusDisplay();
-    }
-}, 3000);
+function ensureVectHareStatusInterval() {
+    if (globalThis.__vecthareStatusInterval) return;
+    globalThis.__vecthareStatusInterval = setInterval(() => {
+        if (isVectorizationActive()) refreshVectorizationStatusDisplay();
+    }, 3000);
+}
 
 async function offerResumeOfUnfinishedVectorization() {
     // A newer refresh or a chat switch invalidates any prior asynchronous work.
     const requestId = ++resumeCheckRequestId;
     const collectionIdAtStart = getChatCollectionId();
+    const chatIdentityAtStart = JSON.stringify(currentChatIdentity());
     const isCurrent = () => requestId === resumeCheckRequestId &&
-        collectionIdAtStart === getChatCollectionId();
+        collectionIdAtStart === getChatCollectionId() &&
+        chatIdentityAtStart === JSON.stringify(currentChatIdentity());
     if (!isCurrent()) return;
     // VectHare+ FIX (notification behavior): a run already in flight IS the
     // resume — don't nag while it works. BUT we must not bail permanently:
@@ -422,6 +434,8 @@ async function onPurgeClick() {
             }),
             settings: extension_settings.vecthare,
             persistSettings: saveSettingsDebounced,
+            cancelJobs: reason => chatJobs.cancelAll(reason),
+            awaitTrackedWrites: () => chatJobs.awaitInFlightWrites(),
         });
 
         toastr.success('All vector data purged', 'Purge Complete');
@@ -443,7 +457,13 @@ function onRunDiagnosticsClick() {
  * Initialize VectHare extension
  */
 jQuery(async () => {
+    // C03: SillyTavern has no extension unload API. A second init must never
+    // register duplicate listeners, workers or delayed tasks.
+    if (globalThis.__vecthareRuntimeInitialized) return;
+    globalThis.__vecthareRuntimeInitialized = true;
+    try {
     console.log('VectHare: Initializing...');
+    ensureVectHareStatusInterval();
 
     // Load saved settings
     if (!extension_settings.vecthare) {
@@ -490,6 +510,15 @@ jQuery(async () => {
     if (pendingDeletions.length) {
         console.warn('VectHare: Collection deletions require reconciliation', pendingDeletions.map(({key,stage})=>({key,stage})));
         toastr.warning(`${pendingDeletions.length} collection deletion(s) require reconciliation; no automatic purge was attempted`, 'VectHare', {timeOut:12000});
+    }
+
+    // C03: pending in-flight requests from a crashed/unloaded tab are not proof
+    // that a backend operation failed. Never auto-clear the reconciliation marker.
+    const pendingWrites = chatJobs.pendingOperations();
+    if (pendingWrites.length) {
+        const pendingWriteCount = pendingWrites.reduce((sum,op)=>sum+(op.count||1),0);
+        console.warn('VectHare: Pending write operations require reconciliation', pendingWrites.map(({id,status})=>({id,status})));
+        toastr.warning(`${pendingWriteCount} interrupted or uncertain write(s) require reconciliation; destructive operations remain blocked`, 'VectHare', {timeOut:12000});
     }
 
     // Render UI
@@ -562,42 +591,73 @@ jQuery(async () => {
         }
     })();
 
+    // Register host listeners exactly once. Keep a registry to support a future
+    // explicit teardown without changing the host's extension lifecycle.
+    const vhListeners = [];
+    const onVhEvent = (type, handler) => {
+        if (!type) return;
+        eventSource.on(type, handler);
+        vhListeners.push({type,handler});
+    };
+    globalThis.__vecthareEventListeners = vhListeners;
+    // A chat switch invalidates every job, not merely its eventual toast.
+    const invalidateChat = () => {
+        chatJobs.cancelAll('chat-changed');
+        chatJobs.bumpGeneration('chat-changed');
+        if (isVectorizationActive()) stopVectorization();
+        else resetControlState();
+    };
+    const invalidateMessage = () => {
+        chatJobs.cancelKinds(['retrieval','sync','repair','vectorize'],'message-changed');
+        chatJobs.bumpGeneration('message-changed');
+    };
+    onVhEvent(event_types.CHAT_CHANGED, invalidateChat);
+    for (const name of ['GENERATION_STOPPED','GENERATION_ENDED','GENERATION_ABORTED']) {
+        onVhEvent(event_types[name], () => chatJobs.bumpGeneration(name.toLowerCase()));
+    }
+    for (const name of ['MESSAGE_EDITED','MESSAGE_DELETED','MESSAGE_SWIPED']) {
+        onVhEvent(event_types[name], invalidateMessage);
+    }
+    const onPageHide = () => chatJobs.teardown();
+    window.addEventListener('pagehide', onPageHide);
     // Register event handlers
-    eventSource.on(event_types.MESSAGE_DELETED, onChatEvent);
-    eventSource.on(event_types.MESSAGE_EDITED, onChatEvent);
+    onVhEvent(event_types.MESSAGE_DELETED, onChatEvent);
+    onVhEvent(event_types.MESSAGE_EDITED, onChatEvent);
     // VectHare+ R10: edits/deletes flag the reverse-sync (repair) pass to run
     // on the very next sync instead of waiting out the 5-minute throttle -
     // the DB is corrected as soon as anything observes the change.
-    eventSource.on(event_types.MESSAGE_EDITED, () => flagImmediateReverseSync(getChatCollectionId(), settings));
-    eventSource.on(event_types.MESSAGE_DELETED, () => flagImmediateReverseSync(getChatCollectionId(), settings));
+    onVhEvent(event_types.MESSAGE_EDITED, () => flagImmediateReverseSync(getChatCollectionId(), settings));
+    onVhEvent(event_types.MESSAGE_DELETED, () => flagImmediateReverseSync(getChatCollectionId(), settings));
     // Run vector sync tasks on message events
     // Note: Semantic WI injection happens in the generate_interceptor (rearrangeChat), not here
-    eventSource.on(event_types.MESSAGE_SENT, onChatEvent);
-    eventSource.on(event_types.MESSAGE_RECEIVED, onChatEvent);
-    eventSource.on(event_types.MESSAGE_SWIPED, onChatEvent);
-    eventSource.on(event_types.MESSAGE_SWIPED, () => flagImmediateReverseSync(getChatCollectionId(), settings));
+    onVhEvent(event_types.MESSAGE_SENT, onChatEvent);
+    onVhEvent(event_types.MESSAGE_RECEIVED, onChatEvent);
+    onVhEvent(event_types.MESSAGE_SWIPED, onChatEvent);
+    onVhEvent(event_types.MESSAGE_SWIPED, () => flagImmediateReverseSync(getChatCollectionId(), settings));
     // When a chat is deleted, purge its vectors (not full purge, just that chat)
-    eventSource.on(event_types.CHAT_DELETED, async (chatId) => {
+    onVhEvent(event_types.CHAT_DELETED, async (chatId) => {
         if (chatId) {
             const collectionId = getChatCollectionId(chatId);
             if (collectionId) {
-                await purgeVectorIndex(collectionId, settings);
+                const confirmed = await purgeVectorIndex(collectionId, settings);
+                if (confirmed !== true) return;
                 console.log(`VectHare: Purged vectors for deleted chat: ${chatId}`);
             }
         }
     });
-    eventSource.on(event_types.GROUP_CHAT_DELETED, async (chatId) => {
+    onVhEvent(event_types.GROUP_CHAT_DELETED, async (chatId) => {
         if (chatId) {
             const collectionId = getChatCollectionId(chatId);
             if (collectionId) {
-                await purgeVectorIndex(collectionId, settings);
+                const confirmed = await purgeVectorIndex(collectionId, settings);
+                if (confirmed !== true) return;
                 console.log(`VectHare: Purged vectors for deleted group chat: ${chatId}`);
             }
         }
     });
 
     // When WebLLM extension is loaded, refresh the model list
-    eventSource.on(event_types.EXTENSION_SETTINGS_LOADED, async (manifest) => {
+    onVhEvent(event_types.EXTENSION_SETTINGS_LOADED, async (manifest) => {
         if (settings.source === 'webllm' && manifest?.display_name === 'WebLLM') {
             console.log('VectHare: WebLLM extension loaded, refreshing models...');
             updateWebLlmStatus();
@@ -606,7 +666,7 @@ jQuery(async () => {
     });
 
     // When chat changes, refresh UI state to match settings
-    eventSource.on(event_types.CHAT_CHANGED, () => {
+    onVhEvent(event_types.CHAT_CHANGED, () => {
         ++resumeCheckRequestId; // Invalidate any pending resume check immediately.
         console.log('VectHare: Chat changed, refreshing UI state');
         refreshAutoSyncCheckbox(settings);
@@ -622,4 +682,5 @@ jQuery(async () => {
     setTimeout(scheduleSavedDatabaseRefresh, 5000);
 
     console.log('VectHare: ✅ Initialized successfully');
+    } catch (error) { globalThis.__vecthareRuntimeInitialized = false; throw error; }
 });

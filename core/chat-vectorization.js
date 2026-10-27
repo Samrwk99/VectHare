@@ -1,4 +1,7 @@
 import {hasVerifiedCapability} from '../utils/backend-contracts.js';
+import {chatJobs, anyJobSignal,currentChatIdentity} from './chat-job-runtime.js';
+import {scopedActivationHistory} from '../utils/activation-history.js';
+import {StaleJobError} from './job-context.js';
 import {planReplacement} from '../utils/replacement-safety.js';
 /**
  * ============================================================================
@@ -492,16 +495,29 @@ async function applyChunkConditions(chunks, chat, settings) {
         isGroupChat: settings.isGroupChat || false,
         currentCharacter: settings.currentCharacter || null,
         activeLorebookEntries: settings.activeLorebookEntries || [],
-        activationHistory: window.VectHare_ActivationHistory || {}
+        activationHistory: {} // per-item scope is installed before rule evaluation
     });
 
     // Filter chunks by their conditions
-    const conditionFilteredChunks = filterChunksByConditions(chunksWithConditions, context);
+    const chatId = currentChatIdentity().originId || currentChatIdentity().chatId;
+    const collectionKeyFor = chunk => chunk.collectionKey || (chunk.collectionId
+        ? `${chunk.backend || settings.vector_backend || 'standard'}:${chunk.source || settings.source || 'transformers'}:${chunk.collectionId}` : null);
+    const conditionFilteredChunks = chunksWithConditions.flatMap(chunk => {
+        const frequencyRule = chunk.conditions?.rules?.find(rule => rule.type === 'frequency');
+        const scope = frequencyRule?.settings?.scope === 'session' ? 'session' : 'conversation';
+        const activationHistory = scopedActivationHistory.snapshot({chatId,collectionKey:collectionKeyFor(chunk),scope});
+        return filterChunksByConditions([chunk], {...context,activationHistory});
+    });
 
     // Track activation for frequency conditions
     conditionFilteredChunks.forEach(chunk => {
         if (chunk.conditions?.enabled) {
-            trackChunkActivation(chunk.hash, chat.length);
+            scopedActivationHistory.record({
+                chatId,
+                collectionKey:collectionKeyFor(chunk),
+                scope:chunk.conditions?.rules?.find(rule => rule.type === 'frequency')?.settings?.scope === 'session' ? 'session' : 'conversation',
+                hash:chunk.hash,messageCount:chat.length
+            });
         }
     });
 
@@ -509,22 +525,6 @@ async function applyChunkConditions(chunks, chat, settings) {
     return conditionFilteredChunks;
 }
 
-/**
- * Tracks chunk activation for frequency/cooldown conditions
- * @param {number} hash Chunk hash
- * @param {number} messageCount Current message count
- */
-function trackChunkActivation(hash, messageCount) {
-    if (!window.VectHare_ActivationHistory) {
-        window.VectHare_ActivationHistory = {};
-    }
-
-    const history = window.VectHare_ActivationHistory[hash] || { count: 0, lastActivation: null };
-    window.VectHare_ActivationHistory[hash] = {
-        count: history.count + 1,
-        lastActivation: messageCount
-    };
-}
 
 /**
  * Rerank chunks using BananaBread's reranking endpoint
@@ -593,9 +593,29 @@ async function rerankWithBananaBread(query, chunks, settings) {
  * @param {number} batchSize Number of messages to process per call
  * @returns {Promise<object>} Progress info
  */
-export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = false) {
+export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = false, parentJob = null) {
+    // Capture identity BEFORE any asynchronous work; manual runs share their parent's job.
+    let job;
+    try {
+        job = parentJob || chatJobs.startJob({kind:'sync',collectionKey:`${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${getChatCollectionId() || ''}`});
+        job.assertCurrent();
+    } catch (error) {
+        if (error instanceof StaleJobError) return {remaining:-1,messagesProcessed:0,chunksCreated:0,stale:true};
+        throw error;
+    }
+    try {
+        return await synchronizeChatScoped(settings,batchSize,bypassAutoSync,job);
+    } catch (error) {
+        if (error instanceof StaleJobError) return {remaining:-1,messagesProcessed:0,chunksCreated:0,stale:true};
+        throw error;
+    } finally {if(!parentJob) job.finish();}
+}
+
+async function synchronizeChatScoped(settings,batchSize,bypassAutoSync,job) {
+    job.assertCurrent();
     // Build proper collection ID using chat UUID first
     const collectionId = getChatCollectionId();
+    job.assertCurrent();
     console.log(`🔍 VectHare DEBUG: getChatCollectionId() returned: "${collectionId}"`);
     console.log(`🔍 VectHare DEBUG: settings.vector_backend = "${settings.vector_backend}"`);
     console.log(`🔍 VectHare DEBUG: settings.source = "${settings.source}"`);
@@ -607,6 +627,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
     // VectHare+: bypassAutoSync lets an explicitly user-started run (Sync Chat /
     // Continue Vectorization) proceed even when background auto-sync is off.
     const { isCollectionAutoSyncEnabled, getCollectionMeta, setCollectionMeta } = await import('./collection-metadata.js');
+    job.assertCurrent();
     if (!bypassAutoSync && !isCollectionAutoSyncEnabled(collectionId)) {
         return { remaining: -1, messagesProcessed: 0, chunksCreated: 0 };
     }
@@ -621,6 +642,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
     if (!bypassAutoSync) {
         try {
             const configFingerprint = await computeVectorizationConfigFingerprint(settings);
+            job.assertCurrent();
             if (configFingerprint) {
                 const storedFingerprint = getCollectionMeta(collectionId).vectorizationConfigFingerprint;
                 if (storedFingerprint && storedFingerprint !== configFingerprint) {
@@ -642,6 +664,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                 }
             }
         } catch (fpError) {
+            if (fpError instanceof StaleJobError) throw fpError;
             // Fingerprint failures must never block background sync (fail-open)
             console.warn('VectHare: Auto-sync fingerprint check failed (continuing):', fpError.message);
         }
@@ -680,6 +703,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
 
     try {
         syncBlocked = true;
+        job.assertCurrent();
         const context = getContext();
 
         if (!getCurrentChatId() || !Array.isArray(context.chat)) {
@@ -691,6 +715,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
 
         // Step 1: What's already vectorized? (source of truth = DB)
         const existingHashes = new Set(await getSavedHashes(collectionId, settings));
+        job.assertCurrent();
 
         // Step 2: Build list of messages NOT in DB
         const strategy = settings.chunking_strategy || 'per_message';
@@ -741,6 +766,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                 const keepHashes = new Set(groupedItems.map(item => String(item.hash)));
 
                 const collectionData = await getSavedHashes(collectionId, settings, true);
+                job.assertCurrent();
 
                 const allStoredHashes = Array.isArray(collectionData) ? collectionData : (collectionData?.hashes || []);
 
@@ -795,6 +821,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                     console.debug('VectHare: Reverse sync skipped - chunk metadata unavailable from backend');
                 }
             } catch (reverseSyncError) {
+                if (reverseSyncError instanceof StaleJobError) throw reverseSyncError;
                 // Never block forward vectorization on reverse-sync failure
                 console.warn('VectHare: Reverse sync failed (forward vectorization continues):', reverseSyncError.message);
             }
@@ -819,6 +846,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
         const label = strategy === 'per_message' ? 'Message' : 'Group';
 
         while (!queue.isEmpty() && itemsProcessed < batchSize) {
+            job.assertCurrent();
             // VectHare+: honor Pause/Stop inside the batch loop. The rest of the
             // queue is left untouched (nothing lost) and every already-successful
             // item is already persisted, so any later run continues seamlessly.
@@ -836,7 +864,8 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                 // R13: pass the Stop signal - Stop now cancels the in-flight
                 // embedding/insert request instead of draining it
                 if (chunks.length > 0) {
-                    await insertVectorItems(collectionId, chunks, settings, (embedded, total) => {
+                    const writeReceipt = await chatJobs.trackWrite(job, () => insertVectorItems(collectionId, chunks, settings, (embedded, total) => {
+                        if (job.signal.aborted) return;
                         // R7 FIX: per-item embedding progress is always 1/1 here
                         // (one item per call) and previously clobbered the panel's
                         // chunk counter ("Chunks 1/1"). vectorizeAll now feeds the
@@ -847,8 +876,14 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                         // Determine phase based on progress (0-50% = Embedding, 50-100% = Writing)
                         const progressPercent = (embedded / total) * 100;
                         const phase = progressPercent <= 50 ? 'Embedding' : 'Writing to database';
+                        job.assertCurrent();
                         progressTracker.updateCurrentItem(`${label} ${itemsProcessed}/${batchSize} - ${phase}: ${embedded}/${total} chunks`);
-                    }, getStopSignal());
+                    }, anyJobSignal(job.signal, bypassAutoSync ? getStopSignal() : null)), {collectionKey:job.snapshot.collectionKey});
+                    job.assertCurrent();
+                    if (writeReceipt?.status === 'uncertain' || writeReceipt?.requiresReconciliation) {
+                        itemsFailed++;
+                        console.warn('VectHare: Sync insertion requires reconciliation before claiming completion');
+                    } else {
                     chunksCreated += chunks.length;
 
                     // Register on first successful insert (prevents ghost collections)
@@ -863,11 +898,13 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                         isRegistered = true;
                         console.log(`VectHare: Registered collection ${registryKey} after first successful insert`);
                     }
+                    }
                 }
             } catch (itemError) {
                 // R13: an aborted request (user pressed Stop) is a CLEAN stop,
                 // not a failed item - exit the batch loop immediately. The loop
                 // top then handles the normal stop bookkeeping.
+                if (job.signal.aborted) throw new StaleJobError('chat-changed');
                 if (isVectorizationStopped()) {
                     break;
                 }
@@ -881,6 +918,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
             progressTracker.updateCurrentItem(`${label} ${itemsProcessed}/${batchSize}${itemsFailed > 0 ? ` (${itemsFailed} failed)` : ''}`);
         }
 
+        job.assertCurrent();
         progressTracker.updateCurrentItem(null);
 
         if (itemsFailed > 0) {
@@ -2068,10 +2106,14 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
  * @param {string} type Generation type
  */
 export async function rearrangeChat(chat, settings, type) {
+    let job;
+    try { job = chatJobs.startJob({kind:'retrieval',generationScoped:true}); }
+    catch (error) { if(error instanceof StaleJobError) return; throw error; }
     console.log(`🐰 VectHare: rearrangeChat called (type: ${type}, chat length: ${chat?.length || 0})`);
 
     try {
         // Clear stale prompt tags even if this run is quiet or exits before searching.
+        job.assertCurrent();
         clearVectHarePrompts(settings);
         // === EARLY EXITS ===
         if (type === 'quiet') {
@@ -2111,6 +2153,7 @@ export async function rearrangeChat(chat, settings, type) {
             };
             noEnabledDebug.stopReason = 'no_active_collections';
             addTrace(noEnabledDebug, 'activation', 'No enabled collections; vector search skipped');
+            job.assertCurrent();
             setLastSearchDebug(noEnabledDebug);
             return;
         }
@@ -2156,6 +2199,7 @@ export async function rearrangeChat(chat, settings, type) {
             });
             searchContext.collectionDecisions = collectionDecisions;
             activeCollections = await filterActiveCollections(collectionsToQuery, searchContext);
+        job.assertCurrent();
         }
 
         // Allow WI-only mode even if no regular collections pass filters
@@ -2181,6 +2225,7 @@ export async function rearrangeChat(chat, settings, type) {
                 candidates: collectionsToQuery.length,
                 rejected: collectionDecisions.length
             });
+            job.assertCurrent();
             setLastSearchDebug(noActiveDebug);
             return;
         }
@@ -2214,6 +2259,7 @@ export async function rearrangeChat(chat, settings, type) {
 
         // === STAGE 4: Query all collections and merge results ===
         let chunks = await queryAndMergeCollections(activeCollections, queryText, settings, chat, debugData);
+        job.assertCurrent();
         // Keep the actual vector-query results before any filtering, keyword boost
         // or semantic World Info merge. Keyword boosts mutate chunk objects.
         debugData.stages.initial = chunks.map(chunk => ({ ...chunk }));
@@ -2310,6 +2356,7 @@ export async function rearrangeChat(chat, settings, type) {
                     .map(x => substituteParams(x.mes));
 
                 const wiEntries = await getSemanticWorldInfoEntries(recentMessages, [], settings);
+        job.assertCurrent();
                 if (Array.isArray(wiEntries) && wiEntries.length > 0) {
                     addTrace(debugData, 'world_info', `Found ${wiEntries.length} semantic WI entries`, { entries: wiEntries.map(e => ({ uid: e.uid, score: e.score })) });
 
@@ -2349,6 +2396,7 @@ export async function rearrangeChat(chat, settings, type) {
         // === STAGE 4.5: Expand summary chunks to parent chunks (dual-vector) ===
         const chunksBeforeExpansion = chunks.length;
         chunks = await expandSummaryChunks(chunks, activeCollections, settings, debugData);
+        job.assertCurrent();
         if (chunks.length !== chunksBeforeExpansion || chunks.some(c => c.expandedFromSummary)) {
             const expandedCount = chunks.filter(c => c.expandedFromSummary).length;
             console.log(`VectHare: Expanded ${expandedCount} summary chunks to parent text`);
@@ -2363,6 +2411,7 @@ export async function rearrangeChat(chat, settings, type) {
                 query: queryText.substring(0, 100)
             });
             chunks = await rerankWithBananaBread(queryText, chunks, settings);
+            job.assertCurrent();
             debugData.stages.afterRerank = [...chunks];
             addTrace(debugData, 'rerank', 'Reranking complete', { rerankedCount: chunks.length });
         }
@@ -2378,17 +2427,20 @@ export async function rearrangeChat(chat, settings, type) {
         debugData.stats.afterDecay = chunks.length;
 
         // === STAGE 8: Chunk conditions ===
+        job.assertCurrent();
         chunks = await applyConditionsStage(chunks, chat, {
             ...settings,
             generationType: type || 'normal',
             isGroupChat: getContext().groupId != null,
             currentCharacter: getContext().name2 || null,
         }, debugData);
+        job.assertCurrent();
         debugData.stages.afterConditions = [...chunks];
         debugData.stats.afterConditions = chunks.length;
 
         // === STAGE 8.5: Chunk Groups and Links ===
         chunks = await applyGroupsAndLinksStage(chunks, activeCollections, settings, debugData);
+        job.assertCurrent();
         debugData.stages.afterGroups = [...chunks];
         debugData.stats.afterGroups = chunks.length;
 
@@ -2437,6 +2489,7 @@ export async function rearrangeChat(chat, settings, type) {
                 reason: 'All chunks already in current context',
                 skippedCount: skippedDuplicates.length
             });
+            job.assertCurrent();
             setLastSearchDebug(debugData);
             return;
         }
@@ -2444,6 +2497,7 @@ export async function rearrangeChat(chat, settings, type) {
         console.log(`[VectHare Deduplication] ✅ ${chunksToInject.length} chunks will proceed to injection`);
 
         // === STAGE 10: Inject into prompt ===
+        job.assertCurrent();
         const injection = injectChunksIntoPrompt(chunksToInject, settings, debugData);
 
         console.log(`\n✅ VectHare: Successfully injected ${chunksToInject.length} chunk(s) into prompt`);
@@ -2473,14 +2527,17 @@ export async function rearrangeChat(chat, settings, type) {
             depth: settings.depth,
             verified: injection.verified
         });
+        job.assertCurrent();
 
-        setLastSearchDebug(debugData);
+        job.assertCurrent();
+            setLastSearchDebug(debugData);
         console.log(`VectHare: ✅ Injected ${chunksToInject.length} chunks (${skippedDuplicates.length} skipped - already in context)`);
 
     } catch (error) {
+        if (error instanceof StaleJobError) return;
         toastr.error(`Generation interceptor aborted: ${error.message}`, 'VectHare');
         console.error('VectHare: Failed to rearrange chat', error);
-    }
+    } finally { job.finish(); }
 }
 
 /**
@@ -2489,6 +2546,7 @@ export async function rearrangeChat(chat, settings, type) {
  * @param {number} batchSize Batch size
  */
 export async function vectorizeAll(settings, batchSize) {
+    let job = null;
     try {
         // VectHare+: Manual Sync Chat / Continue always runs, regardless of the
         // per-collection auto-sync toggle - auto-sync gating applies ONLY to
@@ -2505,6 +2563,7 @@ export async function vectorizeAll(settings, batchSize) {
             return false;
         }
 
+        job = chatJobs.startJob({kind:'vectorize',collectionKey:`${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${getChatCollectionId() || ''}`});
         const chatId = getCurrentChatId();
         if (!chatId) {
             toastr.info('No chat selected', 'Vectorization aborted');
@@ -2515,6 +2574,7 @@ export async function vectorizeAll(settings, batchSize) {
         // Pre-flight check: verify backend is available before starting
         const backendName = settings.vector_backend || 'standard';
         const backendAvailable = await isBackendAvailable(backendName, settings);
+        job.assertCurrent();
         if (!backendAvailable) {
             toastr.error(
                 `Backend "${backendName}" is not available. Check your settings or start the backend service.`,
@@ -2676,6 +2736,7 @@ export async function vectorizeAll(settings, batchSize) {
         });
 
         while (!finished) {
+            job.assertCurrent();
             if (is_send_press) {
                 // VectHare+: wait out the generation instead of aborting the run.
                 // R6 FIX: honor Stop while waiting - previously a hung generation
@@ -2712,7 +2773,8 @@ export async function vectorizeAll(settings, batchSize) {
             // VectHare+ (restored + improved): bypassAutoSync=true - the run was
             // explicitly started by the user (Sync Chat / Continue button), so
             // synchronizeChat's autoSync gate must not block a manual run.
-            const result = await synchronizeChat(settings, batchSize, true);
+            const result = await synchronizeChat(settings, batchSize, true, job);
+            job.assertCurrent();
 
             // VectHare+ BUG FIX (infinite failure loop): items that permanently
             // fail to embed are never written to the DB, so they re-enter the
@@ -2810,6 +2872,9 @@ export async function vectorizeAll(settings, batchSize) {
         console.log(`VectHare: ✅ Vectorization complete after ${iteration} iterations`);
         return true;
     } catch (error) {
+        if (error instanceof StaleJobError) {
+            vectorizeRunActive = false; resetControlState(); return false;
+        }
         console.error('VectHare: Failed to vectorize all', error);
         vectorizeRunActive = false;
         resetControlState(); // VectHare+: never let pause/stop flags leak past a failed run
@@ -2817,7 +2882,7 @@ export async function vectorizeAll(settings, batchSize) {
         progressTracker.complete(false, 'Vectorization failed');
         toastr.error(`Vectorization failed: ${error.message}`, 'VectHare');
         return false;
-    }
+    } finally { job?.finish(); }
 }
 
 /**
@@ -2842,9 +2907,11 @@ export async function vectorizeAll(settings, batchSize) {
  * @param {number} batchSize Embed batch size (unused for deletes)
  */
 export async function repairChatVectors(settings, batchSize = 5) {
+    let job = null;
     try {
         if (!tryAcquireVectorizationRun()) return;
 
+        job = chatJobs.startJob({kind:'repair',collectionKey:`${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${getChatCollectionId() || ''}`});
         const chatId = getCurrentChatId();
         if (!chatId) {
             toastr.info('No chat selected', 'Repair aborted');
@@ -2875,6 +2942,7 @@ export async function repairChatVectors(settings, batchSize = 5) {
         try {
             const { getCollectionMeta, setCollectionMeta } = await import('./collection-metadata.js');
             const configFingerprint = await computeVectorizationConfigFingerprint(settings);
+            job.assertCurrent();
             const storedFingerprint = getCollectionMeta(collectionId).vectorizationConfigFingerprint;
             if (configFingerprint && storedFingerprint && storedFingerprint !== configFingerprint) {
                 toastr.error(
@@ -2891,6 +2959,7 @@ export async function repairChatVectors(settings, batchSize = 5) {
                 setCollectionMeta(collectionId, { vectorizationConfigFingerprint: configFingerprint });
             }
         } catch (fpError) {
+            if (fpError instanceof StaleJobError) throw fpError;
             console.warn('VectHare: Repair fingerprint check failed (continuing):', fpError.message);
         }
 
@@ -2908,8 +2977,10 @@ export async function repairChatVectors(settings, batchSize = 5) {
             // R17: abortable+timed read (was an unbounded await - a hung backend
             // read previously stalled repair before it even started, with Stop
             // unable to free it)
-            collectionData = await getSavedHashes(collectionId, settings, true, getStopSignal());
+            collectionData = await getSavedHashes(collectionId, settings, true, anyJobSignal(job.signal,getStopSignal()));
+            job.assertCurrent();
         } catch (readError) {
+            if (readError instanceof StaleJobError) throw readError;
             toastr.error('Could not read collection metadata - repair aborted, nothing was changed.', 'Repair');
             console.warn('VectHare: Repair aborted - metadata read failed:', readError.message);
             vectorizeRunActive = false;
@@ -2935,6 +3006,7 @@ export async function repairChatVectors(settings, batchSize = 5) {
         const storedHashSet = new Set(storedHashes.map(h => String(h)));
 
         const { getChunkMetadata } = await import('./collection-metadata.js');
+        job.assertCurrent();
         const isProtectedMeta = (meta) => {
             if (!meta) return false;
             if (meta.isScene === true) return true;
@@ -3089,16 +3161,21 @@ export async function repairChatVectors(settings, batchSize = 5) {
         // embed leaves the stale vector in place rather than a hole; the ghost
         // cleanup on the next pass will retry)
         for (const item of replacements) {
+            job.assertCurrent();
             if (isVectorizationStopped() || isVectorizationPaused()) break;
             try {
                 const chunks = prepareItemsForInsertion([item]);
                 // R13: abortable - Stop cancels the in-flight repair embed
-                await insertVectorItems(collectionId, chunks, settings, (embedded, total) => {
+                const receipt = await chatJobs.trackWrite(job, () => insertVectorItems(collectionId, chunks, settings, (embedded, total) => {
+                    if(job.signal.aborted) return;
                     progressTracker.updateCurrentItem(`${label} ${done + 1}/${totalUnits} - embedding ${embedded}/${total}`);
-                }, getStopSignal());
-                inserted++;
+                }, anyJobSignal(job.signal,getStopSignal())), {collectionKey:job.snapshot.collectionKey});
+                job.assertCurrent();
+                if (receipt?.status === 'uncertain' || receipt?.requiresReconciliation) {failedHashes.add(String(item.hash)); failed++;}
+                else inserted++;
             } catch (err) {
                 // R13: user abort is a clean stop, not a failed item
+                if (job.signal.aborted) throw new StaleJobError('chat-changed');
                 if (isVectorizationStopped()) break;
                 console.warn(`VectHare: Repair - failed to re-vectorize group (hash ${item.hash}):`, err.message);
                 failedHashes.add(String(item.hash)); // R20: keep its stale vector as fallback
@@ -3128,7 +3205,8 @@ export async function repairChatVectors(settings, batchSize = 5) {
         const unconfirmed = [];
         if (replacements.length > 0) {
             try {
-                const hashes = await getSavedHashes(collectionId, settings, false, getStopSignal());
+                const hashes = await getSavedHashes(collectionId, settings, false, anyJobSignal(job.signal,getStopSignal()));
+                job.assertCurrent();
                 if (!Array.isArray(hashes)) throw new Error('Read-back inventory was not an array');
                 readbackVerified = hasVerifiedCapability(settings?.vector_backend || 'standard','getByIds');
                 const verifyHashes = new Set(hashes.map(h => String(h))); 
@@ -3144,6 +3222,7 @@ export async function repairChatVectors(settings, batchSize = 5) {
                     console.warn(`VectHare: Repair verification FAILED for hash ${item.hash} (message index ${item.metadata?.messageId ?? item.metadata?.messageIds?.join(',')}): "${String(item.text).substring(0, 80)}..."`);
                 }
             } catch (verifyError) {
+                if (verifyError instanceof StaleJobError) throw verifyError;
                 unconfirmed.push(...replacements); // A failed read is not an empty successful result.
                 console.warn('VectHare: Repair verification read failed (cannot confirm inserts)');
             }
@@ -3167,13 +3246,14 @@ export async function repairChatVectors(settings, batchSize = 5) {
             );
         }
     } catch (error) {
+        if (error instanceof StaleJobError) {vectorizeRunActive=false;resetControlState();return;}
         console.error('VectHare: Repair failed', error);
         vectorizeRunActive = false;
         resetControlState();
         progressTracker.addError(error.message);
         progressTracker.complete(false, 'Repair failed');
         toastr.error(`Repair failed: ${error.message}`, 'VectHare');
-    }
+    } finally {job?.finish();}
 }
 
 /**

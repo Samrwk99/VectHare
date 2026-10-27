@@ -30,6 +30,7 @@ function resumeHarness() {
         RESUME_CHECK_RETRY_MS: 0,
         isVectorizationActive: () => false,
         getChatCollectionId: () => chat,
+        currentChatIdentity: () => ({chatId:chat}),
         checkUnfinishedVectorization: () => {
             const d = deferred(); pending.push({ chat, ...d }); return d.promise;
         },
