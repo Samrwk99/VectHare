@@ -197,7 +197,7 @@ test('C04-B: C01 cleanup prunes only deleted key, and rolls policies back on fai
  const run=(store,persist)=>deleteCollectionSafely({key:a,store,contractVerified:true,persist,
    inventory:async()=>({scope:a,status:'complete',complete:true,endOfListConfirmed:true,recordIds:[]}),
    purge:async()=>({scope:a,status:'confirmed'}),
-   verifyEmpty:(()=>{let n=0;return async()=>({scope:a,status:'confirmed',complete:true,empty:++n>=2});})()});
+   verifyEmpty:(()=>{let n=0;return async()=>({scope:a,status:'confirmed',complete:true,empty:++n>=2,endOfListConfirmed:true,verifiedCount:0});})()});
  const success=mk();assert.equal((await run(success,async()=>true)).success,true);
  assert.deepEqual(success.chatCollectionPolicies.chat.selectedCollections,[b,'one']);
  const failure=mk();let n=0;assert.equal((await run(failure,async()=>++n!==4)).success,false);

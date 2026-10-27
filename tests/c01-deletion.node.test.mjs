@@ -4,9 +4,9 @@ import {collectScopedInventory,metadataEvidence,planOrphanCollectionMetadataRemo
 import {deleteCollectionSafely,recoverTombstones} from '../utils/c01-deletion.js';
 import {FaultBackend} from './helpers/fake-backend.js';
 const A='qdrant:openai:story',B='milvus:openai:story';
-const page=(key,ids=[],more=null)=>({scope:key,items:ids.map(recordId=>({recordId})),endOfList:more===null,...(more!==null?{nextCursor:more}:{})});
+const page=(key,ids=[],more=null)=>({scope:key,items:ids.map(recordId=>({recordId,collectionKey:key})),endOfList:more===null,...(more!==null?{nextCursor:more}:{})});
 const goodInventory=key=>({status:'complete',complete:true,scope:key,endOfListConfirmed:true,recordIds:['same']});
-const goodEmpty=key=>({scope:key,status:'confirmed',complete:true,empty:true});
+const goodEmpty=key=>({scope:key,status:'confirmed',complete:true,empty:true,endOfListConfirmed:true,verifiedCount:0});
 const fixtures=()=>{const db=new FaultBackend();db.seed(A,['same']);db.seed(B,['same']);
   const store={registry:[A,B],collections:{[A]:{},[B]:{protected:true}},recordMetadata:{[A]:{same:{}},[B]:{same:{owner:'B'}}},tombstones:{}};
   let persistCount=0;const persist=async()=>{persistCount++;return true;};
@@ -74,7 +74,7 @@ test('C01: protected collections require verified export receipt before purge',a
  assert.equal((await deleteCollectionSafely(f.handlers)).status,'blocked');assert.equal(f.purges(),0);
  f.handlers.backup=async()=>({scope:B,complete:false});
  assert.equal((await deleteCollectionSafely(f.handlers)).status,'blocked');assert.equal(f.purges(),0);
- f.handlers.backup=async()=>({scope:B,complete:true,verified:true});
+ f.handlers.backup=async()=>({scope:B,complete:true,verified:true,recordCount:1});
  const done=await deleteCollectionSafely(f.handlers);
  assert.equal(done.success,true);assert.deepEqual(f.db.ids(A),['same']);
 });
@@ -155,7 +155,7 @@ test('C01 #158: legacy hash metadata deletion refuses an owner in another collec
  assert.equal(mayRemoveLegacyHashMetadata({hash:'same',registry:[A,B],inventoryByCollection:inventories}).allowed,false);
  assert.equal(mayRemoveLegacyHashMetadata({hash:'gone',registry:[A,B],inventoryByCollection:{...inventories,[B]:{...inventories[B],complete:false}}}).allowed,false);
  assert.equal(mayRemoveLegacyHashMetadata({hash:'gone',registry:[A,B,'old:legacy'],inventoryByCollection:inventories}).allowed,false);
- assert.equal(mayRemoveLegacyHashMetadata({hash:'gone',registry:[A,B],inventoryByCollection:inventories}).allowed,true);
+ assert.equal(mayRemoveLegacyHashMetadata({hash:'gone',registry:[A,B],inventoryByCollection:inventories,registryCoverageVerified:true}).allowed,true);
 });
 test('C01 #220: null metadata cannot masquerade as an explicitly empty record',()=>{
  assert.equal(metadataEvidence({[A]:null},A).status,'unavailable');
@@ -196,4 +196,102 @@ test('C01 #158/#220: real metadata module never deletes B for A or through a bar
  m.deleteCollectionMeta(A);assert.equal(Object.hasOwn(settings.vecthare.collections,A),false);
  assert.equal(Object.hasOwn(settings.vecthare.collections,B),true);
  assert.ok(saves>=4);
+});
+
+// C01 finish: evidence integrity, checkpoint corruption and receipt faults.
+test('C01 finish: duplicate record identity in a later page never produces complete inventory',async()=>{
+ let n=0;const result=await collectScopedInventory({key:A,contractVerified:true,listPage:async()=>++n===1?page(A,['same'],'next'):page(A,['same'])});
+ assert.equal(result.complete,false);assert.ok(result.errors.includes('duplicate-record-identity'));
+});
+test('C01 finish: duplicate collection identities cannot establish authoritative collection inventory',async()=>{
+ const {collectCollectionInventory}=await import('../utils/c01-inventory.js');
+ const result=await collectCollectionInventory({backend:'qdrant',source:'openai',contractVerified:true,
+  listPage:async()=>({scope:'qdrant:openai',collections:[A,A],endOfList:true})});
+ assert.equal(result.complete,false);assert.ok(result.errors.includes('duplicate-collection-identity'));
+});
+test('C01 finish: hash-global metadata cleanup requires separately proven registry coverage',async()=>{
+ const {mayRemoveLegacyHashMetadata}=await import('../utils/c01-inventory.js');
+ assert.equal(mayRemoveLegacyHashMetadata({hash:'missing',registry:[A],inventoryByCollection:{[A]:goodInventory(A)}}).allowed,false);
+ assert.equal(mayRemoveLegacyHashMetadata({hash:'missing',registry:[],registryCoverageVerified:true}).allowed,false);
+});
+test('C01 finish: malformed recovery tombstone cannot authorize purge, finalization or metadata deletion',async()=>{
+ for(const marker of [
+  {status:'deleting',stage:'prepared',collectionKey:B,durable:true},
+  {status:'deleting',stage:'unrecognized',collectionKey:A,durable:true},
+  {status:'completed',stage:'purged',collectionKey:A,durable:true}
+ ]) {
+  const f=fixtures();f.store.tombstones[A]=marker;
+  const r=await deleteCollectionSafely({...f.handlers,resume:true});
+  assert.equal(r.reason,'invalid-or-untrusted-tombstone');assert.equal(f.purges(),0);
+  assert.ok(f.store.collections[A]);assert.ok(f.store.registry.includes(A));
+ }
+});
+test('C01 finish: previously prepared checkpoint cannot purge after its ownership is removed',async()=>{
+ const f=fixtures();f.store.tombstones[A]={status:'deleting',stage:'prepared',collectionKey:A,durable:true,inventoryCount:1};
+ delete f.store.collections[A];
+ const r=await deleteCollectionSafely({...f.handlers,resume:true});
+ assert.equal(r.reason,'prepared-deletion-ownership-changed');assert.equal(f.purges(),0);
+});
+test('C01 finish: conflicting positive-empty read after nonempty inventory requires reconciliation, no purge',async()=>{
+ const f=fixtures();f.handlers.verifyEmpty=async key=>goodEmpty(key);
+ const r=await deleteCollectionSafely(f.handlers);
+ assert.equal(r.reason,'inventory-readback-conflict');assert.equal(f.purges(),0);
+ assert.ok(f.store.registry.includes(A));assert.ok(f.store.collections[A]);
+});
+test('C01 finish: a failed optional completion receipt is reported, but durable finalization remains intact',async()=>{
+ const f=fixtures();let n=0;f.handlers.persist=async()=>++n<5;
+ const r=await deleteCollectionSafely(f.handlers);
+ assert.equal(r.success,true);assert.equal(r.receiptDurable,false);
+ assert.equal(f.store.tombstones[A].status,'completed');assert.equal(f.purges(),1);
+});
+test('C01 finish: unverified plugin remains blocked regardless of simulated backend adapter success',async()=>{
+ const f=fixtures();f.handlers.contractVerified=false;
+ f.handlers.verifyEmpty=async key=>goodEmpty(key);
+ assert.equal((await deleteCollectionSafely(f.handlers)).reason,'destructive-server-contract-unverified');
+ assert.equal(f.purges(),0);assert.equal(f.persisted(),0);
+});
+
+test('C01 finish: protected metadata requires complete matching export even when caller forgets protected flag',async()=>{
+ const f=fixtures();f.handlers.key=B;f.handlers.protectedCollection=false;
+ assert.equal((await deleteCollectionSafely(f.handlers)).reason,'protected-collection-requires-export');
+ f.handlers.backup=async()=>({scope:B,complete:true,verified:true,recordCount:0});
+ assert.equal((await deleteCollectionSafely(f.handlers)).reason,'protected-collection-export-unverified');
+ assert.equal(f.purges(),0);
+ f.handlers.backup=async()=>({scope:B,complete:true,verified:true,recordCount:1});
+ assert.equal((await deleteCollectionSafely(f.handlers)).success,true);
+});
+test('C01 finish: protected prepared tombstone cannot resume with no verified export receipt',async()=>{
+ const f=fixtures();f.store.tombstones[B]={status:'deleting',stage:'prepared',collectionKey:B,durable:true,inventoryCount:1};
+ const r=await deleteCollectionSafely({...f.handlers,key:B,resume:true});
+ assert.equal(r.reason,'protected-recovery-export-unverified');assert.equal(f.purges(),0);
+});
+test('C01 finish: recover finalized state without resurrecting a missing metadata entry after save failure',async()=>{
+ const f=fixtures();f.db.seed(A,[]);
+ f.store.tombstones[A]={status:'deleting',stage:'finalized',collectionKey:A,durable:true};
+ delete f.store.collections[A];delete f.store.recordMetadata[A];
+ const r=await deleteCollectionSafely({...f.handlers,resume:true,persist:async()=>false});
+ assert.equal(r.reason,'purge-checkpoint-durability-unverified');
+ assert.equal(Object.hasOwn(f.store.collections,A),false);
+});
+
+test('C01 finish: positive empty without explicit end and verified zero count cannot finalize',async()=>{
+ for (const proof of [
+  {scope:A,status:'confirmed',complete:true,empty:true},
+  {scope:A,status:'confirmed',complete:true,empty:true,endOfListConfirmed:true},
+  {scope:A,status:'confirmed',complete:true,empty:true,endOfListConfirmed:true,verifiedCount:1},
+  {scope:A,status:'confirmed',complete:true,empty:true,endOfListConfirmed:false,verifiedCount:0}
+ ]) {
+  const f=fixtures();f.db.seed(A,[]);
+  f.store.tombstones[A]={status:'deleting',stage:'purged',collectionKey:A,durable:true};
+  f.handlers.verifyEmpty=async()=>proof;
+  const r=await deleteCollectionSafely({...f.handlers,resume:true});
+  assert.equal(r.reason,'post-purge-empty-proof-unavailable');assert.equal(f.purges(),0);
+  assert.ok(f.store.registry.includes(A));
+ }
+});
+
+test('C01 finish: record inventory requires each record to affirm its qualified owner',async()=>{
+ const result=await collectScopedInventory({key:A,contractVerified:true,
+  listPage:async()=>({scope:A,items:[{recordId:'same'}],endOfList:true})});
+ assert.equal(result.complete,false);assert.ok(result.errors.includes('cross-scope-record'));
 });

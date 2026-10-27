@@ -1,0 +1,33 @@
+{
+  "referenceMatched": true,
+  "deployedVersionVerified": false,
+  "safeForLiveDeletion": false,
+  "capabilityPromotion": false,
+  "mismatches": [],
+  "observations": {
+    "standard": {
+      "status": "unverified",
+      "reason": "route returns generic success and does not prove durability, tenant scope or readback; host settings lack durable ACK"
+    },
+    "lancedb": {
+      "status": "unverified",
+      "reason": "route returns generic success and independent durable purge/checkpoint proof is unavailable"
+    },
+    "qdrant": {
+      "status": "unsafe",
+      "reason": "plugin Qdrant purge handler calls purgeAll, ignoring tenant filters and potentially deleting shared physical collection"
+    },
+    "milvus": {
+      "status": "unsafe",
+      "reason": "Milvus purge can drop vecthare_main when filters are absent and catches errors without rethrowing"
+    }
+  },
+  "blockers": [
+    "deployed server fingerprint verified",
+    "tenant-safe purge implementation",
+    "fail-propagating purge acknowledgement",
+    "independently verified scoped pagination and count",
+    "durably acknowledged host tombstone persist",
+    "live disposable integration tests"
+  ]
+}

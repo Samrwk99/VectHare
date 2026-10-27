@@ -25,8 +25,9 @@ export async function collectScopedInventory({key,listPage,contractVerified=fals
         for (const item of result.items) {
             if (!item || !['string','number'].includes(typeof item.recordId) || String(item.recordId).length === 0)
                 return incomplete(key,'missing-record-identity',[...records]);
-            if (item.collectionKey !== undefined && item.collectionKey !== key)
+            if (item.collectionKey !== key)
                 return incomplete(key,'cross-scope-record',[...records]);
+            if(records.has(String(item.recordId))) return incomplete(key,'duplicate-record-identity',[...records]);
             records.add(String(item.recordId));
         }
         if (result.endOfList === true) {
@@ -92,6 +93,7 @@ export async function collectCollectionInventory({backend,source,listPage,contra
         for(const key of response.collections){
             const parsed=parseCollectionKey(key);
             if(!parsed || parsed.backend!==backend || parsed.source!==source) return partial('foreign-collection-in-page');
+            if(collections.has(key)) return partial('duplicate-collection-identity');
             collections.add(key);
         }
         if(response.endOfList===true){
@@ -107,8 +109,10 @@ export async function collectCollectionInventory({backend,source,listPage,contra
 
 /** C01 #158: global legacy hash metadata is removable only when ALL owners
  * have a complete authoritative record-ID inventory and none contains it. */
-export function mayRemoveLegacyHashMetadata({hash,registry=[],inventoryByCollection={}}={}) {
-    if (!Array.isArray(registry) || hash===null || hash===undefined || typeof inventoryByCollection!=='object')
+export function mayRemoveLegacyHashMetadata({hash,registry=[],inventoryByCollection={},registryCoverageVerified=false}={}) {
+    // A registry is not an exhaustive list of all backend owners. No hash-global
+    // metadata can be removed until the registry's coverage was separately proven.
+    if (registryCoverageVerified!==true || !Array.isArray(registry) || registry.length===0 || hash===null || hash===undefined || typeof inventoryByCollection!=='object')
         return {allowed:false,reason:'ownership-unknown'};
     for(const key of registry){
         if(!parseCollectionKey(key)) return {allowed:false,reason:'legacy-registry-owner-unknown'};
