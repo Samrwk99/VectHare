@@ -193,15 +193,16 @@ export async function testConditionalActivation() {
  */
 export async function testActivationTriggers() {
     try {
-        const { getChunkMetadata } = await import('../core/collection-metadata.js');
-
-        // This test would check activation triggers on chunks
-        // For now, just verify the metadata system works
-
+        const { checkTriggers } = await import('../core/collection-metadata.js');
+        const context = { recentMessages: ['The wizard found a hidden door', 'Then she opened it'] };
+        const positive = checkTriggers(['wizard'], context, { scanDepth: 2, matchMode: 'any' });
+        const negative = checkTriggers(['dragon'], context, { scanDepth: 2, matchMode: 'any' });
+        const bounded = checkTriggers(['wizard'], context, { scanDepth: 1, matchMode: 'any' });
+        const passed = positive === true && negative === false && bounded === false;
         return {
             name: '[PROD] Activation Triggers',
-            status: 'pass',
-            message: 'Activation triggers system available',
+            status: passed ? 'pass' : 'fail',
+            message: passed ? 'Positive, negative, and scan-depth trigger cases passed' : 'Activation trigger matcher failed its fixture checks',
             category: 'production'
         };
     } catch (error) {

@@ -1,4 +1,5 @@
 import { completeSavedChunkMetadata } from '../utils/chunk-record-metadata.js';
+import { recordCollectionUsage } from './collection-metadata.js';
 /**
  * ============================================================================
  * CORE VECTOR API CLIENT
@@ -992,6 +993,7 @@ export async function queryCollection(collectionId, searchText, topK, settings) 
             const result = await hybridSearch(collectionId, searchText, topK, settings, { queryVector });
             const queryLatency = Date.now() - queryStart;
             recordQuery(settings?.vector_backend || 'standard', queryLatency);
+            recordCollectionUsage(collectionId);
             return result;
         } catch (error) {
             // VEC-18: Record query error
@@ -1010,6 +1012,7 @@ export async function queryCollection(collectionId, searchText, topK, settings) 
         rawResults = await backend.queryCollection(collectionId, searchText, overfetchAmount, settings, queryVector);
         const queryLatency = Date.now() - queryStart;
         recordQuery(settings?.vector_backend || 'standard', queryLatency);
+        recordCollectionUsage(collectionId);
     } catch (error) {
         // VEC-18: Record query error
         recordError(settings?.vector_backend || 'standard', error);
@@ -1132,6 +1135,7 @@ export async function queryMultipleCollections(collectionIds, searchText, topK, 
             try {
                 const queryStart = Date.now();
                 processedResults[collectionId] = await hybridSearch(collectionId, searchText, topK, settings, { queryVector });
+                recordCollectionUsage(collectionId);
                 const queryLatency = Date.now() - queryStart;
                 recordQuery(settings?.vector_backend || 'standard', queryLatency);
             } catch (error) {
@@ -1175,6 +1179,7 @@ export async function queryMultipleCollections(collectionIds, searchText, topK, 
             continue;
         }
 
+        recordCollectionUsage(collectionId);
         // Convert to format expected by scoring functions
         const resultsForBoost = collectionResults.metadata.map((meta, idx) => ({
             hash: meta.hash || collectionResults.hashes[idx],

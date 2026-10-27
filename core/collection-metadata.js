@@ -948,7 +948,15 @@ export function recordCollectionUsage(collectionId) {
 
     ensureCollectionsObject();
 
-    const existing = extension_settings.vecthare.collections[collectionId];
+    const collections = extension_settings.vecthare.collections;
+    // Never guess when multiple qualified entries share a bare identifier.
+    const bareId = parseRegistryKey(collectionId).collectionId || collectionId;
+    const candidates = Object.keys(collections).filter(key =>
+        (parseRegistryKey(key).collectionId || key) === bareId
+    );
+    const resolvedKey = Object.hasOwn(collections, collectionId) ? collectionId
+        : candidates.length === 1 ? candidates[0] : null;
+    const existing = resolvedKey ? collections[resolvedKey] : null;
     if (existing) {
         existing.lastUsed = Date.now();
         existing.queryCount = (existing.queryCount || 0) + 1;
@@ -967,7 +975,7 @@ export function recordCollectionUsage(collectionId) {
  * @param {object} options Matching options
  * @returns {boolean} Whether triggers matched
  */
-function checkTriggers(triggers, context, options = {}) {
+export function checkTriggers(triggers, context, options = {}) {
     if (!triggers || triggers.length === 0) {
         return false;
     }

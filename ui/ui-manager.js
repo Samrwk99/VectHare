@@ -3311,9 +3311,9 @@ function copyDiagnosticsReport(results) {
     const source = settings.source || 'none';
     const modelField = getModelField(source);
     const model = modelField ? (settings[modelField] || 'not set') : 'n/a (provider handles it)';
-    const qdrantMode = settings.qdrant_mode || 'local';
+    const qdrantMode = settings.qdrant_use_cloud ? 'cloud' : 'local';
     const qdrantUrl = backend === 'qdrant'
-        ? (qdrantMode === 'cloud' ? settings.qdrant_cloud_url : settings.qdrant_url)
+        ? settings.qdrant_url
         : null;
 
     // Build provider URL info

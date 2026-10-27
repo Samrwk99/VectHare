@@ -67,10 +67,12 @@ import {
     fixDuplicateHashes
 } from './production-tests.js';
 
-import { testConditionalActivation } from './activation-tests.js';
+import { testConditionalActivation, testActivationTriggers } from './activation-tests.js';
 
 import { runVisualizerTests } from './visualizer-tests.js';
 import { cleanupTestCollections } from '../core/collection-loader.js';
+import { extension_settings } from '../../../../extensions.js';
+import { VECTOR_LIST_LIMIT } from '../core/constants.js';
 
 /**
  * Runs all diagnostic checks
@@ -241,6 +243,7 @@ export async function runDiagnostics(settings, includeProductionTests = false) {
         // Conditional activation returns an array of individual test results
         const activationResults = await testConditionalActivation();
         categories.production.push(...activationResults);
+        categories.production.push(await testActivationTriggers());
     }
 
     // Flatten all checks
@@ -353,8 +356,7 @@ export async function executeFixAction(check) {
         case 'removeDuplicateHashes':
             if (check.data?.duplicates && check.data?.collectionId) {
                 // Need settings for the fix function - get from VectHare
-                const { getVectHareSettings } = await import('../ui/ui-settings.js');
-                const settings = getVectHareSettings();
+                const settings = extension_settings.vecthare;
                 return await fixDuplicateHashes(check.data.duplicates, check.data.collectionId, settings);
             }
             return { success: false, message: 'No duplicate data found in check' };
@@ -381,15 +383,14 @@ export async function executeFixAction(check) {
  */
 async function fixOrphanedGroupMembers() {
     try {
-        const { getCollectionMeta, saveCollectionMeta } = await import('../core/collection-metadata.js');
+        const { getCollectionMeta, setCollectionMeta } = await import('../core/collection-metadata.js');
         const { getCollectionRegistry } = await import('../core/collection-loader.js');
         const { getSavedHashes } = await import('../core/core-vector-api.js');
-        const { getVectHareSettings } = await import('../ui/ui-settings.js');
-
-        const settings = getVectHareSettings();
+        const settings = extension_settings.vecthare;
         const registry = getCollectionRegistry();
         let totalCleaned = 0;
         let collectionsFixed = 0;
+        let collectionsSkipped = 0;
 
         for (const registryKey of registry) {
             let collectionId = registryKey;
@@ -405,16 +406,20 @@ async function fixOrphanedGroupMembers() {
             // Get actual chunk hashes
             let existingHashes;
             try {
-                existingHashes = new Set((await getSavedHashes(collectionId, settings)).map(h => String(h)));
+                const hashes = await getSavedHashes(collectionId, settings);
+                if (!Array.isArray(hashes) || hashes.length >= VECTOR_LIST_LIMIT) throw new Error('Incomplete or capped collection inventory');
+                existingHashes = new Set(hashes.map(h => String(h)));
             } catch {
+                collectionsSkipped++;
                 continue;
             }
 
             let collectionModified = false;
             for (const group of groups) {
                 const originalLength = group.members?.length || 0;
-                group.members = (group.members || []).filter(hash => existingHashes.has(String(hash)));
-                const removed = originalLength - group.members.length;
+                const retained = (group.members || []).filter(hash => existingHashes.has(String(hash)));
+                const removed = originalLength - retained.length;
+                if (removed > 0) group.members = retained;
                 if (removed > 0) {
                     totalCleaned += removed;
                     collectionModified = true;
@@ -422,18 +427,20 @@ async function fixOrphanedGroupMembers() {
             }
 
             if (collectionModified) {
-                saveCollectionMeta(collectionId, meta);
+                setCollectionMeta(collectionId, { groups });
                 collectionsFixed++;
             }
         }
 
-        if (totalCleaned > 0) {
+        if (collectionsSkipped > 0) {
             return {
-                success: true,
-                message: `Removed ${totalCleaned} orphaned member(s) from ${collectionsFixed} collection(s)`
+                success: false,
+                message: `Checked available collections; skipped ${collectionsSkipped} collection(s) with unavailable inventories. ${totalCleaned} member(s) cleaned from ${collectionsFixed} collection(s). Recheck before further cleanup.`
             };
         }
-
+        if (totalCleaned > 0) {
+            return { success: true, message: `Removed ${totalCleaned} orphaned member(s) from ${collectionsFixed} collection(s)` };
+        }
         return { success: true, message: 'No orphaned members found to clean' };
     } catch (error) {
         return { success: false, message: `Fix failed: ${error.message}` };

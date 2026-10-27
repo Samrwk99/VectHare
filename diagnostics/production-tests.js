@@ -10,7 +10,7 @@
  */
 
 import { getCurrentChatId, getRequestHeaders } from '../../../../../script.js';
-import { getSavedHashes, purgeVectorIndex } from '../core/core-vector-api.js';
+import { getSavedHashes, purgeVectorIndex, queryCollection } from '../core/core-vector-api.js';
 import { getChatCollectionId } from '../core/chat-vectorization.js';
 import { getModelField, getProviderConfig } from '../core/providers.js';
 import { unregisterCollection, markDiagnosticTestCollection } from '../core/collection-loader.js';
@@ -23,16 +23,15 @@ import { applyKeywordBoost, extractTextKeywords, extractLorebookKeywords } from 
  * @param {object} settings - VectHare settings
  */
 async function cleanupTestCollection(collectionId, settings) {
-    try {
-        // Purge all vectors from the backend
-        await purgeVectorIndex(collectionId, settings);
-    } catch (e) {
-        // Ignore purge errors - collection might already be empty
+    // Never silently unregister a test collection when its vectors may remain.
+    const purged = await purgeVectorIndex(collectionId, settings);
+    if (purged !== true) {
+        return { success: false, reason: 'Backend did not confirm test-vector purge; cleanup marker preserved' };
     }
-    // Always unregister from registry to prevent ghost entries
     const registryKey = `${settings.source}:${collectionId}`;
     unregisterCollection(registryKey);
-    unregisterCollection(collectionId); // Also try without source prefix
+    unregisterCollection(collectionId);
+    return { success: true };
 }
 
 /**
@@ -163,8 +162,10 @@ export async function testEmbeddingGeneration(settings) {
  * Creates a temporary test collection that is cleaned up after the test.
  */
 export async function testVectorStorage(settings) {
+    let testCollectionId = null;
+    let outcome;
     try {
-        const testCollectionId = `vh:test:storage_${Date.now()}`;
+        testCollectionId = `vh:test:storage_${Date.now()}`;
         markDiagnosticTestCollection(testCollectionId);
         const testHash = String(Math.floor(Math.random() * 1000000));
         const testText = 'VectHare storage test message';
@@ -191,31 +192,33 @@ export async function testVectorStorage(settings) {
 
         if (!insertResponse.ok) {
             const errorText = await insertResponse.text();
-            return {
-                name: '[PROD] Vector Storage',
-                status: 'fail',
-                message: `Failed to store vector: ${insertResponse.status} - ${errorText}`,
-                category: 'production'
-            };
+            throw new Error(`Failed to store vector: ${insertResponse.status} - ${errorText}`);
         }
 
-        // Cleanup - full collection cleanup (purge + unregister from registry)
-        await cleanupTestCollection(testCollectionId, settings);
-
-        return {
+        outcome = {
             name: '[PROD] Vector Storage',
             status: 'pass',
-            message: 'Successfully stored and cleaned up test vector',
+            message: 'Successfully stored test vector',
             category: 'production'
         };
     } catch (error) {
-        return {
-            name: '[PROD] Vector Storage',
-            status: 'fail',
-            message: `Storage test error: ${error.message}`,
-            category: 'production'
-        };
+        outcome = { name: '[PROD] Vector Storage', status: 'fail', message: `Storage test error: ${error.message}`, category: 'production' };
+    } finally {
+        if (testCollectionId) {
+            try {
+                const cleanup = await cleanupTestCollection(testCollectionId, settings);
+                if (!cleanup.success) {
+                    outcome = { name: '[PROD] Vector Storage', status: 'fail', category: 'production',
+                        message: `${outcome?.message || 'Storage test ended'}. Cleanup failed: ${cleanup.reason}` };
+                } else if (outcome?.status === 'pass') {
+                    outcome.message = 'Successfully stored and cleaned up test vector';
+                }
+            } catch (error) {
+                outcome = { name: '[PROD] Vector Storage', status: 'fail', category: 'production', message: `Cleanup error: ${error.message}` };
+            }
+        }
     }
+    return outcome;
 }
 
 /**
@@ -253,33 +256,14 @@ export async function testVectorRetrieval(settings) {
             };
         }
 
-        const response = await fetch('/api/vector/query', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-            body: JSON.stringify({
-                collectionId: collectionId,
-                searchText: 'test query',
-                topK: 3,
-                source: settings.source,
-                ...getProviderBody(settings)
-            })
-        });
-
-        if (!response.ok) {
-            return {
-                name: '[PROD] Vector Retrieval',
-                status: 'fail',
-                message: `Query failed: ${response.status}`,
-                category: 'production'
-            };
+        const result = await queryCollection(collectionId, 'test query', 3, settings);
+        if (!result || !Array.isArray(result.hashes) || !Array.isArray(result.metadata)) {
+            throw new Error('Selected backend returned an invalid retrieval result');
         }
-
-        const data = await response.json();
-
         return {
             name: '[PROD] Vector Retrieval',
             status: 'pass',
-            message: `Successfully retrieved ${data.hashes?.length || 0} results`,
+            message: `Queried selected ${settings.vector_backend || 'standard'} backend; retrieved ${result.hashes.length} result(s)`,
             category: 'production'
         };
     } catch (error) {
@@ -302,7 +286,7 @@ export async function testVectorDimensions(settings) {
     if (!getCurrentChatId()) {
         return {
             name: '[PROD] Vector Dimensions',
-            status: 'pass',
+            status: 'warning',
             message: 'No chat selected - cannot check dimensions',
             category: 'production'
         };
@@ -312,7 +296,7 @@ export async function testVectorDimensions(settings) {
     if (!collectionId) {
         return {
             name: '[PROD] Vector Dimensions',
-            status: 'pass',
+            status: 'warning',
             message: 'Could not get collection ID',
             category: 'production'
         };
@@ -335,7 +319,7 @@ export async function testVectorDimensions(settings) {
             // Stats endpoint not available or error - skip check
             return {
                 name: '[PROD] Vector Dimensions',
-                status: 'pass',
+                status: 'warning',
                 message: 'Could not fetch collection stats',
                 category: 'production'
             };
@@ -343,12 +327,13 @@ export async function testVectorDimensions(settings) {
 
         const statsData = await statsResponse.json();
         const storedDimensions = statsData.stats?.embeddingDimensions;
+        const storedCount = statsData.stats?.count ?? statsData.stats?.totalChunks ?? statsData.stats?.total ?? null;
 
-        if (!storedDimensions || storedDimensions === 0) {
+        if (!Number.isFinite(Number(storedDimensions)) || Number(storedDimensions) <= 0) {
             return {
                 name: '[PROD] Vector Dimensions',
-                status: 'pass',
-                message: 'No vectors stored yet - dimensions will be set on first vectorization',
+                status: 'warning',
+                message: storedCount === 0 ? 'Collection is empty; dimensions cannot be compared' : 'Stored vector dimensions are unavailable; comparison not performed',
                 category: 'production'
             };
         }
@@ -428,10 +413,9 @@ export async function testVectorDimensions(settings) {
 export async function testTemporalDecay(settings) {
     try {
         const { applyTemporalDecay, getDefaultDecaySettings } = await import('../core/temporal-decay.js');
-        const { getDefaultDecayForType } = await import('../core/collection-metadata.js');
 
-        // Test with chat defaults (enabled by default)
-        const chatDecaySettings = getDefaultDecayForType('chat');
+        // Exercise decay math independently of the user's global enabled/disabled preference.
+        const chatDecaySettings = { ...getDefaultDecaySettings(), enabled: true, type: 'decay' };
 
         const testScore = 0.85;
         const testAge = 50;
@@ -760,13 +744,17 @@ export async function fixDuplicateHashes(duplicates, collectionId, settings) {
  * Test: Does temporally blind chunk immunity work?
  */
 export async function testTemporallyBlindChunks(settings) {
+    let temporaryHash = null;
+    let originalMetadata = null;
     try {
         const { applyDecayToResults } = await import('../core/temporal-decay.js');
-        const { setChunkTemporallyBlind, isChunkTemporallyBlind } = await import('../core/collection-metadata.js');
+        const { setChunkTemporallyBlind, isChunkTemporallyBlind, getChunkMetadata } = await import('../core/collection-metadata.js');
         const { getDefaultDecayForType } = await import('../core/collection-metadata.js');
 
-        const testHash = `__test_blind_${Date.now()}__`;
-        const chatDecaySettings = getDefaultDecayForType('chat');
+        const testHash = `__test_blind_${Date.now()}_${Math.random().toString(36).slice(2)}__`;
+        temporaryHash = testHash;
+        originalMetadata = getChunkMetadata(testHash);
+        const chatDecaySettings = { ...getDefaultDecayForType('chat'), enabled: true, type: 'decay' };
 
         // Create test chunks
         const testChunks = [
@@ -795,8 +783,6 @@ export async function testTemporallyBlindChunks(settings) {
         const blindChunk = decayedChunks.find(c => c.hash === testHash);
         const normalChunk = decayedChunks.find(c => c.hash === 'normal_chunk');
 
-        // Cleanup
-        setChunkTemporallyBlind(testHash, false);
 
         // Blind chunk should keep original score
         if (blindChunk.score !== 0.9 || !blindChunk.temporallyBlind) {
@@ -831,6 +817,12 @@ export async function testTemporallyBlindChunks(settings) {
             message: `Test error: ${error.message}`,
             category: 'production'
         };
+    } finally {
+        if (temporaryHash) {
+            const { deleteChunkMetadata, saveChunkMetadata } = await import('../core/collection-metadata.js');
+            if (originalMetadata) saveChunkMetadata(temporaryHash, originalMetadata);
+            else deleteChunkMetadata(temporaryHash);
+        }
     }
 }
 
@@ -853,8 +845,9 @@ export async function testPluginEmbeddingGeneration(settings) {
         };
     }
 
+    let testCollectionId = null;
     try {
-        const testCollectionId = `vh:test:embed_${Date.now()}`;
+        testCollectionId = `vh:test:embed_${Date.now()}`;
         markDiagnosticTestCollection(testCollectionId);
         const testHash = String(Math.floor(Math.random() * 1000000));
         const testText = 'Plugin embedding generation test';
@@ -911,8 +904,6 @@ export async function testPluginEmbeddingGeneration(settings) {
             querySuccess = results.results?.length > 0 || results.hashes?.length > 0;
         }
 
-        // Cleanup test collection
-        await cleanupTestCollection(testCollectionId, settings);
 
         if (!querySuccess) {
             return {
@@ -930,12 +921,16 @@ export async function testPluginEmbeddingGeneration(settings) {
             category: 'production'
         };
     } catch (error) {
-        return {
-            name: '[PROD] Plugin Embedding Gen',
-            status: 'fail',
-            message: `Test error: ${error.message}`,
-            category: 'production'
-        };
+        return { name: '[PROD] Plugin Embedding Gen', status: 'fail', message: `Test error: ${error.message}`, category: 'production' };
+    } finally {
+        if (testCollectionId) {
+            const cleanup = await cleanupTestCollection(testCollectionId, settings).catch(error => ({ success: false, reason: error.message }));
+            if (!cleanup.success) {
+                // Preserve the marker for later recovery and record a visible warning.
+                console.warn(`[VectHare] Diagnostic plugin test cleanup failed for ${testCollectionId}: ${cleanup.reason}`);
+                return { name: '[PROD] Plugin Embedding Gen', status: 'fail', category: 'production', message: `Test-vector cleanup failed: ${cleanup.reason}` };
+            }
+        }
     }
 }
 
@@ -1307,41 +1302,21 @@ export async function testKeywordBoosting(settings) {
             };
         }
 
-        // Verify boost was applied correctly
-        // Expected boost: 1 + (2.0 - 1) + (1.5 - 1) = 2.5x
-        const expectedBoost = 2.5;
+        // Current boosting has a per-keyword contribution cap, diminishing
+        // returns and confidence scaling. Check invariants, not legacy 2.5x math.
         const actualBoost = doc1Boosted.keywordBoost;
-
-        if (Math.abs(actualBoost - expectedBoost) > 0.01) {
-            return {
-                name: '[PROD] Keyword Boosting',
-                status: 'fail',
-                message: `Expected boost ${expectedBoost}x, got ${actualBoost}x`,
-                category: 'production'
-            };
+        if (!Number.isFinite(actualBoost) || actualBoost <= 1 || actualBoost > 2.0) {
+            return { name: '[PROD] Keyword Boosting', status: 'fail', message: `Invalid bounded boost: ${actualBoost}`, category: 'production' };
         }
-
-        // Verify original score is preserved
-        if (doc1Boosted.originalScore !== 0.70) {
-            return {
-                name: '[PROD] Keyword Boosting',
-                status: 'fail',
-                message: 'Original score not preserved',
-                category: 'production'
-            };
+        if (doc1Boosted.originalScore !== 0.70 || !Number.isFinite(doc1Boosted.score)) {
+            return { name: '[PROD] Keyword Boosting', status: 'fail', message: 'Original score lost or boosted score invalid', category: 'production' };
         }
-
-        // Verify new score is correct (0.70 * 2.5 = 1.75, but should be capped or not)
-        const expectedNewScore = 0.70 * 2.5;
-        if (Math.abs(doc1Boosted.score - expectedNewScore) > 0.01) {
-            return {
-                name: '[PROD] Keyword Boosting',
-                status: 'fail',
-                message: `Expected boosted score ${expectedNewScore.toFixed(3)}, got ${doc1Boosted.score.toFixed(3)}`,
-                category: 'production'
-            };
+        if (doc1Boosted.score <= doc1Boosted.originalScore || doc1Boosted.score > 1) {
+            return { name: '[PROD] Keyword Boosting', status: 'fail', message: 'Boost must improve score without exceeding 1', category: 'production' };
         }
-
+        if (Math.abs(doc1Boosted.score - Math.min(1, doc1Boosted.originalScore * actualBoost)) > 1e-8) {
+            return { name: '[PROD] Keyword Boosting', status: 'fail', message: 'Boosted score does not reflect the calculated boost and score cap', category: 'production' };
+        }
         // Verify matched keywords are tracked
         if (!doc1Boosted.matchedKeywords || doc1Boosted.matchedKeywords.length !== 2) {
             return {
@@ -1353,12 +1328,12 @@ export async function testKeywordBoosting(settings) {
         }
 
         // Verify results are re-sorted by boosted score
-        // After boosting, doc1 (0.70 * 2.5 = 1.75) should rank higher than doc2 (0.85)
-        if (boosted[0].hash !== 'doc1') {
+        // Ranking should remain in descending actual boosted score.
+        if (boosted.some((item, index) => index > 0 && boosted[index - 1].score < item.score)) {
             return {
                 name: '[PROD] Keyword Boosting',
                 status: 'fail',
-                message: `Expected doc1 to rank first after boosting, got ${boosted[0].hash}`,
+                message: 'Results are not sorted by their actual boosted scores',
                 category: 'production'
             };
         }

@@ -15,6 +15,7 @@ import { getChatCollectionId, getChatUUID, parseCollectionId } from '../core/cha
 import { VALID_EMOTIONS, VALID_GENERATION_TYPES, validateConditionRule } from '../core/conditional-activation.js';
 import { getTemporallyBlindCount, getTemporallyBlindChunks, isChunkTemporallyBlind, isCollectionEnabled } from '../core/collection-metadata.js';
 import { getCollectionRegistry } from '../core/collection-loader.js';
+import { VECTOR_LIST_LIMIT } from '../core/constants.js';
 
 /**
  * Check: RAG Query Status
@@ -604,18 +605,13 @@ export async function checkConditionRuleValidity(settings) {
 
         // Get chunks with conditions
         const hashesResult = await getSavedHashes(collectionId, settings, true);
-        if (!hashesResult || !Array.isArray(hashesResult)) {
-            return {
-                name: 'Condition Rules',
-                status: 'pass',
-                message: 'No chunks with conditions',
-                category: 'configuration'
-            };
+        if (!hashesResult || !Array.isArray(hashesResult.hashes) || !Array.isArray(hashesResult.metadata) || hashesResult.hashes.length !== hashesResult.metadata.length) {
+            return { name: 'Condition Rules', status: 'warning', message: 'Chunk metadata unavailable; cannot validate conditions', category: 'configuration' };
         }
 
-        const chunksWithConditions = hashesResult.filter(item =>
-            item.metadata?.conditions && Object.keys(item.metadata.conditions).length > 0
-        );
+        const chunksWithConditions = hashesResult.metadata.map((metadata, index) => ({
+            hash: hashesResult.hashes[index], metadata
+        })).filter(item => Array.isArray(item.metadata?.conditions?.rules) && item.metadata.conditions.rules.length > 0);
 
         if (chunksWithConditions.length === 0) {
             return {
@@ -630,12 +626,12 @@ export async function checkConditionRuleValidity(settings) {
         const invalidConditions = [];
         for (const chunk of chunksWithConditions) {
             const conditions = chunk.metadata.conditions;
-            for (const [ruleType, rule] of Object.entries(conditions)) {
-                const validation = validateConditionRule(ruleType, rule);
+            for (const rule of conditions.rules) {
+                const validation = validateConditionRule(rule);
                 if (!validation.valid) {
                     invalidConditions.push({
                         hash: chunk.hash,
-                        rule: ruleType,
+                        rule: rule?.type || '(missing)',
                         error: validation.errors?.join(', ') || 'Invalid rule'
                     });
                 }
@@ -865,6 +861,7 @@ export async function checkChunkGroupMemberIntegrity(settings) {
 
         let totalMembers = 0;
         let orphanedMembers = 0;
+        let unverifiedCollections = 0;
         const orphanedDetails = [];
 
         for (const registryKey of registry) {
@@ -881,9 +878,11 @@ export async function checkChunkGroupMemberIntegrity(settings) {
             // Get actual chunk hashes in this collection
             let existingHashes;
             try {
-                existingHashes = new Set((await getSavedHashes(collectionId, settings)).map(h => String(h)));
+                const hashes = await getSavedHashes(collectionId, settings);
+                if (!Array.isArray(hashes) || hashes.length >= VECTOR_LIST_LIMIT) throw new Error('Incomplete or capped inventory');
+                existingHashes = new Set(hashes.map(h => String(h)));
             } catch {
-                // Collection may not exist on backend yet
+                unverifiedCollections++;
                 continue;
             }
 
@@ -901,6 +900,14 @@ export async function checkChunkGroupMemberIntegrity(settings) {
                     }
                 }
             }
+        }
+
+        if (unverifiedCollections > 0) {
+            return {
+                name: 'Group Member Integrity', status: 'warning', category: 'configuration',
+                message: `Cannot verify ${unverifiedCollections} collection(s); ${orphanedMembers} possibly orphaned of ${totalMembers} verified members. Cleanup is disabled until all inventories are available.`,
+                data: { orphanedDetails, orphanedCount: orphanedMembers, unverifiedCollections }
+            };
         }
 
         if (totalMembers === 0) {
