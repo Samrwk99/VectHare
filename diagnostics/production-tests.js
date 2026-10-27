@@ -11,6 +11,7 @@
 
 import { getCurrentChatId, getRequestHeaders } from '../../../../../script.js';
 import { getSavedHashes, purgeVectorIndex, queryCollection } from '../core/core-vector-api.js';
+import {hasVerifiedCapability} from '../utils/backend-contracts.js';
 import { getChatCollectionId } from '../core/chat-vectorization.js';
 import { getModelField, getProviderConfig } from '../core/providers.js';
 import { unregisterCollection, markDiagnosticTestCollection } from '../core/collection-loader.js';
@@ -23,7 +24,10 @@ import { applyKeywordBoost, extractTextKeywords, extractLorebookKeywords } from 
  * @param {object} settings - VectHare settings
  */
 async function cleanupTestCollection(collectionId, settings) {
-    // Never silently unregister a test collection when its vectors may remain.
+    // Never purge a user collection from diagnostics; the test suite may only
+    // act on reserved, generated identifiers. Metadata/registry stay on failure.
+    if (typeof collectionId!=='string' || !/^vh:test:(?:visualizer|storage|embed)_\d{13}$/.test(collectionId))
+        return {success:false,reason:'destructive diagnostics restricted to generated test IDs'};
     const purged = await purgeVectorIndex(collectionId, settings);
     if (purged !== true) {
         return { success: false, reason: 'Backend did not confirm test-vector purge; cleanup marker preserved' };
@@ -162,6 +166,12 @@ export async function testEmbeddingGeneration(settings) {
  * Creates a temporary test collection that is cleaned up after the test.
  */
 export async function testVectorStorage(settings) {
+    // Never create an uncleanable diagnostic vector. The old test inserted a
+    // record even when Phase 0's safe purge gate was necessarily disabled.
+    const backend=settings?.vector_backend || 'standard';
+    if (!['purgeAcknowledgement','tenantFilter','completeInventory','count'].every(cap=>hasVerifiedCapability(backend,cap)))
+        return {name:'[PROD] Vector Storage',status:'warning',category:'production',
+            message:'Storage test skipped: safe scoped cleanup and purge verification are not available (no test vectors created)'};
     let testCollectionId = null;
     let outcome;
     try {
@@ -472,6 +482,11 @@ export async function testTemporalDecay(settings) {
  * Compares chunk hashes we have locally vs what's stored on the server
  */
 export async function testChunkServerSync(settings, collectionId) {
+    // Global hash metadata may belong to several collections. Until scoped
+    // record IDs and complete inventory are proven, no "orphan" finding is valid.
+    if (!['tenantFilter','completeInventory','getByIds'].every(cap=>hasVerifiedCapability(settings?.vector_backend||'standard',cap)))
+        return {name:'[PROD] Chunk-Server Sync',status:'warning',category:'production',fixable:false,
+            message:'Chunk ownership cannot be verified using global hashes; cleanup disabled'};
     if (!collectionId) {
         if (!getCurrentChatId()) {
             return {
@@ -526,10 +541,10 @@ export async function testChunkServerSync(settings, collectionId) {
             return {
                 name: '[PROD] Chunk-Server Sync',
                 status: 'warning',
-                message: `${onlyLocal.length} orphaned local entries (vectors deleted from server)`,
+                message: `${onlyLocal.length} local hash records absent from this collection; ownership in other collections unverified (no cleanup)`,
                 category: 'production',
-                fixable: true,
-                fixAction: 'cleanOrphanedMetadata',
+                fixable: false,
+                fixAction: null,
                 data: { orphanedHashes: onlyLocal, collectionId }
             };
         }
@@ -555,25 +570,11 @@ export async function testChunkServerSync(settings, collectionId) {
  * Fix: Clean orphaned local metadata entries
  */
 export async function fixOrphanedMetadata(orphanedHashes) {
-    try {
-        const { deleteChunkMetadata } = await import('../core/collection-metadata.js');
-
-        let cleaned = 0;
-        for (const hash of orphanedHashes) {
-            deleteChunkMetadata(hash);
-            cleaned++;
-        }
-
-        return {
-            success: true,
-            message: `Cleaned ${cleaned} orphaned metadata entries`
-        };
-    } catch (error) {
-        return {
-            success: false,
-            message: `Failed to clean: ${error.message}`
-        };
-    }
+    // C01 #158/#220: hash-only legacy records can be referenced by unrelated
+    // collections. Until a complete authoritative inventory of ALL owners and
+    // scoped record IDs is available, no safe deletion can be proven.
+    return {success:false,requiresReconciliation:true,
+        message:'Orphan cleanup blocked: legacy hash metadata has no verified collection ownership; records preserved'};
 }
 
 /**

@@ -27,7 +27,8 @@
     "test:i16": "node --experimental-vm-modules --test tests/i16-diagnostics.node.test.mjs",
     "test:i17": "node --experimental-vm-modules --test tests/i17-emotion-cache.node.test.mjs",
     "test:i18": "node --experimental-vm-modules --test tests/i18-ui-lifecycle.node.test.mjs",
-    "test:p0": "node --experimental-vm-modules --test tests/p0-*.node.test.mjs"
+    "test:p0": "node --experimental-vm-modules --test tests/p0-*.node.test.mjs",
+    "test:c01": "node --experimental-vm-modules --test tests/c01-*.node.test.mjs"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^2.1.0",

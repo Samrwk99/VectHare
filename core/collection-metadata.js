@@ -12,6 +12,8 @@
 import { extension_settings } from '../../../../extensions.js';
 import { saveSettingsDebounced } from '../../../../../script.js';
 import { parseRegistryKey } from './collection-ids.js';
+import { planOrphanCollectionMetadataRemoval } from '../utils/c01-inventory.js';
+import { parseCollectionKey } from '../utils/collection-keys.js';
 
 // ============================================================================
 // COLLECTION METADATA CRUD
@@ -246,15 +248,13 @@ function resolveStoredCollectionKey(collectionId) {
         return collectionId;
     }
 
+    if (parseCollectionKey(collectionId)) return null; // no cross-backend fallback
     const targetBareId = parseRegistryKey(collectionId).collectionId || collectionId;
-    for (const key of Object.keys(collections)) {
-        const bareId = parseRegistryKey(key).collectionId || key;
-        if (bareId === targetBareId) {
-            return key;
-        }
-    }
-
-    return null;
+    const matches = Object.keys(collections).filter(key =>
+        (parseRegistryKey(key).collectionId || key) === targetBareId);
+    // Bare/legacy aliases cannot pick an arbitrary winner when multiple owners
+    // share the same collectionId.
+    return matches.length === 1 ? matches[0] : null;
 }
 
 /**
@@ -315,7 +315,14 @@ export function setCollectionMeta(collectionId, data) {
 export function deleteCollectionMeta(collectionId) {
     ensureCollectionsObject();
 
-    const key = resolveStoredCollectionKey(collectionId);
+    // Destructive collection deletion accepts only the exact qualified owner.
+    // Legacy bare IDs are readable for compatibility but never deletion proof.
+    if (!parseCollectionKey(collectionId)) {
+        console.warn('VectHare: metadata deletion blocked (unqualified collection key)');
+        return;
+    }
+    const key = Object.prototype.hasOwnProperty.call(extension_settings.vecthare.collections, collectionId)
+        ? collectionId : null;
     if (key) {
         delete extension_settings.vecthare.collections[key];
         saveSettingsDebounced();
@@ -573,15 +580,12 @@ export function saveChunkMetadata(hash, metadata) {
  * @param {string} hash Chunk hash
  */
 export function deleteChunkMetadata(hash) {
-    if (!extension_settings.vecthare) {
-        return;
-    }
-
-    const key = `vecthare_chunk_meta_${hash}`;
-    if (extension_settings.vecthare[key]) {
-        delete extension_settings.vecthare[key];
-        saveSettingsDebounced();
-    }
+    // C01 #158: a hash is not a collection-scoped record identity. Existing
+    // legacy metadata may be shared by any registered collection. Without an
+    // authoritative all-owner inventory, deleting it would be cross-tenant.
+    // Call deleteScopedChunkMetadata(collectionKey, recordId) for new records.
+    console.warn('VectHare: refusing hash-only metadata deletion; scoped ownership required');
+    return false;
 }
 
 /**
@@ -604,6 +608,35 @@ export function getAllChunkMetadata() {
     }
 
     return result;
+}
+
+/** C01: collection-scoped record metadata. Missing and explicitly empty records differ. */
+export function getScopedChunkMetadata(collectionKey, recordId) {
+    if (!parseCollectionKey(collectionKey) || recordId === null || recordId === undefined) return {status:'unknown',exists:false};
+    const store = extension_settings?.vecthare?.vecthare_chunk_meta_by_collection;
+    if (!store || typeof store !== 'object') return {status:'unknown',exists:false};
+    const records = store[collectionKey];
+    if (!records || !Object.prototype.hasOwnProperty.call(records,String(recordId))) return {status:'available',exists:false};
+    return {status:'available',exists:true,value:cloneCollectionSettings(records[String(recordId)])};
+}
+
+export function saveScopedChunkMetadata(collectionKey, recordId, data) {
+    if (!parseCollectionKey(collectionKey) || recordId === null || recordId === undefined || !data || typeof data !== 'object')
+        throw new Error('Scoped chunk metadata requires a qualified collection key, record ID, and object');
+    if (!extension_settings.vecthare) extension_settings.vecthare={};
+    const store = extension_settings.vecthare.vecthare_chunk_meta_by_collection ||= {};
+    (store[collectionKey] ||= {})[String(recordId)] = cloneCollectionSettings(data);
+    saveSettingsDebounced();
+}
+
+/** Never delete global legacy hash metadata as if it belonged to one collection. */
+export function deleteScopedChunkMetadata(collectionKey, recordId) {
+    if (!parseCollectionKey(collectionKey) || recordId===null || recordId===undefined) return false;
+    const records=extension_settings?.vecthare?.vecthare_chunk_meta_by_collection?.[collectionKey];
+    if (!records || !Object.prototype.hasOwnProperty.call(records,String(recordId))) return false;
+    delete records[String(recordId)];
+    if (Object.keys(records).length===0) delete extension_settings.vecthare.vecthare_chunk_meta_by_collection[collectionKey];
+    saveSettingsDebounced();return true;
 }
 
 // ============================================================================
@@ -662,29 +695,14 @@ export function migrateOldEnabledKeys() {
  * @param {string[]} actualCollectionIds Array of collection IDs that actually exist
  * @returns {object} Cleanup stats
  */
-export function cleanupOrphanedMeta(actualCollectionIds) {
+export function cleanupOrphanedMeta(authoritativeInventory, {registry = []} = {}) {
     ensureCollectionsObject();
-
-    const actualSet = new Set(actualCollectionIds);
-    const orphaned = [];
-
-    for (const collectionId in extension_settings.vecthare.collections) {
-        if (!actualSet.has(collectionId)) {
-            orphaned.push(collectionId);
-        }
-    }
-
-    for (const collectionId of orphaned) {
-        delete extension_settings.vecthare.collections[collectionId];
-        console.log(`VectHare: Removed orphaned metadata for ${collectionId}`);
-    }
-
-    if (orphaned.length > 0) {
-        saveSettingsDebounced();
-        console.log(`VectHare: Cleaned up ${orphaned.length} orphaned metadata entries`);
-    }
-
-    return { removed: orphaned.length, orphanedIds: orphaned };
+    const plan = planOrphanCollectionMetadataRemoval({inventory:authoritativeInventory,
+        collections:extension_settings.vecthare.collections,registry});
+    if (!plan.allowed) return {removed:0,orphanedIds:[],blocked:true,reason:plan.reason};
+    for (const key of plan.remove) delete extension_settings.vecthare.collections[key];
+    if (plan.remove.length) saveSettingsDebounced();
+    return {removed:plan.remove.length,orphanedIds:plan.remove,blocked:false};
 }
 
 // ============================================================================

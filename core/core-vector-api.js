@@ -721,7 +721,11 @@ export async function getSavedHashes(collectionId, settings, includeMetadata = f
         const metaByHash = new Map(items.map(item => [String(item.hash), completeSavedChunkMetadata(item)]));
         return {
             hashes: hashes,
-            metadata: hashes.map(h => metaByHash.get(String(h)) || {}),
+            metadata: hashes.map(h => metaByHash.get(String(h)) || null),
+            // A record legitimately containing {} is distinct from metadata
+            // whose presence the adapter could not establish.
+            metadataStatus: data?.metadataStatus === 'unavailable' ? 'unavailable'
+                : data?.metadataStatus === 'available' ? 'available' : 'unknown',
         };
     } catch (error) {
         console.warn('VectHare: Metadata read failed, returning hashes only:', error.message);
@@ -730,11 +734,12 @@ export async function getSavedHashes(collectionId, settings, includeMetadata = f
         // R20: this fallback was a bare unbounded await - the last surviving
         // instance of the R17 hang class (it lives in an error path, i.e.
         // exactly where nobody looks while debugging a hang).
-        return await withOpGuard(
+        const fallbackHashes = await withOpGuard(
             () => backend.getSavedHashes(collectionId, settings),
             abortSignal,
             'Read saved hashes (fallback)'
         );
+        return {hashes:fallbackHashes,metadata:[],metadataStatus:'unavailable'};
     }
 }
 
@@ -1277,6 +1282,11 @@ export async function queryActiveCollections(collectionIds, searchText, topK, th
  */
 export async function purgeVectorIndex(collectionId, settings) {
     try {
+        // A verified network ACK alone cannot replace C01 ownership,
+        // tombstone and post-purge verification. Direct purge is unavailable
+        // until an explicitly verified C01 transaction adapter is provided.
+        if (!hasVerifiedCapability(settings?.vector_backend || 'standard','c01ScopedDeleteGate'))
+            throw new Error('Direct collection purge blocked: C01 transaction gate unavailable');
         if (!hasVerifiedCapability(settings?.vector_backend || 'standard','purgeAcknowledgement')) throw new Error('Purge blocked: server acknowledgement contract unverified');
         const backend = await getBackend(settings);
         const purgeResult = await backend.purgeVectorIndex(collectionId, settings);
@@ -1316,6 +1326,8 @@ export async function purgeFileVectorIndex(collectionId, settings) {
  */
 export async function purgeAllVectorIndexes(settings) {
     try {
+        if (!hasVerifiedCapability(settings?.vector_backend || 'standard','globalDeleteGate'))
+            throw new Error('Global purge blocked: C01/C02 transaction coordination unavailable');
         if (!hasVerifiedCapability(settings?.vector_backend || 'standard','purgeAcknowledgement')) throw new Error('Global purge blocked: unverified backend contract');
         const drain = await writeBarrier.closeAndDrain({timeoutMs:15000});
         if (!drain.verified) throw new Error('Global purge blocked: uncertain or pending writes');

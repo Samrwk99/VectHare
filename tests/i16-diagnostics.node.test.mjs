@@ -138,12 +138,12 @@ test('#168: failed cleanup does not unregister or report successful storage',asy
  const cleanup=extracted(prod,'cleanupTestCollection',{
   purgeVectorIndex:async()=>false,unregisterCollection:()=>{unregisters++}
  });
- const result=await cleanup('vh:test:storage_123',{source:'x'});
+ const result=await cleanup('vh:test:storage_1700000000000',{source:'x'});
  assert.equal(result.success,false);assert.equal(unregisters,0);
  const success=extracted(prod,'cleanupTestCollection',{
   purgeVectorIndex:async()=>true,unregisterCollection:()=>{unregisters++}
  });
- assert.equal((await success('vh:test:storage_123',{source:'x'})).success,true);assert.equal(unregisters,2);
+ assert.equal((await success('vh:test:storage_1700000000000',{source:'x'})).success,true);assert.equal(unregisters,2);
 });
 
 test('#168: storage fixture always attempts cleanup after insertion error',async()=>{
@@ -153,7 +153,7 @@ test('#168: storage fixture always attempts cleanup after insertion error',async
  });
  // Build an independent helper with identical mocked calls, exercise the actual storage body through a combined VM scope.
  const fn=extracted(prod,'testVectorStorage',{
-  markDiagnosticTestCollection:()=>{},getModelField:()=>null,getRequestHeaders:()=>({}),
+  hasVerifiedCapability:()=>true,markDiagnosticTestCollection:()=>{},getModelField:()=>null,getRequestHeaders:()=>({}),
   fetch:async()=>({ok:false,status:500,text:async()=> 'server error'}),
   getPluginProviderParams:()=>({}),cleanupTestCollection:cleanup,
   Math,
@@ -206,7 +206,7 @@ test('#168: successful storage must also confirm the cleanup purge',async()=>{
    purgeVectorIndex:async()=>true,unregisterCollection:()=>{}
  });
  const fn=extracted(prod,'testVectorStorage',{
-   markDiagnosticTestCollection:()=>{},getModelField:()=>null,getRequestHeaders:()=>({}),
+   hasVerifiedCapability:()=>true,markDiagnosticTestCollection:()=>{},getModelField:()=>null,getRequestHeaders:()=>({}),
    fetch:async()=>({ok:true}),getPluginProviderParams:()=>({}),cleanupTestCollection:cleanup
  });
  const result=await fn({source:'transformers'});

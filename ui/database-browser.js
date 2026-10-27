@@ -665,14 +665,9 @@ async function refreshCollections() {
   try {
     browserState.collections = await loadAllCollections(browserState.settings);
 
-    // Clean up orphaned metadata entries (collections that no longer exist)
-    const actualIds = browserState.collections.map((c) => c.id);
-    const cleanupResult = cleanupOrphanedMeta(actualIds);
-    if (cleanupResult.removed > 0) {
-      console.log(
-        `VectHare: Cleaned up ${cleanupResult.removed} orphaned metadata entries`,
-      );
-    }
+    // C01 #189: the browser view can be partial, backend-dependent, and omit
+    // empty collections. Never infer orphan ownership or delete settings from it.
+    // Reconciliation requires an authoritative backend-qualified inventory.
 
     renderCollections();
   } catch (error) {
@@ -1121,7 +1116,7 @@ function bindCollectionCardEvents() {
           toastr.success(`Deleted collection "${collection.name}"`, "VectHare");
         } else {
           toastr.warning(
-            `Partial deletion: ${result.errors.join(", ")}`,
+            `Deletion not completed (${result.status || 'blocked'}): ${result.errors.join(", ")}`,
             "VectHare",
           );
         }

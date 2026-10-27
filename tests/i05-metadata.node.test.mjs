@@ -108,6 +108,8 @@ async function collectionSettingsModule() {
             '../../../../extensions.js': { extension_settings: data },
             '../../../../../script.js': { saveSettingsDebounced: () => saves++ },
             './collection-ids.js': { parseRegistryKey: id => ({ collectionId: String(id).split(':').pop() }) },
+            '../utils/c01-inventory.js': {planOrphanCollectionMetadataRemoval:()=>({allowed:false,reason:'no authoritative inventory',remove:[]})},
+            '../utils/collection-keys.js': {parseCollectionKey:()=>null},
         };
         assert.ok(dependencies[spec], `Unexpected dependency ${spec}`);
         const obj = dependencies[spec];

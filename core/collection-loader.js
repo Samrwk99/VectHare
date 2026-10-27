@@ -1,5 +1,8 @@
 import {withCollectionLock} from '../utils/keyed-mutex.js';
 import {guardDelete} from './destructive-safety.js';
+import {deleteCollectionSafely, recoverTombstones as inspectDeletionTombstones} from '../utils/c01-deletion.js';
+import {collectScopedInventory} from '../utils/c01-inventory.js';
+import {hasVerifiedCapability} from '../utils/backend-contracts.js';
 /**
  * ============================================================================
  * VECTHARE COLLECTION LOADER
@@ -104,87 +107,41 @@ export function unregisterCollection(collectionId) {
  * @returns {Promise<{success: boolean, errors: string[], vectorsDeleted: boolean, registryDeleted: boolean, metadataDeleted: boolean}>}
  */
 export async function deleteCollection(collectionId, settings, registryKey = null) {
-    const registry = getCollectionRegistry();
-    const resolved = resolveCollectionKey(registryKey || collectionId, {registry});
-    if (resolved.status !== 'unique') return {success:false,errors:[`Destructive delete blocked: ${resolved.status} or legacy/unqualified identity`],vectorsDeleted:false,registryDeleted:false,metadataDeleted:false};
-    const target = parseCollectionKey(resolved.key);
-    if (!target || target.collectionId !== collectionId) return {success:false,errors:['Collection identity mismatch'],vectorsDeleted:false,registryDeleted:false,metadataDeleted:false};
-    return withCollectionLock(resolved.key, async () => {
-      const fresh = resolveCollectionKey(registryKey || collectionId, {registry:getCollectionRegistry()});
-      if(fresh.status!=='unique' || fresh.key!==resolved.key) return {success:false,errors:['Collection registry changed while waiting for lock'],vectorsDeleted:false,registryDeleted:false,metadataDeleted:false};
-      const collections = extension_settings.vecthare?.collections;
-      const proof = guardDelete({key:resolved.key,operation:'targeted-delete',ownership:{verified:true,key:resolved.key},metadata:{available:!!collections && Object.prototype.hasOwnProperty.call(collections,resolved.key)}});
-      if(!proof.allowed) return {success:false,errors:[`Destructive delete blocked: ${proof.reason}`],vectorsDeleted:false,registryDeleted:false,metadataDeleted:false};
-    const errors = [];
-    let vectorsDeleted = false;
-    let registryDeleted = false;
-    let metadataDeleted = false;
-
-    console.log(`VectHare: Deleting collection ${collectionId} (registry key: ${registryKey || collectionId})`);
-
-    // Step 1: Delete vectors from backend (most important - actual data)
-    try {
-        // purgeVectorIndex returns false on backend failures; it does not
-        // necessarily throw. Treat only an explicit true as success.
-        if (await purgeVectorIndex(collectionId, settings) !== true) {
-            throw new Error('Backend purge did not confirm success');
-        }
-        vectorsDeleted = true;
-        console.log(`VectHare: ✓ Deleted vectors for ${collectionId}`);
-    } catch (error) {
-        errors.push(`Vectors: ${error.message}`);
-        console.warn(`VectHare: ✗ Failed to delete vectors for ${collectionId}:`, error.message);
-        // Keep registry and metadata intact for a later retry. No cleanup
-        // may proceed when the vector purge was not acknowledged.
-        return { success: false, errors, vectorsDeleted, registryDeleted, metadataDeleted };
-    }
-
-    // Step 2: Unregister from registry (try both formats)
-    try {
-        const keyToUnregister = resolved.key;
-        unregisterCollection(keyToUnregister);
-
-        // Do not unregister a separate legacy alias; ownership is not proven.
-
-        registryDeleted = true;
-        console.log(`VectHare: ✓ Unregistered ${collectionId}`);
-    } catch (error) {
-        errors.push(`Registry: ${error.message}`);
-        console.warn(`VectHare: ✗ Failed to unregister ${collectionId}:`, error.message);
-    }
-
-    // Step 3: Delete metadata
-    try {
-        deleteCollectionMeta(collectionId);
-        metadataDeleted = true;
-        console.log(`VectHare: ✓ Deleted metadata for ${collectionId}`);
-    } catch (error) {
-        errors.push(`Metadata: ${error.message}`);
-        console.warn(`VectHare: ✗ Failed to delete metadata for ${collectionId}:`, error.message);
-    }
-
-    const success = vectorsDeleted && registryDeleted && metadataDeleted;
-
-    if (success) {
-        console.log(`VectHare: ✓ Fully deleted collection ${collectionId}`);
-    } else {
-        // VEC-28: Warn about partial deletion to prevent zombie collections
-        const warningMsg = `VectHare: ⚠️ PARTIAL DELETION of ${collectionId} - may create zombie collection. Errors: ${errors.join(', ')}`;
-        console.error(warningMsg);
-        // Only treat as critical failure if ALL steps failed
-        if (!vectorsDeleted && !registryDeleted && !metadataDeleted) {
-            throw new Error(`Complete deletion failure for ${collectionId}: ${errors.join(', ')}`);
-        }
-    }
-
-    return {
-        success,
-        errors,
-        vectorsDeleted,
-        registryDeleted,
-        metadataDeleted,
-    };
+    const registry=getCollectionRegistry();
+    const resolved=resolveCollectionKey(registryKey || collectionId,{registry});
+    const blocked=reason=>({success:false,status:'blocked',errors:[reason],vectorsDeleted:false,registryDeleted:false,metadataDeleted:false,requiresReconciliation:true});
+    if (resolved.status!=='unique') return blocked(`Collection deletion blocked: ${resolved.status} qualified ownership`);
+    const target=parseCollectionKey(resolved.key);
+    if (!target || target.collectionId!==collectionId) return blocked('Collection identity mismatch');
+    // Never route a qualified collection through a different physical backend or
+    // embedding tenant provided by stale browser state.
+    if ((settings?.vector_backend || 'standard')!==target.backend || settings?.source!==target.source)
+        return blocked('Backend/source mismatch: deletion requires the exact qualified target');
+    const capabilityVerified=['purgeAcknowledgement','completeInventory','tenantFilter','count']
+        .every(cap=>hasVerifiedCapability(target.backend,cap));
+    const ext=extension_settings.vecthare;
+    const store={registry,collections:ext.collections,
+        tombstones:(ext.vecthare_delete_tombstones ||= {}),
+        recordMetadata:ext.vecthare_chunk_meta_by_collection};
+    const result=await deleteCollectionSafely({
+        key:resolved.key,store,contractVerified:capabilityVerified,
+        inventory:key=>collectScopedInventory({key,contractVerified:false}),
+        // No pinned provider currently proves that a debounced ST save reached
+        // durable storage. Do not issue a purge based on that assumption.
+        persist:async()=>{saveSettingsDebounced();return false;},
+        purge:async()=>({status:'unverified'}),
+        verifyEmpty:async()=>({status:'unavailable',complete:false}),
+        protectedCollection:ext.collections?.[resolved.key]?.protected===true,
     });
+    return {success:result.success===true,status:result.status,
+        errors:result.success?[]:[result.reason],vectorsDeleted:result.success===true,
+        registryDeleted:result.success===true,metadataDeleted:result.success===true,
+        requiresReconciliation:result.requiresReconciliation===true};
+}
+
+/** C01 recovery discovery: show tombstones on the next load, never auto-purge. */
+export function getPendingCollectionDeletions() {
+    return inspectDeletionTombstones({tombstones:extension_settings?.vecthare?.vecthare_delete_tombstones});
 }
 
 /**

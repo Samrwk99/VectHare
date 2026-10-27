@@ -84,6 +84,9 @@ async function loadCollectionLoader({ registry = [], purge = async () => true } 
     const cache = new Map();
     const stubs = {
         '../utils/keyed-mutex.js': {withCollectionLock: async (_key,fn)=>fn(),writeBarrier:{closeAndDrain:async()=>({verified:true}),reopen:()=>{}}},
+        '../utils/c01-deletion.js': {deleteCollectionSafely:async()=>({success:false,status:'blocked',reason:'destructive-server-contract-unverified'}),recoverTombstones:()=>[]},
+        '../utils/c01-inventory.js': {collectScopedInventory:async()=>({complete:false,status:'unavailable'})},
+        '../utils/backend-contracts.js': {hasVerifiedCapability:()=>false},
         '../../../../extensions.js': { extension_settings, getContext: () => ({}) },
         '../../../../../script.js': {
             characters: [], substituteParams: x => x,
@@ -169,10 +172,11 @@ test('I01 #6: purge exceptions retain collection registry and metadata', async (
     assert.deepEqual(calls.metadataDeletes, []);
 });
 
-test('I01 #6: acknowledged purge removes registry and metadata', async () => {
+test('I01 #6 / C01: a mocked purge acknowledgement alone cannot authorize registry or metadata deletion', async () => {
     const { api, settings, calls } = await loadCollectionLoader({ registry: ['standard:openai:my_chat', 'my_chat'] });
     const result = await api.deleteCollection('my_chat', {}, 'standard:openai:my_chat');
-    assert.equal(result.success, true);
-    assert.deepEqual(settings.vecthare_collection_registry, ['my_chat']); // legacy aliases are never removed by a different identity
-    assert.deepEqual(calls.metadataDeletes, ['my_chat']);
+    assert.equal(result.success, false);
+    assert.deepEqual(settings.vecthare_collection_registry, ['standard:openai:my_chat', 'my_chat']);
+    assert.deepEqual(calls.metadataDeletes, []);
+    assert.deepEqual(calls.purges, []);
 });

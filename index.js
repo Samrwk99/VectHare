@@ -28,7 +28,7 @@ import { purgeAllVectorIndexes, purgeVectorIndex } from './core/core-vector-api.
 import { getChatCollectionId } from './core/chat-vectorization.js';
 import { getDefaultDecaySettings } from './core/temporal-decay.js';
 import { migrateOldEnabledKeys } from './core/collection-metadata.js';
-import { clearCollectionRegistry, discoverExistingCollections, getCollectionRegistry } from './core/collection-loader.js';
+import { clearCollectionRegistry, discoverExistingCollections, getCollectionRegistry, getPendingCollectionDeletions } from './core/collection-loader.js';
 import AsyncUtils from './utils/async-utils.js';
 import { purgeAllAndResetSettings } from './core/destructive-safety.js';
 
@@ -482,6 +482,14 @@ jQuery(async () => {
     const migrationResult = migrateOldEnabledKeys();
     if (migrationResult.migrated > 0) {
         console.log(`VectHare: Migrated ${migrationResult.migrated} old collection enabled keys`);
+    }
+
+    // C01: inspect durable deletion markers after settings load. Never silently
+    // retry a destructive operation until backend contracts can verify scope.
+    const pendingDeletions = getPendingCollectionDeletions();
+    if (pendingDeletions.length) {
+        console.warn('VectHare: Collection deletions require reconciliation', pendingDeletions.map(({key,stage})=>({key,stage})));
+        toastr.warning(`${pendingDeletions.length} collection deletion(s) require reconciliation; no automatic purge was attempted`, 'VectHare', {timeOut:12000});
     }
 
     // Render UI

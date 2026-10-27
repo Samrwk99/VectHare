@@ -436,7 +436,9 @@ export class StandardBackend extends VectorBackend {
         // Fallback: use native list (hashes only)
         const hashes = await this.getSavedHashes(collectionId, settings);
         return {
-            items: hashes.map(hash => ({ hash, text: '', metadata: {} })),
+            items: hashes.map(hash => ({ hash })),
+            metadataStatus: 'unavailable',
+            complete: false,
             total: hashes.length,
         };
     }
