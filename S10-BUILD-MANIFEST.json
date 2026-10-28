@@ -1,12 +1,12 @@
 {
   "formatVersion": 1,
   "contractVersion": 2,
-  "pluginVersion": "3.2.10-s10.16-f12",
+  "pluginVersion": "3.2.10-s10.21-f09b4c",
   "algorithm": "sha256",
   "files": {
-    "index.js": "220dbe075ac415a731d54165a17dfea31d1b94e2bdaaca72c40efcd546566fd6",
+    "index.js": "62555146811798038d835f0bce1b01382dc286a66c5e360e003c0f9d42ac0a9f",
     "lancedb-backend.js": "a3cd5b9cafd1686a6775b24345a48611b396e5cd2672a028b57b154335d499de",
-    "lib/f01-host-sources.js": "af4c52a3d961a3befb7d2f7a42b08c5b9429ddfd8bb07022f067dd8820878c57",
+    "lib/f01-host-sources.js": "0e1de535de9381a109aadf6638d7f589933e92b1866a6f0d91e0137f58d8d474",
     "lib/f02-public-reads.js": "936a025a1d5e7a809ca0fa6900c4fa12b43c857a632c77c6069c5987f996c15e",
     "lib/f03-provision.js": "ef7f231d25462c8906c0f6f46291f6b6ddcaef4806676f2dff486bcd82324822",
     "lib/f03-vector-evidence.js": "11452d572faa925a57e65146cc50e4606fc4c2d6f3e7fba3920058ecbf1c5407",
@@ -19,10 +19,14 @@
     "lib/f07-vectra.js": "afe8d01788010158d4ceecd8b37c8c975daec9d8701e8c3d6737983de64ae3db",
     "lib/f08-milvus-acceptance.js": "939adc6c8f0ee221ea68ef56c78ce2c101c9a75ff13cd4c1ed71b65647fedd79",
     "lib/f08-milvus.js": "bff90ded4de23c4955586e08c4fdf339306a40f1cc14dba11b333ecbb91e48dd",
-    "lib/f09-workflows.js": "3ea45df328b6197bdccb5427335203a79bbfcf83f5af3b30eb7cbfcdcfa5c601",
+    "lib/f09-workflows.js": "3955410c9198cd7e8e1b6c190064b18dbec85dc2b1354805d56b2f4a9a561cfe",
+    "lib/f09b-chat-sync.js": "dacb13c5249e55a97885a9c7578a720c1ebe363ca2cceae0c266e5e76bf51b2d",
+    "lib/f09b3-chat-sync-execute.js": "ac549f69bdddf58dd00939d2278bff520a09f1a4ef89fe04f8d4c16f8b49d54d",
+    "lib/f09b4-chat-lifecycle.js": "1f3d0f87086514318db6a6a5a2a1932dc30a746e87a973a9f0180592a958931c",
+    "lib/f09b4-managed-registry.js": "2fd14e399685eea7f235850fe18dd69176a7b0eb453ad9948bab59587b8f4c26",
     "lib/f10-recovery-capture.js": "dc816ffab9c8fb6250ef65866c511d631b85b3264a931e6dd2b9068f0e65ff4e",
     "lib/f11-readiness.js": "27f53bf622965f815e20eb48fa82ea197724ca79b6e11ebaefe71b09c350e452",
-    "lib/f12-release-assessment.js": "10cd14e7d71889d7223e0dd2620881b75cb06587f3f2f94cffcd061b9b28b4eb",
+    "lib/f12-release-assessment.js": "b5042faca7df945300f0b0042fdf9ff922e077ee37040ad6f1f499fbe12d4b57",
     "lib/h01-qdrant-acceptance.js": "b6420fdf0e6524d7d4344ae2eff12b5ccbcfc484a35c6744920e5df4cb37d915",
     "lib/s01-safety.js": "559917c958cdc7f6573e0d38bbe04d22199da726224aa38b1e0d74fe3d086310",
     "lib/s02-identity.js": "fd525737359313609b40dc9493a9195f143d4da14396226aa4f6a6048ac582b0",
@@ -45,11 +49,11 @@
     "lib/s09-fixture.js": "be09261e7dc79edf854232b59360d0c3e277f99f21d61a232509d6cfb0455848",
     "lib/s09-manifest.js": "9e27d35b82a8775e6a001fc8b001782a773fff7c7dcb909ff78712ddb1e86269",
     "lib/s10-build.js": "f724d07f0acdf40bc47715fdc4ce4c367ccd07a4bb211511ce87c979e2209eef",
-    "lib/s10-contracts.js": "6f40b6e2cef003da47291ba7322fbbf5c2a18d0aa651bf560d97063d65f7dfe0",
+    "lib/s10-contracts.js": "e0f6df8446799760193952fab9949ee751380fcbd08efcd0a09df52ab369fbf7",
     "lib/s10-gui-connections.js": "e5a041abda59cdefd4f3556e58e9bfd8debbcba7309a2bac504b0c68d887ff58",
     "milvus-backend.js": "6cfee983eb34ab39a0f59f6ce2590a6c75d24a961f5a19ee4ae59d440427394e",
-    "package.json": "2ade933c1b4fb8ccd0e2b8e27f41a2e302287f87c8f91ad46f84a7843f10035f",
+    "package.json": "902691048c207ab22f19637c2dcf18e0fbfde1a241059b55818fcaf2f15a9ba3",
     "qdrant-backend.js": "f6a71992d55288345f041ed5d30e38524fc8f58201150b0b92cab18cf3e3d72b"
   },
-  "sourceFingerprint": "b69848c2e8b2c1e0ed2c78558f609271fdfc5d7614d44296700b7034704a320a"
+  "sourceFingerprint": "b773c4cbc1c4799b76635f6e09054da419601dd85f174ea7f90ffcd3e4c33090"
 }

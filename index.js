@@ -7,7 +7,7 @@
  * All chunk operations go through unified /chunks/* endpoints.
  * Backend is specified via `backend` parameter in request body.
  *
- * @version 3.2.10-s10.16-f12
+ * @version 3.2.10-s10.21-f09b4c
  */
 
 import path from 'node:path';
@@ -26,6 +26,9 @@ import { registerS04Routes } from './lib/s04-routes.js';
 import { registerS05Routes } from './lib/s05-routes.js';
 import {registerF02Routes} from './lib/f02-public-reads.js';
 import {registerF09WorkflowRoutes} from './lib/f09-workflows.js';
+import {registerF09bSyncRoutes} from './lib/f09b-chat-sync.js';
+import {registerF09b3SyncRoutes} from './lib/f09b3-chat-sync-execute.js';
+import {registerF09b4LifecycleRoutes} from './lib/f09b4-chat-lifecycle.js';
 import {registerF10Routes} from './lib/f10-recovery-capture.js';
 import {registerF11ReadinessRoutes} from './lib/f11-readiness.js';
 import {registerF12ReleaseRoutes} from './lib/f12-release-assessment.js';
@@ -46,7 +49,7 @@ import {registerF01HostRoutes} from './lib/f01-host-sources.js';
 import { validateVector as validateS05Vector } from './lib/s05-contract.js';
 
 const pluginName = 'similharity';
-const pluginVersion = '3.2.10-s10.16-f12';
+const pluginVersion = '3.2.10-s10.21-f09b4c';
 
 /**
  * Initialize the plugin
@@ -94,6 +97,12 @@ export async function init(router) {
     registerS05Routes(router,{readHandler:f02ReadHandler});
     registerF09WorkflowRoutes(router,{backendPool,createVectra:async(req,binding)=>
       f07SealedVectra(req,binding,{createIndex:folder=>new vectra.LocalIndex(folder)})});
+    registerF09bSyncRoutes(router,{backendPool,createVectra:async(req,binding)=>
+      f07SealedVectra(req,binding,{createIndex:folder=>new vectra.LocalIndex(folder)})});
+    registerF09b3SyncRoutes(router,{backendPool,embed:getEmbeddingForSource,
+      createVectra:async(req,binding)=>f07SealedVectra(req,binding,{createIndex:folder=>new vectra.LocalIndex(folder)})});
+    registerF09b4LifecycleRoutes(router,{backendPool,embed:getEmbeddingForSource,
+      createVectra:async(req,binding)=>f07SealedVectra(req,binding,{createIndex:folder=>new vectra.LocalIndex(folder)})});
     registerF10Routes(router,{backendPool,createVectra:async(req,binding)=>
       f07SealedVectra(req,binding,{createIndex:folder=>new vectra.LocalIndex(folder)})});
     registerF03ProvisionRoutes(router,{backendPool,createVectra:async(req,binding)=>{

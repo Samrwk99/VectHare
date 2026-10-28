@@ -1,4 +1,5 @@
 import {registerF09WorkflowRoutes} from '../lib/f09-workflows.js';
+import {registerF09bSyncRoutes} from '../lib/f09b-chat-sync.js';
 import {registerF10Routes} from '../lib/f10-recovery-capture.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -63,6 +64,9 @@ async function registered(pool) {
             './lib/f08-milvus.js':{registerF08MilvusPilotRoutes},
             './lib/f08-milvus-acceptance.js':{registerF08AcceptanceRoutes},
             './lib/f09-workflows.js':{registerF09WorkflowRoutes},
+            './lib/f09b-chat-sync.js':{registerF09bSyncRoutes},
+            './lib/f09b3-chat-sync-execute.js':{registerF09b3SyncRoutes:()=>{}},
+            './lib/f09b4-chat-lifecycle.js':{registerF09b4LifecycleRoutes:()=>{}},
             './lib/f10-recovery-capture.js':{registerF10Routes},
             './lib/f11-readiness.js':{registerF11ReadinessRoutes:()=>{}},
             './lib/f12-release-assessment.js':{registerF12ReleaseRoutes:()=>{}},
