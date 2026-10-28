@@ -1,5 +1,6 @@
 import {buildRecoveryReport} from './utils/e03-recovery.js';
 import { guardedVectorFetch as fetch } from './utils/e02-vector-request-gateway.js';
+import {discoverS11Plugin, renderS11CompatibilityStatus} from './utils/s11-plugin-compatibility.js';
 import {recoverPendingC02Operations} from './core/core-vector-api.js';
 /**
  * ============================================================================
@@ -34,6 +35,7 @@ import { migrateOldEnabledKeys } from './core/collection-metadata.js';
 import { clearCollectionRegistry, discoverExistingCollections, getCollectionRegistry, getPendingCollectionDeletions } from './core/collection-loader.js';
 import AsyncUtils from './utils/async-utils.js';
 import {chatJobs,currentChatIdentity} from './core/chat-job-runtime.js';
+import {getChatIdentityObservation} from './core/collection-ids.js';
 import {promptReceipts} from './core/prompt-receipt-runtime.js';
 import {worldInfoSnapshots} from './utils/world-info-identity.js';
 import {stopVectorization,resetControlState} from './core/vectorization-control.js';
@@ -564,6 +566,13 @@ jQuery(async () => {
         onRunDiagnostics: onRunDiagnosticsClick
     });
 
+    // S11: read-only S10 build/contract discovery. This is NOT authorization
+    // to reactivate any backend operation. Failure remains visibly blocked.
+    void discoverS11Plugin().then(status=>{
+        renderS11CompatibilityStatus(document.querySelector('.vecthare_settings'),status);
+        if (!status.compatible) console.warn('VectHare: Similharity S10 compatibility unavailable:',status.reason);
+    });
+
     progressTracker.setStartCallback(onVectorizeAllClick);
     window.addEventListener('vecthare:database-changed', event => {
         const collectionId = event.detail?.collectionId;
@@ -643,6 +652,14 @@ jQuery(async () => {
         chatJobs.bumpGeneration('message-changed');
     };
     onVhEvent(event_types.CHAT_CHANGED, invalidateChat);
+    let s11BranchQuarantineNoticeShown=false;
+    onVhEvent(event_types.CHAT_CHANGED, () => {
+        const observation=getChatIdentityObservation();
+        if(observation.status==='QUARANTINED' && !s11BranchQuarantineNoticeShown){
+            s11BranchQuarantineNoticeShown=true;
+            toastr.warning('Two chat handles appear to share one integrity ID. Chat vector collections are quarantined pending identity review.', 'VectHare branch identity', {timeOut:15000});
+        }
+    });
     // The event payload is the assembled host prompt, not the extension registry.
     onVhEvent(event_types.CHAT_COMPLETION_PROMPT_READY, event=>promptReceipts.observe('chat',event));
     onVhEvent(event_types.GENERATE_AFTER_COMBINE_PROMPTS, event=>promptReceipts.observe('text',event));

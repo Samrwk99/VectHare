@@ -13,6 +13,7 @@
 
 import { getContext } from '../../../../extensions.js';
 import { getCurrentChatId, chat_metadata } from '../../../../../script.js';
+import {observeChatFork} from '../utils/s11-chat-fork-observer.js';
 
 // ============================================================================
 // CONSTANTS
@@ -69,15 +70,22 @@ export const COLLECTION_SCOPES = {
 /** Stable ownership may only use an ID persisted with chat metadata, not a
  * filename or UI chat index. A missing integrity ID requires user remapping.
  */
-export function getVerifiedChatOriginId() {
+export function getChatIdentityObservation() {
     const value = chat_metadata?.integrity;
-    return typeof value === 'string' && value.trim() ? value : null;
+    let storage = null;
+    try { storage = globalThis.localStorage || null; } catch { /* browser storage inaccessible */ }
+    return observeChatFork({chatId:getCurrentChatId(),integrity:value,storage});
+}
+export function getVerifiedChatOriginId() {
+    return getChatIdentityObservation().originId;
 }
 
 export function getChatUUID() {
     const integrity = chat_metadata?.integrity;
     if (integrity) {
-        return integrity;
+        // A copied integrity value must never become a second chat's collection.
+        // No local/host observation is proof of server authorization.
+        return getVerifiedChatOriginId();
     }
     // Fallback: use chatId (less ideal but works for old chats)
     const chatId = getCurrentChatId();

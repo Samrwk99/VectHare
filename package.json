@@ -41,7 +41,9 @@
     "test:c10": "node --test tests/c10-*.node.test.mjs",
     "test:c11": "node --test tests/c11-complete.node.test.mjs",
     "test:c13": "node --test tests/c13-chunking.node.test.mjs",
-    "test:c14": "node --test tests/c14-similarity.node.test.mjs"
+    "test:c14": "node --test tests/c14-similarity.node.test.mjs",
+    "test:s11": "node --experimental-vm-modules --test tests/s11-*.node.test.mjs",
+    "check:s11": "node --check index.js && node --check core/collection-ids.js && node --check utils/e02-vector-request-gateway.js && node --check utils/s11-plugin-compatibility.js && node --check utils/s11-chat-fork-observer.js"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^2.1.0",

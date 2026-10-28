@@ -1,0 +1,30 @@
+{
+  "checkpoint": "S11",
+  "date": "2026-10-28",
+  "extension": "2.2.0-alpha.s11.0",
+  "pairedPlugin": "3.2.10-s10.0",
+  "pairedPluginZipSha256": "c1740e22067d53ad7e53c916c3704d52d40e026325b2f325b69e9915f281f594",
+  "pairedPluginSourceFingerprint": "fc0b3c4209b8b8c04cfa43fb11ea78e9a4aa74b52158cc7941e3b2cf48b505c5",
+  "pluginModified": false,
+  "sourceFiles": {
+    "index.js": "e9c937fc51d9166f0d533b655684a9569d3f4443311189c847f02db548bebbc8",
+    "manifest.json": "ee97ef024ff22006fcb1f21f0852fba7a953060f89c8e3e7aac314ebd11176bc",
+    "package.json": "b41c3761434d1b123219f8a8441d44a370331ef47b30f85833b3c044f877aaa1",
+    "core/collection-ids.js": "872ffc12ed4529d1d6005dffca71fef9f634a15f64dbd060a64534d2a062953a",
+    "utils/e02-vector-request-gateway.js": "2c227831b5ee93793589ed2c5e9abbe9336018de6fb00be029621e6621f1dd32",
+    "utils/s11-plugin-compatibility.js": "b28dba086c54e1adfdcf65049d22ccba3e4940e2003b6febfaf41a8c73f86b52",
+    "utils/s11-chat-fork-observer.js": "c6fe8b3657222a8b92771a1275dd4207878ccdd17e5f40d94a3925b57e900095",
+    "tests/i01-safety.node.test.mjs": "521e8e1824b31e2bbfbb01b15432d0170a974bcb28fa07f4ae9aa8107764705f",
+    "tests/s11-compatibility.node.test.mjs": "fbcecc15ef3c3c8fb40b18498e1f285876156aae267fdbd089d4bdfa31e78d42",
+    "tests/s11-chat-integration.node.test.mjs": "260b23483fdb36ee08c82a18b7ecadfcd9853f798176a724410dd4134ec87783",
+    "tools/s11-verify-pair.mjs": "5672d20dcb5aff3a2afeb6a132acfadd41ade9b955272db1ad8c1ef4b36cff78",
+    "S11-CHANGELOG.md": "26577fa340d0466faaa06be732badcd11c3669f774231766db9d07cdcde795e3",
+    "S11-VERIFICATION.md": "e9258c3a375c2cc27ce709c7a86f33ec91ea16a811fd9e7065b59b1ea3b9429e",
+    "S11-HOST-ACCEPTANCE-RUNBOOK.md": "942c9af251b6b2c94f22bd75860275bb4f4e7ec9bca54d19fb8f7b57a5122f5b",
+    "S11-NEXT-STEPS.md": "5bb03554da49002e8eecff98320b2f0ee823ee8daa21a8eef4f6b126441f7c20",
+    "S11-RELEASE-DECISION.md": "25fcecdcbab32c96572b324a9bf4482c1b4576cff148b5aee0b007771a72fc72",
+    "S11-CAPABILITY-MATRIX.json": "863f65cda228615c5c5f8158885f090a12c67cd379dfa5ab1b38fb43cfcb2890"
+  },
+  "liveHostAccepted": false,
+  "writesUnlocked": false
+}

@@ -30,6 +30,9 @@ const pluginOperations = Object.freeze({
     '/chunks/query':'query','/chunks/hybrid-query':'hybrid','/chunks/purge':'purge',
     '/chunks/stats':'stats','/purge-all':'purgeAll',
 });
+// S11: only explicitly enumerated inspection GETs are allowed. All v2
+// execution and unknown paths remain denied before network dispatch.
+const s11InspectionPaths = new Set(['/capabilities','/v2/capabilities','/v2/contracts','/v2/build']);
 const shared = backend => backend === 'qdrant' || backend === 'milvus';
 function parseRequest(url, options={}) {
     const urlText = typeof url === 'string' ? url : (url?.url || '');
@@ -68,6 +71,14 @@ function hasValidTenant(value){
 export function inspectVectorRequest(url, options={}) {
     const req = parseRequest(url, options);
     if (!req) return {intercepted:false,allowed:true};
+    if (req.transport === 'plugin' && s11InspectionPaths.has(req.suffix)) {
+        if (req.method !== 'GET') fail(req,'inspection-readonly');
+        if (req.body != null) fail(req,'inspection-rejects-body');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:'s11Discovery',backend:'none',method:'GET'};
+    }
+    // S10 v2 execution routes are implemented only as refusal contracts.
+    // Do not allow aliases or a newer plugin response to override this rule.
+    if (req.transport === 'plugin' && (req.suffix==='/v2' || req.suffix.startsWith('/v2/'))) fail(req,'s11-v2-execution-not-certified');
     if (!req.operation || req.backend === 'unknown') fail(req, 'unsupported-route-or-backend');
     if (req.operation === 'secretProbe') return {intercepted:true,allowed:true,operation:'secretProbe',backend:req.backend,transport:req.transport};
     if (req.transport === 'native') {
