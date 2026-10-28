@@ -1,6 +1,6 @@
 {
   "name": "similharity",
-  "version": "3.2.10-s10.15-f11",
+  "version": "3.2.10-s10.16-f12",
   "description": "Vector database backend extensions for Similharity - LanceDB, Qdrant, and enhanced Vectra with full metadata storage",
   "main": "index.js",
   "type": "module",

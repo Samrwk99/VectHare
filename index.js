@@ -7,7 +7,7 @@
  * All chunk operations go through unified /chunks/* endpoints.
  * Backend is specified via `backend` parameter in request body.
  *
- * @version 3.2.10-s10.15-f11
+ * @version 3.2.10-s10.16-f12
  */
 
 import path from 'node:path';
@@ -28,6 +28,7 @@ import {registerF02Routes} from './lib/f02-public-reads.js';
 import {registerF09WorkflowRoutes} from './lib/f09-workflows.js';
 import {registerF10Routes} from './lib/f10-recovery-capture.js';
 import {registerF11ReadinessRoutes} from './lib/f11-readiness.js';
+import {registerF12ReleaseRoutes} from './lib/f12-release-assessment.js';
 import {registerF03ProvisionRoutes} from './lib/f03-provision.js';
 import {registerF04PilotRoutes} from './lib/f04-pilot-mutations.js';
 import {registerF05AcceptanceRoutes} from './lib/f05-qdrant-acceptance.js';
@@ -45,7 +46,7 @@ import {registerF01HostRoutes} from './lib/f01-host-sources.js';
 import { validateVector as validateS05Vector } from './lib/s05-contract.js';
 
 const pluginName = 'similharity';
-const pluginVersion = '3.2.10-s10.15-f11';
+const pluginVersion = '3.2.10-s10.16-f12';
 
 /**
  * Initialize the plugin
@@ -112,6 +113,7 @@ export async function init(router) {
     registerF01HostRoutes(router);
     registerGuiConnectionRoutes(router,{backendPool});
     registerF11ReadinessRoutes(router);
+    registerF12ReleaseRoutes(router);
     // NOTE: S02 registry mappings are reservations only; this route exposes
     // no mutation or claim that the physical collection belongs to the user.
     router.post('/v2/identity/resolve', async (req,res) => {

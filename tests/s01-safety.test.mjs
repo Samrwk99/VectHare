@@ -266,6 +266,7 @@ test('plugin registration keeps legacy mutation endpoints blocked even without m
             './lib/f09-workflows.js':{registerF09WorkflowRoutes:()=>{}},
             './lib/f10-recovery-capture.js':{registerF10Routes:()=>{}},
             './lib/f11-readiness.js':{registerF11ReadinessRoutes:()=>{}},
+            './lib/f12-release-assessment.js':{registerF12ReleaseRoutes:()=>{}},
         './lib/s10-gui-connections.js':{registerGuiConnectionRoutes:()=>{}}
     });
     const routes=new Map(); const middleware=[];
