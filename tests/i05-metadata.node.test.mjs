@@ -1,3 +1,4 @@
+import {sharedTenantFromCollection,assertSharedReadOwnership,markSharedDisplayPage,denyUnverifiedSharedInventory,labelSharedQuery} from '../utils/e06-shared-read-contract.js';
 import {verifyWriteIdentity,validateWriteBatch,collectVerifiedInventory} from '../utils/e05-verified-write-contract.js';
 import {adapterCollectionId, rejectUnscopedPointOperation} from '../utils/tenant-route.js';
 /** I05: collection isolation and metadata integrity tests; no live backend required. */
@@ -24,7 +25,7 @@ function makeAdapter(file, results) {
         mergeDefinedChunkMetadata, trustedQueryMetadata,
         verifyWriteIdentity,validateWriteBatch,collectVerifiedInventory,
         verifyWriteIdentity,validateWriteBatch,collectVerifiedInventory,
-        adapterCollectionId, rejectUnscopedPointOperation, requireTenantScope: () => {}, hasVerifiedCapability: () => false,
+        adapterCollectionId, sharedTenantFromCollection,assertSharedReadOwnership,markSharedDisplayPage,denyUnverifiedSharedInventory,labelSharedQuery, rejectUnscopedPointOperation, requireTenantScope: () => {}, hasVerifiedCapability: () => false,
         fetch: async (url, options) => { calls.push({ url, body: JSON.parse(options.body) }); return response(results.shift()); },
     });
     const className = { standard: 'StandardBackend', qdrant: 'QdrantBackend', milvus: 'MilvusBackend', lancedb: 'LanceDBBackend' }[file];
@@ -48,7 +49,7 @@ for (const name of ['qdrant', 'milvus', 'lancedb', 'standard']) {
         if (name === 'qdrant') backend._registerCollection = async () => {};
         const item = { hash: 42, text: 'hello', index: 0, metadata: { keywords: ['inside'], conditions: { enabled: true }, summary: 'inside', importance: 0.9 },
             importance: undefined, keywords: undefined, conditions: undefined, vector:[0.2,0.4] };
-        await backend.insertVectorItems('my-collection', [item], settings);
+        await backend.insertVectorItems(name === 'milvus' ? 'vh:chat:my-collection' : 'my-collection', [item], settings);
         assert.equal(calls.length, 1);
         assert.equal(calls[0].body.items[0].metadata.summary, 'inside');
         assert.deepEqual(calls[0].body.items[0].metadata.keywords, ['inside']);
@@ -62,17 +63,17 @@ for (const name of ['qdrant', 'milvus', 'lancedb']) {
         const malicious = { hash: 'wrong', text: 'wrong text', score: 900, keywordBoost: 2 };
         const r = { hash: 123, text: 'real text', score: 0.32, metadata: {...malicious,type:'chat',sourceId:'collection'} };
         const a = makeAdapter(name, [{ results: [r] }]);
-        const single = await a.backend.queryCollection(name === 'qdrant' ? 'vh:chat:collection' : 'collection', 'query', 5, settings);
+        const single = await a.backend.queryCollection(['qdrant','milvus'].includes(name) ? 'vh:chat:collection' : 'collection', 'query', 5, settings);
         assert.deepEqual(Array.from(single.hashes), [123]);
         assert.equal(single.metadata[0].hash, 123);
         assert.equal(single.metadata[0].text, 'real text');
         assert.equal(single.metadata[0].score, 0.32);
         assert.equal(single.metadata[0].keywordBoost, 2);
         const b = makeAdapter(name, [{ results: [r] }]);
-        const multi = await b.backend.queryMultipleCollections([name === 'qdrant' ? 'vh:chat:collection' : 'collection'], 'query', 5, 0, settings);
-        assert.equal(multi[name === 'qdrant' ? 'vh:chat:collection' : 'collection'].metadata[0].hash, 123);
-        assert.equal(multi[name === 'qdrant' ? 'vh:chat:collection' : 'collection'].metadata[0].text, 'real text');
-        assert.equal(multi[name === 'qdrant' ? 'vh:chat:collection' : 'collection'].metadata[0].score, 0.32);
+        const multi = await b.backend.queryMultipleCollections([['qdrant','milvus'].includes(name) ? 'vh:chat:collection' : 'collection'], 'query', 5, 0, settings);
+        assert.equal(multi[['qdrant','milvus'].includes(name) ? 'vh:chat:collection' : 'collection'].metadata[0].hash, 123);
+        assert.equal(multi[['qdrant','milvus'].includes(name) ? 'vh:chat:collection' : 'collection'].metadata[0].text, 'real text');
+        assert.equal(multi[['qdrant','milvus'].includes(name) ? 'vh:chat:collection' : 'collection'].metadata[0].score, 0.32);
     });
 }
 

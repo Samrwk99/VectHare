@@ -3,6 +3,7 @@ import {adapterCollectionId,requireTenantScope,rejectUnscopedPointOperation} fro
 import {hasVerifiedCapability} from '../utils/backend-contracts.js';
 import {verifyServerSecretContract, ProtectedCredentialUnavailable, assertNoCredentialsInUrl} from '../utils/c05-protected-credentials.js';
 import { mergeDefinedChunkMetadata, trustedQueryMetadata } from '../utils/chunk-record-metadata.js';
+import {sharedTenantFromCollection,markSharedDisplayPage,denyUnverifiedSharedInventory,labelSharedQuery} from '../utils/e06-shared-read-contract.js';
 /**
  * ============================================================================
  * QDRANT BACKEND (via Unified Plugin API)
@@ -10,21 +11,14 @@ import { mergeDefinedChunkMetadata, trustedQueryMetadata } from '../utils/chunk-
  * Uses the Similharity plugin's unified /chunks/* endpoints.
  * Backend: Qdrant (external vector database server)
  *
- * COLLECTION STRATEGY (configurable via settings.qdrant_multitenancy):
- *
- * MULTITENANCY MODE (qdrant_multitenancy = true):
- * - Uses a single shared collection: "vecthare_multitenancy"
- * - Adds content_type metadata field to distinguish different sources
- * - Uses Qdrant filtering to query only the relevant content_type
- * - More efficient for resource usage, suitable for smaller deployments
- *
- * SEPARATE COLLECTIONS MODE (qdrant_multitenancy = false, DEFAULT):
- * - Creates separate collections per content type/source
- * - Each chat vectorization gets its own collection
- * - Each character gets its own collection
- * - Each lorebook gets its own collection
- * - Better organization and isolation of data
- * - Recommended for production use
+ * COLLECTION ROUTING WARNING (E06):
+ * - Similharity, not this adapter, decides the physical Qdrant collection.
+ * - The plugin's _parseCollectionName strips colon-qualified names and may
+ *   collapse different logical collection IDs onto the same physical name.
+ * - The old “separate collections” setting is NOT proof of physical isolation.
+ * - Qdrant writes, purge, metadata edits and deletes remain denied by E02.
+ * - Scoped reads need type/sourceId and per-record owner checks; a successful
+ *   plugin list/query does not prove authoritative completeness or health.
  *
  * Requires either a local Qdrant instance or Qdrant Cloud account.
  *
@@ -69,15 +63,9 @@ function getActualCollectionId(collectionId, settings) {
  * Unrecognized collection IDs are refused rather than guessed as a chat.
  */
 function tenantFiltersFor(collectionId) {
-    let type, sourceId;
-    const canonical = /^vh:([^:]+):(.+)$/.exec(collectionId);
-    const legacy = /^vecthare_([^_]+)_(.+)$/.exec(collectionId);
-    if (canonical) [, type, sourceId] = canonical;
-    else if (legacy) [, type, sourceId] = legacy;
-    if (!type || !sourceId || type === 'unknown' || sourceId === 'unknown')
-        throw new Error('[Qdrant] Cannot prove tenant from collection ID; scoped read refused');
-    return { type, sourceId };
+    return sharedTenantFromCollection(collectionId, BACKEND_TYPE);
 }
+
 function verifyTenantResults(items, filters) {
     for (const item of items) {
         const owner = item?.metadata && typeof item.metadata === 'object' ? item.metadata : item;
@@ -210,32 +198,11 @@ export class QdrantBackend extends VectorBackend {
     }
 
     async getSavedHashes(collectionId, settings) {
-        if (settings?.qdrant_multitenancy) requireTenantScope(BACKEND_TYPE, 'getSavedHashes');
-        const strippedCollectionId = this._stripRegistryPrefix(collectionId, settings);
-        const actualCollectionId = getActualCollectionId(strippedCollectionId, settings);
-
-        const body = {
-            backend: BACKEND_TYPE,
-            collectionId: actualCollectionId,
-            source: settings.source || 'transformers',
-            model: getModelFromSettings(settings),
-            limit: VECTOR_LIST_LIMIT,
-        };
-        body.filters = tenantFiltersFor(strippedCollectionId);
-
-        const response = await fetch('/api/plugins/similharity/chunks/list', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-            body: JSON.stringify(body),
-        });
-
-        if (!response.ok) {
-            const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`[Qdrant] Failed to get saved hashes for ${collectionId}: ${response.status} ${response.statusText} - ${errorBody}`);
-        }
-
-        const data = await response.json();
-        return verifyTenantResults(requireListedItems(data, 'Qdrant'), body.filters).map(item => item.hash);
+        // Do not present Similharity's swallowed Qdrant list errors as a
+        // complete saved-hash set. The mutation policy is already DENIED.
+        const stripped = this._stripRegistryPrefix(collectionId, settings);
+        tenantFiltersFor(stripped);
+        denyUnverifiedSharedInventory(BACKEND_TYPE);
     }
 
     async insertVectorItems(collectionId, items, settings) {
@@ -405,7 +372,7 @@ export class QdrantBackend extends VectorBackend {
         const hashes = items.map(r => r.hash);
         const metadata = items.map(r => trustedQueryMetadata(r));
 
-        return { hashes, metadata };
+        return { hashes, metadata, ...labelSharedQuery(items, BACKEND_TYPE) };
     }
 
     async queryMultipleCollections(collectionIds, searchText, topK, threshold, settings, queryVector = null) {
@@ -569,8 +536,7 @@ export class QdrantBackend extends VectorBackend {
         }
 
         const data = await response.json();
-        verifyTenantResults(requireListedItems(data, 'Qdrant'), body.filters);
-        return data;
+        return markSharedDisplayPage(data, body.filters, BACKEND_TYPE);
     }
 
     /**

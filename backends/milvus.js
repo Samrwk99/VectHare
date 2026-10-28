@@ -3,6 +3,7 @@ import {adapterCollectionId,requireTenantScope,rejectUnscopedPointOperation} fro
 import {hasVerifiedCapability} from '../utils/backend-contracts.js';
 import {verifyServerSecretContract, ProtectedCredentialUnavailable, assertNoCredentialsInUrl} from '../utils/c05-protected-credentials.js';
 import { mergeDefinedChunkMetadata, trustedQueryMetadata } from '../utils/chunk-record-metadata.js';
+import {sharedTenantFromCollection,assertSharedReadOwnership,markSharedDisplayPage,denyUnverifiedSharedInventory,labelSharedQuery} from '../utils/e06-shared-read-contract.js';
 /**
  * ============================================================================
  * MILVUS BACKEND (via Unified Plugin API)
@@ -13,7 +14,9 @@ import { mergeDefinedChunkMetadata, trustedQueryMetadata } from '../utils/chunk-
  * MULTITENANCY SUPPORT:
  * - Uses ONE collection ("vecthare_main") with payload filters
  * - Passes type and sourceId for data isolation
- * - Supports all VectHare features via payload metadata
+ * - Shared collection mutations remain denied; the plugin omits authoritative
+ *   tenant columns from ordinary query/list responses, so missing owner
+ *   metadata causes read results to be refused (E06).
  *
  * Requires either a local Milvus instance or Milvus Cloud account.
  *
@@ -139,60 +142,14 @@ export class MilvusBackend extends VectorBackend {
      * Legacy format: vecthare_{type}_{sourceId}
      */
     _parseCollectionId(collectionId, settings) {
-        collectionId = adapterCollectionId(collectionId, BACKEND_TYPE, settings?.source || 'transformers');
-
-        // Now parse the actual collection ID
-        const idParts = collectionId.split(':');
-
-        // New format: vh:{type}:{sourceId}
-        if (idParts.length >= 3 && idParts[0] === 'vh') {
-            return {
-                type: idParts[1],
-                sourceId: idParts.slice(2).join(':') // Handle UUIDs that might have colons
-            };
-        }
-
-        // Legacy format: vecthare_{type}_{sourceId}
-        const legacyParts = collectionId.split('_');
-        if (legacyParts.length >= 3 && legacyParts[0] === 'vecthare') {
-            return {
-                type: legacyParts[1],
-                sourceId: legacyParts.slice(2).join('_')
-            };
-        }
-
-        // Fallback: assume it's a chat with raw ID
-        console.warn('VectHare: Unknown collection ID format:', collectionId);
-        return {
-            type: 'chat',
-            sourceId: collectionId
-        };
+        return sharedTenantFromCollection(collectionId, BACKEND_TYPE, settings?.source || 'transformers');
     }
 
     async getSavedHashes(collectionId, settings) {
-        requireTenantScope(BACKEND_TYPE, 'getSavedHashes');
-        const { type, sourceId } = this._parseCollectionId(collectionId, settings);
-
-        const response = await fetch('/api/plugins/similharity/chunks/list', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-            body: JSON.stringify({
-                backend: BACKEND_TYPE,
-                collectionId: 'vecthare_main', // Always use main collection
-                source: settings.source || 'transformers',
-                model: getModelFromSettings(settings),
-                limit: VECTOR_LIST_LIMIT,
-                filters: { type, sourceId }, // Filter by tenant
-            }),
-        });
-
-        if (!response.ok) {
-            const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`[Milvus] Failed to get saved hashes for ${collectionId} (type: ${type}, sourceId: ${sourceId}): ${response.status} ${response.statusText} - ${errorBody}`);
-        }
-
-        const data = await response.json();
-        return requireListedItems(data, 'Milvus').map(item => item.hash);
+        const owner = this._parseCollectionId(collectionId, settings);
+        // Milvus returns page length as `total` and hides list errors as [].
+        // There is no safe complete hash inventory with this plugin source.
+        denyUnverifiedSharedInventory(BACKEND_TYPE);
     }
 
     async insertVectorItems(collectionId, items, settings) {
@@ -279,11 +236,11 @@ export class MilvusBackend extends VectorBackend {
         const data = await response.json();
 
         // Reject application-level failures even when HTTP returned 200.
-        const items = requireQueryItems(data, 'milvus');
+        const items = assertSharedReadOwnership(requireQueryItems(data, 'milvus'), {type, sourceId}, BACKEND_TYPE);
         const hashes = items.map(r => r.hash);
         const metadata = items.map(r => trustedQueryMetadata(r));
 
-        return { hashes, metadata };
+        return { hashes, metadata, ...labelSharedQuery(items, BACKEND_TYPE) };
     }
 
     async queryMultipleCollections(collectionIds, searchText, topK, threshold, settings) {
@@ -311,7 +268,7 @@ export class MilvusBackend extends VectorBackend {
 
                 if (response.ok) {
                     const data = await response.json();
-                    const resultArray = requireQueryItems(data, 'Milvus');
+                    const resultArray = assertSharedReadOwnership(requireQueryItems(data, 'Milvus'), {type, sourceId}, BACKEND_TYPE);
 
                     results[collectionId] = {
                         hashes: resultArray.map(r => r.hash),
@@ -421,7 +378,8 @@ export class MilvusBackend extends VectorBackend {
             throw new Error(`[Milvus] Failed to list chunks in ${collectionId} (type: ${type}, sourceId: ${sourceId}): ${response.status} ${response.statusText} - ${errorBody}`);
         }
 
-        return await response.json();
+        const data = await response.json();
+        return markSharedDisplayPage(data, {type, sourceId}, BACKEND_TYPE);
     }
 
     /**
@@ -572,7 +530,7 @@ export class MilvusBackend extends VectorBackend {
 
             if (response.ok) {
                 const data = await response.json();
-                const hybridItems = requireQueryItems(data, 'Milvus hybrid');
+                const hybridItems = assertSharedReadOwnership(requireQueryItems(data, 'Milvus hybrid'), {type, sourceId}, BACKEND_TYPE);
                 console.log(`[Milvus] Native hybrid search returned ${data.results?.length || 0} results`);
 
                 return {

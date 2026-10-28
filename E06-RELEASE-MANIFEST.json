@@ -1,0 +1,47 @@
+{
+  "checkpoint": "E06",
+  "date": "2026-10-28",
+  "baselineCheckpoint": "E05",
+  "pluginModified": false,
+  "writesUnlocked": false,
+  "liveSillyTavernAcceptance": false,
+  "testVerification": {
+    "individualProcessRuns": "1058/1058 passing, 53 files",
+    "combinedRun": "intermittent SIGSEGV in legacy C09/C12 tests; NOT a clean combined run",
+    "offlineStaticChecks": "E01 through E06 all passing",
+    "syntax": "210/210 JavaScript/MJS files passed"
+  },
+  "baselineFiles": 366,
+  "baselineFilesModified": [
+    "backends/milvus.js",
+    "backends/qdrant.js",
+    "tests/c04-c06-c11.node.test.mjs",
+    "tests/e02-safety-gateway.node.test.mjs",
+    "tests/i02-security.node.test.mjs",
+    "tests/i04-backend-errors.node.test.mjs",
+    "tests/i05-metadata.node.test.mjs"
+  ],
+  "newFilesExcludingThisManifest": [
+    "E06-CAPABILITY-ASSESSMENT.json",
+    "E06-CHANGELOG.md",
+    "E06-CHECKLIST.md",
+    "E06-FULL-TEST-OUTPUT.txt",
+    "E06-FUTURE-SIMILHARITY-PATCH-SPEC.md",
+    "E06-LIVE-READ-PROBE-RUNBOOK.md",
+    "E06-PARTITIONED-TEST-RESULTS.json",
+    "E06-READINESS-DECISION.md",
+    "E06-STATIC-VERIFICATION.json",
+    "E06-VERIFICATION.md",
+    "tests/e06-shared-backends.node.test.mjs",
+    "tools/e06-read-probe.mjs",
+    "tools/e06-verify.mjs",
+    "utils/e06-shared-read-contract.js"
+  ],
+  "baselineFilesMissing": [],
+  "baselineFilesUnchanged": 359,
+  "pluginSourceReferenceHashes": {
+    "index.js": "32a2aba3a83511a61c34620c600db5a91c04b4d638c02919a4d0bf7217a5a287",
+    "qdrant-backend.js": "3fd587cf9adbe3da8e8ee53c397ab46b943f95a13c58f325f89f327d961ab149",
+    "milvus-backend.js": "fc3c81888a9bd30d770d99a4fce6735e819a4079fc5c36717dc88ca16715fa6b"
+  }
+}

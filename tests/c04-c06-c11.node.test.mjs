@@ -1,3 +1,4 @@
+import {sharedTenantFromCollection,assertSharedReadOwnership,markSharedDisplayPage,denyUnverifiedSharedInventory,labelSharedQuery} from '../utils/e06-shared-read-contract.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -18,7 +19,7 @@ const adapter=(name)=>{
  const context=vm.createContext({console:quiet,VectorBackend:class{},getModelField:()=>null,getRequestHeaders:()=>({}),
   getProviderSpecificParams:()=>({}),mergeDefinedChunkMetadata:x=>x,trustedQueryMetadata:x=>x,
   VECTOR_LIST_LIMIT:100, requireListedItems:x=>x.items,requireQueryItems:x=>x.results,hybridEndpointUnsupported:()=>false,
-  hasVerifiedCapability,adapterCollectionId,requireTenantScope,rejectUnscopedPointOperation,
+  hasVerifiedCapability,adapterCollectionId,requireTenantScope,rejectUnscopedPointOperation,sharedTenantFromCollection,assertSharedReadOwnership,markSharedDisplayPage,denyUnverifiedSharedInventory,labelSharedQuery,
   fetch:async(url,options)=>{sends++;requests.push({url,body:options?.body ? JSON.parse(options.body) : null});return {ok:true,json:async()=>(name==='standard' ? [] : {items:[],results:[]})};},
   URLSearchParams});
  const Type=vm.runInContext(code+'\n'+{standard:'StandardBackend',qdrant:'QdrantBackend',milvus:'MilvusBackend',lancedb:'LanceDBBackend'}[name],context);
@@ -55,7 +56,7 @@ test('C06-A: Qdrant separate-mode refuses cross-backend qualified identities bef
 });
 test('C06-A: Milvus shared tenants cannot read/write/delete before verified filtering',async()=>{
  const a=adapter('milvus'),settings={vector_backend:'milvus',source:'openai'};
- await assert.rejects(a.backend.getSavedHashes('milvus:openai:vh:chat:a',settings),/tenantFilter contract unavailable/);
+ await assert.rejects(a.backend.getSavedHashes('milvus:openai:vh:chat:a',settings),/authoritative-inventory-contract-unavailable/);
  await assert.rejects(a.backend.insertVectorItems('milvus:openai:vh:chat:a',[{hash:3}],settings),/tenantFilter contract unavailable/);
  await assert.rejects(a.backend.deleteVectorItems('milvus:openai:vh:chat:a',['3'],settings),/acknowledgement unverified/);
  await assert.rejects(a.backend.getChunk('milvus:openai:vh:chat:a','3',settings),/does not carry verified tenant scope/);

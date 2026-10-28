@@ -1,3 +1,4 @@
+import {sharedTenantFromCollection,assertSharedReadOwnership,markSharedDisplayPage,denyUnverifiedSharedInventory,labelSharedQuery} from '../utils/e06-shared-read-contract.js';
 import {verifyWriteIdentity,validateWriteBatch,collectVerifiedInventory} from '../utils/e05-verified-write-contract.js';
 import {adapterCollectionId, rejectUnscopedPointOperation} from '../utils/tenant-route.js';
 /** I04: real adapter methods against a fake fetch; no SillyTavern server required. */
@@ -33,7 +34,7 @@ function adapter(file, replies = []) {
         requireListedItems, requireQueryItems, hybridEndpointUnsupported,
         mergeDefinedChunkMetadata, trustedQueryMetadata,
         verifyWriteIdentity,validateWriteBatch,collectVerifiedInventory,
-        adapterCollectionId, rejectUnscopedPointOperation, requireTenantScope: () => {}, hasVerifiedCapability: () => false,
+        adapterCollectionId, sharedTenantFromCollection,assertSharedReadOwnership,markSharedDisplayPage,denyUnverifiedSharedInventory,labelSharedQuery, rejectUnscopedPointOperation, requireTenantScope: () => {}, hasVerifiedCapability: () => false,
         fetch: async (url, opts) => {
             calls.push({ url, opts });
             assert.ok(replies.length > 0, `No fake response for ${url}`);
@@ -47,42 +48,42 @@ function adapter(file, replies = []) {
     return { backend: new Class(), calls };
 }
 
-for (const file of ['qdrant', 'lancedb', 'milvus']) {
-    test(`I04 #222: ${file} list rejects HTTP 200 application failure, malformed, and missing items`, async () => {
-        for (const payload of [{ success: false, items: [] }, { foo: [] }, { items: null }, { error: 'database offline', items: [] }]) {
-            const { backend } = adapter(file, [response(200, payload)]);
-            await assert.rejects(backend.getSavedHashes(file === 'qdrant' ? 'vh:chat:abc' : 'abc', settings), /invalid or unsuccessful|E05 evidence unavailable/);
-        }
-    });
-    test(`I04 #222: ${file} list accepts explicit empty list and valid hashes`, async () => {
-        const emptyPayload = file === 'lancedb'
-            ? { success:true, items:[], total:0, offset:0, limit:100, hasMore:false }
-            : { success:true, items:[] };
-        let h = adapter(file, file==='lancedb' ? [response(200,emptyPayload),response(200,emptyPayload)] : [response(200,emptyPayload)]);
-        assert.deepEqual(Array.from(await h.backend.getSavedHashes(file === 'qdrant' ? 'vh:chat:abc' : 'abc', settings)), []);
-        const rows=[{ hash:55, text:'chunk 55', metadata:{type:'chat',sourceId:'abc'} },
-                    { hash:99, text:'chunk 99', metadata:{type:'chat',sourceId:'abc'} }];
-        const validPayload=file==='lancedb'
-            ? {success:true,items:rows,total:2,offset:0,limit:100,hasMore:false}
-            : {items:rows};
-        h = adapter(file, file==='lancedb' ? [response(200,validPayload),response(200,validPayload)] : [response(200,validPayload)]);
-        assert.deepEqual(Array.from(await h.backend.getSavedHashes(file === 'qdrant' ? 'vh:chat:abc' : 'abc', settings)), [55, 99]);
+for (const file of ['qdrant', 'milvus']) {
+    test(`E06 ${file} saved-hash inventory is refused even when HTTP claims success`, async () => {
+        const a = adapter(file, [response(200,{success:true,items:[],total:0})]);
+        await assert.rejects(a.backend.getSavedHashes('vh:chat:abc',settings),/authoritative-inventory-contract-unavailable/);
+        assert.equal(a.calls.length,0,'no ambiguous list should be sent');
     });
 }
+for(const payload of [{success:false,items:[]},{foo:[]},{items:null},{error:'offline',items:[]}]) {
+    test('I04 #222 LanceDB list rejects application-level failures',async()=>{
+        const a=adapter('lancedb',[response(200,payload)]);
+        await assert.rejects(a.backend.getSavedHashes('abc',settings),/invalid or unsuccessful|E05 evidence unavailable/);
+    });
+}
+test('I04 LanceDB accepts independently rechecked empty and non-empty inventory', async()=>{
+    const empty={success:true,items:[],total:0,offset:0,limit:100,hasMore:false};
+    let a=adapter('lancedb',[response(200,empty),response(200,empty)]);
+    assert.deepEqual(Array.from(await a.backend.getSavedHashes('abc',settings)),[]);
+    const rows=[{hash:55,text:'one'},{hash:99,text:'two'}];
+    const full={success:true,items:rows,total:2,offset:0,limit:100,hasMore:false};
+    a=adapter('lancedb',[response(200,full),response(200,full)]);
+    assert.deepEqual(Array.from(await a.backend.getSavedHashes('abc',settings)),[55,99]);
+});
 
 for (const file of ['lancedb', 'milvus']) {
     test(`I04 #78: ${file} mixed multi-collection query preserves failure metadata`, async () => {
-        const { backend } = adapter(file, [response(200, { results: [{ hash: 9, score: 0.8, text: 'good' }] }), response(503, {})]);
-        const result = await backend.queryMultipleCollections(['A', 'B'], 'test', 5, 0, settings);
-        assert.deepEqual(Array.from(result.A.hashes), [9]);
-        assert.deepEqual(Array.from(result.B.hashes), []);
-        assert.match(result.B.error, /503/);
+        const { backend } = adapter(file, [response(200, { results: [{ hash: 9, score: 0.8, text: 'good', metadata:{type:'chat',sourceId:'A'} }] }), response(503, {})]);
+        const result = await backend.queryMultipleCollections(file === 'milvus' ? ['vh:chat:A','vh:chat:B'] : ['A','B'], 'test', 5, 0, settings);
+        assert.deepEqual(Array.from(result[file === 'milvus' ? 'vh:chat:A' : 'A'].hashes), [9]);
+        assert.deepEqual(Array.from(result[file === 'milvus' ? 'vh:chat:B' : 'B'].hashes), []);
+        assert.match(result[file === 'milvus' ? 'vh:chat:B' : 'B'].error, /503/);
     });
     test(`I04 #78: ${file} transport and application-level query failure are distinct from empty`, async () => {
         const { backend } = adapter(file, [response(200, { success: false, results: [] }), new Error('connection refused')]);
-        const result = await backend.queryMultipleCollections(['A', 'B'], 'test', 5, 0, settings);
-        assert.match(result.A.error, /unsuccessful/);
-        assert.match(result.B.error, /connection refused/);
+        const result = await backend.queryMultipleCollections(file === 'milvus' ? ['vh:chat:A','vh:chat:B'] : ['A','B'], 'test', 5, 0, settings);
+        assert.match(result[file === 'milvus' ? 'vh:chat:A' : 'A'].error, /unsuccessful/);
+        assert.match(result[file === 'milvus' ? 'vh:chat:B' : 'B'].error, /connection refused/);
     });
 }
 
@@ -114,16 +115,16 @@ test('I04 #67: Standard rejected plugin init remains native-only', async () => {
 for (const file of ['qdrant', 'milvus']) {
     test(`I04 hybrid ${file}: fallback on unsupported endpoint only`, async () => {
         const a = adapter(file, [response(404), response(200, { results: [] })]);
-        const result = await a.backend.hybridQuery(file === 'qdrant' ? 'vh:chat:abc' : 'abc', 'hello', 5, settings);
+        const result = await a.backend.hybridQuery(['qdrant','milvus'].includes(file) ? 'vh:chat:abc' : 'abc', 'hello', 5, settings);
         assert.equal(result.hashes.length, 0);
         assert.equal(a.calls.length, 2);
         const b = adapter(file, [response(503)]);
-        await assert.rejects(b.backend.hybridQuery(file === 'qdrant' ? 'vh:chat:abc' : 'abc', 'hello', 5, settings), /HTTP 503/);
+        await assert.rejects(b.backend.hybridQuery(['qdrant','milvus'].includes(file) ? 'vh:chat:abc' : 'abc', 'hello', 5, settings), /HTTP 503/);
         assert.equal(b.calls.length, 1);
         const c = adapter(file, [new Error('connection broke')]);
-        await assert.rejects(c.backend.hybridQuery(file === 'qdrant' ? 'vh:chat:abc' : 'abc', 'hello', 5, settings), /connection broke/);
+        await assert.rejects(c.backend.hybridQuery(['qdrant','milvus'].includes(file) ? 'vh:chat:abc' : 'abc', 'hello', 5, settings), /connection broke/);
         const d = adapter(file, [response(200, { success: false, results: [] })]);
-        await assert.rejects(d.backend.hybridQuery(file === 'qdrant' ? 'vh:chat:abc' : 'abc', 'hello', 5, settings), /unsuccessful/);
+        await assert.rejects(d.backend.hybridQuery(['qdrant','milvus'].includes(file) ? 'vh:chat:abc' : 'abc', 'hello', 5, settings), /unsuccessful/);
     });
 }
 

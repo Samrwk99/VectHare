@@ -108,5 +108,5 @@ test('E02 Qdrant adapter uses the actual plugin tenant contract and checks retur
   assert.equal((source.match(/body\.filter\s*=/g)||[]).length,0);
   assert.ok((source.match(/body\.filters\s*=\s*tenantFiltersFor/g)||[]).length>=5);
   assert.match(source,/verifyTenantResults\(requireQueryItems/);
-  assert.match(source,/verifyTenantResults\(requireListedItems/);
+  assert.match(source,/markSharedDisplayPage\(data, body\.filters/);
 });
