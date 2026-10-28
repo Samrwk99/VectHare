@@ -1,0 +1,56 @@
+{
+  "checkpoint": "F07",
+  "versions": {
+    "extension": "2.2.0-alpha.s11.12-f07",
+    "plugin": "3.2.10-s10.11-f07"
+  },
+  "evidence": {
+    "plugin": {
+      "passed": 305,
+      "failed": 0,
+      "environment": "offline/synthetic Vectra mock"
+    },
+    "extension": {
+      "passed": 1125,
+      "failed": 0,
+      "files": 65
+    },
+    "syntax": "passed"
+  },
+  "transports": {
+    "plugin_vectra": {
+      "guiSetup": "F03_SUPPORTED_NEW_ONLY",
+      "v2Reads": "GUARDED_RECEIPT_AND_SOURCE_BOUND",
+      "manualCRUD": "EXPERIMENTAL_EXPLICIT_CONSENT",
+      "normalInsert": "DENIED",
+      "normalDelete": "DENIED",
+      "legacyCollections": "QUARANTINED",
+      "verifiedFullInventory": "DENIED",
+      "hostCertified": false
+    },
+    "native_standard": {
+      "readProbe": "READ_ONLY_2_ROUTES",
+      "insert": "UNPROBED_DENIED",
+      "delete": "UNPROBED_DENIED",
+      "purge": "UNPROBED_DENIED",
+      "hostCertified": false
+    },
+    "qdrant": {
+      "status": "F05_GUARDED_CANDIDATE_NOT_LIVE_CERTIFIED"
+    },
+    "lancedb": {
+      "status": "F06_GUARDED_CANDIDATE_NOT_LIVE_CERTIFIED"
+    },
+    "milvus": {
+      "status": "F03_PROVISION_F02_READ_GUARDED_F08_PENDING"
+    }
+  },
+  "normalMemoryWorkflowsEnabled": false,
+  "productionReady": false,
+  "remaining": [
+    "real Vectra SDK acceptance",
+    "native Standard host mutation proof",
+    "F08 Milvus",
+    "F09-F12 workflows, backup, GUI, acceptance"
+  ]
+}

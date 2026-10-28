@@ -7,7 +7,7 @@
  * All chunk operations go through unified /chunks/* endpoints.
  * Backend is specified via `backend` parameter in request body.
  *
- * @version 3.2.10-s10.10-f06
+ * @version 3.2.10-s10.11-f07
  */
 
 import path from 'node:path';
@@ -30,6 +30,9 @@ import {registerF04PilotRoutes} from './lib/f04-pilot-mutations.js';
 import {registerF05AcceptanceRoutes} from './lib/f05-qdrant-acceptance.js';
 import {registerF06AcceptanceRoutes} from './lib/f06-lancedb.js';
 import {registerF06PilotRoutes} from './lib/f06-lancedb-pilot.js';
+import {f07SealedVectra,f07VectraLocation} from './lib/f07-vectra.js';
+import {registerF07PilotRoutes} from './lib/f07-vectra-pilot.js';
+import {registerF07AcceptanceRoutes} from './lib/f07-vectra-acceptance.js';
 import { loadS10Build } from './lib/s10-build.js';
 import { registerS10Routes } from './lib/s10-contracts.js';
 import {registerH01AcceptanceRoutes} from './lib/h01-qdrant-acceptance.js';
@@ -37,7 +40,7 @@ import {registerF01HostRoutes} from './lib/f01-host-sources.js';
 import { validateVector as validateS05Vector } from './lib/s05-contract.js';
 
 const pluginName = 'similharity';
-const pluginVersion = '3.2.10-s10.10-f06';
+const pluginVersion = '3.2.10-s10.11-f07';
 
 /**
  * Initialize the plugin
@@ -80,15 +83,19 @@ export async function init(router) {
     registerS04Routes(router);
     const f02ReadHandler=registerF02Routes(router,{backendPool,createVectra:async(req,binding)=>{
         // No fabricated index seal or auto-creation: S08 refuses unprovisioned Vectra.
-        const index=new vectra.LocalIndex(path.join(req.s03.vectorsPath,'vectra-v2',binding.collection.physicalName));
-        return {index};
+        return f07SealedVectra(req,binding,{createIndex:folder=>new vectra.LocalIndex(folder)});
     }});
     registerS05Routes(router,{readHandler:f02ReadHandler});
-    registerF03ProvisionRoutes(router,{backendPool});
+    registerF03ProvisionRoutes(router,{backendPool,createVectra:async(req,binding)=>{
+      const folder=await f07VectraLocation(req.s03,binding,{createRoot:true});
+      return {folder,index:new vectra.LocalIndex(folder)};
+    }});
     registerF04PilotRoutes(router,{backendPool});
     registerF05AcceptanceRoutes(router,{backendPool});
     registerF06AcceptanceRoutes(router,{backendPool});
     registerF06PilotRoutes(router,{backendPool});
+    registerF07PilotRoutes(router,{createVectra:(req,binding)=>f07SealedVectra(req,binding,{createIndex:folder=>new vectra.LocalIndex(folder)})});
+    registerF07AcceptanceRoutes(router,{makeIndex:folder=>new vectra.LocalIndex(folder)});
     registerS10Routes(router, s10Build);
     registerH01AcceptanceRoutes(router,{backendPool});
     registerF01HostRoutes(router);

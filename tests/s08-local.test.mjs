@@ -45,7 +45,7 @@ function vectraMock({disposable=true,binding=bind('vectra'),failure=null,exists=
   async isIndexCreated(){calls.push('exists');return exists;},
   async getItem(id){calls.push('get');if(failure==='read')throw Error('read down');return map.get(id)?structuredClone(map.get(id)):undefined;},
   async listItems(){calls.push('list');return [...map.values()].map(x=>structuredClone(x));},
-  async queryItems(v,topK){calls.push('query');return [...map.values()].slice(0,topK).map(item=>({score:0.9,item:structuredClone(item)}));},
+  async queryItems(v,text,topK){if(text!=='')throw Error('bad vectra query');calls.push('query');return [...map.values()].slice(0,topK).map(item=>({score:0.9,item:structuredClone(item)}));},
   async beginUpdate(){calls.push('begin');},async endUpdate(){calls.push('end');if(failure==='commit')throw Error('commit down');},
   async cancelUpdate(){calls.push('cancel');},
   async insertItem(item){calls.push('insert');if(failure==='insert')throw Error('insert down');if(map.has(item.id))throw Error('duplicate');map.set(item.id,structuredClone(item));return item;},
