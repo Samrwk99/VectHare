@@ -256,6 +256,9 @@ export async function exportCollection(collectionId, settings, collectionInfo = 
                 chunkCount: chunks.length,
                 inventoryComplete: false, // legacy uncapped API has no verified end-of-list receipt
                 inventoryStatus: 'unverified',
+                expectedCount: null, // no independent scoped count is established by the legacy endpoint
+                receivedCount: chunks.length,
+                completenessReceipt: {expectedCount:null,receivedCount:chunks.length,complete:false},
                 chunksWithVectors,
                 hasText: chunks.filter(c => c.text).length,
                 hasKeywords: chunks.filter(c => c.metadata?.keywords?.length > 0).length,
@@ -325,7 +328,10 @@ export function downloadExport(exportData, filename = null) {
         ? `vecthare-export-${exportData.stats.totalCollections}-collections`
         : `vecthare-${exportData.collection?.id || 'collection'}`;
 
-    const finalFilename = (filename || defaultName) + EXPORT_FILE_EXTENSION;
+    const unverified = exportData?.stats?.inventoryComplete !== true ||
+        exportData?.collections?.some(c=>c?.stats?.inventoryComplete!==true);
+    const finalFilename = (filename || defaultName) +
+        (unverified ? '.UNVERIFIED' : '') + EXPORT_FILE_EXTENSION;
 
     if (exportData?.stats?.inventoryComplete === false ||
         exportData?.collections?.some(c=>c?.stats?.inventoryComplete===false)) {

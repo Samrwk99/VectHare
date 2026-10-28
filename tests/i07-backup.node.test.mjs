@@ -122,7 +122,7 @@ test('#117/#210 PNG zlib is interoperable and preserves UTF-8',async()=>{
 });
 
 test('#117 fallback tEXt Base64 Unicode survives large text without argument-spread overflow',async()=>{
- const src=source('core/png-export.js').replace(/^import .*\n/gm,'').replaceAll('export async function','async function').replaceAll('export function','function');
+ const src=source('core/png-export.js').replace(/^import .*\n/gm,'').replaceAll('export async function','async function').replaceAll('export function','function').replaceAll('export const','const');
  const context=vm.createContext({parseSafePng,readLimitedStream,MAX_PNG_TEXT_BYTES,console:quiet,CompressionStream:undefined,DecompressionStream,TextDecoder,TextEncoder,Uint8Array,DataView,Blob,Response,URL,Image:class{},document:{},btoa,atob});
  const fn=vm.runInContext(`${src}\n({embedDataInPNG,extractDataFromPNG})`,context);
  const payload={generator:'VectHare',text:'漢字 🐇'.repeat(30000)};
@@ -163,7 +163,7 @@ test('#154 character-card PNG loader decodes UTF-8 instead of Latin-1 byte strin
  const content=Buffer.concat([Buffer.from('chara\0'),Buffer.from(base64)]);
  const type=Buffer.from('tEXt');const len=Buffer.alloc(4);len.writeUInt32BE(content.length,0);
  const c=Buffer.alloc(4);c.writeUInt32BE(crc32(Buffer.concat([type,content]))>>>0);
- const image=Buffer.concat([Buffer.from(pngBase).subarray(0,8),len,type,content,c,Buffer.from(pngBase).subarray(-12)]);
+ const image=Buffer.concat([Buffer.from(pngBase).subarray(0,-12),len,type,content,c,Buffer.from(pngBase).subarray(-12)]);
  assert.deepEqual(JSON.parse(JSON.stringify(fn(new Uint8Array(image)))),payload.data);
 });
 

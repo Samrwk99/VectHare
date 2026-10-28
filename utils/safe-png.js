@@ -3,6 +3,8 @@ export const MAX_PNG_BYTES=32*1024*1024;
 export const MAX_PNG_CHUNK_BYTES=12*1024*1024;
 export const MAX_PNG_TEXT_BYTES=16*1024*1024;
 const SIGNATURE=[137,80,78,71,13,10,26,10];
+const ALLOWED_PNG_CHUNKS=new Set(['IHDR','PLTE','IDAT','IEND','tEXt','zTXt','iTXt',
+    'gAMA','cHRM','sRGB','iCCP','sBIT','bKGD','hIST','tRNS','pHYs','sPLT','tIME','eXIf']);
 let crcTable;
 function crc32(bytes){
     if(!crcTable) crcTable=Uint32Array.from({length:256},(_,i)=>{let c=i;for(let j=0;j<8;j++)c=(c&1)?0xedb88320^(c>>>1):(c>>>1);return c>>>0;});
@@ -13,15 +15,26 @@ function crc32(bytes){
 export function parseSafePng(bytes){
     if(!(bytes instanceof Uint8Array) || bytes.length<20 || bytes.length>MAX_PNG_BYTES) throw new Error('PNG exceeds safe size or is truncated');
     if(!SIGNATURE.every((b,i)=>bytes[i]===b)) throw new Error('Invalid PNG signature');
-    let offset=8;const chunks=[];let ended=false;
+    let offset=8;const chunks=[];let ended=false;let ihdr=false;let idat=false;
     while(offset<bytes.length){
         if(offset+12>bytes.length)throw new Error('Truncated PNG chunk header');
-        const view=new DataView(bytes.buffer,bytes.byteOffset+offset,12+Math.min(bytes.length-offset-12,MAX_PNG_CHUNK_BYTES));
+        const view=new DataView(bytes.buffer,bytes.byteOffset+offset,bytes.length-offset);
         const length=view.getUint32(0,false);
         if(length>MAX_PNG_CHUNK_BYTES || length>bytes.length-offset-12)throw new Error('Invalid PNG chunk length');
         const typeBytes=bytes.subarray(offset+4,offset+8);
         if(!typeBytes.every(b=>(b>=65&&b<=90)||(b>=97&&b<=122)))throw new Error('Invalid PNG chunk type');
         const type=String.fromCharCode(...typeBytes);
+        // Strict allowlist: unknown critical or ancillary extension chunks
+        // are not copied into a VectHare export without review.
+        if (!ALLOWED_PNG_CHUNKS.has(type)) throw new Error('Unsupported PNG chunk type');
+        if (!ihdr && type!=='IHDR') throw new Error('PNG must begin with IHDR');
+        if (type==='IHDR') {
+            if (ihdr || length!==13 || offset!==8) throw new Error('Invalid PNG IHDR');
+            const width=view.getUint32(8,false),height=view.getUint32(12,false);
+            if (!width || !height || width>100000 || height>100000) throw new Error('Invalid PNG dimensions');
+            ihdr=true;
+        }
+        if (type==='IDAT') idat=true;
         const expected=view.getUint32(8+length,false); // use full-span view below
         const actual=crc32(bytes.subarray(offset+4,offset+8+length));
         if(expected!==actual)throw new Error('PNG CRC mismatch');
@@ -29,7 +42,7 @@ export function parseSafePng(bytes){
         offset+=length+12;
         if(type==='IEND'){if(length!==0)throw new Error('Invalid IEND');ended=true;break;}
     }
-    if(!ended || offset!==bytes.length)throw new Error('Invalid PNG terminator');
+    if(!ended || !ihdr || !idat || offset!==bytes.length)throw new Error('Invalid PNG terminator');
     return chunks;
 }
 /** Stream with a decompressed byte ceiling; rejected bombs do not buffer unbounded data. */

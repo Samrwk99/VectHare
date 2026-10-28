@@ -109,7 +109,10 @@ async function decompressZlib(data) {
         try {
             const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream(format));
             return await readLimitedStream(stream, MAX_PNG_TEXT_BYTES);
-        } catch (_) { /* Try the legacy raw format. */ }
+        } catch (error) {
+            if (/safe limit/.test(String(error?.message))) throw error;
+            /* Try the legacy raw format. */
+        }
     }
     throw new Error('Unsupported or corrupt VectHare zTXt compression');
 }
@@ -397,16 +400,39 @@ export async function createDefaultPNG(width = 512, height = 512, text = 'VectHa
  * @param {Uint8Array|null} pngData - Base PNG image (null = use default)
  * @returns {Promise<Uint8Array>} PNG with embedded data
  */
+export const MAX_PNG_EXPORT_CHUNKS = 2500;
+export const MAX_PNG_EXPORT_PAYLOAD_BYTES = 6 * 1024 * 1024;
+
+/** PNG is only a small, shareable envelope, not a large-data backup format. */
+export function validatePngExportSize(exportData) {
+    const chunks = exportData?.type === 'multi'
+        ? (Array.isArray(exportData.collections) ? exportData.collections.reduce((n, c) => n + (c?.chunks?.length || 0), 0) : Infinity)
+        : (Array.isArray(exportData?.chunks) ? exportData.chunks.length : 0);
+    if (chunks > MAX_PNG_EXPORT_CHUNKS)
+        throw new Error('PNG export limited to 2,500 chunks; choose JSON or verified NDJSON instead');
+    // Prevent costly stringify/compression for obviously huge text payloads.
+    const collections = exportData?.type === 'multi' ? exportData.collections : [exportData];
+    let approximateBytes = 0;
+    for (const collection of collections || []) for (const chunk of collection?.chunks || []) {
+        approximateBytes += (chunk?.text?.length || 0);
+        if (approximateBytes > MAX_PNG_EXPORT_PAYLOAD_BYTES)
+            throw new Error('PNG export exceeds safe payload limit; choose JSON or verified NDJSON');
+    }
+    return true;
+}
+
 export async function embedDataInPNG(exportData, pngData = null) {
+    validatePngExportSize(exportData);
+    // Enforce payload ceiling before canvas creation or compression.
+    const jsonString = JSON.stringify(exportData);
+    if (new TextEncoder().encode(jsonString).byteLength > MAX_PNG_EXPORT_PAYLOAD_BYTES)
+        throw new Error('PNG export exceeds 6 MiB payload limit; choose JSON or verified NDJSON');
     // Use default image if none provided
     if (!pngData) {
         const collectionName = exportData.collection?.name ||
             (exportData.type === 'multi' ? `${exportData.stats?.totalCollections || 0} Collections` : 'Collection');
         pngData = await createDefaultPNG(512, 512, collectionName);
     }
-
-    // Convert export data to JSON string
-    const jsonString = JSON.stringify(exportData);
 
     // Create zTXt chunk with compressed data
     const textChunk = await createZTXtChunk(VECTHARE_KEYWORD, jsonString);

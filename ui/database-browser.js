@@ -934,6 +934,14 @@ function renderCollectionCard(collection) {
                                 title="Export as JSON (includes vectors)">
                             ${icons.fileExport(16)} JSON
                         </button>
+                        <button class="vecthare-btn-sm vecthare-btn-json vecthare-action-export-ndjson"
+                                data-collection-key="${escapeHtml(uniqueKey)}"
+                                data-backend="${escapeHtml(collection.backend)}"
+                                data-source="${escapeHtml(collection.source || "transformers")}"
+                                data-model="${escapeHtml(collection.model || "")}" 
+                                title="Verified complete NDJSON (requires a certified paginated backend contract)">
+                            ${icons.fileExport(16)} Verified NDJSON
+                        </button>
                         <button class="vecthare-btn-sm vecthare-btn-png vecthare-action-export-png"
                                 data-collection-key="${escapeHtml(uniqueKey)}"
                                 data-collection-id="${escapeHtml(collection.id)}"
@@ -1008,8 +1016,8 @@ async function performPngExport(imageFile) {
     const pngSize = pngWithData.length;
     const ratio = Math.round((pngSize / jsonSize) * 100);
 
-    toastr.success(
-      `PNG export complete!\n${exportData.stats.chunkCount} chunks\n` +
+    toastr.warning(
+      `PNG export created (inventory unverified)!\n${exportData.stats.chunkCount} listed chunks\n` +
         `Original: ${formatBytes(jsonSize)}\n` +
         `PNG: ${formatBytes(pngSize)} (${ratio}%)`,
       "VectHare Export",
@@ -1299,13 +1307,46 @@ function bindCollectionCardEvents() {
 
         downloadExport(exportData, collection.name || collectionId);
 
-        toastr.success(
-          `Exported ${exportData.stats.chunkCount} chunks (${exportData.stats.chunksWithVectors} with vectors)`,
+        toastr.warning(
+          `Exported ${exportData.stats.chunkCount} listed chunks, but inventory completeness is NOT verified. Do not use this as a complete backup.`,
           "VectHare Export",
         );
       } catch (error) {
         console.error("VectHare: Export failed", error);
         toastr.error(`Export failed: ${error.message}`, "VectHare");
+      }
+    });
+
+  // Verified large export. A backend capability gate runs before any save dialog.
+  $(".vecthare-action-export-ndjson")
+    .off("click")
+    .on("click", async function (e) {
+      e.stopPropagation();
+      const key = $(this).data("collection-key");
+      const collection = findCollectionByKey(key);
+      if (!collection) return;
+      try {
+        const { downloadVerifiedCollectionNDJSON } = await import("../core/c11-export.js");
+        const { getBackendForCollection } = await import("../backends/backend-manager.js");
+        const settings = { ...browserState.settings,
+          vector_backend: collection.backend,
+          source: collection.source || "transformers",
+          model: collection.model || "" };
+        // This remains blocked for the unchanged plugin until independently
+        // verified count, tenant, and pagination contracts are available.
+        const { parseCollectionKey } = await import("../utils/collection-keys.js");
+        if (!parseCollectionKey(key)) throw Error("Choose a qualified collection identity before a verified export");
+        const { hasVerifiedCapability } = await import("../utils/backend-contracts.js");
+        for (const flag of ["listPagination","completeInventory","tenantFilter","count"]) {
+          if (!hasVerifiedCapability(collection.backend,flag))
+            throw Error("Verified NDJSON export is unavailable: the backend inventory contract is not certified");
+        }
+        const adapter = await getBackendForCollection(collection.backend,settings);
+        const receipt = await downloadVerifiedCollectionNDJSON({key,settings,adapter,
+          filename:`${collection.name || collection.id}.vecthare.ndjson`});
+        toastr.success(`Verified export: ${receipt.receivedCount} records`,"VectHare Export");
+      } catch (error) {
+        toastr.warning(error.message, "VectHare Export");
       }
     });
 
@@ -3629,7 +3670,7 @@ function bindBulkEvents() {
         }
       }
 
-      toastr.success(`Exported ${successCount} collection(s)`, "VectHare");
+      toastr.warning(`Exported ${successCount} collection listing(s); completeness is not verified`, "VectHare");
     });
 
   // Bulk delete - uses unified deleteCollection()
