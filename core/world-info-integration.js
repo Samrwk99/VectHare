@@ -23,6 +23,7 @@ import { buildLorebookCollectionId } from './collection-ids.js';
 import { setExtensionPrompt, getCurrentChatId } from '../../../../../script.js';
 import { LEGACY_WORLD_INFO_PROMPT_TAG } from './constants.js';
 import { buildSearchContext } from './conditional-activation.js';
+import {normalizeWorldInfoEntries, normalizeWorldInfoEntry} from '../utils/world-info-identity.js';
 
 // ============================================================================
 // WORLD INFO ACTIVATION HOOKS
@@ -66,7 +67,7 @@ export async function getSemanticWorldInfoEntries(recentMessages, activeEntries,
             generationType: 'normal',
             isGroupChat: context.groupId != null,
             currentCharacter: context.name2 || null,
-            activeLorebookEntries: activeEntries.map(e => e.key || e.uid),
+            activeLorebookEntries: normalizeWorldInfoEntries(activeEntries),
             currentChatId: getCurrentChatId(),
             currentCharacterId: context.characterId || null
         }
@@ -197,12 +198,14 @@ async function getEnabledLorebookCollections(settings, searchContext) {
  * @returns {object[]} Deduplicated entries
  */
 function deduplicateWithActiveEntries(semanticEntries, activeEntries) {
-    const activeUids = new Set(activeEntries.map(e => e.uid));
+    // UIDs alone are not unique across lorebooks.
+    const activeIds = new Set(normalizeWorldInfoEntries(activeEntries).map(e => e.id));
     const activeContents = new Set(activeEntries.map(e => e.content?.trim().toLowerCase()));
 
     return semanticEntries.filter(entry => {
         // Skip if UID already active
-        if (activeUids.has(entry.uid)) {
+        const identity = normalizeWorldInfoEntry(entry, entry.lorebookName);
+        if (identity && activeIds.has(identity.id)) {
             return false;
         }
 

@@ -32,6 +32,7 @@ import { migrateOldEnabledKeys } from './core/collection-metadata.js';
 import { clearCollectionRegistry, discoverExistingCollections, getCollectionRegistry, getPendingCollectionDeletions } from './core/collection-loader.js';
 import AsyncUtils from './utils/async-utils.js';
 import {chatJobs,currentChatIdentity} from './core/chat-job-runtime.js';
+import {worldInfoSnapshots} from './utils/world-info-identity.js';
 import {stopVectorization,resetControlState} from './core/vectorization-control.js';
 import { purgeAllAndResetSettings } from './core/destructive-safety.js';
 
@@ -613,6 +614,7 @@ jQuery(async () => {
     // A chat switch invalidates every job, not merely its eventual toast.
     const invalidateChat = () => {
         chatJobs.cancelAll('chat-changed');
+        worldInfoSnapshots.clear(); // Do not reuse stale WI observations across chat switches.
         chatJobs.bumpGeneration('chat-changed');
         if (isVectorizationActive()) stopVectorization();
         else resetControlState();
@@ -622,6 +624,13 @@ jQuery(async () => {
         chatJobs.bumpGeneration('message-changed');
     };
     onVhEvent(event_types.CHAT_CHANGED, invalidateChat);
+    // C08: capture host WI activations for the *next* retrieval. Event ordering
+    // versus generate_interceptor is version-dependent and not assumed.
+    onVhEvent(event_types.WORLD_INFO_ACTIVATED, payload => {
+        const current = currentChatIdentity();
+        worldInfoSnapshots.capture(current.originId || current.chatId, payload);
+    });
+
     for (const name of ['GENERATION_STOPPED','GENERATION_ENDED','GENERATION_ABORTED']) {
         onVhEvent(event_types[name], () => chatJobs.bumpGeneration(name.toLowerCase()));
     }

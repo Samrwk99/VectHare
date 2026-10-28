@@ -35,7 +35,8 @@
     "test:c07": "node --test tests/c07-*.node.test.mjs",
     "test:c02": "node --test tests/c02-operations.node.test.mjs && node --experimental-vm-modules --test tests/c02-integration.node.test.mjs",
     "test:step6": "node --test tests/c04-c06-c07-completion.node.test.mjs && node --experimental-vm-modules --test tests/c06-backend-cache.node.test.mjs",
-    "test:c05": "node --test tests/c05-credentials.node.test.mjs"
+    "test:c05": "node --test tests/c05-credentials.node.test.mjs",
+    "test:c08": "node --test tests/c08-activation.node.test.mjs"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^2.1.0",

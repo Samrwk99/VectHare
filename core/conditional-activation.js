@@ -11,6 +11,7 @@
  */
 
 import { EVALUATED_CONDITION_TYPES, normalizeConditionRule } from './condition-rule-compat.js';
+import {activeWorldInfoMatches, normalizeWorldInfoEntries} from '../utils/world-info-identity.js';
 
 // ============================================================================
 // EXPRESSIONS EXTENSION INTEGRATION
@@ -272,7 +273,8 @@ function evaluatePatternCondition(rule, context) {
 function evaluateSpeakerCondition(rule, context) {
     const settings = rule.settings || { values: [rule.value || ''], matchType: 'any' };
     const targets = settings.values || [];
-    const depth = Number.isSafeInteger(settings.lookback) && settings.lookback > 0 ? settings.lookback : 10;
+    const numericDepth = Number(settings.lookback);
+    const depth = Number.isSafeInteger(numericDepth) && numericDepth > 0 ? numericDepth : 10;
     const recent = (context.messageSpeakers || []).slice(-depth);
     if (recent.length && context.lastSpeaker) recent[recent.length-1] = context.lastSpeaker;
     if (!targets.length || !recent.length) return false;
@@ -662,7 +664,8 @@ function evaluateCharacterPresentCondition(rule, context) {
     const settings = rule.settings || { values: [rule.value || ''], matchType: 'any', lookback: 10 };
     const targetCharacters = settings.values || [];
     const matchType = settings.matchType || 'any';
-    const depth = Number.isSafeInteger(settings.lookback) && settings.lookback > 0 ? settings.lookback : 10;
+    const numericDepth = Number(settings.lookback);
+    const depth = Number.isSafeInteger(numericDepth) && numericDepth > 0 ? numericDepth : 10;
     const speakers = (context.messageSpeakers || []).slice(-depth);
     const normalizedSpeakers = new Set(speakers.map(s => String(s ?? '').trim().toLocaleLowerCase()).filter(Boolean));
     const matches = name => normalizedSpeakers.has(String(name ?? '').trim().toLocaleLowerCase());
@@ -746,16 +749,7 @@ function evaluateLorebookActiveCondition(rule, context) {
     const matchType = settings.matchType || 'any';
     const activeEntries = context.activeLorebookEntries || [];
 
-    const matches = target => {
-        const targetLower = String(target ?? '').trim().toLowerCase();
-        if (!targetLower) return false;
-        return activeEntries.some(entry => {
-            const keys = Array.isArray(entry?.key) ? entry.key : [entry?.key];
-            const entryUid = entry?.uid == null ? '' : String(entry.uid).toLowerCase();
-            return entryUid === targetLower || keys.some(key =>
-                String(key ?? '').toLowerCase().includes(targetLower));
-        });
-    };
+    const matches = target => activeWorldInfoMatches(target, activeEntries);
     return matchType === 'all' ? targetEntries.length > 0 && targetEntries.every(matches)
         : targetEntries.some(matches);
 }
@@ -790,6 +784,9 @@ export function evaluateConditionRule(rawRule, context) {
         console.warn(`VectHare Conditions: Unsupported condition type: ${rule.type}`);
         return false;
     }
+    // Absence of an observed WI scan is not evidence of inactivity. In
+    // particular, a negated WI rule must not turn an unknown into success.
+    if (rule.type === 'lorebookActive' && ['unavailable','unverified'].includes(context.activeLorebookSource)) return false;
     let result = false;
 
     switch (rule.type) {
@@ -913,7 +910,7 @@ export function filterChunksByConditions(chunks, baseContext) {
             ...baseContext,
             currentChunkScore: chunk.score ?? chunk.similarity ?? 0,
             currentChunkMessageIndex: chunk.metadata?.messageIndex || chunk.index || 0,
-            currentChunkHash: chunk.hash,
+            currentChunkHash: chunk.recordId ?? chunk.metadata?.recordId ?? chunk.hash,
             activeChunks: chunks // Pass all chunks for dependency checking
         };
         return evaluateConditions(chunk, chunkContext);
@@ -934,6 +931,10 @@ export function filterChunksByConditions(chunks, baseContext) {
  */
 export function buildSearchContext(chat, contextWindow = 10, activeChunks = [], metadata = {}) {
     const recentMessages = chat.slice(-contextWindow).map(m => m.mes || '');
+    const rawWorldInfo = metadata.activeLorebookEntries || [];
+    const normalizedWorldInfo = normalizeWorldInfoEntries(rawWorldInfo);
+    const activeLorebookSource = rawWorldInfo.length && !normalizedWorldInfo.length
+        ? 'unverified' : (metadata.activeLorebookSource || (Object.hasOwn(metadata,'activeLorebookEntries') ? 'provided' : 'unavailable'));
     const messageRoles = chat.slice(-contextWindow).map(m => m.is_user ? 'user' : 'assistant');
     const lastMessage = chat[chat.length - 1] || {};
     //currentCharacterId: metadata.currentCharacterId || null,
@@ -962,7 +963,8 @@ export function buildSearchContext(chat, contextWindow = 10, activeChunks = [], 
         // Context for collection & general conditionals
         generationType: metadata.generationType || 'normal',         // Generation type (normal, swipe, regenerate, continue, impersonate)
         swipeCount: swipeCount,                                      // Number of swipes on last message
-        activeLorebookEntries: metadata.activeLorebookEntries || [], // Active lorebook entries
+        activeLorebookEntries: normalizedWorldInfo, // C08: qualified WI identities
+        activeLorebookSource, // previous-observed-scan / unavailable / unverified
         isGroupChat: metadata.isGroupChat || false,                  // Whether this is a group chat
         currentCharacter: metadata.currentCharacter || null,         // Current character name (for expressions extension)
         currentCharacterId: metadata.currentCharacterId || null,     // FIX: Pass character ID for character lock checks

@@ -78,17 +78,18 @@ test('#231: character-present is exact, trimmed, case-insensitive, any and all',
     assert.equal(evaluateConditionRule({type:'characterPresent',settings:{values:['bob','ann'],matchType:'all'}},ctx),false);
 });
 
-test('#232: array-form lorebook keys and UID zero work in any/all without throwing', () => {
-    const context = {...basic,activeLorebookEntries:[{key:['Dragons','Flame'],uid:0},{key:'Water',uid:42}]};
-    for (const value of ['dragon','flame','0','water','42']) {
+test('#232 / C08: only qualified WI entries can match a selected identity', () => {
+    const context = {...basic,activeLorebookSource:'provided',activeLorebookEntries:[{world:'Fables',key:['Dragons','Flame'],uid:0},{world:'Waterways',key:'Water',uid:42}]};
+    for (const value of ['fables','fables:0','waterways:42','0']) {
         assert.equal(evaluateConditionRule(rule('lorebookActive',value),context),true,value);
     }
-    assert.equal(evaluateConditionRule({type:'lorebookActive',settings:{values:['0','water'],matchType:'all'}},context),true);
-    assert.equal(evaluateConditionRule({type:'lorebookActive',settings:{values:['0','missing'],matchType:'all'}},context),false);
-    assert.equal(evaluateConditionRule(rule('lorebookActive','0'), {...basic,activeLorebookEntries:[{key:[],uid:null}]}),false);
+    assert.equal(evaluateConditionRule({type:'lorebookActive',settings:{values:['fables:0','waterways:42'],matchType:'all'}},context),true);
+    assert.equal(evaluateConditionRule({type:'lorebookActive',settings:{values:['fables:0','missing'],matchType:'all'}},context),false);
+    assert.equal(evaluateConditionRule(rule('lorebookActive','dragons'),context),false,'keyword is not an entry identity');
+    assert.equal(evaluateConditionRule(rule('lorebookActive','0'), {...basic,activeLorebookSource:'provided',activeLorebookEntries:[{key:[],uid:0}]}),false,'missing world fails closed');
 });
 
-test('#141: required scan depths include triggers, collection and chunk rules independently of query depth', () => {
+test('#141: required scan depths include triggers, collection and chunk rules independently of query depth', async () => {
     const conditions = {enabled:true,rules:[{type:'pattern',settings:{patterns:['old'],scanDepth:55}}]};
     assert.equal(getRequiredConditionDepth(conditions,2),55);
     assert.equal(getRequiredConditionDepth({enabled:false,rules:conditions.rules},2),2);
@@ -99,10 +100,12 @@ test('#141: required scan depths include triggers, collection and chunk rules in
     const make = getFunction('core/chat-vectorization.js','applyChunkConditions',{
         filterSceneDisabledChunks: items=>items, getChunkMetadata: ()=>({conditions}), buildSearchContext,
         filterChunksByConditions, getRequiredConditionDepth, currentChatIdentity:()=>({chatId:"chat-A"}),
-        scopedActivationHistory:{snapshot:()=>({}),record:()=>true}, trackChunkActivation:()=>{}, window:{VectHare_ActivationHistory:{}},
+        worldInfoSnapshots:{previous:()=>({entries:[]})}, chatIdForActivation:()=> 'chat-A',
+        collectionKeyForFrequency:()=> 'standard:transformers:test', activationFrequencyLedger:{snapshot:()=>({}),recordActivation:()=>{}},C08_FINAL_INCLUSION_RECEIPT_AVAILABLE:false,
+
     });
     const chat=Array.from({length:60},(_,i)=>({mes:i===8?'old memory':'other text',is_user:true}));
-    const result = make([{hash:1,score:1}],chat,{query:2});
+    const result = await make([{hash:1,score:1}],chat,{query:2});
     assert.equal(result.length,1,'pattern looks 55 messages back despite query=2');
 });
 
@@ -135,7 +138,9 @@ test('#136 #143 #144: stage uses real generation type, group flag and character,
             ]}}),
         buildSearchContext:(chat,depth,items,metadata)=>{observed=metadata;return buildSearchContext(chat,depth,items,metadata);},
         filterChunksByConditions,getRequiredConditionDepth,currentChatIdentity:()=>({chatId:"chat-A"}),
-        scopedActivationHistory:{snapshot:()=>({}),record:()=>true},trackChunkActivation:()=>{},window:{VectHare_ActivationHistory:{}},
+        worldInfoSnapshots:{previous:()=>({entries:[]})}, chatIdForActivation:()=> 'chat-A',
+        collectionKeyForFrequency:()=> 'standard:transformers:test', activationFrequencyLedger:{snapshot:()=>({}),recordActivation:()=>{}},C08_FINAL_INCLUSION_RECEIPT_AVAILABLE:false,
+
     });
     const chunks=await make([{hash:1,score:0.8}],[{mes:'Hello',name:'Alice'}],{
         generationType:'swipe',isGroupChat:true,currentCharacter:'Alice',query:2,

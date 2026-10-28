@@ -2,7 +2,8 @@ import { requireServerCredentialResolution } from '../utils/c05-protected-creden
 import {recordId, fingerprint, stampMessageUids, messageReference, groupRecordLocalId, checkCollision, embeddingProfileFingerprint, MESSAGE_UID_FIELD} from '../utils/record-identity.js';
 import {hasVerifiedCapability} from '../utils/backend-contracts.js';
 import {chatJobs, anyJobSignal,currentChatIdentity} from './chat-job-runtime.js';
-import {scopedActivationHistory} from '../utils/activation-history.js';
+import {activationFrequencyLedger, C08_FINAL_INCLUSION_RECEIPT_AVAILABLE} from '../utils/activation-frequency-ledger.js';
+import {worldInfoSnapshots} from '../utils/world-info-identity.js';
 import {StaleJobError} from './job-context.js';
 import {planReplacement} from '../utils/replacement-safety.js';
 /**
@@ -548,6 +549,12 @@ function filterSceneDisabledChunks(chunks) {
  * @param {object} settings VectHare settings
  * @returns {Promise<object[]>} Filtered chunks
  */
+function chatIdForActivation() { const identity = currentChatIdentity(); return identity.originId || identity.chatId || null; }
+function frequencyRecordKey(chunk) {return String(chunk.recordId ?? chunk.metadata?.recordId ?? chunk.hash);}
+function collectionKeyForFrequency(chunk, settings) {
+    return chunk.collectionKey || (chunk.collectionId
+        ? `${chunk.backend || settings.vector_backend || 'standard'}:${chunk.source || settings.source || 'transformers'}:${chunk.collectionId}` : null);
+}
 async function applyChunkConditions(chunks, chat, settings) {
     // First filter out chunks disabled by scenes
     let filtered = filterSceneDisabledChunks(chunks);
@@ -574,32 +581,33 @@ async function applyChunkConditions(chunks, chat, settings) {
         generationType: settings.generationType || 'normal',
         isGroupChat: settings.isGroupChat || false,
         currentCharacter: settings.currentCharacter || null,
-        activeLorebookEntries: settings.activeLorebookEntries || [],
+        activeLorebookEntries: worldInfoSnapshots.previous(chatIdForActivation()).entries,
+        activeLorebookSource: worldInfoSnapshots.previous(chatIdForActivation()).source,
         activationHistory: {} // per-item scope is installed before rule evaluation
     });
 
+    // C08: frequency rules have to wait for C10 final-inclusion receipts.
+    // Report the unavailable condition once per pass, not once per record.
+    if (!C08_FINAL_INCLUSION_RECEIPT_AVAILABLE && chunksWithConditions.some(c =>
+        c.conditions?.enabled && c.conditions.rules?.some(r => r.type === 'frequency'))) {
+        console.warn('VectHare C08: frequency-conditioned chunks are withheld until a verified final prompt receipt is available (C10).');
+    }
     // Filter chunks by their conditions
-    const chatId = currentChatIdentity().originId || currentChatIdentity().chatId;
-    const collectionKeyFor = chunk => chunk.collectionKey || (chunk.collectionId
-        ? `${chunk.backend || settings.vector_backend || 'standard'}:${chunk.source || settings.source || 'transformers'}:${chunk.collectionId}` : null);
+    const chatId = chatIdForActivation();
     const conditionFilteredChunks = chunksWithConditions.flatMap(chunk => {
         const frequencyRule = chunk.conditions?.rules?.find(rule => rule.type === 'frequency');
+        // C10 has not yet supplied a final prompt receipt. If a frequency
+        // condition cannot be enforced, excluding it is safer than silently
+        // bypassing maxActivation/cooldown limits.
+        if (frequencyRule && !C08_FINAL_INCLUSION_RECEIPT_AVAILABLE) return [];
         const scope = frequencyRule?.settings?.scope === 'session' ? 'session' : 'conversation';
-        const activationHistory = scopedActivationHistory.snapshot({chatId,collectionKey:collectionKeyFor(chunk),scope});
+        const activationHistory = activationFrequencyLedger.snapshot({chatId,collectionKey:collectionKeyForFrequency(chunk,settings),scope});
+        // Frequency lookups use durable logical record identities when available.
         return filterChunksByConditions([chunk], {...context,activationHistory});
     });
 
-    // Track activation for frequency conditions
-    conditionFilteredChunks.forEach(chunk => {
-        if (chunk.conditions?.enabled) {
-            scopedActivationHistory.record({
-                chatId,
-                collectionKey:collectionKeyFor(chunk),
-                scope:chunk.conditions?.rules?.find(rule => rule.type === 'frequency')?.settings?.scope === 'session' ? 'session' : 'conversation',
-                hash:chunk.hash,messageCount:chat.length
-            });
-        }
-    });
+    // C08: no ledger mutation here. These are candidates, not injected records.
+    // Inclusion receipts are produced only AFTER final C09/C10 selection.
 
     console.log(`VectHare: Chunk conditions filtered ${filtered.length} → ${conditionFilteredChunks.length}`);
     return conditionFilteredChunks;
@@ -2277,7 +2285,8 @@ export async function rearrangeChat(chat, settings, type) {
                 generationType: type || 'normal',
                 isGroupChat: getContext().groupId != null,
                 currentCharacter: getContext().name2 || null,
-                activeLorebookEntries: [],
+                activeLorebookEntries: worldInfoSnapshots.previous(chatIdForActivation()).entries,
+                activeLorebookSource: worldInfoSnapshots.previous(chatIdForActivation()).source,
                 currentChatId: getCurrentChatId(),
                 currentCharacterId: getContext().characterId || null,
                 collectionDecisions
@@ -2440,7 +2449,7 @@ export async function rearrangeChat(chat, settings, type) {
                     .slice(-Math.max(1, Number(settings.world_info_query_depth || settings.query) || 3))
                     .map(x => substituteParams(x.mes));
 
-                const wiEntries = await getSemanticWorldInfoEntries(recentMessages, [], settings);
+                const wiEntries = await getSemanticWorldInfoEntries(recentMessages, worldInfoSnapshots.previous(chatIdForActivation()).entries, settings);
         job.assertCurrent();
                 if (Array.isArray(wiEntries) && wiEntries.length > 0) {
                     addTrace(debugData, 'world_info', `Found ${wiEntries.length} semantic WI entries`, { entries: wiEntries.map(e => ({ uid: e.uid, score: e.score })) });
@@ -2584,6 +2593,24 @@ export async function rearrangeChat(chat, settings, type) {
         // === STAGE 10: Inject into prompt ===
         job.assertCurrent();
         const injection = injectChunksIntoPrompt(chunksToInject, settings, debugData);
+        // Prompt registration is NOT final host inclusion: C10 still controls the
+        // final budget/selection receipt. Record uncertain receipts without spending
+        // a frequency slot. This also never consumes an activation on dry runs.
+        const activationChatId = chatIdForActivation();
+        const lastUser = [...chat].reverse().find(m => m?.is_user);
+        const turnId = lastUser?.extra?.vecthareMessageUid ?? lastUser?.extra?.vecthare_message_uid ??
+            (lastUser ? `legacy-user-index:${chat.lastIndexOf(lastUser)}` : null);
+        for (const chunk of chunksToInject) {
+            if (!chunk.conditions?.enabled || !chunk.conditions.rules?.some(rule => rule.type === 'frequency')) continue;
+            const record = frequencyRecordKey(chunk);
+            const scope = chunk.conditions.rules.find(rule => rule.type === 'frequency')?.settings?.scope === 'session' ? 'session' : 'conversation';
+            activationFrequencyLedger.recordActivation({
+                chatId:activationChatId,collectionKey:collectionKeyForFrequency(chunk,settings),
+                recordId:record,turnId,scope,messageCount:chat.length,
+                receipt:{status:injection.verified ? 'registered' : 'unknown',verified:false,recordIds:[record]}
+            });
+        }
+
 
         console.log(`\n✅ VectHare: Successfully injected ${chunksToInject.length} chunk(s) into prompt`);
         console.log(`   Verification: ${injection.verified ? '✓ PASSED' : '✗ FAILED'}`);

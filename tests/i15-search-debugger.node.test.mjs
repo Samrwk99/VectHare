@@ -35,6 +35,7 @@ function coreScope(options={}) {
   getCollectionMeta:()=> ({}), getContext:()=> ({groupId:null,characterId:1,name2:'Character'}),
   getRequiredConditionDepth:()=> 0,
   buildSearchContext:()=> ({}),
+  chatIdForActivation:()=> 'chat-1',worldInfoSnapshots:{previous:()=>({entries:[]})},
   filterActiveCollections:async()=> ['collection-A'],
   setLastSearchDebug: d=>debugEntries.push(d),
   createDebugData:()=> ({query:'',timestamp:Date.now(),collectionId:null,collectionsQueried:[],collectionDecisions:[],settings:{},stages:{initial:[],afterThreshold:[],afterDecay:[],afterConditions:[],injected:[]},trace:[],chunkFates:{},stats:{retrievedFromVector:0}}),
