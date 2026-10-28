@@ -1,11 +1,12 @@
 {
   "formatVersion": 1,
   "contractVersion": 2,
-  "pluginVersion": "3.2.10-s10.4",
+  "pluginVersion": "3.2.10-s10.5-f01",
   "algorithm": "sha256",
   "files": {
-    "index.js": "1d525b064570d096d4c6e9fa6e0baab0af1ebda90bd7de26d4d9bfb55298f1db",
+    "index.js": "0ec9e3891f16de6da618ce43553636e0aeaeac996b3bf710f02f21cd1234a021",
     "lancedb-backend.js": "a3cd5b9cafd1686a6775b24345a48611b396e5cd2672a028b57b154335d499de",
+    "lib/f01-host-sources.js": "af4c52a3d961a3befb7d2f7a42b08c5b9429ddfd8bb07022f067dd8820878c57",
     "lib/h01-qdrant-acceptance.js": "b6420fdf0e6524d7d4344ae2eff12b5ccbcfc484a35c6744920e5df4cb37d915",
     "lib/s01-safety.js": "559917c958cdc7f6573e0d38bbe04d22199da726224aa38b1e0d74fe3d086310",
     "lib/s02-identity.js": "fd525737359313609b40dc9493a9195f143d4da14396226aa4f6a6048ac582b0",
@@ -28,11 +29,11 @@
     "lib/s09-fixture.js": "be09261e7dc79edf854232b59360d0c3e277f99f21d61a232509d6cfb0455848",
     "lib/s09-manifest.js": "9e27d35b82a8775e6a001fc8b001782a773fff7c7dcb909ff78712ddb1e86269",
     "lib/s10-build.js": "f724d07f0acdf40bc47715fdc4ce4c367ccd07a4bb211511ce87c979e2209eef",
-    "lib/s10-contracts.js": "4589398096b07e86ba24b6627d58f78c1a20eabae5cb3fbfe7f58b2964c9bff0",
+    "lib/s10-contracts.js": "801fcc5d6c11ea263abf402403cad7f545e3e88a1b353c831dd6fa920fd1bb22",
     "lib/s10-gui-connections.js": "e5a041abda59cdefd4f3556e58e9bfd8debbcba7309a2bac504b0c68d887ff58",
     "milvus-backend.js": "6cfee983eb34ab39a0f59f6ce2590a6c75d24a961f5a19ee4ae59d440427394e",
-    "package.json": "583ed6ae22886bfda6f9883045c9074c56aa57f16a716e632146888e68fd6e48",
+    "package.json": "7bf88523e00bfb05ba66cf5993a30f6502a8fae4133e7b93df3049deef0e7e18",
     "qdrant-backend.js": "f6a71992d55288345f041ed5d30e38524fc8f58201150b0b92cab18cf3e3d72b"
   },
-  "sourceFingerprint": "e96b5b0d43693110b9c5701716d95539e7ab859903e2b749ad50a53e480f8dd6"
+  "sourceFingerprint": "2de0ac2f7b5fc3749f2b1ce1844e2333ee564120f8d2de4854b49034dc1aff8c"
 }

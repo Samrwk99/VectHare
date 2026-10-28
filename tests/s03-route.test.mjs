@@ -9,6 +9,7 @@ import { s01MutationGuard } from '../lib/s01-safety.js';
 import { authenticatedContext, forbidOwnerSpoof, validateClientConfig,lookupAuthorizedReservation,
     legacyReadBoundary,s03SensitiveRouteBoundary,AccessError,exposedSafeSource } from '../lib/s03-security.js';
 import { safeLegacyPhysicalName } from '../lib/s02-identity.js';
+import {registerF01HostRoutes} from '../lib/f01-host-sources.js';
 import { registerS04Routes } from '../lib/s04-routes.js';
 import {registerS05Routes} from '../lib/s05-routes.js';
 import {registerS10Routes} from '../lib/s10-contracts.js';
@@ -36,6 +37,7 @@ async function registered(pool) {
             './lib/s10-build.js':{loadS10Build},
             './lib/s10-contracts.js':{registerS10Routes},
             './lib/h01-qdrant-acceptance.js':{registerH01AcceptanceRoutes:()=>{}},
+            './lib/f01-host-sources.js':{registerF01HostRoutes},
             './lib/s10-gui-connections.js':{registerGuiConnectionRoutes:()=>{}}
         };
         assert.ok(objects[specifier],`unexpected import: ${specifier}`);
@@ -157,4 +159,21 @@ test('S10.2 actual init and health routes pass explicit local selector, without 
     assert.equal(forbidden.statusCode,403);assert.equal(forbidden.payload.code,'S03_CLIENT_CONFIG_FORBIDDEN');
     const write=await call('POST','/chunks/insert',{user,body:{backend:'qdrant'}});
     assert.equal(write.statusCode,409);assert.equal(write.payload.code,'S01_MUTATION_BLOCKED');
+}));
+
+test('F01 real plugin router authenticates user and attests only an owned source file',async()=>disposable(async dir=>{
+  const root=path.join(dir,'alice'),vectors=path.join(root,'vectors'),chats=path.join(root,'chats');
+  const characters=path.join(root,'characters'),worlds=path.join(root,'worlds');
+  for(const d of [vectors,characters,worlds,path.join(chats,'Nina')])await fs.mkdir(d,{recursive:true});
+  await fs.writeFile(path.join(characters,'Nina.png'),'avatar');
+  await fs.writeFile(path.join(chats,'Nina','branch.jsonl'),JSON.stringify({chat_metadata:{integrity:'shared',main_chat:'parent'}})+'\n');
+  const call=await registered({async get(){throw Error('backend must not connect');}});
+  const body={kind:'chat',avatar:'Nina.png',chatFile:'branch'};
+  const user={profile:{handle:'alice'},directories:{root,vectors,chats,characters,worlds}};
+  const bad=await call('POST','/v2/sources/attest',{body});
+  assert.equal(bad.statusCode,401);
+  const okay=await call('POST','/v2/sources/attest',{body,user});
+  assert.equal(okay.statusCode,200);assert.equal(okay.payload.hostSourceOwnerVerified,true);
+  assert.equal(okay.payload.scope.branchId,okay.payload.sourceId);
+  assert.equal(okay.payload.publicWritesEnabled,false);
 }));
