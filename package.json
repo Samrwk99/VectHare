@@ -1,6 +1,6 @@
 {
   "name": "similharity",
-  "version": "3.2.8-s08.0",
+  "version": "3.2.9-s09.0",
   "description": "Vector database backend extensions for Similharity - LanceDB, Qdrant, and enhanced Vectra with full metadata storage",
   "main": "index.js",
   "type": "module",
@@ -42,6 +42,8 @@
     "test:s07": "node --experimental-vm-modules --test tests/*.test.mjs",
     "check:s07": "find . -type f \\( -name \"*.js\" -o -name \"*.mjs\" \\) -not -path \"./node_modules/*\" -print0 | xargs -0 -n1 node --check",
     "test:s08": "node --experimental-vm-modules --test tests/*.test.mjs",
-    "check:s08": "find . -type f \\( -name \"*.js\" -o -name \"*.mjs\" \\) -not -path \"./node_modules/*\" -print0 | xargs -0 -n1 node --check"
+    "check:s08": "find . -type f \\( -name \"*.js\" -o -name \"*.mjs\" \\) -not -path \"./node_modules/*\" -print0 | xargs -0 -n1 node --check",
+    "test:s09": "node --experimental-vm-modules --test tests/*.test.mjs",
+    "check:s09": "find . -type f \\( -name \"*.js\" -o -name \"*.mjs\" \\) -not -path \"./node_modules/*\" -print0 | xargs -0 -n1 node --check"
   }
 }

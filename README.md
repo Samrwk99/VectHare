@@ -1040,3 +1040,9 @@ Use `npm run test:s07` and `npm run check:s07` for offline checks. Read
 ## S08 checkpoint — local backend v2 adapters (offline only)
 
 S08 adds internal LanceDB and plugin Vectra v2 adapters (`lib/s08-lancedb.js`, `lib/s08-vectra.js`), with canonical ownership, revision-aware disposable-fixture mutations, bounded read contracts, S04 ledger tests and no new public route activation. The native SillyTavern Standard API is separate. For safety restrictions see `S08-VERIFICATION.md` and `S08-NEXT-STEPS.md`.
+
+## S09 — Migration / compatibility (offline only)
+
+S09 introduces `lib/s09-manifest.js` for strict read-only legacy identity mapping, collision and dependency quarantine, and an integrity-checked manifest, plus `lib/s09-fixture.js` for an **isolated disposable local-file rehearsal** of snapshot backup, v2 row transformation, readback and staged rollback. It does **not** copy any real Qdrant, Milvus, LanceDB or Vectra collection, change server registry activation, authorize a cutover, or restore public mutation routes.
+
+Run `node tools/s09-plan.mjs inventory.json` with an explicitly prepared local inventory. A valid manifest still contains `cutoverAllowed: false`: its owner mapping references are *unverified claims* until a trusted live host and independently verified backend inventory establish ownership and completeness. See `S09-MIGRATION-RUNBOOK.md` for limitations, mandatory proofs, and the disposable fixture procedure.
