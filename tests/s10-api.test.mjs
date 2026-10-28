@@ -21,7 +21,7 @@ async function fixture(fn) {
  }finally{await fs.rm(dir,{recursive:true,force:true});}
 }
 test('S10 packaged executable fingerprint matches generated manifest and live package version',async()=>{
- const build=await loadS10Build(ROOT,'3.2.10-s10.6-f02');
+ const build=await loadS10Build(ROOT,'3.2.10-s10.7-f03');
  assert.equal(build.verification,'MATCHED_LOCAL_SOURCE_MANIFEST');
  assert.equal(build.deploymentAttested,false);
  assert.equal(build.liveBackendsCertified,false);

@@ -1,0 +1,14 @@
+# F04 Handoff — Production v2 record mutation activation
+
+**Prerequisites from F03:** authenticated saved-source F01 identity; F02 registry-backed read routes; F03 collection schema provisioning and source-bound receipt; S04 ledger, cross-process collection lock and physical-vector verification. These remain unverified on live backend software.
+
+1. **Accept F03 on actual backend:** Qdrant on Termux first, then Milvus, including restart, credential-safety, schema inspection, branch and user isolation, and error injection. Refuse production activation if schema indices, readback, or recovery are uncertain.
+2. **External-writer policy:** Determine whether Qdrant/Milvus support a suitable native conditional update for the target versions. If not, require and prove an exclusive single-writer deployment contract; S04 local file locks do not secure a shared database against external writers or other data roots. Do not claim atomic compare-and-swap for Qdrant upsert/Milvus upsert.
+3. **Authorized mutation endpoints:** Define strictly bounded insert/update/metadata/delete v2 routes that re-attest saved sources on every call and derive collection and physical IDs server-side. Never take tenant, branch owner, or backend credentials from the browser. Match S02 binding to the F03 provision receipt and physically inspected schema.
+4. **Ledger/operation semantics:** Persist PREPARED before mutation, SUBMITTED before dispatch, VERIFIED only after independent owner/revision/text/metadata/vector readback; UNCERTAIN cannot be automatically repeated. For metadata-only operations preserve original reference vectors. Acquire collection and record locks in a consistent order.
+5. **Reconciliation after restart:** A copied payload hash is insufficient evidence for a restored vector. Use physical readback and a recoverable original-vector reference; if evidence is unavailable retain UNCERTAIN. Never silently mark a backend timeout as success.
+6. **VectHare production workflow integration:** Replace legacy `/chunks/*` operations and hash-only identities with safe public v2 UUID operations; wire embedding generation, manual memory CRUD, revectorization, summaries and World Info, and review final prompt injection. No blanket matrix unlock.
+7. **Other backends:** Add LanceDB typed Arrow schema/table lifecycle with actual SDK fixture and Vectra schema seal; handle native SillyTavern Standard endpoints separately. Only enable backend/operation cells with live acceptance.
+8. **Release evidence:** Tests on real SillyTavern and backend across restart, concurrent processes, competing external writer, two authenticated users, copied-ID branches, bad schema, failures before/after commit, and a >1,050 record inventory. Exports and purge remain disabled until consistent snapshots and rollback are independently proven.
+
+**Do not treat a successful F03 collection creation as F04 authorization.**

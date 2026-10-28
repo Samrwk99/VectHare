@@ -252,6 +252,7 @@ test('plugin registration keeps legacy mutation endpoints blocked even without m
         './lib/h01-qdrant-acceptance.js':{registerH01AcceptanceRoutes:()=>{}},
             './lib/f01-host-sources.js':{registerF01HostRoutes:()=>{}},
             './lib/f02-public-reads.js':{registerF02Routes:()=>()=>{}},
+            './lib/f03-provision.js':{registerF03ProvisionRoutes:()=>{}},
         './lib/s10-gui-connections.js':{registerGuiConnectionRoutes:()=>{}}
     });
     const routes=new Map(); const middleware=[];

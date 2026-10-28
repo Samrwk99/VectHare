@@ -11,6 +11,7 @@ import { authenticatedContext, forbidOwnerSpoof, validateClientConfig,lookupAuth
 import { safeLegacyPhysicalName } from '../lib/s02-identity.js';
 import {registerF01HostRoutes} from '../lib/f01-host-sources.js';
 import {registerF02Routes} from '../lib/f02-public-reads.js';
+import {registerF03ProvisionRoutes} from '../lib/f03-provision.js';
 import { registerS04Routes } from '../lib/s04-routes.js';
 import {registerS05Routes} from '../lib/s05-routes.js';
 import {registerS10Routes} from '../lib/s10-contracts.js';
@@ -40,6 +41,7 @@ async function registered(pool) {
             './lib/h01-qdrant-acceptance.js':{registerH01AcceptanceRoutes:()=>{}},
             './lib/f01-host-sources.js':{registerF01HostRoutes},
             './lib/f02-public-reads.js':{registerF02Routes},
+            './lib/f03-provision.js':{registerF03ProvisionRoutes},
             './lib/s10-gui-connections.js':{registerGuiConnectionRoutes:()=>{}}
         };
         assert.ok(objects[specifier],`unexpected import: ${specifier}`);

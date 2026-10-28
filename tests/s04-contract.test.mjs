@@ -36,7 +36,7 @@ test('S04 forbids invalid vectors, protected fields, malformed metadata, and par
 });
 test('S04 independent readback verifies physical ID, owner, revision, content, embedding, metadata',()=>{
  const plan=planMutation(ctx,sample());
- const item={recordId:plan.recordId,physicalId:plan.physicalId,scope:plan.scope,revision:1,textHash:plan.textHash,vectorHash:plan.vectorHash,metadataHash:plan.metadataHash};
+ const item={recordId:plan.recordId,physicalId:plan.physicalId,scope:plan.scope,revision:1,textHash:plan.textHash,vectorHash:plan.vectorHash,metadataHash:plan.metadataHash,vector:[.1,.2,.3]};
  assert.equal(verifyMutationReadback(plan,item).verified,true);
  for(const bad of [{...item,revision:0},{...item,scope:{...item.scope,userScopeId:'bob'}},{...item,vectorHash:'bad'},{...item,physicalId:'other'}])
   assert.equal(verifyMutationReadback(plan,bad).verified,false);

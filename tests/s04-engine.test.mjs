@@ -6,13 +6,13 @@ const sha=s=>createHash('sha256').update(s).digest('hex');
 async function fixture(fn){const dir=await fs.mkdtemp(path.join(os.tmpdir(),'s04-engine-'));try{const ctx={userScopeId:'alice',vectorsPath:dir};const records=new Map();let writes=0,failWrite=false,failRead=false;
  const backend={async getRecord(p){if(failRead)throw Error('read failure');return records.get(p.physicalId)??null;},
   async insertRecord(p,payload){writes++;records.set(p.physicalId,item(p,payload));if(failWrite)throw Error('lost response');},
-  async updateRecord(p,payload){writes++;records.set(p.physicalId,item(p,payload));if(failWrite)throw Error('lost response');},
+  async updateRecord(p,payload){writes++;records.set(p.physicalId,{...item(p,payload),vector:payload.vector??records.get(p.physicalId)?.vector});if(failWrite)throw Error('lost response');},
   async deleteRecord(p){writes++;records.delete(p.physicalId);if(failWrite)throw Error('lost response');}};
  const authorize=async p=>({authorized:true,ownerVerified:true,mutationContractVerified:true,collectionKey:p.collectionKey,backend:p.backend});
  const ledger=new OperationLedger(ctx),engine=new MutationEngine({ledger,adapter:backend,authorize});
  await fn({ctx,ledger,engine,backend,records,authorize,getWrites:()=>writes,setFailWrite:v=>failWrite=v,setFailRead:v=>failRead=v});
  }finally{await fs.rm(dir,{recursive:true,force:true});}}
-function item(p,payload){return {recordId:p.recordId,physicalId:p.physicalId,scope:p.scope,revision:p.targetRevision,textHash:p.textHash,vectorHash:p.vectorHash,metadataHash:p.metadataHash};}
+function item(p,payload){return {recordId:p.recordId,physicalId:p.physicalId,scope:p.scope,revision:p.targetRevision,textHash:p.textHash,vectorHash:p.vectorHash,metadataHash:p.metadataHash,vector:payload?.vector??[.1,.2,.3]};}
 function plan(c,action,changes={}){return planMutation(c,{...sample(action),operationId:randomUUID(),...changes});}
 test('S04 engine inserts, updates and deletes using independent mock-backend readback',async()=>fixture(async f=>{
  const p=plan(f.ctx,'insert');const done=await f.engine.execute(p,{text:'hello',vector:[.1,.2,.3],metadata:{tag:'safe'}});
