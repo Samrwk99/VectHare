@@ -1,0 +1,13 @@
+# F08 — Milvus host test runbook
+
+1. Back up the existing VectHare and Similharity installations and your chat/vector data. Use a **disposable SillyTavern profile and database**, not valuable collections.
+2. Replace **both** extension and plugin with the matched F08 packages. Restart SillyTavern. Verify that capability discovery recognizes plugin `3.2.10-s10.12-f08` while **production writes remain disabled**.
+3. Configure a Milvus connection using the VectHare GUI (**local** `127.0.0.1:19530` for a local server or a secured TLS connection for remote); run GUI Save & Test. If using Termux only with Qdrant, you may leave Milvus untested until a Milvus server is available.
+4. In VectHare, select **F08 — Milvus disposable acceptance** and confirm the isolated test. The server creates an independently named, NEW v2 collection and one synthetic record; it tests 11 stages and leaves the empty test collection in place after success. Record the first failure stage and machine-readable code. Do not delete or retry an uncertain collection automatically.
+5. For the manual pilot, open a **saved disposable chat**. In F03's new v2 collection setup select `milvus`, enter exact embedding source/model/dimension/metric, preview and explicitly confirm creation. Check `SCHEMA_VERIFIED_OFFLINE_UNCERTIFIED` in the receipt. Existing legacy collections cannot be enrolled.
+6. Use F02 source-bound read-only listing for the exact saved chat and embedding. Then open **F08 — Milvus v2 manual mutation PILOT**. This route accepts **loopback Milvus only**, even if the disposable acceptance works on a remote Milvus server. Use the exact F03 embedding configuration, a synthetic record UUID, a matching-length vector and individual consent for each insert/edit/delete.
+7. After each operation, verify the returned S04 receipt/record revision, use F02 scoped get/list/query as appropriate, then restart SillyTavern and check persistence. If a request returns `UNCERTAIN`, **do not retry it**; inspect its UUID using the read-only receipt lookup and preserve the collection and logs.
+8. Repeat with a second disposable saved chat/branch, and a second test user if available. Verify no cross-user/branch records become visible. Capture SillyTavern version, Milvus SDK/server version and exact errors.
+9. Expect **ordinary automatic memory inserts/deletes/revectorization, legacy shared reads, exports, purge and migration to remain disabled**. F08 is intentionally a guarded manual test checkpoint.
+
+Never point the pilot or acceptance suite at valuable existing data. There is no blanket permission to activate production Milvus writes based on a single diagnostic PASS.

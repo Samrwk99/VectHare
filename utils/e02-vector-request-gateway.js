@@ -206,6 +206,41 @@ export function inspectVectorRequest(url, options={}) {
            (b.action==='delete'&&b.metadata!==undefined))fail(req,'f06-disposable-source-bound-pilot-required');
         return {intercepted:true,allowed:true,transport:'plugin',operation:'f06PilotMutation',backend:'lancedb',method:'POST'};
     }
+    // F08: Milvus disposable acceptance creates a new server-selected collection.
+    if(req.transport==='plugin'&&req.suffix==='/v2/diagnostics/milvus-f08'){
+        const b=req.body;
+        if(req.method!=='POST'||!b||b.configId!=='default'||
+           b.consent!=='I ACCEPT F08 DISPOSABLE MILVUS TEST'||
+           Object.keys(b).some(k=>!['configId','consent'].includes(k)))fail(req,'f08-disposable-consent-required');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:'f08DisposableAcceptance',backend:'milvus',method:'POST'};
+    }
+    // F08: explicit server-attested MILVUS local pilot only; no client owners/physical IDs.
+    if(req.transport==='plugin'&&req.suffix==='/v2/records/milvus-pilot-mutate'){
+        const b=req.body,src=b?.source,emb=b?.embedding;
+        const k=src?.kind,sourceKeys=k==='chat'?['kind','avatar','chatFile']:
+          k==='group-chat'?['kind','groupId','chatFile']:
+          k==='lorebook'?['kind','name']:[];
+        const accepted=['backend','source','embedding','configId','action','recordId','expectedRevision','operationId',
+         'experimentalConsent','text','vector','metadata'];
+        const fields=['insert','update'].includes(b?.action)?['text','vector','metadata']:
+          b?.action==='metadata'?['metadata']:[];
+        if(req.method!=='POST'||!b||b.backend!=='milvus'||b.configId!=='default'||
+           b.experimentalConsent!=='I ACCEPT F08 DISPOSABLE MILVUS PILOT'||
+           !['insert','update','metadata','delete'].includes(b.action)||
+           !UUID_RE.test(b.recordId||'')||!UUID_RE.test(b.operationId||'')||
+           !sourceKeys.length||!src||Object.keys(src).some(key=>!sourceKeys.includes(key))||
+           sourceKeys.some(key=>typeof src[key]!=='string'||!src[key]||src[key].length>220)||
+           !emb||typeof emb!=='object'||Array.isArray(emb)||
+           Object.keys(emb).some(key=>!['source','model','dimension','metric'].includes(key))||
+           Object.keys(b).some(key=>!accepted.includes(key))||
+           (b.action==='insert'&&b.expectedRevision!==0)||
+           (b.action!=='insert'&&(!Number.isSafeInteger(b.expectedRevision)||b.expectedRevision<1))||
+           ['text','vector','metadata'].some(key=>Object.hasOwn(b,key)&&!fields.includes(key))||
+           (['insert','update'].includes(b.action)&&(typeof b.text!=='string'||!Array.isArray(b.vector)))||
+           (b.action==='metadata'&&(!b.metadata||typeof b.metadata!=='object'||Array.isArray(b.metadata))))
+           fail(req,'f08-disposable-source-bound-pilot-required');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:'f08PilotMutation',backend:'milvus',method:'POST'};
+    }
     // F07: source-bound Vectra LOCAL PILOT; NEVER native SillyTavern Standard.
     if(req.transport==='plugin'&&req.suffix==='/v2/records/vectra-pilot-mutate'){
         const b=req.body, src=b?.source, emb=b?.embedding;
