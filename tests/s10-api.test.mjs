@@ -15,13 +15,13 @@ async function fixture(fn) {
    await fs.mkdir(path.join(dir,'lib'));
    for(const f of ['index.js','qdrant-backend.js','milvus-backend.js','lancedb-backend.js'])await fs.writeFile(path.join(dir,f),'export const x=1;\n');
    await fs.writeFile(path.join(dir,'lib','helper.js'),'export const y=2;\n');
-   await fs.writeFile(path.join(dir,'package.json'),JSON.stringify({version:'3.2.10-s10.0'}));
+   await fs.writeFile(path.join(dir,'package.json'),JSON.stringify({version:'3.2.10-s10.1'}));
    async function seal(){await fs.writeFile(path.join(dir,'S10-BUILD-MANIFEST.json'),JSON.stringify(await calculateSourceManifest(dir)));}
    await seal(); await fn({dir,seal});
  }finally{await fs.rm(dir,{recursive:true,force:true});}
 }
 test('S10 packaged executable fingerprint matches generated manifest and live package version',async()=>{
- const build=await loadS10Build(ROOT,'3.2.10-s10.0');
+ const build=await loadS10Build(ROOT,'3.2.10-s10.4');
  assert.equal(build.verification,'MATCHED_LOCAL_SOURCE_MANIFEST');
  assert.equal(build.deploymentAttested,false);
  assert.equal(build.liveBackendsCertified,false);
@@ -32,9 +32,9 @@ test('S10 packaged executable fingerprint matches generated manifest and live pa
  assert.equal(Object.keys(calc.files).length,(await runtimeSourceFiles(ROOT)).length);
 });
 test('S10 refuses modified executable source and does not accept version-only equality',async()=>fixture(async({dir})=>{
- await loadS10Build(dir,'3.2.10-s10.0');
+ await loadS10Build(dir,'3.2.10-s10.1');
  await fs.writeFile(path.join(dir,'lib','helper.js'),'export const y=99;\n');
- await assert.rejects(()=>loadS10Build(dir,'3.2.10-s10.0'),/S10_BUILD_SOURCE_MISMATCH/);
+ await assert.rejects(()=>loadS10Build(dir,'3.2.10-s10.1'),/S10_BUILD_SOURCE_MISMATCH/);
 }));
 test('S10 refuses an unexpected executable file, and cannot be bypassed by deleting a file',async()=>fixture(async({dir})=>{
  await fs.writeFile(path.join(dir,'lib','new-handler.js'),'export const leaked=3;');

@@ -7,7 +7,7 @@
  * All chunk operations go through unified /chunks/* endpoints.
  * Backend is specified via `backend` parameter in request body.
  *
- * @version 3.2.10-s10.0
+ * @version 3.2.10-s10.4
  */
 
 import path from 'node:path';
@@ -20,15 +20,17 @@ import { authenticatedContext, forbidOwnerSpoof, validateClientConfig,
     lookupAuthorizedReservation, legacyReadBoundary, s03SensitiveRouteBoundary,
     AccessError, exposedSafeSource } from './lib/s03-security.js';
 import { BackendPool } from './lib/s03-backends.js';
+import { registerGuiConnectionRoutes } from './lib/s10-gui-connections.js';
 import { safeLegacyPhysicalName } from './lib/s02-identity.js';
 import { registerS04Routes } from './lib/s04-routes.js';
 import { registerS05Routes } from './lib/s05-routes.js';
 import { loadS10Build } from './lib/s10-build.js';
 import { registerS10Routes } from './lib/s10-contracts.js';
+import {registerH01AcceptanceRoutes} from './lib/h01-qdrant-acceptance.js';
 import { validateVector as validateS05Vector } from './lib/s05-contract.js';
 
 const pluginName = 'similharity';
-const pluginVersion = '3.2.10-s10.0';
+const pluginVersion = '3.2.10-s10.4';
 
 /**
  * Initialize the plugin
@@ -71,6 +73,8 @@ export async function init(router) {
     registerS04Routes(router);
     registerS05Routes(router);
     registerS10Routes(router, s10Build);
+    registerH01AcceptanceRoutes(router,{backendPool});
+    registerGuiConnectionRoutes(router,{backendPool});
     // NOTE: S02 registry mappings are reservations only; this route exposes
     // no mutation or claim that the physical collection belongs to the user.
     router.post('/v2/identity/resolve', async (req,res) => {
@@ -84,10 +88,10 @@ export async function init(router) {
         }
     });
 
-    async function requestBackend(req, backend) {
+    async function requestBackend(req, backend, configId = 'default') {
         if (!req.s03) throw new AccessError('S03_AUTH_UNVERIFIED', 'Trusted user context required');
         if (backend === 'standard' || backend === 'vectra') return null;
-        return await backendPool.get(req.s03,backend);
+        return await backendPool.get(req.s03,backend,configId);
     }
 
 
@@ -715,14 +719,15 @@ export async function init(router) {
             if (!['vectra','standard','lancedb','qdrant','milvus'].includes(backend)) {
                 return res.status(400).json({success:false,code:'S03_BACKEND_UNKNOWN'});
             }
-            const instance = await requestBackend(req,backend);
+            const configId = validateClientConfig(req.query ?? {});
+            const instance = await requestBackend(req,backend,configId);
             const healthy = instance ? (backend === 'lancedb'
                 ? !!instance.basePath : await instance.healthCheck()) : true;
-            res.json({backend,healthy,configuration:'server-only',userIsolated:true,
+            res.json({backend,healthy,configuration: configId === 'local' ? 'local-loopback' : 'server-only',userIsolated:true,
                 productionCertified:false});
         } catch (error) {
             res.status(error.status||503).json({backend,healthy:false,code:error.code||'S03_BACKEND_UNAVAILABLE',
-                error:'Backend is not available in the authenticated server configuration.'});
+                error:'Backend is not available for the selected server configuration.'});
         }
     });
 
@@ -733,12 +738,12 @@ export async function init(router) {
     router.post('/backend/init/:backend', async (req, res) => {
         const backend = req.params.backend;
         try {
-            validateClientConfig(req.body ?? {});
-            const instance = await requestBackend(req,backend);
+            const configId = validateClientConfig(req.body ?? {});
+            const instance = await requestBackend(req,backend,configId);
             if (backend !== 'standard' && backend !== 'vectra' && !instance) {
                 throw new AccessError('S03_BACKEND_UNKNOWN','Unknown backend',400);
             }
-            res.json({success:true,backend,configuration:'server-only',initialized:true,
+            res.json({success:true,backend,configuration:configId === 'local' ? 'local-loopback' : 'server-only',initialized:true,
                 mutationsEnabled:false});
         } catch (error) {
             res.status(error.status||503).json({success:false,code:error.code||'S03_BACKEND_UNAVAILABLE',

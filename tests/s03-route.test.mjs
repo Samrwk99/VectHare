@@ -34,7 +34,9 @@ async function registered(pool) {
             './lib/s05-routes.js':{registerS05Routes},
             './lib/s05-contract.js':{validateVector:validateS05Vector},
             './lib/s10-build.js':{loadS10Build},
-            './lib/s10-contracts.js':{registerS10Routes}
+            './lib/s10-contracts.js':{registerS10Routes},
+            './lib/h01-qdrant-acceptance.js':{registerH01AcceptanceRoutes:()=>{}},
+            './lib/s10-gui-connections.js':{registerGuiConnectionRoutes:()=>{}}
         };
         assert.ok(objects[specifier],`unexpected import: ${specifier}`);
         const obj=objects[specifier];
@@ -136,4 +138,23 @@ test('S10 actual index registers build/capabilities routes behind S03 authentica
     const blocked=await call('POST','/v2/records/insert',{user,body:{verified:true}});
     assert.equal(blocked.statusCode,409);
     assert.equal(blocked.payload.code,'S10_OPERATION_NOT_CERTIFIED');
+}));
+
+test('S10.2 actual init and health routes pass explicit local selector, without enabling writes',async()=>disposable(async dir=>{
+    const seen=[];
+    const pool={async get(_ctx,backend,selector){seen.push([backend,selector]);return {baseUrl:'http://127.0.0.1:6333',healthCheck:async()=>true};}};
+    const call=await registered(pool);
+    const user={profile:{handle:'local-alice'},directories:{vectors:dir}};
+    const init=await call('POST','/backend/init/:backend',{path:'/backend/init/qdrant',user,params:{backend:'qdrant'},body:{configId:'local'}});
+    assert.equal(init.statusCode,200);assert.equal(init.payload.configuration,'local-loopback');assert.equal(init.payload.mutationsEnabled,false);
+    const health=await call('GET','/backend/health/:backend',{path:'/backend/health/qdrant',user,params:{backend:'qdrant'},query:{configId:'local'}});
+    assert.equal(health.statusCode,200);assert.equal(health.payload.healthy,true);
+    assert.equal(health.payload.configuration,'local-loopback');
+    const remote=await call('POST','/backend/init/:backend',{path:'/backend/init/qdrant',user,params:{backend:'qdrant'},body:{configId:'default'}});
+    assert.equal(remote.statusCode,200);assert.equal(remote.payload.configuration,'server-only');
+    assert.deepEqual(seen,[['qdrant','local'],['qdrant','local'],['qdrant','default']]);
+    const forbidden=await call('POST','/backend/init/:backend',{path:'/backend/init/qdrant',user,params:{backend:'qdrant'},body:{configId:'local',url:'http://attacker'}});
+    assert.equal(forbidden.statusCode,403);assert.equal(forbidden.payload.code,'S03_CLIENT_CONFIG_FORBIDDEN');
+    const write=await call('POST','/chunks/insert',{user,body:{backend:'qdrant'}});
+    assert.equal(write.statusCode,409);assert.equal(write.payload.code,'S01_MUTATION_BLOCKED');
 }));

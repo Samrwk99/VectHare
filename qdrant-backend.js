@@ -85,7 +85,7 @@ class QdrantBackend {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 60000);
             try {
-                const options = { method, headers: this._getHeaders(), signal: controller.signal };
+                const options = { method, headers: this._getHeaders(), signal: controller.signal, redirect: 'error' }; // never forward configured API key across redirects
                 if (body !== null && body !== undefined) options.body = JSON.stringify(body);
                 const response = await fetch(url, options);
                 if (!response.ok) {
