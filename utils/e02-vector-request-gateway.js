@@ -179,6 +179,18 @@ export function inspectVectorRequest(url, options={}) {
            (b.action==='delete'&&b.metadata!==undefined))fail(req,'f04-disposable-source-bound-pilot-required');
         return {intercepted:true,allowed:true,transport:'plugin',operation:'f04PilotMutation',backend:'qdrant',method:'POST'};
     }
+    // F05: fixed-parameter, explicit-consent local Qdrant acceptance suite.
+    // Server selects a new random namespace and synthetic record IDs. No user
+    // chat, backend collection, physical IDs, or credentials are transported.
+    if(req.transport==='plugin'&&req.suffix==='/v2/diagnostics/qdrant-f05'){
+        const b=req.body;
+        if(req.method!=='POST'||!b||b.configId!=='local'||
+           b.consent!=='I ACCEPT F05 DISPOSABLE QDRANT TEST'||
+           Object.keys(b).some(k=>!['configId','consent'].includes(k)))
+            fail(req,'f05-disposable-consent-required');
+        return {intercepted:true,allowed:true,transport:'plugin',backend:'qdrant',
+            operation:'f05DisposableAcceptance',method:'POST'};
+    }
     // H01 is a narrowly bounded, explicitly confirmed disposable acceptance
     // diagnostic. It cannot select a collection, write real memories, or lift
     // any production capability matrix cell.

@@ -1,0 +1,66 @@
+{
+  "checkpoint": "F05",
+  "status": "PARTIAL_HOST_ACCEPTANCE_CANDIDATE_NOT_PRODUCTION_READY",
+  "extensionVersion": "2.2.0-alpha.s11.10-f05",
+  "pluginVersion": "3.2.10-s10.9-f05",
+  "pluginSourceFingerprint": "a268af5ec5318c3309f1deaab623977c118a3b1e10f1cbd453e19fa4638d5b23",
+  "backends": {
+    "qdrant": {
+      "ordinaryInsert": "DENIED",
+      "ordinaryEdit": "DENIED",
+      "ordinaryDelete": "DENIED",
+      "ordinaryReindex": "DENIED",
+      "verifiedInventory": "DENIED",
+      "fullExport": "DENIED",
+      "guardedV2Reads": "GUARDED_ALREADY_PROVISIONED_V2_ONLY",
+      "extendedDisposableAcceptance": "AVAILABLE_UNCERTIFIED"
+    },
+    "lancedb": {
+      "ordinaryInsert": "DENIED",
+      "ordinaryEdit": "DENIED",
+      "ordinaryDelete": "DENIED",
+      "ordinaryReindex": "DENIED",
+      "verifiedInventory": "DENIED",
+      "fullExport": "DENIED",
+      "guardedV2Reads": "GUARDED_ALREADY_PROVISIONED_V2_ONLY",
+      "extendedDisposableAcceptance": "NOT_AVAILABLE"
+    },
+    "vectra": {
+      "ordinaryInsert": "DENIED",
+      "ordinaryEdit": "DENIED",
+      "ordinaryDelete": "DENIED",
+      "ordinaryReindex": "DENIED",
+      "verifiedInventory": "DENIED",
+      "fullExport": "DENIED",
+      "guardedV2Reads": "GUARDED_ALREADY_PROVISIONED_V2_ONLY",
+      "extendedDisposableAcceptance": "NOT_AVAILABLE"
+    },
+    "milvus": {
+      "ordinaryInsert": "DENIED",
+      "ordinaryEdit": "DENIED",
+      "ordinaryDelete": "DENIED",
+      "ordinaryReindex": "DENIED",
+      "verifiedInventory": "DENIED",
+      "fullExport": "DENIED",
+      "guardedV2Reads": "GUARDED_ALREADY_PROVISIONED_V2_ONLY",
+      "extendedDisposableAcceptance": "NOT_AVAILABLE"
+    }
+  },
+  "nativeStandard": {
+    "insert": "DENIED_NATIVE_UNPROBED",
+    "delete": "DENIED_NATIVE_UNPROBED",
+    "purge": "DENIED_NATIVE_UNPROBED"
+  },
+  "f05ExtendedAcceptance": {
+    "backend": "qdrant",
+    "connection": "local-only",
+    "serverGeneratedCollection": true,
+    "syntheticMutations": true,
+    "realHostAcceptance": "NOT_RUN",
+    "externalWriterCAS": "UNPROVEN",
+    "restartDurability": "UNPROVEN",
+    "productionWritePromotion": false,
+    "autoPurge": false
+  },
+  "next": "LIVE_TERMUX_ACCEPTANCE_THEN_FINISH_QDRANT_PRODUCTION_PATH"
+}

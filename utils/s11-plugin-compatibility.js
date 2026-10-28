@@ -5,9 +5,9 @@
  */
 import { guardedVectorFetch } from './e02-vector-request-gateway.js';
 export const S11_EXPECTED_PLUGIN = Object.freeze({
-    pluginVersion: '3.2.10-s10.8-f04',
+    pluginVersion: '3.2.10-s10.9-f05',
     contractVersion: 2,
-    sourceFingerprint: '1d13562e109129ca487f85eab24f1a5681b7b6f1fcb651c5d9c95bae35977e67',
+    sourceFingerprint: 'a268af5ec5318c3309f1deaab623977c118a3b1e10f1cbd453e19fa4638d5b23',
 });
 export const S11_BACKENDS = Object.freeze(['standard','lancedb','qdrant','milvus']);
 const ROOT = '/api/plugins/similharity';
@@ -33,7 +33,9 @@ export function validateS11Discovery(build,caps,contracts,expected=S11_EXPECTED_
         contracts.routes['POST /v2/collections/provision']!=='F03_EXPLICIT_SOURCE_BOUND_EMPTY_SCHEMA_CREATION_UNCERTIFIED' ||
         contracts.routes['POST /v2/collections/status']!=='F03_SOURCE_BOUND_PROVISION_RECEIPT_ONLY' ||
         contracts.routes['POST /v2/records/pilot-mutate']!=='F04_DISPOSABLE_QDRANT_CONSENTED_V2_RECORDS_UNCERTIFIED' ||
-        caps.experimentalQdrantPilotMutationsAvailable!==true)
+        caps.experimentalQdrantPilotMutationsAvailable!==true ||
+        caps.extendedQdrantDisposableAcceptanceAvailable!==true ||
+        contracts.routes['POST /v2/diagnostics/qdrant-f05']!=='F05_EXTENDED_LOCAL_QDRANT_DISPOSABLE_ACCEPTANCE_NOT_PRODUCTION')
         return refused('unexpected-execution-contract');
     if(S11_BACKENDS.some(b=>['insert','delete','updateText','updateMetadata','operationSubmit'].some(op=>
         caps.backends[b].operations[op]!=='DENIED_NOT_LIVE_CERTIFIED')))return refused('unaccepted-mutation-claim');
@@ -77,7 +79,7 @@ export function renderS11CompatibilityStatus(root,status,doc=globalThis.document
         node.setAttribute('role','status');node.style.padding='0.5em';
         node.style.marginBottom='0.5em';root.prepend(node);}
     node.textContent=status?.compatible
-        ? 'Similharity F04 detected. Source-bound v2 reads, F03 collection provisioning, and a consented Qdrant pilot CRUD panel are available for disposable testing. Automatic memory writes, legacy retrieval and exports remain blocked.'
+        ? 'Similharity F05 detected. Source-bound v2 reads, F03 collection provisioning, an F04 disposable pilot, and extended F05 local-Qdrant host acceptance are available for testing. Automatic memory writes, legacy retrieval and exports remain blocked.'
         : 'Similharity S10 compatibility not verified. Unsafe operations remain disabled.';
     return true;
 }
