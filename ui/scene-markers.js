@@ -344,36 +344,12 @@ async function handleStartClick(messageId) {
             `This message is inside an existing scene (${existingSceneAt.sceneStart}-${existingSceneAt.sceneEnd}).\n\nSplit it? The existing scene will end at message ${messageId - 1}, and a new scene will start here.`
         );
         if (confirmSplit) {
-            // Delete old scene
-            const deleteResult = await deleteSceneChunk(
-                existingSceneAt.hash,
-                existingSceneAt.containedHashes,
-                currentSettings
-            );
-            if (!deleteResult.success) {
-                toastr.error('Failed to modify existing scene');
-                return;
-            }
+            // C02: original scene cannot be deleted before its shortened
+            // replacement has been durably verified. The deployed plugin has
+            // no accepted replacement/delete contract, so fail closed.
+            toastr.warning('Scene split requires verified replacement; original scene preserved', 'VectHare');
+            return;
 
-            // Create shortened scene (if it would have at least 1 message)
-            if (messageId - 1 >= existingSceneAt.sceneStart) {
-                const createResult = await createSceneChunk(
-                    existingSceneAt.sceneStart,
-                    messageId - 1,
-                    { title: existingSceneAt.title },
-                    currentSettings
-                );
-                if (!createResult.success) {
-                    toastr.warning('Split scene created but shortened original failed');
-                }
-            }
-
-            // Set pending start
-            pendingSceneStart = messageId;
-            toastr.success('Scene split. Mark the end of your new scene.');
-            await refreshSceneCache();
-            updateAllMarkerStates();
-            eventSource.emit('vecthare_scenes_changed');
         }
         return;
     }

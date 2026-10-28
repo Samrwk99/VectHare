@@ -23,7 +23,7 @@ import {
 import {
     deleteVectorItems,
     insertVectorItems,
-    updateChunkText,
+    replaceVectorRecords,
     updateChunkMetadata,
 } from '../core/core-vector-api.js';
 import { getStringHash } from '../../../../utils.js';
@@ -174,19 +174,24 @@ async function saveAllChanges() {
     for (const [hash, updates] of [...pendingChanges]) {
         try {
             if (updates.text !== undefined) {
-                await updateChunkText(currentCollectionId, hash, updates.text, currentSettings);
+                const newHash=getStringHash(updates.text);
+                const result=await replaceVectorRecords(currentCollectionId,[hash],[{
+                    hash:newHash,text:updates.text,index:0,
+                }],currentSettings,{kind:'reembed'});
+                if(result?.status!=='committed')throw new Error('Text change requires reconciliation; original retained');
             }
 
             if (updates._newSummaries?.length > 0) {
                 for (const summaryText of updates._newSummaries) {
                     const summaryHash = getStringHash(summaryText);
-                    await insertVectorItems(currentCollectionId, [{
+                    const summaryOutcome = await insertVectorItems(currentCollectionId, [{
                         text: summaryText,
                         hash: summaryHash,
                         index: 0,
                         keywords: [],
                         metadata: { isSummary: true, parentHash: hash, contentType: 'summary' },
                     }], currentSettings);
+                    if(summaryOutcome?.status!=='confirmed')throw new Error('Summary write requires reconciliation');
                 }
             }
 
@@ -1756,16 +1761,14 @@ function bindDetailEvents() {
         $(this).prop('disabled', true).html('<i class="fa-solid fa-spinner fa-spin"></i> Saving...');
 
         try {
-            // Delete old
-            await deleteVectorItems(currentCollectionId, [chunk.hash], currentSettings);
-
-            // Insert new with new hash (keep as number for Qdrant compatibility)
+            // C02: stage replacement first. Unknown writes cannot delete the
+            // old record or update UI/metadata as if the edit was committed.
             const newHash = getStringHash(newText);
-            await insertVectorItems(currentCollectionId, [{
-                hash: newHash,
-                text: newText,
-                index: chunk.index
-            }], currentSettings);
+            const replacement = await replaceVectorRecords(currentCollectionId,[chunk.hash],[{
+                hash: newHash, text: newText, index: chunk.index,
+            }],currentSettings,{kind:'reembed'});
+            if(replacement?.status!=='committed')
+                throw new Error('Re-embedding requires reconciliation; original chunk preserved');
 
             // Update metadata (use string keys for metadata storage)
             const oldMeta = getChunkMetadata(String(chunk.hash));
@@ -2017,16 +2020,14 @@ function openTextEditor(chunk) {
         $(this).prop('disabled', true).text('Saving...');
 
         try {
-            // Delete old
-            await deleteVectorItems(currentCollectionId, [chunk.hash], currentSettings);
-
-            // Insert new with new hash (keep as number for Qdrant compatibility)
+            // C02: stage replacement first. Unknown writes cannot delete the
+            // old record or update UI/metadata as if the edit was committed.
             const newHash = getStringHash(newText);
-            await insertVectorItems(currentCollectionId, [{
-                hash: newHash,
-                text: newText,
-                index: chunk.index
-            }], currentSettings);
+            const replacement = await replaceVectorRecords(currentCollectionId,[chunk.hash],[{
+                hash: newHash, text: newText, index: chunk.index,
+            }],currentSettings,{kind:'reembed'});
+            if(replacement?.status!=='committed')
+                throw new Error('Re-embedding requires reconciliation; original chunk preserved');
 
             // Update metadata (use string keys for metadata storage)
             const oldMeta = getChunkMetadata(String(chunk.hash));

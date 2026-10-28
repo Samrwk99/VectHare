@@ -1,3 +1,6 @@
+import {inspectAdapterInventory} from '../utils/c11-adapter-inventory.js';
+import {createC02Coordinator} from '../utils/c02-replacement.js';
+import {createIndexedDBOperationJournal} from '../utils/c02-operation-journal.js';
 import {beginOperation,settleOperation} from '../utils/operation-outcomes.js';
 import {writeBarrier,withCollectionLock} from '../utils/keyed-mutex.js';
 import {chatJobs} from './chat-job-runtime.js';
@@ -804,15 +807,15 @@ export async function insertVectorItems(collectionId, items, settings, onProgres
             console.log(`VectHare: Processing ${items.length} items in ${batches.length} batch(es) of up to ${BATCH_SIZE}${hasRateLimit ? ` with rate limit (Max ${settings.rate_limit_calls} calls / ${settings.rate_limit_interval}s)` : ''}`);
 
             for (let i = 0; i < batches.length; i++) {
+                // C02 #202: NEVER automatically resend an unacknowledged
+                // non-idempotent batch. A lost ACK may mean the server wrote
+                // every record; retrying blindly creates duplicates.
                 const processBatch = async () => {
-                    await AsyncUtils.retry(async () => {
-                        // R17: timeout-bounded + abortable (was a bare unbounded fetch)
-                        await withOpGuard(
-                            () => backend.insertVectorItems(collectionId, batches[i], settings),
-                            abortSignal,
-                            'Batch insert'
-                        );
-                    }, RETRY_CONFIG);
+                    await withOpGuard(
+                        () => backend.insertVectorItems(collectionId, batches[i], settings),
+                        abortSignal,
+                        'Batch insert (no blind retry)'
+                    );
                 };
 
                 // Apply rate limiting if configured, otherwise execute directly.
@@ -924,16 +927,16 @@ async function streamEmbeddingsAndWrite(backend, collectionId, items, textString
         console.log(`VectHare: Writing batch ${batchNum} to database (${itemsToWrite.length} items)`);
         try {
             // R13: abortable. R17: also timeout-bounded (was unbounded).
-            await makeAbortable(AsyncUtils.retry(async () => {
-                await withOpGuard(
-                    () => backend.insertVectorItems(collectionId, itemsToWrite, settings),
-                    abortSignal,
-                    'Streamed batch write'
-                );
-            }, RETRY_CONFIG), abortSignal);
+            // C02 #202: generating embeddings may be retried, but sending a
+            // non-idempotent INSERT may not. A missing ACK is uncertain.
+            await makeAbortable(withOpGuard(
+                () => backend.insertVectorItems(collectionId, itemsToWrite, settings),
+                abortSignal,
+                'Streamed batch write (no blind retry)'
+            ), abortSignal);
         } catch (error) {
             if (isAbortError(error)) throw error; // R13: propagate verbatim, no wrapping
-            throw new Error(`VectHare: Failed to write batch ${batchNum} to database after retries: ${error.message}`);
+            throw new Error(`VectHare: Batch ${batchNum} write uncertain; reconcile before retrying: ${error.message}`);
         }
 
         totalProcessed += itemsToWrite.length;
@@ -1356,6 +1359,69 @@ export async function purgeAllVectorIndexes(settings) {
     } finally {writeBarrier.reopen();}
 }
 
+/** C02 journal for destructive or non-idempotent edit/import operations.
+ * No server-side write can become a confirmed replacement until complete
+ * collection-scoped inventory and backend contracts have been verified.
+ */
+const c02Journal=createIndexedDBOperationJournal();
+export async function listPendingC02Operations(){
+    return (await c02Journal.list()).filter(h=>h.phase!=='committed');
+}
+export async function recoverPendingC02Operations(){
+    // Recovery from an untrusted live contract can report only the persisted
+    // need for reconciliation; it cannot transform an unknown into success.
+    const entries=await listPendingC02Operations();
+    return entries.map(h=>({operationId:h.operationId,collectionKey:h.collectionKey,kind:h.kind,
+        status:'needs-reconcile',phase:h.phase,oldIds:h.oldIds,newIds:h.newIds}));
+}
+export async function replaceVectorRecords(collectionId,oldIds,newItems,settings,{kind='replace',signal,upsertOverride}={}){
+    const key=parseCollectionKey(collectionId) ? collectionId : formatCollectionKey({backend:settings?.vector_backend||'standard',source:settings?.source,collectionId});
+    const parsed=parseCollectionKey(key);
+    if(parsed.backend!==(settings?.vector_backend||'standard') || parsed.source!==settings?.source)
+        throw new Error('Replacement backend/source identity mismatch');
+    // Never permit the very first write to clobber a previously stored hash.
+    // Legacy Standard hashes are not collision-resistant physical IDs.
+    const previous=new Set(oldIds.map(String));
+    if(newItems.some(item=>previous.has(String(item?.recordId??item?.hash??item?.id))))
+        throw new Error('Same-ID replacement blocked: cannot prove original and new content are identical');
+    // Source audit: the current plugin cannot prove complete collection scope,
+    // idempotent upserts, or the final state of a write. Refuse to send an
+    // import/re-embed/scene replacement until these contracts are verified.
+    const required=['listPagination','completeInventory','count','getByIds','insertAcknowledgement','tenantFilter'];
+    if(required.some(cap=>!hasVerifiedCapability(parsed.backend,cap)) ||
+       (['qdrant','milvus'].includes(parsed.backend) && !hasVerifiedCapability(parsed.backend,'tenantFilter')) ||
+       (oldIds.length && !hasVerifiedCapability(parsed.backend,'deleteAcknowledgement')))
+        throw new Error('C02 replacement blocked: scoped inventory, upsert and deletion contracts not verified; originals preserved');
+    // The C11 bridge requires authoritative page, count and tenant evidence.
+    // These are currently UNKNOWN for the supplied plugin; no network writes
+    // are admitted until a pinned server implementation proves otherwise.
+    const coordinator=createC02Coordinator({journal:c02Journal,
+        allowUnverifiedFirstWrite:false,
+        list:async scope=>{
+            const backend=await withOpGuard(()=>getBackend(settings),signal,'C02 inventory initialization');
+            const result=await inspectAdapterInventory({key:scope,adapter:backend,settings});
+            return {...result,contractVerified:result.status==='complete'&&result.endOfListConfirmed===true};
+        },
+        upsert:async(_key,items,{signal:writeSignal})=>{
+            // The coordinator holds the collection mutex already: never
+            // re-enter insertVectorItems() and deadlock on the same key.
+            const ticket=writeBarrier.enter();
+            try {
+                if(['webllm','koboldcpp','bananabread'].includes(settings?.source))
+                    throw new Error('Client-generated embeddings require verified C02 adapter');
+                const backend=upsertOverride ? null : await withOpGuard(()=>getBackend(settings),writeSignal,'C02 backend initialization');
+                if(upsertOverride)await withOpGuard(()=>upsertOverride(items),writeSignal,'C02 import write without retry');
+                else await withOpGuard(()=>backend.insertVectorItems(collectionId,items,settings),writeSignal,'C02 write without retry');
+            } finally {writeBarrier.leave(ticket,{uncertain:true});}
+        },
+        // The plugin currently supplies neither an independently proven
+        // idempotent upsert contract nor a safe scoped delete receipt.
+        canUpsertIdempotently:()=>false,
+        canDelete:()=>false,
+    });
+    return coordinator.replaceRecords({collectionKey:key,kind,oldIds,newItems,signal});
+}
+
 /**
  * Update chunk text (triggers re-embedding)
  * @param {string} collectionId - Collection ID
@@ -1364,8 +1430,11 @@ export async function purgeAllVectorIndexes(settings) {
  * @param {object} settings - VectHare settings
  */
 export async function updateChunkText(collectionId, hash, newText, settings) {
-    const backend = await getBackend(settings);
-    return await backend.updateChunkText(collectionId, hash, newText, settings);
+    if(typeof newText!=='string'||!newText.trim())throw new Error('Replacement text required');
+    // The adapter's updateChunkText could delete before a verified upsert.
+    // It cannot safely be called until its semantics and the new physical ID
+    // contract are verified. UI callers should stage via replaceVectorRecords.
+    throw new Error('Unsafe direct re-embedding blocked: use journal-backed replaceVectorRecords after backend verification');
 }
 
 /**

@@ -22,7 +22,7 @@ import {adapterCollectionId} from '../utils/tenant-route.js';
 
 import { extension_settings } from '../../../../extensions.js';
 import { getRequestHeaders, saveSettingsDebounced } from '../../../../../script.js';
-import { getSavedHashes, insertVectorItems, purgeVectorIndex } from './core-vector-api.js';
+import { getSavedHashes, insertVectorItems, purgeVectorIndex, replaceVectorRecords } from './core-vector-api.js';
 import {
     getCollectionMeta,
     setCollectionMeta,
@@ -437,7 +437,7 @@ async function insertChunksWithVectors(collectionId, chunks, settings) {
         headers: getRequestHeaders(),
         body: JSON.stringify({
             backend: backendName === 'standard' ? 'vectra' : backendName,
-            collectionId: collectionId,
+            collectionId: adapterCollectionId(collectionId,backendName,settings.source || 'transformers'),
             source: settings.source || 'transformers',
             model: getConfiguredEmbeddingModel(settings),
             items: chunks.map(c => ({
@@ -456,9 +456,23 @@ async function insertChunksWithVectors(collectionId, chunks, settings) {
     }
 
     const result = await response.json();
-    if (!result || result.success === false || result.error ||
-        (typeof result.inserted === 'number' && result.inserted < chunks.length)) {
+    if (!result || result.success !== true || result.error ||
+        (typeof result.inserted === 'number' && result.inserted !== chunks.length)) {
         throw new Error(result?.error || 'Server did not confirm all imported vector writes');
+    }
+    return result;
+}
+
+/** C02: stage a single import in the durable ID-only journal before any
+ * backend write. Never call metadata/register on an unverified result. */
+async function stageC02Import(collectionId,preparedChunks,settings,canUseVectors){
+    const result=await replaceVectorRecords(collectionId,[],preparedChunks,settings,{
+        kind:'import',
+        ...(canUseVectors ? {upsertOverride:items=>insertChunksWithVectors(collectionId,items,settings)} : {}),
+    });
+    if(result?.status!=='committed'){
+        const id=result?.operationId ? ` (operation ${result.operationId})`:'';
+        throw new Error(`Import requires reconciliation${id}; metadata not activated and existing records preserved`);
     }
     return result;
 }
@@ -527,28 +541,13 @@ export async function importCollection(exportData, settings, options = {}) {
             metadata: chunk.metadata || {},
         }));
 
-        // Step 3: Insert chunks
-        if (validChunks.length === 0) {
-            // Empty collections still have meaningful policies and registry metadata.
-        } else if (canUseVectors) {
-            // Direct insert with pre-computed vectors (fast!)
-            progressTracker.updateProgress(3, `Inserting ${preparedChunks.length} chunks (using existing vectors)...`);
-            try {
-                await insertChunksWithVectors(collectionId, preparedChunks, settings);
-                console.log(`VectHare Import: Inserted ${preparedChunks.length} chunks with pre-computed vectors`);
-            } catch (error) {
-                throw new Error(`Failed to insert chunks: ${error.message}`);
-            }
-        } else {
-            // Need to embed (slow)
-            progressTracker.updateProgress(3, `Embedding ${preparedChunks.length} chunks...`);
-            try {
-                await insertVectorItems(collectionId, preparedChunks, settings);
-                console.log(`VectHare Import: Embedded and inserted ${preparedChunks.length} chunks`);
-            } catch (error) {
-                throw new Error(`Failed to embed chunks: ${error.message}`);
-            }
-        }
+        if(new Map(preparedChunks.map(c=>[String(c.hash),c.text])).size!==preparedChunks.length)
+            throw new Error('Import contains duplicate content hashes; explicit deduplication and collision review required');
+
+        // Step 3: journal every non-empty import before the first write. A
+        // non-authoritative ACK cannot grant a successful import or activation.
+        progressTracker.updateProgress(3, 'Journalled import (verification required)...');
+        if(preparedChunks.length)await stageC02Import(collectionId,preparedChunks,settings,canUseVectors);
 
         // Step 4: Save metadata
         progressTracker.updateProgress(4, 'Saving metadata...');
@@ -714,14 +713,11 @@ async function importCollectionSilent(exportData, settings, options = {}) {
         metadata: chunk.metadata || {},
     }));
 
-    // Insert
-    if (validChunks.length === 0) {
-        // Metadata-only restore; no embedding or insertion request.
-    } else if (canUseVectors) {
-        await insertChunksWithVectors(collectionId, preparedChunks, settings);
-    } else {
-        await insertVectorItems(collectionId, preparedChunks, settings);
-    }
+    if(new Map(preparedChunks.map(c=>[String(c.hash),c.text])).size!==preparedChunks.length)
+        throw new Error('Import contains duplicate content hashes; review required');
+
+    // C02: abort before metadata registration if writes are uncertain.
+    if(preparedChunks.length)await stageC02Import(collectionId,preparedChunks,settings,canUseVectors);
 
     // Save metadata
     const importedMeta = {

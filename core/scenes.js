@@ -28,6 +28,7 @@ import { getStringHash } from '../../../../utils.js';
 import {
     insertVectorItems,
     deleteVectorItems,
+    replaceVectorRecords,
 } from './core-vector-api.js';
 import { getChatCollectionId, getTextWithoutAttachments } from './chat-vectorization.js';
 import {
@@ -195,7 +196,12 @@ export async function createSceneChunk(start, end, sceneData, settings) {
 
     try {
         // Insert scene chunk into vector DB
-        await insertVectorItems(collectionId, [sceneChunk], settings);
+        const staged=await replaceVectorRecords(collectionId,[],[sceneChunk],settings,{kind:'scene-replace'});
+        if(staged?.status!=='committed')return {
+            success:false,requiresReconciliation:true,
+            operationId:staged?.operationId,
+            error:'Scene creation requires reconciliation; existing message chunks remain enabled',
+        };
 
         // Disable contained chunks
         for (const hash of containedHashes) {
