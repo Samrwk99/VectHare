@@ -1,3 +1,4 @@
+import {registerF09WorkflowRoutes} from '../lib/f09-workflows.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
@@ -262,6 +263,7 @@ test('plugin registration keeps legacy mutation endpoints blocked even without m
             './lib/f07-vectra.js':{f07SealedVectra:()=>{},f07VectraLocation:()=>{}},
             './lib/f08-milvus.js':{registerF08MilvusPilotRoutes:()=>{}},
             './lib/f08-milvus-acceptance.js':{registerF08AcceptanceRoutes:()=>{}},
+            './lib/f09-workflows.js':{registerF09WorkflowRoutes:()=>{}},
         './lib/s10-gui-connections.js':{registerGuiConnectionRoutes:()=>{}}
     });
     const routes=new Map(); const middleware=[];

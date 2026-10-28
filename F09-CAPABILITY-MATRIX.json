@@ -1,0 +1,75 @@
+{
+  "checkpoint": "F09",
+  "baseline": "F08",
+  "status": "PARTIAL_GUARDED_READ_ONLY_BRIDGE",
+  "versions": {
+    "extension": "2.2.0-alpha.s11.14-f09",
+    "plugin": "3.2.10-s10.13-f09"
+  },
+  "verification": {
+    "pluginTestsPassed": 317,
+    "pluginTestsFailed": 0,
+    "extensionAssertionsPassed": 1134,
+    "extensionFilesPassed": 67,
+    "extensionRetries": [
+      {
+        "file": "c12-integration.node.test.mjs",
+        "codes": [
+          1,
+          0
+        ]
+      }
+    ],
+    "focusedExtensionTestsPassed": 27,
+    "liveHostTested": false
+  },
+  "capabilities": {
+    "qdrant": {
+      "sourceScopedReadPreview": "GUARDED_V2_ONLY",
+      "readByRecordId": "F02_GUARDED_V2_ONLY",
+      "manualMutations": "PREVIOUS_PILOT_ONLY",
+      "normalMemoryCRUD": "DENIED",
+      "automaticPromptInjection": "DENIED",
+      "legacyRecords": "QUARANTINED",
+      "verifiedExport": "DENIED",
+      "hostCertified": false
+    },
+    "lancedb": {
+      "sourceScopedReadPreview": "GUARDED_V2_ONLY",
+      "readByRecordId": "F02_GUARDED_V2_ONLY",
+      "manualMutations": "PREVIOUS_PILOT_ONLY",
+      "normalMemoryCRUD": "DENIED",
+      "automaticPromptInjection": "DENIED",
+      "legacyRecords": "QUARANTINED",
+      "verifiedExport": "DENIED",
+      "hostCertified": false
+    },
+    "pluginVectra": {
+      "sourceScopedReadPreview": "GUARDED_V2_ONLY",
+      "readByRecordId": "F02_GUARDED_V2_ONLY",
+      "manualMutations": "PREVIOUS_PILOT_ONLY",
+      "normalMemoryCRUD": "DENIED",
+      "automaticPromptInjection": "DENIED",
+      "legacyRecords": "QUARANTINED",
+      "verifiedExport": "DENIED",
+      "hostCertified": false
+    },
+    "milvus": {
+      "sourceScopedReadPreview": "GUARDED_V2_ONLY",
+      "readByRecordId": "F02_GUARDED_V2_ONLY",
+      "manualMutations": "PREVIOUS_PILOT_ONLY",
+      "normalMemoryCRUD": "DENIED",
+      "automaticPromptInjection": "DENIED",
+      "legacyRecords": "QUARANTINED",
+      "verifiedExport": "DENIED",
+      "hostCertified": false
+    }
+  },
+  "nativeStandard": {
+    "listQuery": "GUARDED_NATIVE_PROBES",
+    "insertDeletePurge": "UNPROBED_DENIED"
+  },
+  "normalMemoryWorkflowsComplete": false,
+  "productionReady": false,
+  "next": "F09B_COMPLETE_NORMAL_WORKFLOWS_BEFORE_F10"
+}
