@@ -1,16 +1,17 @@
 {
   "formatVersion": 1,
   "contractVersion": 2,
-  "pluginVersion": "3.2.10-s10.8-f04",
+  "pluginVersion": "3.2.10-s10.9-f05",
   "algorithm": "sha256",
   "files": {
-    "index.js": "c7bc9a5df6e2578ee173151c2e8c6119604269dbe28bfc4b75a1f837466f9369",
+    "index.js": "89a371c31e08bfcff5477f9f39f2b6a2f2117c2513bfd855c732e9f6ce6e5ab6",
     "lancedb-backend.js": "a3cd5b9cafd1686a6775b24345a48611b396e5cd2672a028b57b154335d499de",
     "lib/f01-host-sources.js": "af4c52a3d961a3befb7d2f7a42b08c5b9429ddfd8bb07022f067dd8820878c57",
     "lib/f02-public-reads.js": "dfab76bec6cd8a8c64ba97b17794853f84dd8c7c7d073cd8c5064c2bf94d2a5e",
     "lib/f03-provision.js": "be331c6268dbb301257117795f2610e1d8919ae7bb31d31a91a7b8489b07116a",
     "lib/f03-vector-evidence.js": "11452d572faa925a57e65146cc50e4606fc4c2d6f3e7fba3920058ecbf1c5407",
     "lib/f04-pilot-mutations.js": "4493d1a0b011b114451cbad95dec70fe8ed6a61a38e3b94576b47ebd1a093412",
+    "lib/f05-qdrant-acceptance.js": "b0afe844967881c20b22e1e216da1775c074652f63d7c6a947092150641f7615",
     "lib/h01-qdrant-acceptance.js": "b6420fdf0e6524d7d4344ae2eff12b5ccbcfc484a35c6744920e5df4cb37d915",
     "lib/s01-safety.js": "559917c958cdc7f6573e0d38bbe04d22199da726224aa38b1e0d74fe3d086310",
     "lib/s02-identity.js": "fd525737359313609b40dc9493a9195f143d4da14396226aa4f6a6048ac582b0",
@@ -33,11 +34,11 @@
     "lib/s09-fixture.js": "be09261e7dc79edf854232b59360d0c3e277f99f21d61a232509d6cfb0455848",
     "lib/s09-manifest.js": "9e27d35b82a8775e6a001fc8b001782a773fff7c7dcb909ff78712ddb1e86269",
     "lib/s10-build.js": "f724d07f0acdf40bc47715fdc4ce4c367ccd07a4bb211511ce87c979e2209eef",
-    "lib/s10-contracts.js": "3525465e073fd1b2667550b1ce62f97e7f0b94a767aee429c87fde7470f925ea",
+    "lib/s10-contracts.js": "ed5c98c9da7540384638b651f2b935fc6b9f834f9bae66a3beb72a1384dc0c56",
     "lib/s10-gui-connections.js": "e5a041abda59cdefd4f3556e58e9bfd8debbcba7309a2bac504b0c68d887ff58",
     "milvus-backend.js": "6cfee983eb34ab39a0f59f6ce2590a6c75d24a961f5a19ee4ae59d440427394e",
-    "package.json": "83428e96a5cf921f7471c43368e3ce29139a96280e208211f43dac70e458a8d5",
+    "package.json": "96bc3877163a69bac7084a6fbca136cf429e1dff1121bbc68cebd0fa976df297",
     "qdrant-backend.js": "f6a71992d55288345f041ed5d30e38524fc8f58201150b0b92cab18cf3e3d72b"
   },
-  "sourceFingerprint": "1d13562e109129ca487f85eab24f1a5681b7b6f1fcb651c5d9c95bae35977e67"
+  "sourceFingerprint": "a268af5ec5318c3309f1deaab623977c118a3b1e10f1cbd453e19fa4638d5b23"
 }
