@@ -2,6 +2,7 @@ import { guardedVectorFetch as fetch } from '../utils/e02-vector-request-gateway
 import {adapterCollectionId} from '../utils/tenant-route.js';
 import {hasVerifiedCapability} from '../utils/backend-contracts.js';
 import { mergeDefinedChunkMetadata, trustedQueryMetadata } from '../utils/chunk-record-metadata.js';
+import { verifyWriteIdentity, validateWriteBatch, collectVerifiedInventory } from '../utils/e05-verified-write-contract.js';
 /**
  * ============================================================================
  * LANCEDB BACKEND (via Unified Plugin API)
@@ -75,32 +76,38 @@ export class LanceDBBackend extends VectorBackend {
     }
 
     async getSavedHashes(collectionId, settings) {
+        // E05: a single first page is NOT an inventory. The plugin's LanceDB
+        // list wrapper has total/offset/hasMore, but each page is a full table
+        // scan. Bound work and refuse truncation, duplicates or drift.
         const actualCollectionId = this._stripRegistryPrefix(collectionId, settings);
-        const response = await fetch('/api/plugins/similharity/chunks/list', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-            body: JSON.stringify({
-                backend: BACKEND_TYPE,
-                collectionId: actualCollectionId,
-                source: settings.source || 'transformers',
-                model: getModelFromSettings(settings),
-                limit: VECTOR_LIST_LIMIT, // Get all for hash comparison
-            }),
+        const base = {
+            backend: BACKEND_TYPE,
+            collectionId: actualCollectionId,
+            source: settings.source || 'transformers',
+            model: getModelFromSettings(settings),
+        };
+        const inventory = await collectVerifiedInventory(async ({offset,limit,includeVectors}) => {
+            const response = await fetch('/api/plugins/similharity/chunks/list', {
+                method: 'POST', headers: getRequestHeaders(),
+                body: JSON.stringify({...base,offset,limit,includeVectors}),
+            });
+            if (!response.ok) throw new Error(`[LanceDB] Collection inventory refused: HTTP ${response.status}`);
+            return response.json();
         });
-
-        if (!response.ok) {
-            const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`[LanceDB] Failed to get saved hashes for ${collectionId}: ${response.status} ${response.statusText} - ${errorBody}`);
-        }
-
-        const data = await response.json();
-        return requireListedItems(data, 'LanceDB').map(item => item.hash);
+        return [...inventory.rows.values()].map(item => {
+            const hash = Number(item.hash);
+            if (!Number.isSafeInteger(hash)) throw new Error('LanceDB inventory returned an invalid numeric hash');
+            return hash;
+        });
     }
 
     async insertVectorItems(collectionId, items, settings) {
         if (items.length === 0) return;
 
         const actualCollectionId = this._stripRegistryPrefix(collectionId, settings);
+        verifyWriteIdentity({backend:BACKEND_TYPE,collectionId:actualCollectionId,
+            source:settings.source || 'transformers',model:getModelFromSettings(settings)});
+        validateWriteBatch(items,{backend:BACKEND_TYPE});
         const response = await fetch('/api/plugins/similharity/chunks/insert', {
             method: 'POST',
             headers: getRequestHeaders(),

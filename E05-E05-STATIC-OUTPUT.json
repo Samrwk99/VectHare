@@ -1,0 +1,23 @@
+{
+  "checkpoint": "E05",
+  "offlineOnly": true,
+  "checks": {
+    "standardPreflight": true,
+    "lancePreflight": true,
+    "lanceIdentity": true,
+    "lanceDoubleSweep": true,
+    "noBlindNativeWrite": true,
+    "deniedUnsafeMutations": true,
+    "noPluginPatchShipped": true,
+    "noProbeAutoActivation": true,
+    "noProbePurge": true,
+    "probeRequiresDisposable": true,
+    "probeLocalOnly": true,
+    "probeReadback": true,
+    "noAckCountsAsProof": true,
+    "journalMustReread": true,
+    "noAutoretry": true,
+    "explicitUncertified": true
+  },
+  "pass": true
+}

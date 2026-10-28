@@ -1,0 +1,18 @@
+{
+  "checkpoint": "E05",
+  "date": "2026-10-28",
+  "type": "source-and-offline-contract-assessment",
+  "pluginModified": false,
+  "pluginSourceHash": "32a2aba3a83511a61c34620c600db5a91c04b4d638c02919a4d0bf7217a5a287",
+  "deployedPluginAttested": false,
+  "liveProbesPerformed": false,
+  "writesUnlocked": false,
+  "operationStatus": {
+    "standard": {"pluginInsert": "UNPROBED_DENIED", "nativeInsert": "UNPROBED_DENIED", "delete": "UNPROBED_DENIED", "replace": "DENIED", "purge": "DENIED", "inventory": "UNVERIFIED"},
+    "lancedb": {"pluginInsert": "UNPROBED_DENIED", "delete": "UNPROBED_DENIED", "replace": "DENIED", "purge": "DENIED", "inventory": "GUARDED_TWO_SWEEP_NOT_LIVE_CERTIFIED"},
+    "qdrant": {"insert": "DENIED", "delete": "DENIED", "replace": "DENIED", "purge": "DENIED"},
+    "milvus": {"insert": "DENIED", "delete": "DENIED", "replace": "DENIED", "purge": "DENIED"}
+  },
+  "liveEvidenceRequirements": ["deployed source fingerprint", "disposable insert/list/get/delete with vector readback", "two independent runs separated by restart", "duplicate and >1000 record probes", "host settings and C02 journal durability", "multi-user path isolation", "real user workflow smoke test"],
+  "note": "Source evidence and locally simulated tests are not permission to write to real collections."
+}

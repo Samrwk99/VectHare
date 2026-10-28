@@ -1,3 +1,4 @@
+import {verifyWriteIdentity,validateWriteBatch,collectVerifiedInventory} from '../utils/e05-verified-write-contract.js';
 import {adapterCollectionId, rejectUnscopedPointOperation} from '../utils/tenant-route.js';
 /** I04: real adapter methods against a fake fetch; no SillyTavern server required. */
 import { test } from 'node:test';
@@ -31,6 +32,7 @@ function adapter(file, replies = []) {
         VECTOR_LIST_LIMIT: 100,
         requireListedItems, requireQueryItems, hybridEndpointUnsupported,
         mergeDefinedChunkMetadata, trustedQueryMetadata,
+        verifyWriteIdentity,validateWriteBatch,collectVerifiedInventory,
         adapterCollectionId, rejectUnscopedPointOperation, requireTenantScope: () => {}, hasVerifiedCapability: () => false,
         fetch: async (url, opts) => {
             calls.push({ url, opts });
@@ -49,13 +51,21 @@ for (const file of ['qdrant', 'lancedb', 'milvus']) {
     test(`I04 #222: ${file} list rejects HTTP 200 application failure, malformed, and missing items`, async () => {
         for (const payload of [{ success: false, items: [] }, { foo: [] }, { items: null }, { error: 'database offline', items: [] }]) {
             const { backend } = adapter(file, [response(200, payload)]);
-            await assert.rejects(backend.getSavedHashes(file === 'qdrant' ? 'vh:chat:abc' : 'abc', settings), /invalid or unsuccessful/);
+            await assert.rejects(backend.getSavedHashes(file === 'qdrant' ? 'vh:chat:abc' : 'abc', settings), /invalid or unsuccessful|E05 evidence unavailable/);
         }
     });
     test(`I04 #222: ${file} list accepts explicit empty list and valid hashes`, async () => {
-        let h = adapter(file, [response(200, { success: true, items: [] })]);
-        assert.deepEqual(await h.backend.getSavedHashes(file === 'qdrant' ? 'vh:chat:abc' : 'abc', settings), []);
-        h = adapter(file, [response(200, { items: [{ hash: 55, metadata:{type:'chat',sourceId:'abc'} }, { hash: 99, metadata:{type:'chat',sourceId:'abc'} }] })]);
+        const emptyPayload = file === 'lancedb'
+            ? { success:true, items:[], total:0, offset:0, limit:100, hasMore:false }
+            : { success:true, items:[] };
+        let h = adapter(file, file==='lancedb' ? [response(200,emptyPayload),response(200,emptyPayload)] : [response(200,emptyPayload)]);
+        assert.deepEqual(Array.from(await h.backend.getSavedHashes(file === 'qdrant' ? 'vh:chat:abc' : 'abc', settings)), []);
+        const rows=[{ hash:55, text:'chunk 55', metadata:{type:'chat',sourceId:'abc'} },
+                    { hash:99, text:'chunk 99', metadata:{type:'chat',sourceId:'abc'} }];
+        const validPayload=file==='lancedb'
+            ? {success:true,items:rows,total:2,offset:0,limit:100,hasMore:false}
+            : {items:rows};
+        h = adapter(file, file==='lancedb' ? [response(200,validPayload),response(200,validPayload)] : [response(200,validPayload)]);
         assert.deepEqual(Array.from(await h.backend.getSavedHashes(file === 'qdrant' ? 'vh:chat:abc' : 'abc', settings)), [55, 99]);
     });
 }

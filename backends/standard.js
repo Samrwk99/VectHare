@@ -2,6 +2,7 @@ import { guardedVectorFetch as fetch } from '../utils/e02-vector-request-gateway
 import {adapterCollectionId} from '../utils/tenant-route.js';
 import {hasVerifiedCapability} from '../utils/backend-contracts.js';
 import { mergeDefinedChunkMetadata } from '../utils/chunk-record-metadata.js';
+import { validateWriteBatch } from '../utils/e05-verified-write-contract.js';
 /**
  * ============================================================================
  * STANDARD BACKEND (Vectra - ST Native + Plugin)
@@ -128,6 +129,9 @@ export class StandardBackend extends VectorBackend {
     async insertVectorItems(collectionId, items, settings) {
         collectionId = adapterCollectionId(collectionId, 'standard', settings?.source || 'transformers');
         if (items.length === 0) return;
+        // E05 preflight remains effective even if a future proven contract
+        // permits writes. No silent provider embedding or hash collisions.
+        validateWriteBatch(items,{backend:'standard'});
 
         const providerParams = getProviderSpecificParams(settings, false);
         const model = getModelFromSettings(settings);

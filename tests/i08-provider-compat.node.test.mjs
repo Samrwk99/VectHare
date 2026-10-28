@@ -1,3 +1,4 @@
+import {verifyWriteIdentity,validateWriteBatch,collectVerifiedInventory} from '../utils/e05-verified-write-contract.js';
 import {adapterCollectionId} from '../utils/tenant-route.js';
 /** I08 regression tests: provider-model compatibility and Standard plugin insert fallback. */
 import { test } from 'node:test';
@@ -39,7 +40,7 @@ function makeStandard(replies, getProviderSpecificParams = () => ({ apiUrl: 'htt
         console: quiet,
         VectorBackend: class {}, getRequestHeaders: () => ({}),
         getModelField: src => ({ ollama: 'ollama_model', vllm: 'vllm_model', openai: 'openai_model' })[src] || null,
-        getProviderSpecificParams, hybridEndpointUnsupported, mergeDefinedChunkMetadata, adapterCollectionId, hasVerifiedCapability:()=>false,
+        getProviderSpecificParams, hybridEndpointUnsupported, mergeDefinedChunkMetadata, adapterCollectionId, validateWriteBatch, hasVerifiedCapability:()=>false,
         VECTOR_LIST_LIMIT: 100,
         fetch: async (url, options) => {
             calls.push({ url, body: JSON.parse(options.body) });
@@ -141,7 +142,7 @@ test('#60 export writes selected provider model and honors explicit registry mod
     assert.equal(calls.at(-1).body.model, 'registry-model');
 });
 
-const item = [{ hash: 1, text: 'one', index: 0, metadata: { keywords: ['tag'] } }];
+const item = [{ hash: 1, text: 'one', index: 0, vector: [0.2,0.3], metadata: { keywords: ['tag'] } }];
 
 test('#224 plugin insert passes identical provider-specific params used by native route', async () => {
     const a = makeStandard([http(200, { success: true, inserted: 1 })]);

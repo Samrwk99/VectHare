@@ -1,0 +1,18 @@
+{
+  "checkpoint": "E04",
+  "offlineOnly": true,
+  "pass": true,
+  "checks": {
+    "receiptSegments": true,
+    "receiptNoCrossMessageJoin": true,
+    "wiExclusiveSingleWinner": true,
+    "wiStaleEmptyClears": true,
+    "wiSemanticDedup": true,
+    "linkedMemberDisabledRefused": true,
+    "exportPreflightBeforeWriter": true,
+    "noUnverifiedFrequencyEnable": true,
+    "noSyntheticBackendProof": true,
+    "noNewUnsafeMutationPolicy": true,
+    "noUnsafePluginSourceIncluded": true
+  }
+}

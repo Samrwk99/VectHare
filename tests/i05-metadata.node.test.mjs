@@ -1,3 +1,4 @@
+import {verifyWriteIdentity,validateWriteBatch,collectVerifiedInventory} from '../utils/e05-verified-write-contract.js';
 import {adapterCollectionId, rejectUnscopedPointOperation} from '../utils/tenant-route.js';
 /** I05: collection isolation and metadata integrity tests; no live backend required. */
 import { test } from 'node:test';
@@ -21,6 +22,8 @@ function makeAdapter(file, results) {
         getRequestHeaders: () => ({}), getModelField: () => null, getProviderSpecificParams: () => ({}),
         VECTOR_LIST_LIMIT: 100, requireListedItems, requireQueryItems, hybridEndpointUnsupported,
         mergeDefinedChunkMetadata, trustedQueryMetadata,
+        verifyWriteIdentity,validateWriteBatch,collectVerifiedInventory,
+        verifyWriteIdentity,validateWriteBatch,collectVerifiedInventory,
         adapterCollectionId, rejectUnscopedPointOperation, requireTenantScope: () => {}, hasVerifiedCapability: () => false,
         fetch: async (url, options) => { calls.push({ url, body: JSON.parse(options.body) }); return response(results.shift()); },
     });
@@ -44,7 +47,7 @@ for (const name of ['qdrant', 'milvus', 'lancedb', 'standard']) {
         if (name === 'standard') backend.pluginAvailable = true;
         if (name === 'qdrant') backend._registerCollection = async () => {};
         const item = { hash: 42, text: 'hello', index: 0, metadata: { keywords: ['inside'], conditions: { enabled: true }, summary: 'inside', importance: 0.9 },
-            importance: undefined, keywords: undefined, conditions: undefined };
+            importance: undefined, keywords: undefined, conditions: undefined, vector:[0.2,0.4] };
         await backend.insertVectorItems('my-collection', [item], settings);
         assert.equal(calls.length, 1);
         assert.equal(calls[0].body.items[0].metadata.summary, 'inside');

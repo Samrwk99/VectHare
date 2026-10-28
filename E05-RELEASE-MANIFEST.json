@@ -1,0 +1,39 @@
+{
+  "checkpoint": "E05",
+  "date": "2026-10-28",
+  "baseline": "VectHare-E04-Cumulative-Read-Only-Host-Integration-Checkpoint.zip",
+  "pluginModified": false,
+  "sourceCodeTests": 1003,
+  "sourceCodeTestsPassed": 1003,
+  "liveBackendTestingPerformed": false,
+  "writesUnlocked": false,
+  "productionCertified": false,
+  "baselineFileCount": 350,
+  "currentFileCount": 359,
+  "modifiedFiles": [
+    "backends/lancedb.js",
+    "backends/standard.js",
+    "tests/i04-backend-errors.node.test.mjs",
+    "tests/i05-metadata.node.test.mjs",
+    "tests/i08-provider-compat.node.test.mjs"
+  ],
+  "addedFiles": [
+    "E05-CAPABILITY-ASSESSMENT.json",
+    "E05-CHANGELOG.md",
+    "E05-CHECKLIST.md",
+    "E05-LIVE-PROBE-RUNBOOK.md",
+    "E05-VERIFICATION.md",
+    "tests/e05-write-contract.node.test.mjs",
+    "tools/e05-disposable-probe.mjs",
+    "tools/e05-verify.mjs",
+    "utils/e05-verified-write-contract.js"
+  ],
+  "removedFiles": [],
+  "filesPreservedUnchanged": 345,
+  "verifiedBy": "node --experimental-vm-modules --test --test-concurrency=1 tests/*.node.test.mjs",
+  "notes": [
+    "No Similharity file changes",
+    "E02 mutation gates remain denied/unprobed",
+    "Probe CLI restricted to local disposable environments"
+  ]
+}
