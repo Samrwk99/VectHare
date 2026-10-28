@@ -20,6 +20,7 @@ function extracted(file,name,context={},deps={}) {
   // Substitute module imports only in an isolated test fixture; production code is unchanged.
   code=code.replace(/await import\((['"])([^'"]+)\1\)/g,(_,q,spec)=>`__mocks[${JSON.stringify(spec)}]`);
   const scope=vm.createContext({console:silent,Date,Math,Set,Map,JSON,Object,RegExp,Number,String,Promise,__mocks:{'../core/collection-ids.js':{parseRegistryKey:(value)=>({collectionId: value.startsWith('source:') ? value.slice(7) : value.split(':').slice(2).join(':') || value})},...deps},
+    mutationDiagnosticRestriction:()=>null,
     parseRegistryKey: (value)=>({collectionId: value.startsWith('source:') ? value.slice(7) : value.split(':').slice(2).join(':') || value}),...context});
   return vm.runInContext(`${code}\n${name}`,scope);
 }

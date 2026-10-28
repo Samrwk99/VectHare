@@ -87,6 +87,17 @@ export function inspectVectorRequest(url, options={}) {
         }
         return {intercepted:true,allowed:true,operation:'guiConnectionConfiguration',backend:'none',transport:'plugin',method:req.method};
     }
+    // H01 is a narrowly bounded, explicitly confirmed disposable acceptance
+    // diagnostic. It cannot select a collection, write real memories, or lift
+    // any production capability matrix cell.
+    if (req.transport === 'plugin' && req.suffix === '/v2/diagnostics/qdrant-contract') {
+        if (req.method !== 'POST' || !req.body || req.body.confirmDisposable !== true ||
+            !['local','default'].includes(req.body.configId) ||
+            Object.keys(req.body).some(key => !['confirmDisposable','configId'].includes(key))) {
+            fail(req,'h01-disposable-confirmation-required');
+        }
+        return {intercepted:true,allowed:true,transport:'plugin',operation:'disposableAcceptance',backend:'qdrant',method:'POST'};
+    }
     // S10 v2 execution routes are implemented only as refusal contracts.
     // Do not allow aliases or a newer plugin response to override this rule.
     if (req.transport === 'plugin' && (req.suffix==='/v2' || req.suffix.startsWith('/v2/'))) fail(req,'s11-v2-execution-not-certified');
