@@ -7,15 +7,15 @@ const root='/api/plugins/similharity';
 function reports(){
  const build={pluginVersion:S11_EXPECTED_PLUGIN.pluginVersion, contractVersion:2,sourceFingerprint:S11_EXPECTED_PLUGIN.sourceFingerprint,verification:'MATCHED_LOCAL_SOURCE_MANIFEST'};
  const operations=Object.fromEntries(['insert','delete','updateText','updateMetadata','operationSubmit'].map(v=>[v,'DENIED_NOT_LIVE_CERTIFIED']));
- const caps={...build,buildVerification:build.verification,capabilityClaimsArePermissions:false,productionCertified:false,publicV2MutationsEnabled:false,publicV2ReadsEnabled:false,backends:Object.fromEntries(['standard','lancedb','qdrant','milvus'].map(b=>[b,{operations}]))};
- const contracts={contractVersion:2,executionCertified:false,routes:{'POST /v2/operations/submit':'DENIED','POST /v2/reads/get':'DENIED'}};
+ const caps={...build,buildVerification:build.verification,capabilityClaimsArePermissions:false,productionCertified:false,publicV2MutationsEnabled:false,publicV2ReadsEnabled:false,publicV2ReadRoutesAvailable:true,backends:Object.fromEntries(['standard','lancedb','qdrant','milvus'].map(b=>[b,{operations}]))};
+ const contracts={contractVersion:2,executionCertified:false,routes:{'POST /v2/operations/submit':'DENIED','POST /v2/reads/get':'GUARDED_F02_HOST_SOURCE_V2_SCHEMA_ONLY'}};
  return {build,caps,contracts};
 }
 const stub=reports();
 const store=()=>{const data=new Map();return {getItem:k=>data.get(k)??null,setItem:(k,v)=>data.set(k,v),data};};
 test('S11 matching S10 inspection never claims certified writes or reads',()=>{
  const status=validateS11Discovery(stub.build,stub.caps,stub.contracts);
- assert.equal(status.compatible,true);assert.equal(status.readiness,'INSPECTION_ONLY');assert.equal(status.writeEnabled,false);assert.equal(status.publicV2ReadsEnabled,false);assert.equal(status.hostAttested,false);
+ assert.equal(status.compatible,true);assert.equal(status.readiness,'GUARDED_F02_READ_ONLY');assert.equal(status.writeEnabled,false);assert.equal(status.publicV2ReadsEnabled,false);assert.equal(status.hostAttested,false);
 });
 for(const property of ['pluginVersion','sourceFingerprint','verification'])test(`S11 rejects altered build ${property}`,()=>{
  const mutated={...stub.build,[property]:'forged'};
@@ -33,7 +33,7 @@ test('S11 discovery uses only three authenticated same-origin GETs',async()=>{
  assert.equal(result.compatible,true);
  assert.equal(calls.length,3);
  assert.ok(calls.every(({o})=>o.method==='GET'&&o.credentials==='same-origin'&&o.body===undefined));
- assert.equal(s11PluginStatus().readiness,'INSPECTION_ONLY');
+ assert.equal(s11PluginStatus().readiness,'GUARDED_F02_READ_ONLY');
 });
 test('S11 failed discovery is conservative and never reuses prior success',async()=>{
  const result=await discoverS11Plugin({fetchImpl:async()=>{throw new Error('offline');}});

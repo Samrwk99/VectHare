@@ -1,0 +1,31 @@
+{
+  "checkpoint": "F02",
+  "baseline": "F01",
+  "pluginVersion": "3.2.10-s10.6-f02",
+  "extensionVersion": "2.2.0-alpha.s11.7-f02",
+  "liveCertified": false,
+  "sourceAttestation": "FRESH_HOST_FILE_CHECK_PER_V2_READ",
+  "readContract": "EXPLICIT_S02_MAPPING_PLUS_V2_SCHEMA_INSPECTION_PLUS_BACKEND_OWNER_FILTERS",
+  "publicV2ReadRoutesAvailable": true,
+  "globallyCertifiedV2Reads": false,
+  "v2Get": "GUARDED_SOURCE_BOUND_EXISTING_V2_SCHEMA_ONLY",
+  "v2List": "GUARDED_SOURCE_BOUND_DISPLAY_PAGE_ONLY",
+  "v2Query": "GUARDED_SOURCE_BOUND_NUMERIC_VECTOR_ONLY",
+  "v2Bind": "AUTHORIZED_PRIVATE_REGISTRY_RESERVATION_NO_PHYSICAL_PROVISIONING",
+  "v2Inventory": "DENIED_UNPROVEN_SNAPSHOT",
+  "v2Writes": "DENIED",
+  "legacySharedReads": "DENIED",
+  "nativeStandardMutations": "DENIED_UNPROBED",
+  "verifiedExport": "DENIED",
+  "legacyMigration": "NOT_ACTIVATED",
+  "backendTargets": {
+    "qdrant": "GUARDED_V2_ADAPTER_REQUIRES_EXISTING_SCHEMA_LIVE_UNVERIFIED",
+    "milvus": "GUARDED_V2_ADAPTER_REQUIRES_EXISTING_SCHEMA_LIVE_UNVERIFIED",
+    "lancedb": "GUARDED_V2_ADAPTER_REQUIRES_EXISTING_ARROW_SCHEMA_LIVE_UNVERIFIED",
+    "vectra": "GUARDED_V2_ADAPTER_REQUIRES_SEPARATE_REGISTRY_SEAL_LIVE_UNVERIFIED"
+  },
+  "activeBrowserChatCertified": false,
+  "automaticMemoryRetrievalRewired": false,
+  "productionReady": false,
+  "next": "F03"
+}

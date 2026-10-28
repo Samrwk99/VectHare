@@ -99,6 +99,29 @@ export function inspectVectorRequest(url, options={}) {
             fail(req,'f01-source-selector-invalid');
         return {intercepted:true,allowed:true,transport:'plugin',operation:'hostSourceAttestation',backend:'none',method:'POST'};
     }
+    // F02: reviewed v2 read/binding API. The server re-attests the selected
+    // saved file and validates an exact v2 registry + physical schema on EACH
+    // read; this allowance is NOT a global query, export or write permission.
+    if (req.transport === 'plugin' && /^\/v2\/reads\/(?:bind|get|list|query)$/.test(req.suffix)) {
+        const b=req.body;
+        const source=b?.source, embedding=b?.embedding;
+        const kind=source?.kind;
+        const sourceKeys=kind==='chat'?['kind','avatar','chatFile']:
+            kind==='group-chat'?['kind','groupId','chatFile']:
+            kind==='lorebook'?['kind','name']:[];
+        const operation=req.suffix.slice('/v2/reads/'.length);
+        const allowed=['backend','source','embedding','configId',
+            ...(operation==='list'?['page']:operation==='get'?['recordId']:operation==='query'?['vector','topK']:[])];
+        if(req.method!=='POST'||!b||!sourceKeys.length||typeof source!=='object'||Array.isArray(source)||
+           Object.keys(source).some(k=>!sourceKeys.includes(k))||sourceKeys.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220)||
+           !embedding||typeof embedding!=='object'||Array.isArray(embedding)||
+           Object.keys(embedding).some(k=>!['source','model','dimension','metric'].includes(k))||
+           !['qdrant','milvus','lancedb','vectra'].includes(b.backend)||
+           Object.keys(b).some(k=>!allowed.includes(k))||
+           (b.configId!==undefined&&!['local','default'].includes(b.configId)))
+            fail(req,'f02-host-scoped-read-shape-required');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:`f02-${operation}`,backend:b.backend,method:'POST'};
+    }
     // H01 is a narrowly bounded, explicitly confirmed disposable acceptance
     // diagnostic. It cannot select a collection, write real memories, or lift
     // any production capability matrix cell.
