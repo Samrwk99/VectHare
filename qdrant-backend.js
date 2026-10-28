@@ -24,6 +24,8 @@
  * ============================================================================
  */
 
+import { denyUnsafeBackendMutation, SafetyError } from './lib/s01-safety.js';
+
 /**
  * Qdrant Backend Manager
  * Manages Qdrant REST API connection and operations
@@ -83,79 +85,42 @@ class QdrantBackend {
      * @param {object|null} body - Request body
      * @param {number} maxRetries - Maximum retry attempts for transient failures
      */
-    async _request(method, endpoint, body = null, maxRetries = 3) {
+    async _request(method, endpoint, body = null, maxRetries = undefined) {
+        if (!this.baseUrl) throw new Error('Qdrant not initialized');
+        // S01: never replay an ambiguous mutating request without an operation ID.
+        // GET is safe to retry. POST/PUT/DELETE default to one attempt.
+        const retryLimit = method.toUpperCase() === 'GET' ? Math.min(maxRetries ?? 3, 3) : 0;
         const url = `${this.baseUrl}${endpoint}`;
-
-        // Add explicit timeout of 60s to prevent indefinite hangs during heavy operations (like wait=true)
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 60000);
-
-        const options = {
-            method,
-            headers: this._getHeaders(),
-            signal: controller.signal,
-        };
-        if (body) {
-            options.body = JSON.stringify(body);
-        }
-
-        let lastError;
-        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        for (let attempt = 0; attempt <= retryLimit; attempt++) {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 60000);
             try {
+                const options = { method, headers: this._getHeaders(), signal: controller.signal };
+                if (body !== null && body !== undefined) options.body = JSON.stringify(body);
                 const response = await fetch(url, options);
-                clearTimeout(timeoutId);
-
                 if (!response.ok) {
                     const errorText = await response.text();
-                    let errorMessage;
+                    let errorMessage = errorText;
                     try {
-                        const errorJson = JSON.parse(errorText);
-                        errorMessage = errorJson.status?.error || errorJson.message || errorText;
-                    } catch {
-                        errorMessage = errorText;
-                    }
-
-                    // Check if error is retryable (5xx errors, 429 rate limit)
-                    const isRetryable = response.status >= 500 || response.status === 429;
-                    if (isRetryable && attempt < maxRetries) {
-                        const delay = Math.min(1000 * Math.pow(2, attempt), 10000); // Exponential backoff, max 10s
-                        console.warn(`[Qdrant] ${method} ${endpoint} failed (${response.status}), retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
-                        await new Promise(resolve => setTimeout(resolve, delay));
-                        continue;
-                    }
-
-                    throw new Error(`Qdrant ${method} ${endpoint} failed: ${response.status} ${errorMessage}`);
+                        const parsed = JSON.parse(errorText);
+                        errorMessage = parsed.status?.error || parsed.message || errorText;
+                    } catch { /* non-JSON error */ }
+                    const error = new Error(`Qdrant ${method} ${endpoint} failed: ${response.status} ${errorMessage}`);
+                    error.httpStatus = response.status;
+                    throw error;
                 }
-
-                // Some endpoints return empty response
-                const text = await response.text();
-                return text ? JSON.parse(text) : null;
-
+                const responseText = await response.text();
+                return responseText ? JSON.parse(responseText) : null;
             } catch (error) {
-                lastError = error;
-
-                // Network errors (ECONNREFUSED, timeout, etc.) are retryable
-                const isNetworkError = error.name === 'TypeError' ||
-                    error.name === 'AbortError' ||
-                    error.message?.includes('fetch failed') ||
-                    error.message?.includes('ECONNREFUSED') ||
-                    error.message?.includes('ETIMEDOUT');
-
-                if (isNetworkError && attempt < maxRetries) {
-                    const delay = Math.min(1000 * Math.pow(2, attempt), 10000);
-                    console.warn(`[Qdrant] Network error, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries}): ${error.message}${error.cause ? ` (Cause: ${error.cause})` : ''}`);
-                    await new Promise(resolve => setTimeout(resolve, delay));
-                    continue;
-                }
-
-                throw error;
+                const transient = error.name === 'TypeError' || error.name === 'AbortError' ||
+                    [429, 500, 502, 503, 504].includes(error.httpStatus);
+                if (!transient || attempt === retryLimit) throw error;
+                const delay = Math.min(1000 * (2 ** attempt), 10000);
+                await new Promise(resolve => setTimeout(resolve, delay));
             } finally {
-                // Ensure timeout is cleared on success or error thrown
                 clearTimeout(timeoutId);
             }
         }
-
-        throw lastError;
     }
 
     /**
@@ -188,12 +153,8 @@ class QdrantBackend {
             throw error;
         }
 
-        // Ensure indexes exist on any existing vecthare_main collection
-        await this.ensurePayloadIndexes('vecthare_main');
-        const collections = await this.getCollections();
-        for (const collectionName of collections || []) {
-            await this.ensurePayloadIndexes(collectionName);
-        }
+        // S01: connection initialization is read-only. Index creation belongs
+        // to a separately authorized and audited S04+ migration/setup operation.
     }
 
     /**
@@ -217,28 +178,28 @@ class QdrantBackend {
      * @param {number} vectorSize - Vector dimension (e.g., 768)
      */
     async ensureCollection(collectionName, vectorSize = 768) {
-        try {
-            // Check if collection exists
-            const collections = await this._request('GET', '/collections');
-            collectionName = this._parseCollectionName(collectionName);
-            const exists = collections.result?.collections?.some(c => c.name === collectionName);
-            if (!exists) {
-                // Create collection
-                await this._request('PUT', `/collections/${collectionName}`, {
-                    vectors: {
-                        size: vectorSize,
-                        distance: 'Cosine',
-                    },
-                });
-                console.log(`[Qdrant] Created collection: ${collectionName} (dim=${vectorSize})`);
-
-                // Create payload indexes for filterable fields
-                await this.createPayloadIndexes(collectionName);
-            }
-        } catch (error) {
-            console.error(`[Qdrant] Failed to ensure collection ${collectionName}:`, error.message);
-            throw error;
+        if (!this.baseUrl) throw new Error('Qdrant not initialized');
+        // S01: verify existing schema only. New collection creation is disabled
+        // until identity and authorization are established in S02-S04.
+        collectionName = this._parseCollectionName(collectionName);
+        const collections = await this._request('GET', '/collections');
+        const exists = collections.result?.collections?.some(c => c.name === collectionName);
+        if (!exists) {
+            throw new SafetyError('S01_COLLECTION_CREATION_BLOCKED',
+                `Qdrant collection ${collectionName} does not exist; creation is disabled in S01.`);
         }
+        const info = await this._request('GET', `/collections/${collectionName}`);
+        const existingVectors = info?.result?.config?.params?.vectors;
+        const existingDimension = Number(existingVectors?.size);
+        if (!Number.isSafeInteger(existingDimension) || existingDimension <= 0) {
+            throw new SafetyError('SCHEMA_UNVERIFIABLE',
+                'Qdrant vector schema could not be verified; no write permitted.');
+        }
+        if (existingDimension !== vectorSize) {
+            throw new SafetyError('DIMENSION_MISMATCH',
+                `Qdrant collection is ${existingDimension}-dimensional; requested ${vectorSize}.`);
+        }
+        return { dimension: existingDimension, verified: true };
     }
 
     /**
@@ -310,122 +271,9 @@ class QdrantBackend {
      * @returns {Promise<void>}
      */
     async insertVectors(collectionName, items, tenantMetadata = {}) {
-        if (!this.baseUrl) throw new Error('Qdrant not initialized');
-        if (items.length === 0) return;
-
-        // MULTITENANCY: Always use vecthare_main collection
-        collectionName = this._parseCollectionName(collectionName);
-        const mainCollection = collectionName;
-
-        // Validate all items have vectors
-        const missingVectors = items.filter(item => !item.vector || !Array.isArray(item.vector));
-        if (missingVectors.length > 0) {
-            throw new Error(`[Qdrant] ${missingVectors.length} items are missing vectors. Hashes: ${missingVectors.slice(0, 5).map(i => i.hash).join(', ')}${missingVectors.length > 5 ? '...' : ''}`);
-        }
-
-        // Get expected dimension from first vector
-        const expectedDimension = items[0].vector.length;
-        if (expectedDimension === 0) {
-            throw new Error('[Qdrant] First item has empty vector (dimension 0)');
-        }
-
-        // Validate all vectors have the same dimension
-        const mismatchedItems = items.filter(item => item.vector.length !== expectedDimension);
-        if (mismatchedItems.length > 0) {
-            const examples = mismatchedItems.slice(0, 3).map(i => `hash ${i.hash}: ${i.vector.length}`).join(', ');
-            throw new Error(`[Qdrant] Vector dimension mismatch. Expected ${expectedDimension}, but found: ${examples}${mismatchedItems.length > 3 ? '...' : ''} (${mismatchedItems.length} total mismatches)`);
-        }
-
-        // Check if collection exists and validate dimension matches
-        try {
-            const collections = await this._request('GET', '/collections');
-            const exists = collections.result?.collections?.some(c => c.name === mainCollection);
-
-            if (exists) {
-                const collectionInfo = await this._request('GET', `/collections/${mainCollection}`);
-                const existingDimension = collectionInfo.result?.config?.params?.vectors?.size;
-
-                if (existingDimension && existingDimension !== expectedDimension) {
-                    console.warn(`[Qdrant] Vector dimension mismatch. Collection has ${existingDimension} dimensions, but insert requires ${expectedDimension}. Dropping collection to recreate...`);
-                    await this.purgeAll();
-                    // Wait slightly for deletion to propagate (optional but safe)
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                }
-            }
-        } catch (error) {
-             console.debug('[Qdrant] Could not check existing collection dimension:', error.message);
-        }
-
-        // Ensure collection exists (use first vector's size)
-        const vectorSize = expectedDimension;
-        await this.ensureCollection(mainCollection, vectorSize);
-
-        // Format points for Qdrant with multitenancy payload
-        // NOTE: Spread item.metadata FIRST so critical fields can override it
-        // IMPORTANT: Ensure hash is a number - Qdrant accepts unsigned integers or UUID strings,
-        // but NOT numeric strings like "977206". JSON parsing from HTTP requests can sometimes
-        // convert numbers to strings, so we explicitly coerce here.
-        const points = items.map(item => ({
-            id: typeof item.hash === 'string' ? parseInt(item.hash, 10) : item.hash, // Ensure numeric ID for Qdrant
-            vector: item.vector,
-            payload: {
-                // ===== SPREAD ADDITIONAL METADATA FIRST (so it can be overridden) =====
-                ...(item.metadata || {}),
-
-                // ===== CORE FIELDS (override metadata) =====
-                text: item.text,
-                hash: typeof item.hash === 'string' ? parseInt(item.hash, 10) : item.hash, // Keep consistent with ID
-
-                // ===== MULTITENANCY FIELDS (CRITICAL - must not be overwritten) =====
-                type: tenantMetadata.type || 'chat',
-                sourceId: tenantMetadata.sourceId || 'unknown',
-                embeddingSource: tenantMetadata.embeddingSource || 'transformers',
-                embeddingModel: tenantMetadata.embeddingModel || '',
-
-                // ===== TIMESTAMPS (for temporal decay) =====
-                timestamp: item.metadata?.timestamp || Date.now(),
-                messageIndex: item.metadata?.messageIndex,
-
-                // ===== LEGACY VECTHARE FEATURES =====
-                importance: item.importance !== undefined ? item.importance : 100,
-                keywords: item.keywords || item.metadata?.keywords || [],
-                customWeights: item.customWeights || {},
-                disabledKeywords: item.disabledKeywords || [],
-                chunkGroup: item.chunkGroup || null,
-                conditions: item.conditions || null,
-                summary: item.summary || null,
-                isSummaryChunk: item.isSummaryChunk || false,
-                parentHash: item.parentHash || null,
-
-                // ===== CHAT-SPECIFIC =====
-                speaker: item.metadata?.speaker,
-                sceneTitle: item.metadata?.sceneTitle,
-                sceneIndex: item.metadata?.sceneIndex,
-                sceneStart: item.metadata?.sceneStart,
-                sceneEnd: item.metadata?.sceneEnd,
-
-                // ===== LOREBOOK-SPECIFIC =====
-                entryName: item.metadata?.entryName,
-                lorebookId: item.metadata?.lorebookId,
-
-                // ===== CHARACTER-SPECIFIC =====
-                characterName: item.metadata?.characterName,
-                fieldName: item.metadata?.fieldName,
-
-                // ===== DOCUMENT-SPECIFIC =====
-                documentName: item.metadata?.documentName,
-                url: item.metadata?.url,
-                scrapeDate: item.metadata?.scrapeDate,
-            },
-        }));
-
-        // Upsert points (PUT with wait=true for reliability)
-        await this._request('PUT', `/collections/${mainCollection}/points?wait=true`, {
-            points: points,
-        });
-
-        console.log(`[Qdrant] Inserted ${items.length} vectors into ${mainCollection} (type: ${tenantMetadata.type}, sourceId: ${tenantMetadata.sourceId})`);
+        denyUnsafeBackendMutation('qdrant', 'insertVectors');
     }
+
 
     /**
      * Query collection for similar vectors (MULTITENANCY)
@@ -532,7 +380,7 @@ class QdrantBackend {
             }));
         } catch (error) {
             console.error(`[Qdrant] Query failed for ${mainCollection}:`, error.message);
-            return [];
+            throw error;
         }
     }
 
@@ -775,7 +623,7 @@ class QdrantBackend {
 
         } catch (error) {
             console.error(`[Qdrant] Hybrid query failed for ${mainCollection}:`, error.message);
-            return [];
+            throw error;
         }
     }
 
@@ -929,7 +777,7 @@ class QdrantBackend {
             return items;
         } catch (error) {
             console.error(`[Qdrant] Failed to list items from ${mainCollection}:`, error.message);
-            return [];
+            throw error;
         }
     }
 
@@ -997,7 +845,7 @@ class QdrantBackend {
             return hashes;
         } catch (error) {
             console.error(`[Qdrant] Failed to get hashes from ${mainCollection}:`, error.message);
-            return [];
+            throw error;
         }
     }
 
@@ -1008,25 +856,9 @@ class QdrantBackend {
      * @returns {Promise<void>}
      */
     async deleteVectors(collectionName, hashes) {
-        if (!this.baseUrl) throw new Error('Qdrant not initialized');
-        if (hashes.length === 0) return;
-
-        collectionName = this._parseCollectionName(collectionName);
-        const mainCollection = collectionName;
-
-        try {
-            // Delete points by ID (hash)
-            // Ensure hashes are numbers - Qdrant requires unsigned integers or UUID strings
-            const numericHashes = hashes.map(h => typeof h === 'string' ? parseInt(h, 10) : h);
-            await this._request('POST', `/collections/${mainCollection}/points/delete?wait=true`, {
-                points: numericHashes,
-            });
-
-            console.log(`[Qdrant] Deleted ${hashes.length} items from ${mainCollection}`);
-        } catch (error) {
-            console.error(`[Qdrant] Delete failed for ${mainCollection}:`, error.message);
-        }
+        denyUnsafeBackendMutation('qdrant', 'deleteVectors');
     }
+
 
     /**
      * Purge collection for a specific source (MULTITENANCY)
@@ -1036,53 +868,9 @@ class QdrantBackend {
      * @returns {Promise<void>}
      */
     async purgeCollection(collectionName, filters = {}) {
-        if (!this.baseUrl) throw new Error('Qdrant not initialized');
-
-        collectionName = this._parseCollectionName(collectionName);
-        const mainCollection = collectionName;
-
-        try {
-            // Check if collection exists
-            const collections = await this._request('GET', '/collections');
-            const exists = collections.result?.collections?.some(c => c.name === mainCollection);
-            if (!exists) {
-                return;
-            }
-
-            // Build filter conditions
-            const must = [];
-            if (filters.type) {
-                must.push({
-                    key: 'type',
-                    match: { value: filters.type }
-                });
-            }
-            if (filters.sourceId) {
-                must.push({
-                    key: 'sourceId',
-                    match: { value: filters.sourceId }
-                });
-            }
-
-            if (must.length === 0) {
-                console.warn('[Qdrant] No filters provided to purgeCollection - use purgeAll() instead');
-                return;
-            }
-
-            // Delete points by filter
-            await this._request('POST', `/collections/${mainCollection}/points/delete?wait=true`, {
-                filter: { must }
-            });
-
-            console.log(`[Qdrant] Purged ${mainCollection} (type: ${filters.type}, sourceId: ${filters.sourceId})`);
-        } catch (error) {
-            if (error.message?.includes('404')) {
-                return;
-            }
-            console.error(`[Qdrant] Purge failed for ${mainCollection}:`, error.message);
-            throw error;
-        }
+        denyUnsafeBackendMutation('qdrant', 'purgeCollection');
     }
+
 
     /**
      * Purge entire vecthare_main collection (MULTITENANCY)
@@ -1090,22 +878,9 @@ class QdrantBackend {
      * @returns {Promise<void>}
      */
     async purgeAll(collectionName = 'vecthare_main') {
-        if (!this.baseUrl) throw new Error('Qdrant not initialized');
-
-        collectionName = this._parseCollectionName(collectionName);
-        const mainCollection = collectionName;
-
-        try {
-            await this._request('DELETE', `/collections/${mainCollection}`);
-            console.log(`[Qdrant] Purged entire collection: ${mainCollection}`);
-        } catch (error) {
-            if (error.message?.includes('404')) {
-                return;
-            }
-            console.error(`[Qdrant] Purge all failed:`, error.message);
-            throw error;
-        }
+        denyUnsafeBackendMutation('qdrant', 'purgeAll');
     }
+
 
     // ========================================================================
     // ADDITIONAL METHODS REQUIRED BY PLUGIN ROUTER
@@ -1120,7 +895,7 @@ class QdrantBackend {
             return collections.result?.collections?.map(c => c.name) || [];
         } catch (error) {
             console.error(`[Qdrant] getCollections failed:`, error.message);
-            return [];
+            throw error;
         }
     }
 
@@ -1174,7 +949,7 @@ class QdrantBackend {
             };
         } catch (error) {
             console.error(`[Qdrant] getItem failed:`, error.message);
-            return null;
+            throw error;
         }
     }
 
@@ -1187,31 +962,9 @@ class QdrantBackend {
      * @returns {Promise<void>}
      */
     async updateItem(collectionName, hash, updates, filters = {}) {
-        if (!this.baseUrl) throw new Error('Qdrant not initialized');
-
-        // Get existing item
-        const existing = await this.getItem(collectionName, hash, filters);
-        if (!existing) {
-            throw new Error(`Item with hash ${hash} not found`);
-        }
-
-        // Delete old item
-        await this.deleteVectors(collectionName, [hash]);
-
-        // Merge updates with existing data
-        const newHash = updates.hash || hash;
-        const newItem = {
-            hash: newHash,
-            text: updates.text || existing.text,
-            vector: updates.vector || existing.vector,
-            metadata: { ...existing.metadata, ...updates },
-        };
-
-        // Insert updated item
-        await this.insertVectors(collectionName, [newItem], filters);
-
-        console.log(`[Qdrant] Updated item ${hash} -> ${newHash}`);
+        denyUnsafeBackendMutation('qdrant', 'updateItem');
     }
+
 
     /**
      * Update item metadata only (no re-embedding needed)
@@ -1222,30 +975,9 @@ class QdrantBackend {
      * @returns {Promise<void>}
      */
     async updateItemMetadata(collectionName, hash, metadata, filters = {}) {
-        if (!this.baseUrl) throw new Error('Qdrant not initialized');
-
-        // Get existing item (need the vector)
-        const existing = await this.getItem(collectionName, hash, filters);
-        if (!existing) {
-            throw new Error(`Item with hash ${hash} not found`);
-        }
-
-        // Delete old item
-        await this.deleteVectors(collectionName, [hash]);
-
-        // Create updated item with same text/vector but new metadata
-        const updatedItem = {
-            hash: hash,
-            text: existing.text,
-            vector: existing.vector,
-            metadata: { ...existing.metadata, ...metadata },
-        };
-
-        // Insert updated item
-        await this.insertVectors(collectionName, [updatedItem], filters);
-
-        console.log(`[Qdrant] Updated metadata for item ${hash}`);
+        denyUnsafeBackendMutation('qdrant', 'updateItemMetadata');
     }
+
 
     /**
      * Query vectors with threshold filtering (alias for queryCollection)
@@ -1331,19 +1063,8 @@ class QdrantBackend {
                 backend: 'qdrant',
             };
         } catch (error) {
-            console.error(`[Qdrant] getCollectionStats failed:`, error.message);
-            return {
-                chunkCount: 0,
-                totalCharacters: 0,
-                totalTokens: 0,
-                storageSize: 0,
-                embeddingDimensions: 0,
-                avgChunkSize: 0,
-                messageCount: 0,
-                sources: {},
-                backend: 'qdrant',
-                error: error.message,
-            };
+            console.error('[Qdrant] getCollectionStats failed:', error.message);
+            throw error;
         }
     }
 
@@ -1393,7 +1114,7 @@ class QdrantBackend {
             return (response.result?.points?.length || 0) > 0;
         } catch (error) {
             console.error(`[Qdrant] chunkExists failed:`, error.message);
-            return false;
+            throw error;
         }
     }
 }

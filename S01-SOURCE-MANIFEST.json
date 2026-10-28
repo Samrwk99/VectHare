@@ -1,0 +1,22 @@
+{
+  "checkpoint": "S01",
+  "date": "2026-10-28",
+  "basedOn": "VectHare-Similharity.zip",
+  "sourceArchiveSHA256": "8d04ad234f9f25e5b9467393a447b5b838a6a1211ce4e70f63ae4c6331fde98e",
+  "extensionArchiveSHA256_unmodified": "481cb9a0bb4341130041dd86ce4b12c7d8301de9df8018f0215446a086c40e7e",
+  "files": {
+    ".gitignore": "88b6b09796bc021a6f46b5964be1cbe30ef7a25d613ee43f868e720ee4d15587",
+    "README.md": "17c0028028c6c34d18c2344c4ec3ce6d26c64e5318640e554c26bb38ed06b097",
+    "S01-CAPABILITY-MATRIX.json": "b6d2077f7cacb7c7f2a3eac31df8282838101ca33deee8c7bd70bbf91357f01b",
+    "S01-CHANGELOG.md": "26c5308e091a92f1e202c9b247bdb9d2601fc5ed830510960b385954ff4a96cf",
+    "S01-NEXT-STEPS.md": "ff13b524425340cf63cca518620f3552988f9beb75b273d8236976b847af34fc",
+    "S01-VERIFICATION.md": "471ecbe533b293a379b6d9dea669e32609276f26248604f90cbbc880587aadb0",
+    "index.js": "f0a7b06ca19b0304c708019f44488a1f03895c0a1aef7529de94a17948c5d3e7",
+    "lancedb-backend.js": "1dc61c10c2f386caa8dde9036453ae6f956d4c1f5ca644fbf2261f034f578a3c",
+    "lib/s01-safety.js": "9efbb75e5635f13441b3c01294d200e5442d8f3943cfd6fd7dffdb7e0f2248e3",
+    "milvus-backend.js": "fd1a9e2655686f069bc7d82fadd419a9fd790b0baa8f41060fb71d72a0b4e47f",
+    "package.json": "05edf1b1abb85f79fafea5fb236e41cc647deab7114408b443cf583d46233f7c",
+    "qdrant-backend.js": "83462fe9eca19de776f213034cdc17edd12d5acf0d484e9fbdca970123b50c26",
+    "tests/s01-safety.test.mjs": "02f764a2bdef324df5cdc8c9602f3efc0121b1195627b607e92176966f109e2e"
+  }
+}

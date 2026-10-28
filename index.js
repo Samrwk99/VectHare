@@ -18,9 +18,10 @@ import vectra from 'vectra';
 import lancedbBackend from './lancedb-backend.js';
 import qdrantBackend from './qdrant-backend.js';
 import milvusBackend from './milvus-backend.js';
+import { s01MutationGuard } from './lib/s01-safety.js';
 
 const pluginName = 'similharity';
-const pluginVersion = '3.2.0';
+const pluginVersion = '3.2.1-s01.0';
 
 /**
  * Initialize the plugin
@@ -28,6 +29,8 @@ const pluginVersion = '3.2.0';
  */
 export async function init(router) {
     console.log(`[${pluginName}] Initializing v${pluginVersion}...`);
+    // S01: must run before ALL legacy routes, including /chunks/:hash/* and /purge-all.
+    router.use(s01MutationGuard);
 
     // ========================================================================
     // BACKEND HANDLER - Routes requests to appropriate backend
@@ -428,7 +431,7 @@ export async function init(router) {
                     },
 
                     purge: async (collectionId, source, model, directories, filters = {}) => {
-                        await qdrantBackend.purgeAll(collectionId, filters);
+                        throw new Error('S01: Qdrant purge is disabled pending server-authorized scoping');
                     },
 
                     stats: async (collectionId, source, model, directories, filters = {}) => {
@@ -532,7 +535,10 @@ export async function init(router) {
             status: 'ok',
             plugin: pluginName,
             version: pluginVersion,
-            backends: ['vectra', 'lancedb', 'qdrant', 'milvus']
+            backends: ['vectra', 'lancedb', 'qdrant', 'milvus'],
+            checkpoint: 'S01',
+            legacyMutations: 'BLOCKED',
+            productionCertified: false
         });
     });
 
@@ -1063,46 +1069,20 @@ async function _getLegacySingleEmbedding(source, text, model, directories, req) 
     });
 
     /**
+     * S01: intentionally refused by the early s01MutationGuard middleware.
      * POST /api/plugins/similharity/chunks/insert
      * Insert new chunks
      * Body: { backend, collectionId, items: [{hash, text, index, metadata?, vector?}], source?, model? }
      */
-    router.post('/chunks/insert', async (req, res) => {
-        try {
-            const {
-                backend = 'vectra',
-                collectionId,
-                items,
-                source = 'transformers',
-                model = '',
-                filters = {}
-            } = req.body;
-
-            if (!collectionId) {
-                return res.status(400).json({ error: 'collectionId is required' });
-            }
-            if (!items || !Array.isArray(items)) {
-                return res.status(400).json({ error: 'items array is required' });
-            }
-
-            if (backend === 'lancedb') {
-                await ensureLanceDBInitialized(req.user.directories);
-            }
-
-            const handler = getBackendHandler(backend);
-            await handler.insert(collectionId, items, source, model, req.user.directories, req, filters);
-
-            res.json({
-                success: true,
-                backend: handler.type,
-                collectionId,
-                inserted: items.length
-            });
-
-        } catch (error) {
-            console.error(`[${pluginName}] chunks/insert error:`, error);
-            res.status(500).json({ error: error.message });
-        }
+    router.post('/chunks/insert', (req, res) => {
+        // Defense in depth if the upstream S01 middleware is modified.
+        return res.status(409).json({
+            success: false,
+            code: 'S01_MUTATION_BLOCKED',
+            error: 'Legacy mutation disabled until scoped, verified S02-S04 contract is available.',
+            retryable: false,
+            checkpoint: 'S01'
+        });
     });
 
     /**
@@ -1110,39 +1090,15 @@ async function _getLegacySingleEmbedding(source, text, model, directories, req) 
      * Update chunk text (triggers re-embedding)
      * Body: { backend, collectionId, text, source?, model? }
      */
-    router.patch('/chunks/:hash/text', async (req, res) => {
-        try {
-            const { hash } = req.params;
-            const {
-                backend = 'vectra',
-                collectionId,
-                text,
-                source = 'transformers',
-                model = '',
-                filters = {}
-            } = req.body;
-
-            if (!collectionId || !text) {
-                return res.status(400).json({ error: 'collectionId and text are required' });
-            }
-
-            if (backend === 'lancedb') {
-                await ensureLanceDBInitialized(req.user.directories);
-            }
-
-            const handler = getBackendHandler(backend);
-            const result = await handler.updateText(collectionId, hash, text, source, model, req.user.directories, req, filters);
-
-            res.json({
-                success: true,
-                backend: handler.type,
-                ...result
-            });
-
-        } catch (error) {
-            console.error(`[${pluginName}] chunks/:hash/text error:`, error);
-            res.status(500).json({ error: error.message });
-        }
+    router.patch('/chunks/:hash/text', (req, res) => {
+        // Defense in depth if the upstream S01 middleware is modified.
+        return res.status(409).json({
+            success: false,
+            code: 'S01_MUTATION_BLOCKED',
+            error: 'Legacy mutation disabled until scoped, verified S02-S04 contract is available.',
+            retryable: false,
+            checkpoint: 'S01'
+        });
     });
 
     /**
@@ -1150,39 +1106,15 @@ async function _getLegacySingleEmbedding(source, text, model, directories, req) 
      * Update chunk metadata (no re-embedding)
      * Body: { backend, collectionId, metadata, source?, model? }
      */
-    router.patch('/chunks/:hash/metadata', async (req, res) => {
-        try {
-            const { hash } = req.params;
-            const {
-                backend = 'vectra',
-                collectionId,
-                metadata,
-                source = 'transformers',
-                model = '',
-                filters = {}
-            } = req.body;
-
-            if (!collectionId || !metadata) {
-                return res.status(400).json({ error: 'collectionId and metadata are required' });
-            }
-
-            if (backend === 'lancedb') {
-                await ensureLanceDBInitialized(req.user.directories);
-            }
-
-            const handler = getBackendHandler(backend);
-            const result = await handler.updateMetadata(collectionId, hash, metadata, source, model, req.user.directories, filters);
-
-            res.json({
-                success: true,
-                backend: handler.type,
-                ...result
-            });
-
-        } catch (error) {
-            console.error(`[${pluginName}] chunks/:hash/metadata error:`, error);
-            res.status(500).json({ error: error.message });
-        }
+    router.patch('/chunks/:hash/metadata', (req, res) => {
+        // Defense in depth if the upstream S01 middleware is modified.
+        return res.status(409).json({
+            success: false,
+            code: 'S01_MUTATION_BLOCKED',
+            error: 'Legacy mutation disabled until scoped, verified S02-S04 contract is available.',
+            retryable: false,
+            checkpoint: 'S01'
+        });
     });
 
     /**
@@ -1190,42 +1122,15 @@ async function _getLegacySingleEmbedding(source, text, model, directories, req) 
      * Delete chunks by hash
      * Body: { backend, collectionId, hashes, source?, model? }
      */
-    router.post('/chunks/delete', async (req, res) => {
-        try {
-            const {
-                backend = 'vectra',
-                collectionId,
-                hashes,
-                source = 'transformers',
-                model = '',
-                filters = {}
-            } = req.body;
-
-            if (!collectionId) {
-                return res.status(400).json({ error: 'collectionId is required' });
-            }
-            if (!hashes || !Array.isArray(hashes)) {
-                return res.status(400).json({ error: 'hashes array is required' });
-            }
-
-            if (backend === 'lancedb') {
-                await ensureLanceDBInitialized(req.user.directories);
-            }
-
-            const handler = getBackendHandler(backend);
-            const deleted = await handler.delete(collectionId, hashes, source, model, req.user.directories, filters);
-
-            res.json({
-                success: true,
-                backend: handler.type,
-                collectionId,
-                deleted
-            });
-
-        } catch (error) {
-            console.error(`[${pluginName}] chunks/delete error:`, error);
-            res.status(500).json({ error: error.message });
-        }
+    router.post('/chunks/delete', (req, res) => {
+        // Defense in depth if the upstream S01 middleware is modified.
+        return res.status(409).json({
+            success: false,
+            code: 'S01_MUTATION_BLOCKED',
+            error: 'Legacy mutation disabled until scoped, verified S02-S04 contract is available.',
+            retryable: false,
+            checkpoint: 'S01'
+        });
     });
 
     /**
@@ -1405,54 +1310,31 @@ async function _getLegacySingleEmbedding(source, text, model, directories, req) 
      * Purge all chunks in a collection
      * Body: { backend, collectionId, source?, model? }
      */
-    router.post('/chunks/purge', async (req, res) => {
-        try {
-            const {
-                backend = 'vectra',
-                collectionId,
-                source = 'transformers',
-                model = '',
-                filters = {}
-            } = req.body;
-
-            if (!collectionId) {
-                return res.status(400).json({ error: 'collectionId is required' });
-            }
-
-            if (backend === 'lancedb') {
-                await ensureLanceDBInitialized(req.user.directories);
-            }
-
-            const handler = getBackendHandler(backend);
-            await handler.purge(collectionId, source, model, req.user.directories, filters);
-
-            res.json({
-                success: true,
-                backend: handler.type,
-                collectionId,
-                message: `Collection ${collectionId} purged`
-            });
-
-        } catch (error) {
-            console.error(`[${pluginName}] chunks/purge error:`, error);
-            res.status(500).json({ error: error.message });
-        }
+    router.post('/chunks/purge', (req, res) => {
+        // Defense in depth if the upstream S01 middleware is modified.
+        return res.status(409).json({
+            success: false,
+            code: 'S01_MUTATION_BLOCKED',
+            error: 'Legacy mutation disabled until scoped, verified S02-S04 contract is available.',
+            retryable: false,
+            checkpoint: 'S01'
+        });
     });
 
     /**
+     * S01: intentionally refused by the early s01MutationGuard middleware.
      * POST /api/plugins/similharity/purge-all
      * Deletes the entire vectors folder
      */
-    router.post('/purge-all', async (req, res) => {
-        try {
-            const vectorsPath = req.user.directories.vectors;
-            await fs.rm(vectorsPath, { recursive: true, force: true });
-            await fs.mkdir(vectorsPath, { recursive: true });
-            res.json({ success: true, message: 'All vectors purged' });
-        } catch (error) {
-            console.error(`[${pluginName}] purge-all error:`, error);
-            res.status(500).json({ error: error.message });
-        }
+    router.post('/purge-all', (req, res) => {
+        // Defense in depth if the upstream S01 middleware is modified.
+        return res.status(409).json({
+            success: false,
+            code: 'S01_MUTATION_BLOCKED',
+            error: 'Legacy mutation disabled until scoped, verified S02-S04 contract is available.',
+            retryable: false,
+            checkpoint: 'S01'
+        });
     });
 
     /**

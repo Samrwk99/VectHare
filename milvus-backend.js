@@ -14,7 +14,8 @@
  * ============================================================================
  */
 
-import { MilvusClient, DataType } from '@zilliz/milvus2-sdk-node';
+import { MilvusClient } from '@zilliz/milvus2-sdk-node';
+import { denyUnsafeBackendMutation, SafetyError } from './lib/s01-safety.js';
 
 /**
  * Milvus Backend Manager
@@ -59,11 +60,8 @@ class MilvusBackend {
             this.isConnected = true;
             console.log('[Milvus] Connection successful');
             
-            // Ensure main collection exists
-            // If dimensions are manually configured, use them. Otherwise default to 768.
-            // If not set, it will be auto-corrected on first insert if different.
-            const dim = this.config.dimensions ? Number(this.config.dimensions) : 768;
-            await this.ensureCollection('vecthare_main', dim);
+            // S01: Initialization is connection-only. Never auto-create or
+            // recreate shared collections before identity/schema migration.
             
         } catch (error) {
             this.isConnected = false;
@@ -94,152 +92,34 @@ class MilvusBackend {
      */
     async ensureCollection(collectionName, vectorSize = 768) {
         if (!this.isConnected) throw new Error('Milvus not initialized');
-
-        try {
-            // Check if collection exists
-            const { data: collections } = await this.client.listCollections();
-            let exists = collections.find(c => c.name === collectionName);
-            
-            if (exists) {
-                // Verify schema has 'vector' field and correct dimension
-                try {
-                    const desc = await this.client.describeCollection({ collection_name: collectionName });
-                    const vectorField = desc.schema.fields.find(f => f.name === 'vector');
-                    
-                    if (!vectorField) {
-                        console.warn(`[Milvus] Existing collection ${collectionName} missing 'vector' field. Dropping...`);
-                        await this.client.dropCollection({ collection_name: collectionName });
-                        exists = false; 
-                    } else {
-                        // Check dimension
-                        // Milvus returns dim as string or number depending on version, safely compare
-                        const existingDim = Number(vectorField.dim || vectorField.params?.find(p => p.key === 'dim')?.value);
-                        
-                        if (existingDim && existingDim !== vectorSize) {
-                             console.warn(`[Milvus] Dimension mismatch for ${collectionName}. Existing: ${existingDim}, Required: ${vectorSize}. Dropping collection to recreate...`);
-                             await this.client.dropCollection({ collection_name: collectionName });
-                             exists = false;
-                        }
-                    }
-                } catch (e) {
-                    console.error('[Milvus] Describe collection failed:', e.message);
-                    // If describe fails, might be safest to assume broken or let it fail later? 
-                    // But we proceed for now.
-                }
-
-                if (exists) {
-                    // Check if index exists
-                    let indexExists = false;
-                    try {
-                        const indexInfo = await this.client.describeIndex({
-                            collection_name: collectionName
-                        });
-                        if (indexInfo.status.error_code === 'Success') {
-                            indexExists = true;
-                            console.log(`[Milvus] Collection and index found for ${collectionName}`);
-                        }
-                    } catch (err) {
-                        // Index missing
-                    }
-
-                    if (!indexExists) {
-                        console.log(`[Milvus] Index missing for existing collection ${collectionName}, creating...`);
-                        await this.client.createIndex({
-                            collection_name: collectionName,
-                            field_name: 'vector',
-                            extra_params: this.baseParams
-                        });
-                    }
-
-                    // Load collection
-                    await this.client.loadCollection({
-                        collection_name: collectionName
-                    });
-                    return;
-                }
-            }
-
-            console.log(`[Milvus] Creating collection ${collectionName}...`);
-
-            // Define schema
-            // Milvus 2.x requires specific fields definition
-            const fields = [
-                {
-                    name: 'hash',
-                    description: 'Primary key (hash of text)',
-                    data_type: DataType.Int64,
-                    is_primary_key: true,
-                },
-                {
-                    name: 'vector',
-                    description: 'Vector embedding',
-                    data_type: DataType.FloatVector,
-                    dim: vectorSize,
-                },
-                {
-                    name: 'text',
-                    description: 'Original text content',
-                    data_type: DataType.VarChar,
-                    max_length: 65535, // Max length for VarChar
-                },
-                // Metadata fields for filtering
-                {
-                    name: 'type', 
-                    data_type: DataType.VarChar, 
-                    max_length: 64,
-                    description: 'Content type (chat, lorebook, etc)'
-                },
-                {
-                    name: 'sourceId', 
-                    data_type: DataType.VarChar, 
-                    max_length: 128,
-                    description: 'Source ID (chat_id, lorebook_id)'
-                },
-                {
-                    name: 'embeddingSource', 
-                    data_type: DataType.VarChar, 
-                    max_length: 64
-                },
-                {
-                    name: 'embeddingModel', 
-                    data_type: DataType.VarChar, 
-                    max_length: 128
-                },
-                {
-                    name: 'timestamp',
-                    data_type: DataType.Int64
-                },
-                {
-                    name: 'metadata',
-                    description: 'Full JSON metadata',
-                    data_type: DataType.JSON 
-                }
-            ];
-
-            await this.client.createCollection({
-                collection_name: collectionName,
-                fields: fields,
-            });
-
-            // Create index on vector field
-            console.log('[Milvus] Creating index...');
-            await this.client.createIndex({
-                collection_name: collectionName,
-                field_name: 'vector',
-                extra_params: this.baseParams // Use default index params
-            });
-
-            // Load collection
-            await this.client.loadCollection({
-                collection_name: collectionName
-            });
-
-            console.log(`[Milvus] Created and loaded collection: ${collectionName} (dim=${vectorSize})`);
-
-        } catch (error) {
-            console.error(`[Milvus] Failed to ensure collection ${collectionName}:`, error.message);
-            throw error;
+        // S01: explicit, read-only verification. Never drop, recreate,
+        // create indexes, or create a shared legacy schema on this path.
+        const listing = await this.client.listCollections();
+        const collections = listing?.data;
+        if (!Array.isArray(collections)) {
+            throw new SafetyError('SCHEMA_UNVERIFIABLE', 'Milvus collection inventory is unavailable.');
         }
+        if (!collections.some(c => c.name === collectionName)) {
+            throw new SafetyError('S01_COLLECTION_CREATION_BLOCKED',
+                `Milvus collection ${collectionName} does not exist; creation is disabled in S01.`);
+        }
+        const desc = await this.client.describeCollection({ collection_name: collectionName });
+        const vectorField = desc?.schema?.fields?.find(f => f.name === 'vector');
+        if (!vectorField) {
+            throw new SafetyError('SCHEMA_MISMATCH',
+                `Milvus collection ${collectionName} has no vector field.`);
+        }
+        const dimParam = vectorField.dim ?? vectorField.params?.find(p => p.key === 'dim')?.value;
+        const existingDim = Number(dimParam);
+        if (!Number.isSafeInteger(existingDim) || existingDim <= 0) {
+            throw new SafetyError('SCHEMA_UNVERIFIABLE',
+                `Milvus collection ${collectionName} dimension cannot be verified.`);
+        }
+        if (existingDim !== vectorSize) {
+            throw new SafetyError('DIMENSION_MISMATCH',
+                `Milvus collection uses ${existingDim} dimensions; requested ${vectorSize}.`);
+        }
+        return { dimension: existingDim, verified: true };
     }
 
     /**
@@ -249,58 +129,9 @@ class MilvusBackend {
      * @param {object} tenantMetadata - Metadata for tenancy
      */
     async insertVectors(collectionName, items, tenantMetadata = {}) {
-        if (!this.isConnected) throw new Error('Milvus not initialized');
-        if (items.length === 0) return;
-
-        const mainCollection = 'vecthare_main';
-
-        // Check dimension from first item
-        const vectorSize = items[0].vector?.length || 0;
-        if (vectorSize === 0) throw new Error('[Milvus] Invalid vector dimension 0');
-
-        // Ensure collection exists
-        await this.ensureCollection(mainCollection, vectorSize);
-
-        // Prepare data matching schema
-        const data = items.map(item => ({
-            hash: item.hash,
-            vector: item.vector,
-            text: item.text,
-            type: tenantMetadata.type || 'chat',
-            sourceId: tenantMetadata.sourceId || 'unknown',
-            embeddingSource: tenantMetadata.embeddingSource || 'transformers',
-            embeddingModel: tenantMetadata.embeddingModel || '',
-            timestamp: item.metadata?.timestamp || Date.now(),
-            metadata: {
-                ...(item.metadata || {}),
-                text: item.text, // Redundant but safe
-                hash: item.hash
-            }
-        }));
-
-        try {
-            const res = await this.client.insert({
-                collection_name: mainCollection,
-                data: data
-            });
-
-            if (res.status.error_code !== 'Success') {
-                console.error(`[Milvus] Insert returned error: ${res.status.error_code} - ${res.status.reason}`);
-                // Use a simpler stringify for logging to avoid huge vector dumps
-                const sample = { ...data[0], vector: '[vector data]' };
-                console.error('[Milvus] Sample data causing error:', JSON.stringify(sample));
-                throw new Error(res.status.reason || res.status.error_code);
-            }
-            
-            // Explicitly flush to ensure data is visible immediately (crucial for Attu/Search visibility)
-            await this.client.flush({ collection_names: [mainCollection] });
-            
-            console.log(`[Milvus] Inserted ${items.length} items into ${mainCollection}`);
-        } catch (error) {
-            console.error('[Milvus] Insert failed:', error.message);
-            throw error;
-        }
+        denyUnsafeBackendMutation('milvus', 'insertVectors');
     }
+
 
     /**
      * Delete vectors by hash
@@ -308,22 +139,9 @@ class MilvusBackend {
      * @param {number[]} hashes 
      */
     async deleteVectors(collectionName, hashes) {
-        if (!this.isConnected) throw new Error('Milvus not initialized');
-        if (hashes.length === 0) return;
-
-        const mainCollection = 'vecthare_main';
-
-        try {
-            const expr = `hash in [${hashes.join(',')}]`;
-            await this.client.delete({
-                collection_name: mainCollection,
-                filter: expr
-            });
-            console.log(`[Milvus] Deleted items with hashes: ${hashes.length}`);
-        } catch (error) {
-            console.error('[Milvus] Delete failed:', error.message);
-        }
+        denyUnsafeBackendMutation('milvus', 'deleteVectors');
     }
+
 
     /**
      * Build boolean expression for filtering
@@ -369,7 +187,7 @@ class MilvusBackend {
 
         } catch (error) {
             console.error('[Milvus] Search failed:', error.message);
-            return [];
+            throw error;
         }
     }
 
@@ -410,7 +228,7 @@ class MilvusBackend {
 
         } catch (error) {
             console.error('[Milvus] List items failed:', error.message);
-            return [];
+            throw error;
         }
     }
 
@@ -441,7 +259,7 @@ class MilvusBackend {
 
         } catch (error) {
             console.error('[Milvus] Get item failed:', error.message);
-            return null;
+            throw error;
         }
     }
 
@@ -449,51 +267,18 @@ class MilvusBackend {
      * Update item (delete & insert)
      */
     async updateItem(collectionName, hash, updates, filters = {}) {
-        const existing = await this.getItem(collectionName, hash, filters);
-        if (!existing) throw new Error(`Item ${hash} not found`);
-
-        await this.deleteVectors(collectionName, [hash]);
-
-        const newHash = updates.hash || hash;
-        const newItem = {
-            hash: newHash,
-            text: updates.text || existing.text,
-            vector: updates.vector || existing.vector,
-            metadata: { ...existing.metadata, ...updates }
-        };
-
-        await this.insertVectors(collectionName, [newItem], filters);
+        denyUnsafeBackendMutation('milvus', 'updateItem');
     }
+
 
     /**
      * Purge collection (drop & recreate or delete by filter)
      * If filters present, delete by filter. If no filters, drop collection.
      */
     async purgeCollection(collectionName, filters = {}) {
-        if (!this.isConnected) throw new Error('Milvus not initialized');
-        const mainCollection = 'vecthare_main';
-
-        const hasFilters = Object.keys(filters).length > 0;
-
-        try {
-            if (hasFilters) {
-                const expr = this._buildFilterExpr(filters);
-                if (expr) {
-                    await this.client.delete({
-                        collection_name: mainCollection,
-                        filter: expr
-                    });
-                    console.log(`[Milvus] Purged items with filter: ${expr}`);
-                }
-            } else {
-                await this.client.dropCollection({ collection_name: mainCollection });
-                console.log(`[Milvus] Dropped collection ${mainCollection}`);
-                // Re-create is handled by next insert/init
-            }
-        } catch (error) {
-            console.error('[Milvus] Purge failed:', error.message);
-        }
+        denyUnsafeBackendMutation('milvus', 'purgeCollection');
     }
+
 
     /**
      * Get stats
@@ -517,7 +302,7 @@ class MilvusBackend {
             };
 
         } catch (error) {
-            return { chunkCount: 0, backend: 'milvus', error: error.message };
+            throw error;
         }
     }
 }

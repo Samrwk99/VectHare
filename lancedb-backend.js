@@ -17,6 +17,7 @@
  */
 
 import path from 'node:path';
+import { denyUnsafeBackendMutation } from './lib/s01-safety.js';
 import fs from 'node:fs/promises';
 import * as lancedb from '@lancedb/lancedb';
 
@@ -147,21 +148,11 @@ class LanceDBBackend {
         // Cache key includes source
         const cacheKey = `${source}:${tableName}`;
 
-        // Filter out items with invalid vectors
-        const validItems = items.filter(item => {
-            if (!Array.isArray(item.vector) || item.vector.length === 0) {
-                console.warn(`[LanceDB] Skipping item with invalid vector (hash: ${item.hash})`);
-                return false;
-            }
-            return true;
-        });
-
-        if (validItems.length === 0) {
-            throw new Error('[LanceDB] No valid items to insert - all items had missing or empty vectors');
-        }
-
-        if (validItems.length < items.length) {
-            console.warn(`[LanceDB] Filtered out ${items.length - validItems.length} items with invalid vectors`);
+        // S01: never silently accept a partial batch.
+        const validItems = items;
+        if (items.some(item => !Array.isArray(item.vector) || item.vector.length === 0 ||
+            !item.vector.every(Number.isFinite))) {
+            throw new Error('[LanceDB] Invalid vector in batch; no records inserted');
         }
 
         // Validate all vectors have the same dimension
@@ -319,29 +310,9 @@ class LanceDBBackend {
      * @returns {Promise<void>}
      */
     async deleteVectors(collectionId, hashes, source = 'transformers') {
-        if (!this.basePath) throw new Error('LanceDB not initialized');
-        if (hashes.length === 0) return;
-
-        // Sanitize table name
-        const tableName = sanitizeTableName(collectionId);
-
-        // Get database for this source
-        const db = await this.getDatabase(source);
-
-        const tableNames = await db.tableNames();
-        if (!tableNames.includes(tableName)) {
-            return; // Collection doesn't exist
-        }
-
-        const collection = await this.getCollection(collectionId, source);
-
-        // Delete by hash
-        const deleteFilter = `hash IN (${hashes.join(',')})`;
-
-        await collection.delete(deleteFilter);
-
-        console.log(`[LanceDB] Deleted ${hashes.length} items from ${source}/${collectionId}`);
+        denyUnsafeBackendMutation('lancedb', 'deleteVectors');
     }
+
 
     /**
      * Purge entire collection
@@ -350,67 +321,18 @@ class LanceDBBackend {
      * @returns {Promise<void>}
      */
     async purgeCollection(collectionId, source = 'transformers') {
-        if (!this.basePath) throw new Error('LanceDB not initialized');
-
-        // Sanitize table name
-        const tableName = sanitizeTableName(collectionId);
-        const cacheKey = `${source}:${tableName}`;
-
-        // Get database for this source
-        const db = await this.getDatabase(source);
-
-        const tableNames = await db.tableNames();
-        if (!tableNames.includes(tableName)) {
-            return; // Collection doesn't exist
-        }
-
-        try {
-            await db.dropTable(tableName);
-        } catch (error) {
-            console.warn(`[LanceDB] dropTable failed for ${tableName}:`, error.message);
-        }
-
-        this.collections.delete(cacheKey);
-        this.tableNameMap.delete(collectionId);
-
-        // EXTRA CLEANUP: Explicitly remove the .lance directory
-        // This handles cases where dropTable leaves the directory (e.g. Windows file locking)
-        // causing tableNames() to still report it as existing ("ghost table")
-        try {
-            const tablePath = path.join(this.basePath, source, `${tableName}.lance`);
-            await fs.rm(tablePath, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
-            console.log(`[LanceDB] Enforced directory removal for: ${tablePath}`);
-        } catch (error) {
-            console.warn(`[LanceDB] Failed to force remove directory for ${tableName}:`, error.message);
-        }
-
-        console.log(`[LanceDB] Purged collection: ${source}/${tableName} (${collectionId})`);
+        denyUnsafeBackendMutation('lancedb', 'purgeCollection');
     }
+
 
     /**
      * Purge all collections across all sources
      * @returns {Promise<void>}
      */
     async purgeAll() {
-        if (!this.basePath) throw new Error('LanceDB not initialized');
-
-        let totalPurged = 0;
-
-        // Purge from all connected databases
-        for (const [source, db] of this.databases) {
-            const tableNames = await db.tableNames();
-
-            for (const tableName of tableNames) {
-                await db.dropTable(tableName);
-                this.collections.delete(`${source}:${tableName}`);
-                totalPurged++;
-            }
-
-            console.log(`[LanceDB] Purged ${tableNames.length} collections from ${source}`);
-        }
-
-        console.log(`[LanceDB] Purged all ${totalPurged} collections across all sources`);
+        denyUnsafeBackendMutation('lancedb', 'purgeAll');
     }
+
 
     /**
      * Health check
@@ -494,29 +416,9 @@ class LanceDBBackend {
      * @returns {Promise<void>}
      */
     async updateItem(collectionId, hash, updates, source = 'transformers') {
-        // Get existing item
-        const existing = await this.getItem(collectionId, hash, source);
-        if (!existing) {
-            throw new Error(`Item with hash ${hash} not found`);
-        }
-
-        // Delete old item
-        await this.deleteVectors(collectionId, [hash], source);
-
-        // Merge updates with existing data
-        const newHash = updates.hash || hash;
-        const newItem = {
-            hash: newHash,
-            text: updates.text || existing.text,
-            vector: updates.vector || existing.vector,
-            metadata: { ...existing.metadata, ...updates },
-        };
-
-        // Insert updated item
-        await this.insertVectors(collectionId, [newItem], source);
-
-        console.log(`[LanceDB] Updated item ${hash} -> ${newHash}`);
+        denyUnsafeBackendMutation('lancedb', 'updateItem');
     }
+
 
     /**
      * Update item metadata only (no re-embedding needed)
@@ -527,28 +429,9 @@ class LanceDBBackend {
      * @returns {Promise<void>}
      */
     async updateItemMetadata(collectionId, hash, metadata, source = 'transformers') {
-        // Get existing item (need the vector)
-        const existing = await this.getItem(collectionId, hash, source);
-        if (!existing) {
-            throw new Error(`Item with hash ${hash} not found`);
-        }
-
-        // Delete old item
-        await this.deleteVectors(collectionId, [hash], source);
-
-        // Create updated item with same text/vector but new metadata
-        const updatedItem = {
-            hash: hash,
-            text: existing.text,
-            vector: existing.vector,
-            metadata: { ...existing.metadata, ...metadata },
-        };
-
-        // Insert updated item
-        await this.insertVectors(collectionId, [updatedItem], source);
-
-        console.log(`[LanceDB] Updated metadata for item ${hash}`);
+        denyUnsafeBackendMutation('lancedb', 'updateItemMetadata');
     }
+
 
     /**
      * Get collection statistics

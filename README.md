@@ -1,3 +1,5 @@
+> **S01 safety checkpoint (28 October 2026): Not a production-ready or functional write release.**  All legacy plugin write/edit/delete/purge HTTP routes return `409 S01_MUTATION_BLOCKED` until later S02–S04 contracts are implemented and tested.  Qdrant/Milvus direct legacy mutations are disabled, read failures propagate, destructive mismatch handling is removed.  See `S01-CHANGELOG.md` and `S01-VERIFICATION.md`.  Do not replace a valuable working installation without reviewing the restrictions.
+
 # Similharity Server Plugin
 
 **Version 2.0.0**
