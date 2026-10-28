@@ -175,11 +175,12 @@ test('#196: usage counter updates the exact key and refuses ambiguous aliases',(
  const core=read('core/core-vector-api.js');assert.match(core,/recordCollectionUsage\(collectionId\)/);
 });
 
-test('#219: report uses live qdrant_use_cloud and qdrant_url fields',()=>{
+test('#219: diagnostics no longer treats browser Qdrant URL as actual server connection',()=>{
  const src=read('ui/ui-manager.js');
  const i=src.indexOf('const qdrantMode = settings.qdrant_use_cloud');
  assert.ok(i>0);
- assert.match(src.slice(i,i+200),/settings\.qdrant_url/);
+ assert.match(src.slice(i,i+750),/getGuiConnectionStatus/);
+ assert.doesNotMatch(src.slice(i,i+200),/settings\.qdrant_url/);
  assert.doesNotMatch(src.slice(i,i+200),/qdrant_cloud_url|settings\.qdrant_mode/);
 });
 

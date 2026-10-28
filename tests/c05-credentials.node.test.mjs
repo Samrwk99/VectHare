@@ -194,7 +194,7 @@ test('C05 backend config fingerprint cannot hash legacy secrets into persisted m
 });
 test('C05 Qdrant source does not forward browser API key in any config',()=>{
  const s=source('backends/qdrant.js');assert.ok(!s.includes('apiKey: settings.qdrant_api_key'));
- assert.ok(s.includes("JSON.stringify({ configId: 'default' })")); // S11.1: server resolves protected config
+ assert.ok(s.includes("JSON.stringify({ configId: this._qdrantConfigId })")); // S11.3: safe local/remote selectors
 });
 test('C05 Milvus source does not send plaintext password or token',()=>{
  const s=source('backends/milvus.js');assert.ok(!s.includes('password: settings.milvus_password'));

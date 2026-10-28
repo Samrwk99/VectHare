@@ -389,13 +389,14 @@ export async function checkQdrantBackend(settings) {
         };
     }
 
-    // S11.1 / Similharity S10: neither local host/port nor cloud keys from
-    // VectHare settings are authoritative. Configuration is server-managed.
+    // S11.3: local is a server-defined loopback preset, cloud requires the
+    // protected default per-user server configuration. Browser settings are not credentials.
+    const configId = isCloud ? 'default' : 'local';
     try {
         const initResponse = await fetch('/api/plugins/similharity/backend/init/qdrant', {
             method: 'POST',
             headers: getRequestHeaders(),
-            body: JSON.stringify({ configId: 'default' }),
+            body: JSON.stringify({ configId }),
         });
         if (!initResponse.ok) {
             const result = await initResponse.json().catch(() => null);
@@ -404,7 +405,9 @@ export async function checkQdrantBackend(settings) {
             return {
                 name: backendName,
                 status: 'fail',
-                message: `Qdrant server configuration/init refused (HTTP ${initResponse.status}; ${code}). Check S03 server-side configuration.`,
+                message: isCloud
+                    ? `Qdrant cloud configuration/init refused (HTTP ${initResponse.status}; ${code}). Set up the private server-side cloud connection.`
+                    : `Local Qdrant init refused (HTTP ${initResponse.status}; ${code}). Confirm Qdrant is listening on the server's loopback address; default port 6333.`,
                 fixable: true,
                 fixAction: 'configure_qdrant',
                 category: 'infrastructure'
@@ -421,7 +424,7 @@ export async function checkQdrantBackend(settings) {
 
     // Then check health
     try {
-        const healthResponse = await fetch('/api/plugins/similharity/backend/health/qdrant', {
+        const healthResponse = await fetch(`/api/plugins/similharity/backend/health/qdrant?configId=${configId}`, {
             method: 'GET',
             headers: getRequestHeaders()
         });
@@ -440,7 +443,7 @@ export async function checkQdrantBackend(settings) {
         const healthData = await healthResponse.json();
 
         if (healthData.healthy) {
-            const target = isCloud ? settings.qdrant_url : `${settings.qdrant_host}:${settings.qdrant_port}`;
+            const target = isCloud ? 'server-configured Qdrant endpoint' : 'server loopback Qdrant endpoint';
             return {
                 name: backendName,
                 status: 'pass',

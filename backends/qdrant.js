@@ -83,26 +83,29 @@ export class QdrantBackend extends VectorBackend {
         if (settings?.qdrant_use_cloud && settings?.qdrant_url) {
             assertNoCredentialsInUrl(settings.qdrant_url);
         }
+        // 'local' is a fixed server-side loopback preset; 'default' loads the
+        // administrator-provisioned per-user private remote config.
+        this._qdrantConfigId = settings?.qdrant_use_cloud ? 'default' : 'local';
         const response = await fetch('/api/plugins/similharity/backend/init/qdrant', {
             method: 'POST',
             headers: getRequestHeaders(),
-            body: JSON.stringify({ configId: 'default' }),
+            body: JSON.stringify({ configId: this._qdrantConfigId }),
         });
 
         if (!response.ok) {
             // S10 exposes machine-readable error codes; avoid echoing response
             // messages or configuration details into browser logs.
-            const body = await response.json().catch(() => null);
+            const body = typeof response.json==='function' ? await response.json().catch(() => null) : null;
             const code = typeof body?.code === 'string' && /^[A-Z0-9_]{1,80}$/.test(body.code)
                 ? `; ${body.code}` : '';
             throw new Error(`[Qdrant] Failed to initialize Qdrant (HTTP ${response.status}${code})`);
         }
-        console.log('VectHare: Qdrant server-managed connection initialized (read-only checkpoint)');
+        console.log(`VectHare: Qdrant ${this._qdrantConfigId === 'local' ? 'loopback' : 'private server'} connection initialized (read-only checkpoint)`);
     }
 
     async healthCheck() {
         try {
-            const response = await fetch('/api/plugins/similharity/backend/health/qdrant', {
+            const response = await fetch(`/api/plugins/similharity/backend/health/qdrant?configId=${this._qdrantConfigId || 'default'}`, {
                 headers: getRequestHeaders(),
             });
 

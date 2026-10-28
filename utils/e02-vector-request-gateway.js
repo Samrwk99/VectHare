@@ -76,6 +76,17 @@ export function inspectVectorRequest(url, options={}) {
         if (req.body != null) fail(req,'inspection-rejects-body');
         return {intercepted:true,allowed:true,transport:'plugin',operation:'s11Discovery',backend:'none',method:'GET'};
     }
+    // S11.4: specifically reviewed authenticated database CONFIGURATION routes.
+    // These never insert or delete vector records; server validates CSRF,
+    // trusted user scope, endpoint restrictions and private file storage.
+    if (req.transport === 'plugin' && /^\/v2\/connections\/(?:qdrant|milvus)$/.test(req.suffix)) {
+        if (!['GET','PUT','DELETE'].includes(req.method)) fail(req,'config-method-unsupported');
+        if (req.method === 'GET' && req.body != null) fail(req,'config-read-body');
+        if (req.method === 'PUT') {
+            if (!req.body || !['default','local'].includes(req.body.configId)) fail(req,'config-selector-required');
+        }
+        return {intercepted:true,allowed:true,operation:'guiConnectionConfiguration',backend:'none',transport:'plugin',method:req.method};
+    }
     // S10 v2 execution routes are implemented only as refusal contracts.
     // Do not allow aliases or a newer plugin response to override this rule.
     if (req.transport === 'plugin' && (req.suffix==='/v2' || req.suffix.startsWith('/v2/'))) fail(req,'s11-v2-execution-not-certified');

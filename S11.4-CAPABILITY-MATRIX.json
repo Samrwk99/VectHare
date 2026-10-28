@@ -1,0 +1,63 @@
+{
+  "checkpoint": "S10.3/S11.4",
+  "category": "connection_configuration_only",
+  "testStatus": {
+    "pluginPassed": 241,
+    "extensionPassed": 1091,
+    "liveAcceptance": false
+  },
+  "backendConnection": {
+    "qdrant_local": "GUI_CONFIGURABLE_DEFAULT_LOOPBACK",
+    "qdrant_cloud": "GUI_CONFIGURABLE_PROTECTED_CREDENTIAL",
+    "milvus": "GUI_CONFIGURABLE_PROTECTED_CREDENTIAL",
+    "lancedb": "EXISTING_LOCAL_SELECTION",
+    "standard": "EXISTING_HOST_SELECTION"
+  },
+  "recordOperations": {
+    "standard": {
+      "public_v2_read": "DENIED_NOT_LIVE_CERTIFIED",
+      "insert": "DENIED_NOT_LIVE_CERTIFIED",
+      "edit": "DENIED_NOT_LIVE_CERTIFIED",
+      "delete": "DENIED_NOT_LIVE_CERTIFIED",
+      "reindex": "DENIED_NOT_LIVE_CERTIFIED",
+      "purge": "DENIED_NOT_LIVE_CERTIFIED",
+      "verified_full_export": "DENIED_NOT_LIVE_CERTIFIED",
+      "migration_cutover": "DENIED_NOT_LIVE_CERTIFIED"
+    },
+    "lancedb": {
+      "public_v2_read": "DENIED_NOT_LIVE_CERTIFIED",
+      "insert": "DENIED_NOT_LIVE_CERTIFIED",
+      "edit": "DENIED_NOT_LIVE_CERTIFIED",
+      "delete": "DENIED_NOT_LIVE_CERTIFIED",
+      "reindex": "DENIED_NOT_LIVE_CERTIFIED",
+      "purge": "DENIED_NOT_LIVE_CERTIFIED",
+      "verified_full_export": "DENIED_NOT_LIVE_CERTIFIED",
+      "migration_cutover": "DENIED_NOT_LIVE_CERTIFIED"
+    },
+    "qdrant": {
+      "public_v2_read": "DENIED_NOT_LIVE_CERTIFIED",
+      "insert": "DENIED_NOT_LIVE_CERTIFIED",
+      "edit": "DENIED_NOT_LIVE_CERTIFIED",
+      "delete": "DENIED_NOT_LIVE_CERTIFIED",
+      "reindex": "DENIED_NOT_LIVE_CERTIFIED",
+      "purge": "DENIED_NOT_LIVE_CERTIFIED",
+      "verified_full_export": "DENIED_NOT_LIVE_CERTIFIED",
+      "migration_cutover": "DENIED_NOT_LIVE_CERTIFIED"
+    },
+    "milvus": {
+      "public_v2_read": "DENIED_NOT_LIVE_CERTIFIED",
+      "insert": "DENIED_NOT_LIVE_CERTIFIED",
+      "edit": "DENIED_NOT_LIVE_CERTIFIED",
+      "delete": "DENIED_NOT_LIVE_CERTIFIED",
+      "reindex": "DENIED_NOT_LIVE_CERTIFIED",
+      "purge": "DENIED_NOT_LIVE_CERTIFIED",
+      "verified_full_export": "DENIED_NOT_LIVE_CERTIFIED",
+      "migration_cutover": "DENIED_NOT_LIVE_CERTIFIED"
+    }
+  },
+  "legacySharedReads": {
+    "qdrant": "DENIED",
+    "milvus": "DENIED"
+  },
+  "claim": "No vector operation enabled; connection setup only."
+}
