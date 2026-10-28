@@ -87,6 +87,18 @@ export function inspectVectorRequest(url, options={}) {
         }
         return {intercepted:true,allowed:true,operation:'guiConnectionConfiguration',backend:'none',transport:'plugin',method:req.method};
     }
+    // F01: read/verify only a host-owned chat/group/lorebook file; route may
+    // reserve a private source identity but can NEVER read/write vector records.
+    if (req.transport === 'plugin' && req.suffix === '/v2/sources/attest') {
+        const b=req.body;
+        const expected=b?.kind==='chat'?['kind','avatar','chatFile']:
+            b?.kind==='group-chat'?['kind','chatFile','groupId']:
+            b?.kind==='lorebook'?['kind','name']:[];
+        if(req.method!=='POST'||!b||!expected.length||Object.keys(b).some(k=>!expected.includes(k))||
+           expected.some(k=>typeof b[k]!=='string'||!b[k]||b[k].length>220))
+            fail(req,'f01-source-selector-invalid');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:'hostSourceAttestation',backend:'none',method:'POST'};
+    }
     // H01 is a narrowly bounded, explicitly confirmed disposable acceptance
     // diagnostic. It cannot select a collection, write real memories, or lift
     // any production capability matrix cell.

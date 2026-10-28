@@ -1,0 +1,69 @@
+{
+  "checkpoint": "F01",
+  "baseline": "S11.5-H01/S10.4-H01",
+  "scope": "SOURCE_OWNERSHIP_ONLY",
+  "pluginVersion": "3.2.10-s10.5-f01",
+  "extensionVersion": "2.2.0-alpha.s11.6-f01",
+  "pluginSourceFingerprint": "2de0ac2f7b5fc3749f2b1ce1844e2333ee564120f8d2de4854b49034dc1aff8c",
+  "newCapabilities": {
+    "sourceAttestation": "HOST_FILE_OWNED_READ_ONLY",
+    "chatFile": "HOST_OWNED_SAVED_FILE",
+    "branch": "DISTINCT_PERSISTED_SOURCE_ID",
+    "groupChat": "HOST_FILE_PLUS_GROUP_MEMBERSHIP",
+    "lorebook": "HOST_OWNED_WORLD_FILE",
+    "activeBrowserChat": "NOT_SERVER_ATTESTED",
+    "scene": "UNPROBED",
+    "backendCollectionOwnership": "NOT_PROVEN"
+  },
+  "backends": {
+    "standard": {
+      "query": "UNCHANGED_PRE_F01",
+      "list": "UNCHANGED_PRE_F01",
+      "get": "UNCHANGED_PRE_F01",
+      "insert": "DENIED",
+      "update": "DENIED",
+      "delete": "DENIED",
+      "reindex": "DENIED",
+      "verifiedExport": "DENIED"
+    },
+    "lancedb": {
+      "query": "UNCHANGED_PRE_F01",
+      "list": "UNCHANGED_PRE_F01",
+      "get": "UNCHANGED_PRE_F01",
+      "insert": "DENIED",
+      "update": "DENIED",
+      "delete": "DENIED",
+      "reindex": "DENIED",
+      "verifiedExport": "DENIED"
+    },
+    "qdrant": {
+      "query": "UNCHANGED_PRE_F01",
+      "list": "UNCHANGED_PRE_F01",
+      "get": "UNCHANGED_PRE_F01",
+      "insert": "DENIED",
+      "update": "DENIED",
+      "delete": "DENIED",
+      "reindex": "DENIED",
+      "verifiedExport": "DENIED"
+    },
+    "milvus": {
+      "query": "UNCHANGED_PRE_F01",
+      "list": "UNCHANGED_PRE_F01",
+      "get": "UNCHANGED_PRE_F01",
+      "insert": "DENIED",
+      "update": "DENIED",
+      "delete": "DENIED",
+      "reindex": "DENIED",
+      "verifiedExport": "DENIED"
+    }
+  },
+  "nativeStandard": {
+    "insert": "DENIED_UNPROBED",
+    "delete": "DENIED_UNPROBED",
+    "purge": "DENIED_UNPROBED"
+  },
+  "productionReady": false,
+  "hostTested": false,
+  "writesUnlocked": false,
+  "next": "F02"
+}

@@ -5,9 +5,9 @@
  */
 import { guardedVectorFetch } from './e02-vector-request-gateway.js';
 export const S11_EXPECTED_PLUGIN = Object.freeze({
-    pluginVersion: '3.2.10-s10.4',
+    pluginVersion: '3.2.10-s10.5-f01',
     contractVersion: 2,
-    sourceFingerprint: 'e96b5b0d43693110b9c5701716d95539e7ab859903e2b749ad50a53e480f8dd6',
+    sourceFingerprint: '2de0ac2f7b5fc3749f2b1ce1844e2333ee564120f8d2de4854b49034dc1aff8c',
 });
 export const S11_BACKENDS = Object.freeze(['standard','lancedb','qdrant','milvus']);
 const ROOT = '/api/plugins/similharity';
@@ -108,4 +108,59 @@ export function renderH01QdrantButton(root,doc=globalThis.document){
         finally{button.disabled=false;}
     });
     wrap.append(button,status);root.prepend(wrap);return true;
+}
+
+/** F01 authenticated source selection — the server verifies the actual file.
+ * The browser does not provide ownership, collection IDs, or record content.
+ */
+export async function attestF01Source(selector,headers,fetchImpl=globalThis.fetch){
+    if(!isObj(selector))throw new Error('F01_SELECTOR_REQUIRED');
+    const response=await guardedVectorFetch(`${ROOT}/v2/sources/attest`,{
+        method:'POST',credentials:'same-origin',cache:'no-store',
+        headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify(selector)},fetchImpl);
+    const payload=await response.json();
+    if(!response.ok||payload?.success!==true)throw new Error(payload?.code||`F01_HTTP_${response.status}`);
+    if(payload.hostSourceOwnerVerified!==true||payload.activeChatVerified!==false||
+       payload.publicReadsEnabled!==false||payload.publicWritesEnabled!==false||
+       typeof payload.sourceId!=='string'||!isObj(payload.scope))throw new Error('F01_RESPONSE_UNVERIFIED');
+    return payload;
+}
+/** GUI source-inspection entry point; never treats client-selected chat as
+ * server-attested active chat or grants read/write capability. */
+export function renderF01SourceAttestation(root,doc=globalThis.document){
+    if(!root||!doc?.createElement||root.querySelector?.('#vecthare_f01_sources'))return false;
+    const panel=doc.createElement('div');panel.id='vecthare_f01_sources';
+    const chatButton=doc.createElement('button');chatButton.type='button';chatButton.textContent='Verify current chat/branch ownership';
+    const loreName=doc.createElement('input');loreName.type='text';loreName.placeholder='Lorebook name';
+    const loreButton=doc.createElement('button');loreButton.type='button';loreButton.textContent='Verify lorebook ownership';
+    const status=doc.createElement('div');status.setAttribute('role','status');
+    const run=async selector=>{
+        status.textContent='Verifying saved source against SillyTavern user files…';
+        try{
+            const {getRequestHeaders}=await import('../../../../script.js');
+            const result=await attestF01Source(selector,getRequestHeaders());
+            status.textContent=`Source verified for this SillyTavern user: ${result.kind}. `+
+                (result.copiedIntegrityObserved?'Copied chat integrity detected; separate source IDs retained. ':'')+
+                'Vector reads and writes remain disabled pending F02–F04.';
+        }catch(error){status.textContent=`Source not verified: ${error?.message||'unknown error'}`;}
+    };
+    chatButton.addEventListener('click',async()=>{
+        let selector;
+        try{
+            const {getCurrentChatId}=await import('../../../../../script.js');
+            const ctx=globalThis.SillyTavern?.getContext?.();
+            const chatFile=getCurrentChatId();
+            if(!chatFile)throw Error('No saved chat is selected');
+            if(ctx?.groupId || ctx?.selectedGroup){selector={kind:'group-chat',chatFile,groupId:String(ctx.groupId||ctx.selectedGroup)};}
+            else {
+                const character=ctx?.characters?.[ctx?.characterId];
+                const avatar=character?.avatar;
+                if(typeof avatar!=='string'||!avatar.endsWith('.png'))throw Error('Host character avatar unavailable');
+                selector={kind:'chat',avatar,chatFile};
+            }
+            await run(selector);
+        }catch(error){status.textContent=`Source not verified: ${error?.message||'host chat unavailable'}`;}
+    });
+    loreButton.addEventListener('click',()=>run({kind:'lorebook',name:loreName.value}));
+    panel.append(chatButton,loreName,loreButton,status);root.prepend(panel);return true;
 }
