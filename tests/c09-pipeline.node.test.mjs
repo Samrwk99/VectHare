@@ -44,7 +44,10 @@ function fixture({roundResults,eligible=x=>true,dedup=x=>false}={}) {
         deduplicateChunks:items=>({toInject:items.filter(x=>!dedup(x)),skipped:items.filter(dedup)}),
         removeOverlappingGroups,selectFinal,candidateId,
         getChatCollectionPolicy:()=>({selectedCollections:[]}),
-        injectChunksIntoPrompt:items=>({verified:true,text:items.map(x=>x.text).join(','),groups:[]}),
+        injectChunksIntoPrompt:items=>({verified:true,text:items.map(x=>x.text).join(','),nonce:'0123456789abcdef0123456789abcdef',groups:[]}),
+        makePromptSentinel:()=> '0123456789abcdef0123456789abcdef',
+        planBudgetedInjection:async items=>({chosen:items,dropped:[],trimmed:[],availableTokens:1024,tokens:10,method:'host',renderedBlocks:['test'],budget:{reason:'bounded',contextTokens:4096}}),
+        promptReceipts:{register(){},invalidate(){}},
         toastr:{error:s=>errors.push(s)},
     };
     const context=vm.createContext(scope);

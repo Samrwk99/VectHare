@@ -193,8 +193,8 @@ test('C03 #21/#81: runtime has idempotent init, listener registry and cache revi
 });
 test('C03 #51/#1: retrieval and manual sync assert current identity after awaits',()=>{
     const code=fs.readFileSync(new URL('../core/chat-vectorization.js',import.meta.url),'utf8');
-    assert.match(code,/const injection = injectChunksIntoPrompt/);
-    assert.match(code,/job\.assertCurrent\(\);\s*const injection/);
+    assert.match(code,/const injection=injectChunksIntoPrompt/);
+    assert.match(code,/const budgetPlan=await planBudgetedInjection[^;]*;\s*job\.assertCurrent\(\)/);
     assert.match(code,/const result = await synchronizeChat[^;]*;\s*job\.assertCurrent\(\)/);
 });
 

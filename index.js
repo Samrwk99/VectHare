@@ -32,6 +32,7 @@ import { migrateOldEnabledKeys } from './core/collection-metadata.js';
 import { clearCollectionRegistry, discoverExistingCollections, getCollectionRegistry, getPendingCollectionDeletions } from './core/collection-loader.js';
 import AsyncUtils from './utils/async-utils.js';
 import {chatJobs,currentChatIdentity} from './core/chat-job-runtime.js';
+import {promptReceipts} from './core/prompt-receipt-runtime.js';
 import {worldInfoSnapshots} from './utils/world-info-identity.js';
 import {stopVectorization,resetControlState} from './core/vectorization-control.js';
 import { purgeAllAndResetSettings } from './core/destructive-safety.js';
@@ -95,6 +96,10 @@ const defaultSettings = {
     min_chat_length: 0, // Minimum number of messages in chat before injection starts (0 = no minimum)
     // Number of top results to retrieve from vector DB (top-K)
     top_k: 3,
+    // C10: upper bound on VectHare injection, with host-context headroom.
+    injection_token_cap: 1024,
+    injection_safety_margin: 128,
+    injection_context_reserve: 512,
     query: 2,
     chunk_size: 500, // For adaptive strategy only
     score_threshold: 0.25,
@@ -613,6 +618,7 @@ jQuery(async () => {
     globalThis.__vecthareEventListeners = vhListeners;
     // A chat switch invalidates every job, not merely its eventual toast.
     const invalidateChat = () => {
+        promptReceipts.invalidate();
         chatJobs.cancelAll('chat-changed');
         worldInfoSnapshots.clear(); // Do not reuse stale WI observations across chat switches.
         chatJobs.bumpGeneration('chat-changed');
@@ -620,10 +626,14 @@ jQuery(async () => {
         else resetControlState();
     };
     const invalidateMessage = () => {
+        promptReceipts.invalidate();
         chatJobs.cancelKinds(['retrieval','sync','repair','vectorize'],'message-changed');
         chatJobs.bumpGeneration('message-changed');
     };
     onVhEvent(event_types.CHAT_CHANGED, invalidateChat);
+    // The event payload is the assembled host prompt, not the extension registry.
+    onVhEvent(event_types.CHAT_COMPLETION_PROMPT_READY, event=>promptReceipts.observe('chat',event));
+    onVhEvent(event_types.GENERATE_AFTER_COMBINE_PROMPTS, event=>promptReceipts.observe('text',event));
     // C08: capture host WI activations for the *next* retrieval. Event ordering
     // versus generate_interceptor is version-dependent and not assumed.
     onVhEvent(event_types.WORLD_INFO_ACTIVATED, payload => {
@@ -637,7 +647,7 @@ jQuery(async () => {
     for (const name of ['MESSAGE_EDITED','MESSAGE_DELETED','MESSAGE_SWIPED']) {
         onVhEvent(event_types[name], invalidateMessage);
     }
-    const onPageHide = () => chatJobs.teardown();
+    const onPageHide = () => {promptReceipts.invalidate();chatJobs.teardown();};
     window.addEventListener('pagehide', onPageHide);
     // Register event handlers
     onVhEvent(event_types.MESSAGE_DELETED, onChatEvent);

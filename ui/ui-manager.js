@@ -520,6 +520,15 @@ export function renderSettings(containerId, settings, callbacks) {
                                 <small class="vecthare_hint" style="margin-left:8px;">Number of results to retrieve per collection</small>
                             </div>
 
+                            <!-- C10: token-aware final prompt limit (before host prompt registration). -->
+                            <div style="margin-top:12px; display:flex; flex-wrap:wrap; gap:10px; align-items:center;">
+                                <label for="vecthare_injection_token_cap"><small>Memory token cap</small></label>
+                                <input id="vecthare_injection_token_cap" type="number" class="vecthare-input" min="1" max="16384" step="64" style="width:110px;" />
+                                <label for="vecthare_injection_safety_margin"><small>Safety margin</small></label>
+                                <input id="vecthare_injection_safety_margin" type="number" class="vecthare-input" min="1" max="8192" step="32" style="width:100px;" />
+                                <small class="vecthare_hint">Counts wrapped blocks using the host tokenizer when available. At least half the host context is reserved for conversation and generation.</small>
+                            </div>
+
                             <label style="margin-top: 16px;">
                                 <small>Injection Position</small>
                             </label>
@@ -2266,6 +2275,15 @@ function bindSettingsEvents(settings, callbacks) {
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
+
+    // C10: keep values bounded; invalid UI input never disables safety headroom.
+    for (const [field,defaultValue,maxValue] of [['injection_token_cap',1024,16384],['injection_safety_margin',128,8192]]) {
+        $(`#vecthare_${field}`).val(settings[field] ?? defaultValue).on('change',function(){
+            const value=Number($(this).val());
+            settings[field]=Number.isSafeInteger(value)&&value>0?Math.min(value,maxValue):defaultValue;
+            $(this).val(settings[field]);applySettingsSnapshot(settings);saveSettingsDebounced();
+        });
+    }
 
     // World Info Integration settings
     $('#vecthare_enabled_world_info')

@@ -1,3 +1,4 @@
+import {createDurableFrequencyLedger} from './durable-frequency-ledger.js';
 /** C08: only a final, confirmed prompt-inclusion receipt can consume frequency.
  * This is a process-local history until the C10 inclusion receipt and persistent
  * generation ledger are established. Unknown and dry-run receipts never spend it.
@@ -52,4 +53,6 @@ export function createFrequencyLedger() {
 // a registered extension prompt is NOT proof that a frequency-constrained
 // record reached the model. Fail closed on these conditions in live retrieval.
 export const C08_FINAL_INCLUSION_RECEIPT_AVAILABLE = false;
-export const activationFrequencyLedger=createFrequencyLedger();
+// Runtime receipts require a confirmed, read-back browser-storage checkpoint.
+// The legacy in-memory factory stays available for isolated rule testing.
+export const activationFrequencyLedger=createDurableFrequencyLedger();

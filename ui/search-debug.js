@@ -860,9 +860,15 @@ function renderInjectionVerification(data) {
 
     const { verified, text, position, depth, charCount } = data.injection;
     const groups = Array.isArray(data.injection.groups) ? data.injection.groups : [];
-    const statusClass = verified ? 'vecthare-verification-success' : 'vecthare-verification-failed';
-    const statusIcon = verified ? 'fa-circle-check' : 'fa-circle-xmark';
-    const statusText = verified ? 'PROMPT REGISTERED' : 'REGISTRATION FAILED';
+    const finalReceipt=data.injection.finalReceipt;
+    const finalStatus=finalReceipt?.status??'unknown';
+    // A registered extension prompt is NOT proven included in the assembled
+    // host prompt. Never show the green verified badge based on registration.
+    const inclusionConfirmed=finalReceipt?.verified===true && finalStatus==='included';
+    const statusClass=inclusionConfirmed?'vecthare-verification-success':'vecthare-verification-failed';
+    const statusIcon=inclusionConfirmed?'fa-circle-check':'fa-circle-question';
+    const statusText=finalReceipt?.verified ? `HOST ASSEMBLY: ${finalStatus}` :
+        (verified?'REGISTERED — FINAL INCLUSION UNCONFIRMED':'REGISTRATION FAILED');
 
     // Position label
     const positionLabels = {
@@ -902,6 +908,14 @@ function renderInjectionVerification(data) {
                     <div class="vecthare-verification-stat">
                         <span class="stat-label">Depth</span>
                         <span class="stat-value">${groups.length > 1 ? 'Per placement' : escapeHtml(groups[0]?.depth ?? depth)}</span>
+                    </div>
+                    <div class="vecthare-verification-stat">
+                        <span class="stat-label">Host inclusion</span>
+                        <span class="stat-value">${escapeHtml(finalStatus)}${finalReceipt?.verified?' (assembly observed)':' (not yet verified)'}</span>
+                    </div>
+                    <div class="vecthare-verification-stat">
+                        <span class="stat-label">Token budget</span>
+                        <span class="stat-value">${escapeHtml(data.promptBudget?.tokens??'unknown')} / ${escapeHtml(data.promptBudget?.availableTokens??'unknown')} (${escapeHtml(data.promptBudget?.method??'unknown')})</span>
                     </div>
                     <div class="vecthare-verification-stat">
                         <span class="stat-label">Characters</span>

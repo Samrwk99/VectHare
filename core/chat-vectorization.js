@@ -3,6 +3,9 @@ import {recordId, fingerprint, stampMessageUids, messageReference, groupRecordLo
 import {hasVerifiedCapability} from '../utils/backend-contracts.js';
 import {chatJobs, anyJobSignal,currentChatIdentity} from './chat-job-runtime.js';
 import {activationFrequencyLedger, C08_FINAL_INCLUSION_RECEIPT_AVAILABLE} from '../utils/activation-frequency-ledger.js';
+import {resolveInjectionBudget, planInjection} from '../utils/prompt-budget.js';
+import {makePromptSentinel,wrapPromptBlock} from '../utils/prompt-receipts.js';
+import {promptReceipts} from './prompt-receipt-runtime.js';
 import {worldInfoSnapshots} from '../utils/world-info-identity.js';
 import {StaleJobError} from './job-context.js';
 import {planReplacement} from '../utils/replacement-safety.js';
@@ -1924,6 +1927,7 @@ function hasInjectableText(chunk) {
 
 /** Clear every prompt tag created by VectHare, including legacy WI injection. */
 function clearVectHarePrompts(settings) {
+    promptReceipts.invalidate();
     setExtensionPrompt(EXTENSION_PROMPT_TAG, '', settings?.position ?? 0, settings?.depth ?? 2, false);
     // Enumerate actual registered tags: a previous turn might have created >10 positions.
     const prefix = `${EXTENSION_PROMPT_TAG}_pos`;
@@ -2044,6 +2048,31 @@ function resolveChunkInjectionPosition(chunk, settings) {
     return { position, depth };
 }
 
+/** Render exact positioned prompt blocks for the C10 budget planner. */
+function renderInjectionBlocks(chunks, settings) {
+    const groups=new Map();
+    for (const chunk of chunks.filter(hasInjectableText)) {
+        const {position,depth}=resolveChunkInjectionPosition(chunk,settings);
+        const key=`${position}:${depth}`;
+        if(!groups.has(key))groups.set(key,[]);
+        groups.get(key).push(chunk);
+    }
+    return [...groups.values()].map(items=>buildNestedInjectionText(items,settings));
+}
+
+/** Token-aware planning MUST happen after C09's final ranking and before registration. */
+async function planBudgetedInjection(chunks,settings,nonce) {
+    const host=getContext();
+    const budget=resolveInjectionBudget({maxContext:host?.maxContext,
+        cap:settings.injection_token_cap,margin:settings.injection_safety_margin,
+        reservedContext:settings.injection_context_reserve});
+    const tokenizer=typeof host?.getTokenCountAsync==='function' ? text=>host.getTokenCountAsync(text) :
+        typeof host?.getTokenCount==='function'?text=>host.getTokenCount(text):null;
+    const plan=await planInjection({candidates:chunks,render:items=>renderInjectionBlocks(items,settings).map((text,i)=>wrapPromptBlock(text,nonce,i)),
+        availableTokens:budget.availableTokens,tokenizer});
+    return {...plan,budget};
+}
+
 /**
  * Stage 8: Format and inject chunks into prompt
  * Supports per-chunk/per-collection injection positions via cascade resolution.
@@ -2054,7 +2083,7 @@ function resolveChunkInjectionPosition(chunk, settings) {
  * @param {object} debugData Debug tracking object
  * @returns {{verified: boolean, text: string}} Injection result
  */
-function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
+function injectChunksIntoPrompt(chunksToInject, settings, debugData, nonce=makePromptSentinel(), preparedBlocks=null) {
     // Defence in depth: a caller must never inject an absent-text placeholder.
     chunksToInject = chunksToInject.filter(hasInjectableText);
     if (chunksToInject.length === 0) {
@@ -2099,7 +2128,7 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
     // If all chunks go to the same position, use the simple single-injection path
     if (positionGroups.size === 1) {
         const [_, group] = [...positionGroups.entries()][0];
-        const insertedText = buildNestedInjectionText(group.chunks, settings);
+        const insertedText = preparedBlocks?.[0] ?? wrapPromptBlock(buildNestedInjectionText(group.chunks, settings),nonce,0);
 
         console.log(`[VectHare Injection Control] Single position injection: position="${group.position}", depth=${group.depth}, chunks=${group.chunks.length}, textLength=${insertedText.length}`);
         // Do not log prompt contents.
@@ -2136,7 +2165,7 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
 
         return {
             verified: Boolean(injectionVerified),
-            text: insertedText,
+            text: insertedText,nonce,
             groups: [{
                 tag: EXTENSION_PROMPT_TAG,
                 position: group.position,
@@ -2144,6 +2173,8 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
                 text: insertedText,
                 charCount: insertedText.length,
                 chunkHashes: group.chunks.map(chunk => chunk.hash),
+                recordIds: group.chunks.map(frequencyRecordKey),
+                chunks: group.chunks,
                 verified: Boolean(injectionVerified)
             }]
         };
@@ -2163,7 +2194,7 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
     for (const [key, group] of positionGroups) {
         // Build text for this position group (no global wrapper - that goes on outermost only)
         // Each position group is a separate prompt block and needs its own global wrappers.
-        const groupText = buildNestedInjectionText(group.chunks, settings);
+        const groupText = preparedBlocks?.[groupIndex] ?? wrapPromptBlock(buildNestedInjectionText(group.chunks, settings),nonce,groupIndex);
 
         console.log(`[VectHare Injection Control] Position group ${groupIndex + 1}/${positionGroups.size}: key="${key}", chunks=${group.chunks.length}, textLength=${groupText.length}`);
         group.chunks.forEach((chunk, idx) => {
@@ -2208,6 +2239,8 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
             text: groupText,
             charCount: groupText.length,
             chunkHashes: group.chunks.map(chunk => chunk.hash),
+            recordIds: group.chunks.map(frequencyRecordKey),
+            chunks: group.chunks,
             verified: Boolean(verified)
         });
         groupIndex++;
@@ -2216,7 +2249,7 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
     console.log(`[VectHare Injection Control] Injection complete: ${allVerified ? '✓ All verified' : '✗ Some failed'}, ${allTexts.length} groups`);
 
     return {
-        verified: allVerified,
+        verified: allVerified,nonce,
         groups: registeredGroups,
         text: allTexts.join('\n\n---\n\n') // Combine for debug output
     };
@@ -2773,30 +2806,46 @@ export async function rearrangeChat(chat, settings, type) {
 
         console.log(`[VectHare Deduplication] ✅ ${chunksToInject.length} chunks will proceed to injection`);
 
-        // === STAGE 10: Inject into prompt ===
+        // === STAGE 10: C10 token budget, then prompt registration ===
         job.assertCurrent();
-        const injection = injectChunksIntoPrompt(chunksToInject, settings, debugData);
-        // Prompt registration is NOT final host inclusion: C10 still controls the
-        // final budget/selection receipt. Record uncertain receipts without spending
-        // a frequency slot. This also never consumes an activation on dry runs.
-        const activationChatId = chatIdForActivation();
-        const lastUser = [...chat].reverse().find(m => m?.is_user);
-        const turnId = lastUser?.extra?.vecthareMessageUid ?? lastUser?.extra?.vecthare_message_uid ??
-            (lastUser ? `legacy-user-index:${chat.lastIndexOf(lastUser)}` : null);
-        for (const chunk of chunksToInject) {
-            if (!chunk.conditions?.enabled || !chunk.conditions.rules?.some(rule => rule.type === 'frequency')) continue;
-            const record = frequencyRecordKey(chunk);
-            const scope = chunk.conditions.rules.find(rule => rule.type === 'frequency')?.settings?.scope === 'session' ? 'session' : 'conversation';
-            activationFrequencyLedger.recordActivation({
-                chatId:activationChatId,collectionKey:collectionKeyForFrequency(chunk,settings),
-                recordId:record,turnId,scope,messageCount:chat.length,
-                receipt:{status:injection.verified ? 'registered' : 'unknown',verified:false,recordIds:[record]}
-            });
+        const injectionNonce=makePromptSentinel();
+        const budgetPlan=await planBudgetedInjection(chunksToInject,settings,injectionNonce);
+        job.assertCurrent();
+        for(const excluded of budgetPlan.dropped)recordChunkFate(debugData,excluded.chunk.hash,'token_budget','dropped',excluded.reason);
+        for(const item of budgetPlan.trimmed)recordChunkFate(debugData,item.chunk.hash,'token_budget','trimmed','token-budget',
+            {originalChars:item.chunk.text.length,trimmedChars:item.chosen.text.length});
+        debugData.promptBudget={availableTokens:budgetPlan.availableTokens,tokens:budgetPlan.tokens,
+            method:budgetPlan.method,reason:budgetPlan.budget.reason,dropped:budgetPlan.dropped.length,
+            trimmed:budgetPlan.trimmed.length,contextTokens:budgetPlan.budget.contextTokens};
+        chunksToInject=budgetPlan.chosen;
+        if(!chunksToInject.length) {
+            clearVectHarePrompts(settings);
+            debugData.stages.injected=[];debugData.stats.actuallyInjected=0;
+            debugData.injection={verified:false,finalReceipt:{status:'notIncluded',verified:false},
+                text:'',groups:[],charCount:0};
+            addTrace(debugData,'token_budget','No chunks fit available context',debugData.promptBudget);
+            job.assertCurrent();setLastSearchDebug(debugData);return;
         }
+        const injection=injectChunksIntoPrompt(chunksToInject,settings,debugData,injectionNonce,budgetPlan.renderedBlocks);
+        const activationChatId=chatIdForActivation();
+        const lastUser=[...chat].reverse().find(m=>m?.is_user);
+        const turnId=lastUser?.extra?.vecthareMessageUid ?? lastUser?.extra?.vecthare_message_uid ??
+            (lastUser?`legacy-user-index:${chat.lastIndexOf(lastUser)}`:null);
+        if(injection.verified) {
+            const receiptGroups=injection.groups.map(group=>({tag:group.tag,text:group.text,
+                recordIds:group.recordIds,frequencyEntries:group.chunks.filter(chunk=>
+                    !budgetPlan.trimmed.some(item=>item.chosen===chunk) &&
+                    chunk.conditions?.enabled && chunk.conditions.rules?.some(rule=>rule.type==='frequency')).map(chunk=>({
+                    chatId:activationChatId,collectionKey:collectionKeyForFrequency(chunk,settings),
+                    recordId:frequencyRecordKey(chunk),turnId,
+                    scope:chunk.conditions.rules.find(rule=>rule.type==='frequency')?.settings?.scope==='session'?'session':'conversation',
+                    messageCount:chat.length
+                }))}));
+            promptReceipts.register({chatId:activationChatId,turnId,nonce:injection.nonce,groups:receiptGroups});
+        } else promptReceipts.invalidate();
 
-
-        console.log(`\n✅ VectHare: Successfully injected ${chunksToInject.length} chunk(s) into prompt`);
-        console.log(`   Verification: ${injection.verified ? '✓ PASSED' : '✗ FAILED'}`);
+        console.log(`\n✅ VectHare: Registered ${chunksToInject.length} chunk(s) for prompt assembly`);
+        console.log(`   Registration: ${injection.verified ? '✓ CONFIRMED (final assembly pending)' : '✗ FAILED'}`);
         console.log(`   Total characters injected: ${injection.text.length}\n`);
 
         // Finalize debug data
@@ -2805,6 +2854,8 @@ export async function rearrangeChat(chat, settings, type) {
         debugData.stats.skippedDuplicates = skippedDuplicates.length;
         debugData.injection = {
             verified: injection.verified,
+            finalReceipt:{status:injection.verified?'registered':'unknown',verified:false},
+            receiptNonce:injection.nonce,
             text: injection.text,
             position: settings.position,
             depth: settings.depth,
@@ -2813,11 +2864,12 @@ export async function rearrangeChat(chat, settings, type) {
             charCount: injection.text.length
         };
 
-        addTrace(debugData, 'final', 'PIPELINE COMPLETE - SUCCESS', {
+        addTrace(debugData, 'final', 'PROMPT REGISTERED - FINAL INCLUSION PENDING', {
             injectedCount: chunksToInject.length,
             skippedDuplicates: skippedDuplicates.length,
             injectedHashes: chunksToInject.map(c => c.hash),
-            totalTokens: injection.text.length,
+            totalTokens: budgetPlan.tokens,
+            tokenMethod:budgetPlan.method,
             position: settings.position,
             depth: settings.depth,
             verified: injection.verified
@@ -2826,7 +2878,7 @@ export async function rearrangeChat(chat, settings, type) {
 
         job.assertCurrent();
             setLastSearchDebug(debugData);
-        console.log(`VectHare: ✅ Injected ${chunksToInject.length} chunks (${skippedDuplicates.length} skipped - already in context)`);
+        console.log(`VectHare: ✅ Registered ${chunksToInject.length} chunks (${skippedDuplicates.length} skipped - already in context)`);
 
     } catch (error) {
         if (error instanceof StaleJobError) return;

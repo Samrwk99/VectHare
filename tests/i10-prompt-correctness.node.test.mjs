@@ -54,6 +54,10 @@ function makeRuntime() {
         getCollectionMeta: id => collectionMeta.get(id),
         substituteParams: x => x,
         recordChunkFate: () => {},
+        promptReceipts:{invalidate(){}},
+        makePromptSentinel:()=> '0123456789abcdef0123456789abcdef',
+        wrapPromptBlock:(text,nonce,i)=>`<!-- VH:${nonce}:${i}:BEGIN -->\n${text}\n<!-- VH:${nonce}:${i}:END -->`,
+        frequencyRecordKey:chunk=>String(chunk.recordId??chunk.hash),
         getCurrentChatId: () => null,
     };
     vm.createContext(scope);
@@ -127,11 +131,11 @@ test('#65 global and collection wrappers are applied independently to each posit
     assert.equal(result.verified, true);
     for (const tag of ['3_vecthare_pos0', '3_vecthare_pos1']) {
         const value = extension_prompts[tag].value;
-        assert.match(value, /^<memories>\nGLOBAL CONTEXT/);
+        assert.match(value, /<memories>\nGLOBAL CONTEXT/);
         assert.match(value, /COLLECTION CONTEXT/);
         assert.match(value, /<group>/);
         assert.match(value, /<item>/);
-        assert.match(value, /<\/memories>$/);
+        assert.match(value, /<\/memories>/);
     }
     assert.match(extension_prompts['3_vecthare_pos0'].value, /first/);
     assert.doesNotMatch(extension_prompts['3_vecthare_pos0'].value, /second/);
@@ -143,8 +147,8 @@ test('#65 single-position wrapping remains unchanged', () => {
     const result = scope.injectChunksIntoPrompt([{ hash: 'x', collectionId: 'C', text: 'memory' }],
         { position: 0, depth: 2, rag_context: 'context', rag_xml_tag: 'root' }, {});
     assert.equal(result.verified, true);
-    assert.match(extension_prompts['3_vecthare'].value, /^<root>\ncontext/);
-    assert.match(extension_prompts['3_vecthare'].value, /<\/root>$/);
+    assert.match(extension_prompts['3_vecthare'].value, /<root>\ncontext/);
+    assert.match(extension_prompts['3_vecthare'].value, /<\/root>/);
 });
 
 test('#29 dormant World Info path uses a separate tag; normal cleanup also clears it', async () => {

@@ -216,5 +216,7 @@ test('C08 integration: collection and chunk paths both receive the WI snapshot',
 test('C08 integration: old condition-stage accounting removed and post-injection path exists',()=>{
     const source=src('core/chat-vectorization.js');
     assert.doesNotMatch(source,/scopedActivationHistory\.record\(/);
-    assert.match(source,/const injection = injectChunksIntoPrompt\(chunksToInject, settings, debugData\);[\s\S]*?activationFrequencyLedger\.recordActivation\(/);
+    assert.match(source,/const injection=injectChunksIntoPrompt\(chunksToInject,settings,debugData,injectionNonce,budgetPlan\.renderedBlocks\)/);
+    assert.match(source,/promptReceipts\.register\(/);
+    assert.match(src('core/prompt-receipt-runtime.js'),/activationFrequencyLedger\.recordActivation\(/);
 });
