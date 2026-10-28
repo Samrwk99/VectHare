@@ -1015,3 +1015,23 @@ S05 adds offline-tested **internal v2 scoped read adapters** for Qdrant/Milvus, 
 ## S06 cumulative checkpoint (developer test build)
 
 S06 adds `lib/s06-qdrant.js`, a Qdrant v2 **internal disposable-test** adapter with schema inspection, full scope filters, controlled fixture writes and independent readback. **It does not reactivate public reads or writes.** The new API retains S01–S05 legacy route blocks; do not deploy over valuable data. See `S06-CHANGELOG.md`, `S06-VERIFICATION.md`, `S06-CAPABILITY-MATRIX.json`, and `S06-NEXT-STEPS.md`.
+
+## S07 safety checkpoint (3.2.7-s07.0)
+
+S07 adds an **internal, disposable-fixture-only** Milvus v2 adapter in
+`lib/s07-milvus.js`, with strict physical-schema and vector-index inspection,
+canonical UUID primary keys, complete scalar ownership fields, verified
+query/get/list validation, a deliberately bounded offset-page contract, and
+scope-qualified insert/upsert/delete with readback and conservative errors.
+It is **not registered on the HTTP routes**, and it does not enable writes,
+legacy migration, verified inventory/export, or automatic collection recreation.
+
+The Milvus v2 schema uses explicit fixed columns, a VarChar `physicalId`
+primary key with AutoID disabled, JSON metadata/embedding, a FloatVector field,
+and scalar user/collection/source/branch/record identifiers. Provisioning is
+restricted to an explicitly marked disposable fixture and refuses existing
+collections. **Milvus upsert is not atomic revision CAS**; public updates and
+writes stay denied until server-wide writer exclusion and live acceptance.
+
+Use `npm run test:s07` and `npm run check:s07` for offline checks. Read
+`S07-VERIFICATION.md` and `S07-NEXT-STEPS.md` before attempting integration.
