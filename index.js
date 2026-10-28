@@ -7,7 +7,7 @@
  * All chunk operations go through unified /chunks/* endpoints.
  * Backend is specified via `backend` parameter in request body.
  *
- * @version 3.2.4-s04.0
+ * @version 3.2.5-s05.0
  */
 
 import path from 'node:path';
@@ -22,9 +22,11 @@ import { authenticatedContext, forbidOwnerSpoof, validateClientConfig,
 import { BackendPool } from './lib/s03-backends.js';
 import { safeLegacyPhysicalName } from './lib/s02-identity.js';
 import { registerS04Routes } from './lib/s04-routes.js';
+import { registerS05Routes } from './lib/s05-routes.js';
+import { validateVector as validateS05Vector } from './lib/s05-contract.js';
 
 const pluginName = 'similharity';
-const pluginVersion = '3.2.4-s04.0';
+const pluginVersion = '3.2.5-s05.0';
 
 /**
  * Initialize the plugin
@@ -62,6 +64,7 @@ export async function init(router) {
     router.use(legacyReadBoundary);
     // S04 endpoints are preflight/status-only. No public mutation dispatch.
     registerS04Routes(router);
+    registerS05Routes(router);
     // NOTE: S02 registry mappings are reservations only; this route exposes
     // no mutation or claim that the physical collection belongs to the user.
     router.post('/v2/identity/resolve', async (req,res) => {
@@ -653,6 +656,7 @@ export async function init(router) {
             }
 
             const embedding = await getEmbeddingForSource(source, text, model, req.user.directories, req);
+            validateS05Vector(embedding, embedding?.length);
             res.json({ success: true, embedding });
 
         } catch (error) {
@@ -674,6 +678,11 @@ export async function init(router) {
             }
 
             const embeddings = await getVectorsForSource(source, texts, model, req.user.directories, req);
+            if (!Array.isArray(embeddings) || embeddings.length !== texts.length ||
+                !embeddings.every(v => Array.isArray(v) && v.length === embeddings[0]?.length)) {
+                throw new Error('S05_BATCH_EMBEDDING_INVALID');
+            }
+            for (const vector of embeddings) validateS05Vector(vector, embeddings[0].length);
             res.json({ success: true, embeddings });
 
         } catch (error) {
@@ -921,6 +930,12 @@ export async function init(router) {
                 vector = await getEmbeddingForSource(source, searchText, model, req.user.directories, req);
             }
 
+            // S05 rejects malformed/oversized search vectors before dispatch.
+            validateS05Vector(vector, vector?.length);
+            if (!Number.isSafeInteger(topK) || topK < 1 || topK > 100 ||
+                typeof threshold !== 'number' || !Number.isFinite(threshold)) {
+                return res.status(400).json({success:false,code:'S05_QUERY_LIMIT_INVALID'});
+            }
             const scopedBackend = await requestBackend(req, backend);
             const handler = getBackendHandler(backend, req, scopedBackend);
             const results = await handler.query(collectionId, vector, topK, threshold, source, model, req.user.directories, {

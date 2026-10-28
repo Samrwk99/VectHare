@@ -1007,3 +1007,7 @@ Run `npm run test:s04` and `npm run check:s04` for cumulative offline checks.
 See `S04-CHANGELOG.md`, `S04-VERIFICATION.md`, `S04-CAPABILITY-MATRIX.json`,
 and `S04-NEXT-STEPS.md`. The authenticated preflight request validates a
 proposed operation; it does **not** grant permission or store vector data.
+
+## S05 checkpoint notice (3.2.5-s05.0)
+
+S05 adds offline-tested **internal v2 scoped read adapters** for Qdrant/Milvus, strict record/embedding/inventory validation, and **preflight-only** HTTP read routes. They are not public active read routes. All S01 mutation blocks and S03 legacy shared-read restrictions remain in place. New schema/migration and source-ownership attestation are not completed. See `S05-CHANGELOG.md`, `S05-VERIFICATION.md` and `S05-NEXT-STEPS.md` before deploying this checkpoint.

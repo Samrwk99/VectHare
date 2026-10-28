@@ -10,6 +10,8 @@ import { authenticatedContext, forbidOwnerSpoof, validateClientConfig,lookupAuth
     legacyReadBoundary,s03SensitiveRouteBoundary,AccessError,exposedSafeSource } from '../lib/s03-security.js';
 import { safeLegacyPhysicalName } from '../lib/s02-identity.js';
 import { registerS04Routes } from '../lib/s04-routes.js';
+import {registerS05Routes} from '../lib/s05-routes.js';
+import {validateVector as validateS05Vector} from '../lib/s05-contract.js';
 const root=path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const noop={log(){},warn(){},error(){},debug(){}};
 function resp(){return {statusCode:200,payload:null,status(n){this.statusCode=n;return this;},json(x){this.payload=x;return this;}};}
@@ -26,7 +28,9 @@ async function registered(pool) {
                 legacyReadBoundary,s03SensitiveRouteBoundary,AccessError,exposedSafeSource},
             './lib/s03-backends.js':{BackendPool:class {constructor(){return pool;}}},
             './lib/s02-identity.js':{safeLegacyPhysicalName},
-            './lib/s04-routes.js':{registerS04Routes}
+            './lib/s04-routes.js':{registerS04Routes},
+            './lib/s05-routes.js':{registerS05Routes},
+            './lib/s05-contract.js':{validateVector:validateS05Vector}
         };
         assert.ok(objects[specifier],`unexpected import: ${specifier}`);
         const obj=objects[specifier];
