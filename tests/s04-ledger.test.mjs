@@ -9,7 +9,7 @@ const err=(fn,code)=>assert.rejects(fn,e=>e.code===code);
 test('S04 ledger persists private, hashed receipts after new instance and enforces legal transitions',async()=>fixture(async(ledger,c,dir)=>{
  const p=planMutation(c,sample());await ledger.writeNew(p);
  const l2=new OperationLedger(c);assert.equal((await l2.read(p.operationId)).state,'PREPARED');
- await err(()=>ledger.writeNew(p),'EEXIST');
+ await err(()=>ledger.writeNew(p),'S04_OPERATION_EXISTS');
  await ledger.advance(p.operationId,'SUBMITTED');await ledger.advance(p.operationId,'UNCERTAIN',{code:'TIMEOUT'});
  await l2.advance(p.operationId,'VERIFIED');
  await err(()=>ledger.advance(p.operationId,'FAILED'),'S04_TRANSITION_DENIED');
@@ -33,5 +33,5 @@ test('S04 lock refuses competing processes and never performs operation twice',a
   await err(()=>new OperationLedger(c).withRecordLock(p,async()=>{}),'S04_OPERATION_BUSY');
  });
  await ledger.writeNew(p);
- await err(()=>ledger.writeNew(p),'EEXIST');
+ await err(()=>ledger.writeNew(p),'S04_OPERATION_EXISTS');
 }));

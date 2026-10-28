@@ -6,7 +6,7 @@ const sha=s=>createHash('sha256').update(s).digest('hex');
 async function fixture(fn){const dir=await fs.mkdtemp(path.join(os.tmpdir(),'s04-engine-'));try{const ctx={userScopeId:'alice',vectorsPath:dir};const records=new Map();let writes=0,failWrite=false,failRead=false;
  const backend={async getRecord(p){if(failRead)throw Error('read failure');return records.get(p.physicalId)??null;},
   async insertRecord(p,payload){writes++;records.set(p.physicalId,item(p,payload));if(failWrite)throw Error('lost response');},
-  async updateRecord(p,payload){writes++;records.set(p.physicalId,{...item(p,payload),vector:payload.vector??records.get(p.physicalId)?.vector});if(failWrite)throw Error('lost response');},
+  async updateRecord(p,payload){writes++;const old=records.get(p.physicalId);records.set(p.physicalId,{...item(p,payload),...(p.action==='metadata'?{textHash:old?.textHash,vectorHash:old?.vectorHash}:{}),vector:payload.vector??old?.vector});if(failWrite)throw Error('lost response');},
   async deleteRecord(p){writes++;records.delete(p.physicalId);if(failWrite)throw Error('lost response');}};
  const authorize=async p=>({authorized:true,ownerVerified:true,mutationContractVerified:true,collectionKey:p.collectionKey,backend:p.backend});
  const ledger=new OperationLedger(ctx),engine=new MutationEngine({ledger,adapter:backend,authorize});

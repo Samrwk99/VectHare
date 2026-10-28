@@ -1,0 +1,1505 @@
+{
+  "checkpoint": "F04",
+  "extensionVersion": "2.2.0-alpha.s11.9-f04",
+  "pluginVersion": "3.2.10-s10.8-f04",
+  "pluginSourceFingerprint": "1d13562e109129ca487f85eab24f1a5681b7b6f1fcb651c5d9c95bae35977e67",
+  "fileCount": 374,
+  "files": [
+    {
+      "path": "VectHare/C01-PLUGIN-SOURCE-AUDIT.json",
+      "sha256": "717d0f8da7cb6c9080b89cd51186d213e89581702425a8a30bdc82f3c91531e8"
+    },
+    {
+      "path": "VectHare/C05-PLUGIN-SOURCE-AUDIT.json",
+      "sha256": "8a449badb429f8b9b48c7813cd6a60c243b4bc6c2c33dbc609917364eecb43a5"
+    },
+    {
+      "path": "VectHare/C08-RELEASE-MANIFEST.json",
+      "sha256": "6c4941c87d43dc0972ceb19ff76de7a4bc07870fb7b8041bcb010ec7c082a858"
+    },
+    {
+      "path": "VectHare/C09-RELEASE-MANIFEST.json",
+      "sha256": "71f9a4bde8c31683d5e061278d08b8c23801f0236d588c0c7800eecd628e7f4a"
+    },
+    {
+      "path": "VectHare/C09-TEST-RESULTS.json",
+      "sha256": "ea7d209c1856f979ec48e554f7078ee3b678e8adbbe9bd9e92e909ba395cef7a"
+    },
+    {
+      "path": "VectHare/C10-RELEASE-MANIFEST.json",
+      "sha256": "c81bc9561c453b9d6f360161f6dd44c03b1c964b5e84a5fda389462ecf1f5224"
+    },
+    {
+      "path": "VectHare/C11-PLUGIN-CONTRACT-AUDIT.json",
+      "sha256": "48e7fd9b8ff2ecb785d734341196df4274745c18df74f5f64884e4004b436cb5"
+    },
+    {
+      "path": "VectHare/C11-RELEASE-MANIFEST.json",
+      "sha256": "881d414221f43f7c810259af4327fcce85a61f37a8c8c8159cee93ac9ed8518e"
+    },
+    {
+      "path": "VectHare/C12-RELEASE-MANIFEST.json",
+      "sha256": "bacbcf031cd6d899ec74c2ea4769153dbe86b0628e2b3116467eb08f33fa17e7"
+    },
+    {
+      "path": "VectHare/C13-RELEASE-MANIFEST.json",
+      "sha256": "32d24de4b02ff3b8cc1cb75812a48bc4f5be287d9dae87274504dae7909d6e9c"
+    },
+    {
+      "path": "VectHare/C14-PLUGIN-CONTRACT-AUDIT.json",
+      "sha256": "b7e3d36e9b8267ddea50d29f5c7162ccbe54f8893a3e2011745cb99de64b8bad"
+    },
+    {
+      "path": "VectHare/E02-RELEASE-MANIFEST.json",
+      "sha256": "ceb610fbe8b3eae89712e61f912a35f29e1800caccef17654b14c6631f01e052"
+    },
+    {
+      "path": "VectHare/E02-RUNTIME-POLICY.json",
+      "sha256": "97d4f48eac19a387c7ca2a45e98a205ea3b22609692e94a0108eaa3c571597bb"
+    },
+    {
+      "path": "VectHare/E03-RELEASE-MANIFEST.json",
+      "sha256": "e5b2f995fda8f25845ccf843e0bd9ff13bcf64fa42ffacfe2eba4c85dc4c78d6"
+    },
+    {
+      "path": "VectHare/E04-RELEASE-MANIFEST.json",
+      "sha256": "1272db8f1b4fbee56de6f8bc05f5c9ae3d7434bda5741e294f48e34854f2c276"
+    },
+    {
+      "path": "VectHare/E04-STATIC-VERIFY-OUTPUT.json",
+      "sha256": "e29eae48f841cf57bccbf4283fea1dc6ad7017d232c4918581edae1921555d15"
+    },
+    {
+      "path": "VectHare/E05-CAPABILITY-ASSESSMENT.json",
+      "sha256": "08f015c88073810ed9c163a5eaf23820cc4c4433dd8beb2dd6e87cc5fde53d9c"
+    },
+    {
+      "path": "VectHare/E05-E02-STATIC-OUTPUT.json",
+      "sha256": "ee3912797b3674bf784ab9eae0d019694a12d74dba51747c904152b214fc5ff9"
+    },
+    {
+      "path": "VectHare/E05-E03-STATIC-OUTPUT.json",
+      "sha256": "bd259e2dd91704acaa5ad15d0c80f53c948e59c7f4748d4269b66ace70c13781"
+    },
+    {
+      "path": "VectHare/E05-E04-STATIC-OUTPUT.json",
+      "sha256": "e29eae48f841cf57bccbf4283fea1dc6ad7017d232c4918581edae1921555d15"
+    },
+    {
+      "path": "VectHare/E05-E05-STATIC-OUTPUT.json",
+      "sha256": "b8862575697f3c9c9e9b0e0771fd2aaf4f10a1e6600b9395d6553c774ab15e74"
+    },
+    {
+      "path": "VectHare/E05-RELEASE-MANIFEST.json",
+      "sha256": "b30d5e71e85254fc9bb055c07217eed7aec03767d3e664bc54a8029e7a183f93"
+    },
+    {
+      "path": "VectHare/E06-CAPABILITY-ASSESSMENT.json",
+      "sha256": "d9d096b54e162d6f09cac40679953cb17b00a79599278c8b99bcd4ba2c350921"
+    },
+    {
+      "path": "VectHare/E06-PARTITIONED-TEST-RESULTS.json",
+      "sha256": "e7132fe04a8512f55d51528ad5b78eb33e964801c8f62231aa0add31d1444d93"
+    },
+    {
+      "path": "VectHare/E06-RELEASE-MANIFEST.json",
+      "sha256": "0763aff1107d10ab9aa85054151937fa31f05cadb61e0be480568d752ef2f64a"
+    },
+    {
+      "path": "VectHare/E06-STATIC-VERIFICATION.json",
+      "sha256": "f3f0c4cf9dce87592ee8dc85a4bee56d917d96b3f5eb9a329421d8644db24b80"
+    },
+    {
+      "path": "VectHare/F01-CAPABILITY-MATRIX.json",
+      "sha256": "a2946a7f46e6eda670e0004ef25ec6c051d9865a9d73eb503129499d1c745653"
+    },
+    {
+      "path": "VectHare/F01-SOURCE-MANIFEST.json",
+      "sha256": "baeaa16690da6e9dfaf99249c49b6adac8287d431d2be6d42d4a8e8e5bd56951"
+    },
+    {
+      "path": "VectHare/F02-CAPABILITY-MATRIX.json",
+      "sha256": "8c3970ea49d523f00d4c2214eba52e63a355d3d7466f9231b96b12caa32e4c35"
+    },
+    {
+      "path": "VectHare/F02-SOURCE-MANIFEST.json",
+      "sha256": "e3a79369c07efdba54f6d4536593e7a8129fa2529db42bc2dd46e0838c029a5a"
+    },
+    {
+      "path": "VectHare/F03-CAPABILITY-MATRIX.json",
+      "sha256": "8fce3bfaec6b1c4d476a724fd251b031b752dba5ae7e553cb6b591af8807eb34"
+    },
+    {
+      "path": "VectHare/F03-SOURCE-MANIFEST.json",
+      "sha256": "0509f77fda18a8cde4b67bbe4c10d1d14e2d6d22326488cc9f134293466e26d1"
+    },
+    {
+      "path": "VectHare/FINAL15-COMPATIBILITY-AUDIT.json",
+      "sha256": "599c592162923f93e3434f078e58e541e5fed6bf4c17fbeb38fe9ae46124057c"
+    },
+    {
+      "path": "VectHare/FINAL15-RELEASE-MANIFEST.json",
+      "sha256": "afaba4fcc00bec71f27b251a1557422d1d0424da616bdda6f84e6f9e9b0cb603"
+    },
+    {
+      "path": "VectHare/FINAL15-TEST-RESULTS.json",
+      "sha256": "93c4e989725ce741453ad62f77e06f0f053c313c3dd67ab5a1d7759e557949f6"
+    },
+    {
+      "path": "VectHare/S11-CAPABILITY-MATRIX.json",
+      "sha256": "86665d841dfbab8d08389d9f1ca0bb50c10e68e5786696b5065e7093e36443c3"
+    },
+    {
+      "path": "VectHare/S11-SOURCE-MANIFEST.json",
+      "sha256": "1014cb3ee61b714f88437563b654d602eb649f7933eff280e2e6f510feb17471"
+    },
+    {
+      "path": "VectHare/S11.1-PATCH-MANIFEST.json",
+      "sha256": "ba5daa645e1eccdd444946368bbdf4c2f0415c00748632a00d84849e7f5efaa2"
+    },
+    {
+      "path": "VectHare/S11.4-CAPABILITY-MATRIX.json",
+      "sha256": "cb437f3603d4d5d98379d0cb97c8b34d57d9137f37cf4ba8d02c85b17e5249c8"
+    },
+    {
+      "path": "VectHare/S11.4-SOURCE-MANIFEST.json",
+      "sha256": "8f9cca0a460adca7a59fd676e5667490a3adc2361a6d2a5944df50e2003ebe3a"
+    },
+    {
+      "path": "VectHare/backends/backend-interface.js",
+      "sha256": "3125b5cfdc22786cbc99445bcf3cb703a36ba8f44472b8cb089fa7456a660e22"
+    },
+    {
+      "path": "VectHare/backends/backend-manager.js",
+      "sha256": "fa997d648d528cd9b29562228203131c827fe3098013b24d3793de4c32e94375"
+    },
+    {
+      "path": "VectHare/backends/lancedb.js",
+      "sha256": "27c9222120f78547ac609aed376c786bb4a9e6ed18475f10859f24e231ad033e"
+    },
+    {
+      "path": "VectHare/backends/milvus.js",
+      "sha256": "baeb53bccb20c0eb8c3b3da58fcf2213a6269b319b9b5dbddb217d8e291746be"
+    },
+    {
+      "path": "VectHare/backends/provider-params.js",
+      "sha256": "863653d828968c8c198b6b77ca5a973b9375deffbf131d472c25aa1f66193809"
+    },
+    {
+      "path": "VectHare/backends/qdrant.js",
+      "sha256": "1705a46c527bb7c0203bef09bfafc0ead7f3305b2196b7fd12a2009ec8d8f408"
+    },
+    {
+      "path": "VectHare/backends/standard.js",
+      "sha256": "d6fedfa164f686733ece4d6f63e15bc8efca9b1fd5baa259602f18dd605a8ba9"
+    },
+    {
+      "path": "VectHare/bm25-test.js",
+      "sha256": "017415823b6ce651158b03c6a66e9328b3c8ac14378fbba25a1639dc3401c078"
+    },
+    {
+      "path": "VectHare/core/bm25-scorer.js",
+      "sha256": "de80dc5390ed2b160d9871c09abc19674466c21ebfed1030f352e0d1a41d0a35"
+    },
+    {
+      "path": "VectHare/core/c11-export.js",
+      "sha256": "ddb4f18c9a54f6efeea9dd7fb21b9cab058ec68ea11c24050a59ca8f844d8d6f"
+    },
+    {
+      "path": "VectHare/core/chat-job-runtime.js",
+      "sha256": "26fd02e1da007fb304966630414d9ce965d4b130dfde98a2b1601fd749f96fa5"
+    },
+    {
+      "path": "VectHare/core/chat-vectorization.js",
+      "sha256": "f95b34e6eb67fe44bf4fa7aad7d02a8c2dd5facbbe445228264ea513068be386"
+    },
+    {
+      "path": "VectHare/core/chunk-groups.js",
+      "sha256": "1fe02a68b153c8d297c50457a2319204bbf45e494066607ab04bda4300a5e02f"
+    },
+    {
+      "path": "VectHare/core/chunking.js",
+      "sha256": "e1ef5e266a5421673c0c597f2165a55166924b2076aac0e8f0614071cf6edbda"
+    },
+    {
+      "path": "VectHare/core/collection-export.js",
+      "sha256": "5f62625e7871ac156a39a6fd68ebbca95ce8ba6d50abf454b362804318cc6ba3"
+    },
+    {
+      "path": "VectHare/core/collection-ids.js",
+      "sha256": "872ffc12ed4529d1d6005dffca71fef9f634a15f64dbd060a64534d2a062953a"
+    },
+    {
+      "path": "VectHare/core/collection-loader.js",
+      "sha256": "93b09a54ba97528f612b6a664cc5a974c4309fe181a917764c54d9249c6d1903"
+    },
+    {
+      "path": "VectHare/core/collection-metadata.js",
+      "sha256": "e0c4b28325b86967fc38e027aa1e6bd2b058129150450675b75e7ed54e765c2a"
+    },
+    {
+      "path": "VectHare/core/condition-rule-compat.js",
+      "sha256": "245193e946b4fd385b0d6efffeaa7153ed605ef74e15245b0ed2aab533c04d61"
+    },
+    {
+      "path": "VectHare/core/conditional-activation.js",
+      "sha256": "dde12395ff90675b20b5410845211604d527ad94abed18806c878886e17c9a1c"
+    },
+    {
+      "path": "VectHare/core/constants.js",
+      "sha256": "e0de5e3a5c75f5118aa065c206d6fd06983b5b72abecb70b59a441704efd5b28"
+    },
+    {
+      "path": "VectHare/core/content-types.js",
+      "sha256": "d3a911aa8a9371e805d8554f00cfd537271a90813ce44d8c5fecf800cb7f9aa8"
+    },
+    {
+      "path": "VectHare/core/content-vectorization.js",
+      "sha256": "1c55f700f963772139e5911f73f53e476c0932ea126decc3f18db34682179c8a"
+    },
+    {
+      "path": "VectHare/core/core-vector-api.js",
+      "sha256": "cb021d2c1c0d9b3cb8740f0c661e4f21313358572c79c231c4d16c6eade9d87a"
+    },
+    {
+      "path": "VectHare/core/destructive-safety.js",
+      "sha256": "8cbecd24cb0f3425b01d81bb96250160519b0952f04742d40b346ccd570bb726"
+    },
+    {
+      "path": "VectHare/core/emotion-classifier.js",
+      "sha256": "de158c9ec8316801dab99e9545c507607da5d0d78ac17e3f4feaa35c439e9e3b"
+    },
+    {
+      "path": "VectHare/core/emotion-embedding-provider.js",
+      "sha256": "6b624a8fca77e82a4859fa5866028ae485c80fa432a6b3d372f3b8889d14c24b"
+    },
+    {
+      "path": "VectHare/core/emotion-similarity.js",
+      "sha256": "794533448008c6c4f0cf01f52e4535e78a6557f44969518fb8484f1a9181b352"
+    },
+    {
+      "path": "VectHare/core/hybrid-search.js",
+      "sha256": "21fc679e87a78ecd44d91aa81c047a19c362dfe3b6d1d07afcbe8cf6671fb82d"
+    },
+    {
+      "path": "VectHare/core/job-context.js",
+      "sha256": "9cb2e0a65fff250c78774463813284cb0ea80ee34b3a35735e277aff55b8f586"
+    },
+    {
+      "path": "VectHare/core/keyword-boost.js",
+      "sha256": "583a392a4cd7f5971947fb417a18aec02e5207e459e084120d629e6d18e5b484"
+    },
+    {
+      "path": "VectHare/core/keyword-learner.js",
+      "sha256": "a3236ef6a5579c98255dbef5361be03868270af8c450b35b3acdef19eecf1464"
+    },
+    {
+      "path": "VectHare/core/lexical-provider.js",
+      "sha256": "b6c1b925beaa30b81b8d1a7325297e0da07d59cacdc60fb04af3576391ec9aa5"
+    },
+    {
+      "path": "VectHare/core/png-export.js",
+      "sha256": "43a3aeb742c8fda65fae2a8ff3950b5b2767935aec6de4b82decd31487ef115f"
+    },
+    {
+      "path": "VectHare/core/prompt-receipt-runtime.js",
+      "sha256": "01269c9a9ada26adc0e6c0f0fd294b64dba8dc3e92001a087f911bf7770a5ccb"
+    },
+    {
+      "path": "VectHare/core/providers.js",
+      "sha256": "5ba62178f6fe2a0a0176faf95e459b0cea1ef6e6418368a7154aefcf66e4e765"
+    },
+    {
+      "path": "VectHare/core/retrieval-planner.js",
+      "sha256": "d964e10ec80990f6c1d29ed682227862f9b729341b5590b7cc97b021f0775c66"
+    },
+    {
+      "path": "VectHare/core/scene-timeline.js",
+      "sha256": "34f39688c47ae5715f478abf4c6628f77c6afa3ec6d081aa179882021ea81468"
+    },
+    {
+      "path": "VectHare/core/scenes.js",
+      "sha256": "383496e2093468cf95d694797919d1db893327dd8b650a62fa565d9fb73d5e68"
+    },
+    {
+      "path": "VectHare/core/temporal-decay.js",
+      "sha256": "1df82b03b020b1081a1f0ced19b5714f1ef160d87b03c12b1f43805bf432b479"
+    },
+    {
+      "path": "VectHare/core/text-cleaning.js",
+      "sha256": "06a8c5d54d752dbb7110ef1cb98b55b5c6232cd840535d74e18b19da33aa0bff"
+    },
+    {
+      "path": "VectHare/core/vectorization-control.js",
+      "sha256": "d97b8c836385bca6b6bb92c6f73680913712df82decf8ba92c45276700b44d8f"
+    },
+    {
+      "path": "VectHare/core/world-info-integration.js",
+      "sha256": "f61f6371fac2cc0502d6358c5643bda30a6c0b535b0076d9bc8ac98705dc2731"
+    },
+    {
+      "path": "VectHare/diagnostics/activation-tests.js",
+      "sha256": "afb4bebced20d98b08d7109ce9076b54e3f65502171078984afa172c5a741476"
+    },
+    {
+      "path": "VectHare/diagnostics/configuration.js",
+      "sha256": "3876ba50b375e07cfddefc3b44ed5507ede51dd4ab138350466173cf4ee00153"
+    },
+    {
+      "path": "VectHare/diagnostics/index.js",
+      "sha256": "3a2693b8e06502f0f5a4b59b52c33b4dbab2c9fb61ffc82e0a935b74030a62a0"
+    },
+    {
+      "path": "VectHare/diagnostics/infrastructure.js",
+      "sha256": "48e827431dc54fc51eb3e0587f64c3397ec52242f0184b7824b70a196855a282"
+    },
+    {
+      "path": "VectHare/diagnostics/production-tests.js",
+      "sha256": "9fbc67c7c5b9e1623305911d1d2a6574e13656a19cceeba17df0167b0dcf3fa2"
+    },
+    {
+      "path": "VectHare/diagnostics/visualizer-tests.js",
+      "sha256": "943f01e88ecc402abc0cb1c032687374fcd7c7712f705057347140849449f5da"
+    },
+    {
+      "path": "VectHare/docs/e01/E01-RELEASE-MANIFEST.json",
+      "sha256": "d6d3fe4ffc8c820255a0c8b1a73af7bd9aa6602c2e11f5621d4592d09aeb94df"
+    },
+    {
+      "path": "VectHare/docs/e01/E01-SYNTAX-RESULTS.json",
+      "sha256": "1d7306b6c76e3e5bbb3c1bb325cc19f6c16285131eefe78028d25e69635c128e"
+    },
+    {
+      "path": "VectHare/docs/e01/E01-TEST-RESULTS.json",
+      "sha256": "95dcd60dadfd55dd8fb65653ecb40addb2493e7076767b1a36b42e1fe28a6ec3"
+    },
+    {
+      "path": "VectHare/docs/e01/capability-matrix.json",
+      "sha256": "bae73b3cca78685b4a924fad3c78e286f394b8ef50a010bd80bd8b5633cc60cf"
+    },
+    {
+      "path": "VectHare/docs/e01/plugin-call-inventory.json",
+      "sha256": "db4a3d67558b39de3639c4864b93626bbfdc3832473a8ec15e709789038fdafb"
+    },
+    {
+      "path": "VectHare/docs/e01/plugin-source-fingerprints.json",
+      "sha256": "a55d9965134233b61b6f51f28d9398c33add253f0817609d2fe2fb062a2758c6"
+    },
+    {
+      "path": "VectHare/docs/e01/source-baseline/backends/lancedb.js",
+      "sha256": "37a25211b3824c5aaa68c03e7bdce0694556d7fdc90e0bc3e1fbafbeb056752f"
+    },
+    {
+      "path": "VectHare/docs/e01/source-baseline/backends/milvus.js",
+      "sha256": "ecb3109f2cce16871c51c5863bdaecfc0ba5d31635e5ead623cf1c7a43c68aa8"
+    },
+    {
+      "path": "VectHare/docs/e01/source-baseline/backends/qdrant.js",
+      "sha256": "6db29216e81190eb7dd5ff6795c4e398387a6163cbeac7dbac907fd920aabf15"
+    },
+    {
+      "path": "VectHare/docs/e01/source-baseline/backends/standard.js",
+      "sha256": "0bb116860343427a7aa2687d2194ae25883d7d4db7e6575d2340558a4319b5e4"
+    },
+    {
+      "path": "VectHare/docs/e01/source-baseline/core/chat-vectorization.js",
+      "sha256": "8bb8ce945712671d0c9cdc48480324df05b368526c7498322f488bf68f1840c5"
+    },
+    {
+      "path": "VectHare/docs/e01/source-baseline/core/collection-export.js",
+      "sha256": "44e4cada6d181adfe55df86c5c6f021bd0a314ffa7e9a7c4b274ce749d09fd48"
+    },
+    {
+      "path": "VectHare/docs/e01/source-baseline/core/collection-loader.js",
+      "sha256": "0f9a4163ccc9220626fb4ff57d0b0ae2477c53f947cf8b9bfe4e3c6207942dd4"
+    },
+    {
+      "path": "VectHare/docs/e01/source-baseline/core/emotion-embedding-provider.js",
+      "sha256": "23485fa66c494941668102d0cb905f3cc51ba605887344dee0b37a2f5938f2ca"
+    },
+    {
+      "path": "VectHare/docs/e01/source-baseline/diagnostics/index.js",
+      "sha256": "3a26eddc7d8ce92f1a2c38054056f6a943d9916c3a810905edf7b71dc50d1e8c"
+    },
+    {
+      "path": "VectHare/docs/e01/source-baseline/diagnostics/infrastructure.js",
+      "sha256": "ed38c877d8889c6bffe055c6c80724403decdb8982d47937d318c129112095a9"
+    },
+    {
+      "path": "VectHare/docs/e01/source-baseline/diagnostics/production-tests.js",
+      "sha256": "ad4b94e81f2252cb412e080f3604095a3b1dadd5435ac99f464400205e7ada9a"
+    },
+    {
+      "path": "VectHare/docs/e01/source-baseline/index.js",
+      "sha256": "fa5d44dbfe0887012a5429f3b0e35c60d18f53cd92bfca2db61ba1b26cdb7b91"
+    },
+    {
+      "path": "VectHare/docs/e01/source-baseline/ui/database-browser.js",
+      "sha256": "376bb33f3eea37a905bd58b1ae9946de60f799528563c46e155d2cfb74e0b3b9"
+    },
+    {
+      "path": "VectHare/docs/e01/source-baseline/utils/c05-protected-credentials.js",
+      "sha256": "fac122223b5f70a835601cf8c88210ac01afe5ee875bbf35d9835e7d641a1e82"
+    },
+    {
+      "path": "VectHare/docs/e01/source-evidence.json",
+      "sha256": "cc576c98400df3f00ad8268f9446fa1060e1831823d34702ac3f200b588f13fc"
+    },
+    {
+      "path": "VectHare/docs/e02/runtime-policy-report.json",
+      "sha256": "97d4f48eac19a387c7ca2a45e98a205ea3b22609692e94a0108eaa3c571597bb"
+    },
+    {
+      "path": "VectHare/index.js",
+      "sha256": "5c8a54e36d660bf8a7ecc32b11f3f1e06c646e886c59f87b33535c9b8e03277d"
+    },
+    {
+      "path": "VectHare/manifest.json",
+      "sha256": "9726723b2925705fec7bf75d1c50060b4bd9a832a2ddd3a7a63766bcab54c548"
+    },
+    {
+      "path": "VectHare/package-lock.json",
+      "sha256": "4758a692897969c4f422d577f56a4d372b977eb1262621c21fa07d3eacd33e3f"
+    },
+    {
+      "path": "VectHare/package.json",
+      "sha256": "b41c3761434d1b123219f8a8441d44a370331ef47b30f85833b3c044f877aaa1"
+    },
+    {
+      "path": "VectHare/providers/webllm.js",
+      "sha256": "44e8deca18b8a9aa096dc6a89ad081a2543c33d7f30ba1f70c6a719be5338870"
+    },
+    {
+      "path": "VectHare/tests/backend-manager.test.js",
+      "sha256": "a0fe74bc22f9580d85168d3ed5193cf99d1fd2c8fe0e96c1b6fab4dded769bae"
+    },
+    {
+      "path": "VectHare/tests/backends.test.js",
+      "sha256": "58a6be7de92969ac4f4e9ae7e1da53247e940d5b587444e19fdef033b424d970"
+    },
+    {
+      "path": "VectHare/tests/bm25-scorer.test.js",
+      "sha256": "5cec14e3e16211afda2984b9a9fc4f1fdd568c306322964f3944a3cdb273590a"
+    },
+    {
+      "path": "VectHare/tests/c01-deletion.node.test.mjs",
+      "sha256": "6831ff46222f27c0d1fb84dcd0ff2d59b3cc0f8f5c0fc0759c30c3d0223277f7"
+    },
+    {
+      "path": "VectHare/tests/c01-plugin-contract.node.test.mjs",
+      "sha256": "b820e23952666c663272a12ce875930b842bb2baaaeee0caec86954ff468a9e8"
+    },
+    {
+      "path": "VectHare/tests/c02-integration.node.test.mjs",
+      "sha256": "1eb8dab64050382094a5a7a54ea684df330bad5a639cfa46a0029707aa28f474"
+    },
+    {
+      "path": "VectHare/tests/c02-operations.node.test.mjs",
+      "sha256": "94814b8e8571af91b720682868f5ce5b1fa95d86581eb5ca8c10a20296e36d23"
+    },
+    {
+      "path": "VectHare/tests/c03-jobs.node.test.mjs",
+      "sha256": "6c446eff6767cd267688023da6762e3183c922bcfbd159edc0009b80e0bedead"
+    },
+    {
+      "path": "VectHare/tests/c03-purge.node.test.mjs",
+      "sha256": "cdf69d7242948ff9b6412d51c827633b376a8902cb72ab05cfc26425db0eb76a"
+    },
+    {
+      "path": "VectHare/tests/c04-c06-c07-completion.node.test.mjs",
+      "sha256": "9a772a67a1bef0d7907889dd187e22a71c303fa54e73e1ae932ab7f6279ff0d1"
+    },
+    {
+      "path": "VectHare/tests/c04-c06-c11.node.test.mjs",
+      "sha256": "a5eb1b091c7e005906f6dd0f94ccbf426e7c55cd8b2afe96daece0edd371bcae"
+    },
+    {
+      "path": "VectHare/tests/c04b-c06b-c11b.node.test.mjs",
+      "sha256": "014b494ed3099524d0a19bda5d653cb982a3f91ce6991ed8340533d5994875bd"
+    },
+    {
+      "path": "VectHare/tests/c05-credentials.node.test.mjs",
+      "sha256": "4626c048bb3806eb7b090422cd99e690ffdbb196edbd1f2df3b817908dc61bc6"
+    },
+    {
+      "path": "VectHare/tests/c06-backend-cache.node.test.mjs",
+      "sha256": "8dd935594c4fdad4d38d6aca5d9788913d9d070ac4340e57d721755a9197e8fb"
+    },
+    {
+      "path": "VectHare/tests/c07-record-identity.node.test.mjs",
+      "sha256": "5e84f785c62f79b370a6fa65a7f22342e13ecc7d656b37216137bd4eb50a6806"
+    },
+    {
+      "path": "VectHare/tests/c08-activation.node.test.mjs",
+      "sha256": "c2d60538fd5652037a84b754c21ccc907351dd95c127df9f892e619fd726318e"
+    },
+    {
+      "path": "VectHare/tests/c09-hybrid.node.test.mjs",
+      "sha256": "f1cdd821a28d53d3f028d038d2dc00fef321954ec2453b605d926cc0470c9eb4"
+    },
+    {
+      "path": "VectHare/tests/c09-pipeline.node.test.mjs",
+      "sha256": "b355eaac4ab356f0ea058ff8aa43834d0b1e9812046b686691b5352b3c65c9b5"
+    },
+    {
+      "path": "VectHare/tests/c09-retrieval.node.test.mjs",
+      "sha256": "a94eb10e6aba52ac439f9ad080457b34074e95c094ec662ea2eb1655393df7db"
+    },
+    {
+      "path": "VectHare/tests/c10-durable-ledger.node.test.mjs",
+      "sha256": "cb38dc5a326005a57a3329d16e4291cf18755341f7ff3663e5d6515eb635316f"
+    },
+    {
+      "path": "VectHare/tests/c10-integration.node.test.mjs",
+      "sha256": "db3081afdfb1e5795e48eb07c1dc9c74a74b48ee62a18fa3d238742d650c8fe7"
+    },
+    {
+      "path": "VectHare/tests/c10-live-pipeline.node.test.mjs",
+      "sha256": "5e887ecbff531fb0e65d0180b08bd76d7ac645bf3d28018401e862d8ac74b0ce"
+    },
+    {
+      "path": "VectHare/tests/c10-prompt-budget.node.test.mjs",
+      "sha256": "6783d8c57972529dde6183c2c765d2900129e5bd233eb98a6300c375f34e5754"
+    },
+    {
+      "path": "VectHare/tests/c11-complete.node.test.mjs",
+      "sha256": "8f2818a1862055f43dd4631573858a0a25ce73d177d07b4f258afc2612cd6b5d"
+    },
+    {
+      "path": "VectHare/tests/c12-integration.node.test.mjs",
+      "sha256": "0a0332c637e57e54f7dc2883618b40ae31fd0eceda01e8edefc470e16126b3cd"
+    },
+    {
+      "path": "VectHare/tests/c12-scenes-temporal.node.test.mjs",
+      "sha256": "52119cb95bf4a69ebbe67f1fb9bd3d8e8f3477ceee6c0a6b850f867a8d6832c4"
+    },
+    {
+      "path": "VectHare/tests/c13-chunking.node.test.mjs",
+      "sha256": "2dbc6c01baee29d26aae19bf3c2ea197989bde632c85d8954d5cbea61b558bfa"
+    },
+    {
+      "path": "VectHare/tests/c14-similarity.node.test.mjs",
+      "sha256": "b3a7fa5775fab764efc886863241983c8e9d7afa3aad1947ec2b658a04762232"
+    },
+    {
+      "path": "VectHare/tests/collection-metadata.test.js",
+      "sha256": "5456967b9915c291af7ce17fc7fcd7e24d8a1f76e6af05c27d4d1a1da5e07eab"
+    },
+    {
+      "path": "VectHare/tests/contracts/lancedb.json",
+      "sha256": "53d05ae4996bdd2dff1441ca3ddec953f329cdfeb409e3bb8c712841de632bf3"
+    },
+    {
+      "path": "VectHare/tests/contracts/milvus.json",
+      "sha256": "daf610b07e5679ab885439441be824c57590375e5f77744db617fbd385ea9b77"
+    },
+    {
+      "path": "VectHare/tests/contracts/qdrant.json",
+      "sha256": "9ac0eea552fc5a38463e38f44f7dc4f1ce33e276a0ae9fafd0d6b6ae75390e3f"
+    },
+    {
+      "path": "VectHare/tests/contracts/similharity-plugin-c01-source.json",
+      "sha256": "aed70d3eafd867de5a6258295cd600918404c0097e9d448b49c7a011dd19bf6c"
+    },
+    {
+      "path": "VectHare/tests/contracts/standard.json",
+      "sha256": "e59c08c2c4b1cba59f38fa7007e4aac9a0436277389e9a0c8c9895b731fe39f1"
+    },
+    {
+      "path": "VectHare/tests/e01-capability-audit.node.test.mjs",
+      "sha256": "1eef93952eb362955a6cd6b4ff981c4f94f75f2f7942ca79e1ea184d8b704b13"
+    },
+    {
+      "path": "VectHare/tests/e02-safety-gateway.node.test.mjs",
+      "sha256": "ef22b5e8ecfb319a0790a80a9dec83d7c311e7d5acfd405e49822c45ea59f37b"
+    },
+    {
+      "path": "VectHare/tests/e03-persistence-recovery.node.test.mjs",
+      "sha256": "fd34e591345bcfc916bcb61fd1ee00132d15789a6ea1f3dd6bd577196d28973e"
+    },
+    {
+      "path": "VectHare/tests/e04-readonly.node.test.mjs",
+      "sha256": "beb8ab1384f2faef1ba8b40570b352216b44700ed25cd7dd29ba466b908fb026"
+    },
+    {
+      "path": "VectHare/tests/e04-worldinfo-integration.node.test.mjs",
+      "sha256": "90a45514bcd1d3259671af5e098f5958a22229dcdc918d0c6dde4007290c0c47"
+    },
+    {
+      "path": "VectHare/tests/e05-write-contract.node.test.mjs",
+      "sha256": "57b527739ffde5773d042b1251b63c41a5f09abf7dbaf21905b1c4b734e8a62d"
+    },
+    {
+      "path": "VectHare/tests/e06-shared-backends.node.test.mjs",
+      "sha256": "1b2cedbdbbf33a795f2f3a0025bae41a748458977dfbd6d0c91905a3252c2770"
+    },
+    {
+      "path": "VectHare/tests/f01-host-sources.node.test.mjs",
+      "sha256": "f73ff25958b8def84a5ceaafccda50484120ca4788719f18982d2bf671383d07"
+    },
+    {
+      "path": "VectHare/tests/f02-public-reads.node.test.mjs",
+      "sha256": "8c265dcb03166acf316b55755eb2522c66c51fd81de6233c635d38f38a81a3aa"
+    },
+    {
+      "path": "VectHare/tests/f03-provision.node.test.mjs",
+      "sha256": "a947d4a5baf4c7399e95d11ba7d9ecdb15acebb5e1a34b0502a1fcdf0ec8b980"
+    },
+    {
+      "path": "VectHare/tests/f04-pilot.node.test.mjs",
+      "sha256": "c7232e3c082968215094653a8f277f2b9cf6b1f9cef8c2ff9b970d681d3098de"
+    },
+    {
+      "path": "VectHare/tests/final15-integration.node.test.mjs",
+      "sha256": "69d4cf3eee8dbb2af852af1a8611b1c45993264ffa4797330267f9af061483a8"
+    },
+    {
+      "path": "VectHare/tests/h01-acceptance.node.test.mjs",
+      "sha256": "e766527f044b1d75780e6b49a2a97a82576e764ac78036c913974ad50caa8a71"
+    },
+    {
+      "path": "VectHare/tests/helpers/fake-backend.js",
+      "sha256": "79de272884764dc9eaaf77a9378c4473447fbaf100dd0d93bae961ac68118010"
+    },
+    {
+      "path": "VectHare/tests/hybrid-search.test.js",
+      "sha256": "44b127c907e4540909fdb350506fd117a055137ea19a41bd508ae06411dc09ec"
+    },
+    {
+      "path": "VectHare/tests/i01-safety.node.test.mjs",
+      "sha256": "521e8e1824b31e2bbfbb01b15432d0170a974bcb28fa07f4ae9aa8107764705f"
+    },
+    {
+      "path": "VectHare/tests/i02-security.node.test.mjs",
+      "sha256": "049fe950743c5bb402c3cde25c2a9e84178dd417b42dc3f46ad2f36a534ed3cb"
+    },
+    {
+      "path": "VectHare/tests/i03-chat-sync.node.test.mjs",
+      "sha256": "2ffd1f8439b418f8e100632f3669a24a33880cb9142bd8c6ce6e15017760d987"
+    },
+    {
+      "path": "VectHare/tests/i04-backend-errors.node.test.mjs",
+      "sha256": "9fec7310cdd581006a1a6395bc653bdfebfc181ede1cf934c2ea6a40d3bea594"
+    },
+    {
+      "path": "VectHare/tests/i05-metadata.node.test.mjs",
+      "sha256": "6772335551fd4308e551f18b58ca08001ba9b5495af1c4d2209ff625a002d14b"
+    },
+    {
+      "path": "VectHare/tests/i06-conditions.node.test.mjs",
+      "sha256": "a9509c0fcaa2c05d15a332c44ae3e9374613d67df03025967352b20e36cb453f"
+    },
+    {
+      "path": "VectHare/tests/i07-backup.node.test.mjs",
+      "sha256": "fff4b08bbdc3b87a08e96dc2dd7ebdc1a3f817c54e66bc3f454b04d888ad6760"
+    },
+    {
+      "path": "VectHare/tests/i08-provider-compat.node.test.mjs",
+      "sha256": "ce8e60ac48020f2bf7e05df5917855f1e663e7d768328f7b8c1f221fbdfa0f55"
+    },
+    {
+      "path": "VectHare/tests/i09-search-relevance.node.test.mjs",
+      "sha256": "d0e2520a0fc292e36764ab79c13d68d426b7685f479fac588b683c81b197ee34"
+    },
+    {
+      "path": "VectHare/tests/i10-prompt-correctness.node.test.mjs",
+      "sha256": "bf2afbc4b15d3cceaf7acf6a69bff7c09f4f41fc27d3b305f9ba1187f1baa637"
+    },
+    {
+      "path": "VectHare/tests/i11-links-temporal.node.test.mjs",
+      "sha256": "a78b6b41fa4843303827c0b63c8645dabd43ee9c1491bfe073f0f7263274426d"
+    },
+    {
+      "path": "VectHare/tests/i12-content-vectorizer.node.test.mjs",
+      "sha256": "a2d8830cede460ccaf894e6e42c1252e384eae84bb2d76f6d2d7deac2d09660b"
+    },
+    {
+      "path": "VectHare/tests/i13-numeric-zero.node.test.mjs",
+      "sha256": "536b0ba2c2091efbbdeb2f37896c9751429852baf3ff5a3644534dc17042e643"
+    },
+    {
+      "path": "VectHare/tests/i14-text-cleaning.node.test.mjs",
+      "sha256": "6f00bebc4393fe24f6b030bac7ee1473b75aa4cbf5abbd397f4a321f2f18e248"
+    },
+    {
+      "path": "VectHare/tests/i15-search-debugger.node.test.mjs",
+      "sha256": "738308a411cf00c872848503e877f92936e40a825ed84e0425c7cd07ae741dfa"
+    },
+    {
+      "path": "VectHare/tests/i16-diagnostics.node.test.mjs",
+      "sha256": "c4fba9856d889e9e8a03e53ef69b65314e656885487a6dd259193db4da856375"
+    },
+    {
+      "path": "VectHare/tests/i17-emotion-cache.node.test.mjs",
+      "sha256": "aa651197e6cc3cbf3c88596f370758fcb21d2b8d52a8cd6374729db764f1b230"
+    },
+    {
+      "path": "VectHare/tests/i18-ui-lifecycle.node.test.mjs",
+      "sha256": "b81145a59d85a71172a64c8d92a48406d7efd41b93a3bd1d224ba496dd6f8e8a"
+    },
+    {
+      "path": "VectHare/tests/keyword-boost.test.js",
+      "sha256": "4774c3287640446673a5815c46d7448cd076bc53389aee76c49a284ac30b642f"
+    },
+    {
+      "path": "VectHare/tests/p0-integration.node.test.mjs",
+      "sha256": "2b0331071655b606cda6f41e0e62c6f253d2620fbebed47dc6808ecb53c98b7b"
+    },
+    {
+      "path": "VectHare/tests/p0-safety.node.test.mjs",
+      "sha256": "fb46f31f5b4045a3d826735a97d85b61ab4763ebbb570f97a957ac2a93fece3f"
+    },
+    {
+      "path": "VectHare/tests/s11-chat-integration.node.test.mjs",
+      "sha256": "260b23483fdb36ee08c82a18b7ecadfcd9853f798176a724410dd4134ec87783"
+    },
+    {
+      "path": "VectHare/tests/s11-compatibility.node.test.mjs",
+      "sha256": "81245d1fe45dc392aa8e3e933d6a10c671f763f453d1f656bc1d46a4900b16db"
+    },
+    {
+      "path": "VectHare/tests/s11-gui-connections.node.test.mjs",
+      "sha256": "e62993c8dc87f664536a6fb937f74b4f67be57730cd0a5f7bd6c0dce253d6b50"
+    },
+    {
+      "path": "VectHare/tests/s11-qdrant-server-config.node.test.mjs",
+      "sha256": "b9faa895a7d6c0604d1700ab00eae04614a1b50183093959e4de9c24ec1f30bf"
+    },
+    {
+      "path": "VectHare/tests/stubs/extensions.js",
+      "sha256": "e3bafffed4d80ac40f0f7493494b263da1e85996450a1c207e62901f43df75e2"
+    },
+    {
+      "path": "VectHare/tests/stubs/openai.js",
+      "sha256": "0efbd97f2d2d6f3ca1f7457dae697bb1220badf6c396deab77597b967f794645"
+    },
+    {
+      "path": "VectHare/tests/stubs/script.js",
+      "sha256": "c930e08ebdb82927806a22004fe596075cb19fbe379d713c4eb57c2049183ad8"
+    },
+    {
+      "path": "VectHare/tests/stubs/secrets.js",
+      "sha256": "1cf8443a16ddc2d8084fc7b1ff4fad7f9f1a4f6826e712981020ea266a47b475"
+    },
+    {
+      "path": "VectHare/tests/stubs/textgen-settings.js",
+      "sha256": "c6d358c43666583e88e62b20311ea85b5354cb0f9a4500a4a3e408cb86b31f74"
+    },
+    {
+      "path": "VectHare/tests/stubs/utils.js",
+      "sha256": "ff71d626aa7938b987b62dc3819fc6dd86bca3dc13d3cf3f421e945b384e8e43"
+    },
+    {
+      "path": "VectHare/tests/stubs/world-info.js",
+      "sha256": "450f0af4f4c1ecc4c7180f2e364c8a59bfed69dd350fb6b47bce8641c2a37786"
+    },
+    {
+      "path": "VectHare/tests/temporal-decay.test.js",
+      "sha256": "846636bcf587e104e540ee8d124cc5f9c39fe0b291ba61a07886c3913f1f8d29"
+    },
+    {
+      "path": "VectHare/tests/utils.test.js",
+      "sha256": "613cd982c94b4f10a81d8e5c61d847f783b8890d118d9d5eeb0df6d24482e5d8"
+    },
+    {
+      "path": "VectHare/tests/vector-distance.test.js",
+      "sha256": "7da56868c02a2661879cef5a4327523dc2d693c30da99434087efa323d1906d6"
+    },
+    {
+      "path": "VectHare/tests/world-info-integration.test.js",
+      "sha256": "1b7119edff71ca941ca10692208c63b200f0fad2cf00437f0b2b78cea6f63b6c"
+    },
+    {
+      "path": "VectHare/tools/audit-similharity-c01.mjs",
+      "sha256": "ede9d89d6948612c94bddfbd03001b51f52d4f92e0a8f08d360f0faca16324ee"
+    },
+    {
+      "path": "VectHare/tools/e01-verify.mjs",
+      "sha256": "1a542d256325badab02d7f712a499ee6789c12fe2a467a882517003072741140"
+    },
+    {
+      "path": "VectHare/tools/e02-verify.mjs",
+      "sha256": "1914b757d547a0b4a8a4dfcfb52c680e7f94045547524c4a976e1f54e401d50c"
+    },
+    {
+      "path": "VectHare/tools/e03-verify.mjs",
+      "sha256": "232129e8d94cf632e2ff96e0dd9d24d5f69428cc68a1d674ef58676489a9941c"
+    },
+    {
+      "path": "VectHare/tools/e04-verify.mjs",
+      "sha256": "6fd30fabe40dcba65725337d5f1be35853dc5ee1a7a276bc623a0387a1d22a13"
+    },
+    {
+      "path": "VectHare/tools/e05-disposable-probe.mjs",
+      "sha256": "aa6f0ae572781c42fa6e5aa708149a6562ac4a4a8cafa3051623bb6c086ed90e"
+    },
+    {
+      "path": "VectHare/tools/e05-verify.mjs",
+      "sha256": "41c5f348ed6fc4bae1c71d087e26ea7d0fc707b19a6fe8afb9bbcad910f453c9"
+    },
+    {
+      "path": "VectHare/tools/e06-read-probe.mjs",
+      "sha256": "bd2959c1ea8bb2edf1230364c5885fc727b5cf6d1acb587cd54709c58ca5736a"
+    },
+    {
+      "path": "VectHare/tools/e06-verify.mjs",
+      "sha256": "2ae6f27e64c3fd2c86907e7c36b3b7a4ddcc30a3be22773d862bd5ee0eaf6f30"
+    },
+    {
+      "path": "VectHare/tools/s11-verify-pair.mjs",
+      "sha256": "5672d20dcb5aff3a2afeb6a132acfadd41ade9b955272db1ad8c1ef4b36cff78"
+    },
+    {
+      "path": "VectHare/ui/chunk-visualizer.js",
+      "sha256": "f9df02ed7ce3b07880cbb4e720a7392b2f0accfdf6b8980c9e512434d23237c1"
+    },
+    {
+      "path": "VectHare/ui/content-vectorizer.js",
+      "sha256": "ec3d965542a96c84547047bde78d4a3619b4436c69b01c2d34fed170f5af6ecf"
+    },
+    {
+      "path": "VectHare/ui/database-browser.js",
+      "sha256": "238eea80e42128bfa979f94d99c79073b4ec3c85212ce12e4dcaabc8458faf77"
+    },
+    {
+      "path": "VectHare/ui/health-dashboard.js",
+      "sha256": "09124380833f388edd10492c25a7c266a2d88b6b4e1275e470bc4b1d64c04c43"
+    },
+    {
+      "path": "VectHare/ui/icons.js",
+      "sha256": "31a21264a069b3b62cfdd1fcf1a9d0ad039bf0f99e0a4cda82cbe4cf657d1685"
+    },
+    {
+      "path": "VectHare/ui/progress-tracker.js",
+      "sha256": "b3aaf49b10322917b023a2609e7a4f9a4eb86740c0df865bcb23545daefe1b75"
+    },
+    {
+      "path": "VectHare/ui/scene-markers.js",
+      "sha256": "c7d0cd52df658efaadd23dbe2f146a251497b90a0b4397ee5a6faae5bf6a8297"
+    },
+    {
+      "path": "VectHare/ui/scenes-panel.js",
+      "sha256": "354557ab7418ac9127f9ddb267019be21bae76051e523004320d06d91599e7bf"
+    },
+    {
+      "path": "VectHare/ui/search-debug.js",
+      "sha256": "e468f2c56ee1ee3c705cc327b371a162c517e961ea1b8a4e9549cad97c2d6317"
+    },
+    {
+      "path": "VectHare/ui/text-cleaning-manager.js",
+      "sha256": "32c603440b253ffbe24f9ad9d94fe7979b71e7e8b1348f8b6ea5ff7e4858316f"
+    },
+    {
+      "path": "VectHare/ui/ui-manager.js",
+      "sha256": "476a4fc63189b98962bf5f38e5e7c1561e598f23f2f9b2f321ee389e9141ffad"
+    },
+    {
+      "path": "VectHare/utils/activation-frequency-ledger.js",
+      "sha256": "e50e9f99042cb7dd280997fc24b515ab439496aa4228be28b271deed8bba8463"
+    },
+    {
+      "path": "VectHare/utils/activation-history.js",
+      "sha256": "e45bed17c24e9fad9da3f4056974b1f3f613fabf69eaf180a5dd0a480298b3c1"
+    },
+    {
+      "path": "VectHare/utils/async-utils.js",
+      "sha256": "ed89b46887beef631c29ac9d153813f8bae203e27ac8ee22f1ac8ac4dadfbf50"
+    },
+    {
+      "path": "VectHare/utils/backend-configuration.js",
+      "sha256": "75aaac5077993a764cc09bce79c6a8a5cc2458cf83b87481e5bde27c67bf5734"
+    },
+    {
+      "path": "VectHare/utils/backend-contracts.js",
+      "sha256": "b46564adb4fc990688f300de07932ee5404e34b5f49666e075b8864e36e46b12"
+    },
+    {
+      "path": "VectHare/utils/backend-operation-validation.js",
+      "sha256": "65910bb53c6d80d163d024f535219eb882a2c85696fcf132a06bcd6abcf6c6bd"
+    },
+    {
+      "path": "VectHare/utils/backend-response-validation.js",
+      "sha256": "dd68626478d1933b524d72f2165f9696616ab118e78763120ccb9aa97b7c997d"
+    },
+    {
+      "path": "VectHare/utils/c01-deletion.js",
+      "sha256": "5575ff88cba217f55483fedd5867e6868b55412793890ae50d5aaf8b9af3f2a2"
+    },
+    {
+      "path": "VectHare/utils/c01-inventory.js",
+      "sha256": "9d3cc39f127f3ac17be5a28c53a6161161281650607e746cfd3921953e60c6fc"
+    },
+    {
+      "path": "VectHare/utils/c02-operation-journal.js",
+      "sha256": "a006d84784fb58ff02c6b8414e685da210c39a4ed80ad71fa47ad4761f816f86"
+    },
+    {
+      "path": "VectHare/utils/c02-replacement.js",
+      "sha256": "8b95ec9c5ec43e2bead99e050ca1e06df93f36f6e5b777c7aceb9f71be5e754e"
+    },
+    {
+      "path": "VectHare/utils/c04-ownership.js",
+      "sha256": "f308e1ee28eee7562b805e07716595b18057182ebb19ffc63a14b45c2a747d51"
+    },
+    {
+      "path": "VectHare/utils/c04-registry-migration.js",
+      "sha256": "652ae8ff83860dc08af455fc37fc5ee59c36b1fbfdd56e61a792aeb28eaffae4"
+    },
+    {
+      "path": "VectHare/utils/c05-protected-credentials.js",
+      "sha256": "2b070d558c8db20bf3b29d2139716532ac32e141e4e73fdd06d98e95c8932654"
+    },
+    {
+      "path": "VectHare/utils/c06-contract-audit.js",
+      "sha256": "a6277c5efc56c3e76c568a15692dca09c9abfa226c2ac58b2ab47d8d1aee75c7"
+    },
+    {
+      "path": "VectHare/utils/c06-scoped-facade.js",
+      "sha256": "ee325993bdcf660ac3ad7146a661088d538e7d45f6217cf58c6c582edd134ea5"
+    },
+    {
+      "path": "VectHare/utils/c07-physical-migration.js",
+      "sha256": "0a4f8b402730e90ec2f5406797d777a2d8a7dee722ce0d0c3e9cd5ade6a3a109"
+    },
+    {
+      "path": "VectHare/utils/c11-adapter-inventory.js",
+      "sha256": "668b5bbd235656857a32599fbaee1a706000cacb735fea52850f74d583e6f053"
+    },
+    {
+      "path": "VectHare/utils/c11-bounded-export.js",
+      "sha256": "81be35b01cb4d6ae714ab28c67fbbeb2cd0cc08f8d1f9b46bbc4465730ce3240"
+    },
+    {
+      "path": "VectHare/utils/c11-paginated-inventory.js",
+      "sha256": "9276370cd40a842e165e6ecf17e620d18b6224944f9201200834328c74de7cb0"
+    },
+    {
+      "path": "VectHare/utils/c12-scene-temporal.js",
+      "sha256": "0a3edb29357e6b7531b5c3b547d19468a3b85c1dee5a8ce0cc3cee3d7e5cb1ab"
+    },
+    {
+      "path": "VectHare/utils/c12-scene-update.js",
+      "sha256": "e8d4b28992a1f2565149bcefebe651046e35f8fe13cd0d4be44d32c732312706"
+    },
+    {
+      "path": "VectHare/utils/chunk-record-metadata.js",
+      "sha256": "911f768e48d5c5927bb09fb694779dac74179be1a41ff543ebaa61a5fe44864c"
+    },
+    {
+      "path": "VectHare/utils/collection-keys.js",
+      "sha256": "70b291e52a42748c12f97acce51eb4b02558967461d3d6ace08577800f10b5ad"
+    },
+    {
+      "path": "VectHare/utils/credential-controls.js",
+      "sha256": "ced4107b66b673b70afa9c3dd6a3673181fca5f838ab3a02f260b3ca308fa734"
+    },
+    {
+      "path": "VectHare/utils/data-structures.js",
+      "sha256": "48dde167d44cb78694a38645d0e8d57166e957470780a8b8cb2f81f5789dbbf4"
+    },
+    {
+      "path": "VectHare/utils/dom-utils.js",
+      "sha256": "1e3d013b58a62bc62884cedd06c522a479aa83266c2f83b2ffdae0eca85fe6eb"
+    },
+    {
+      "path": "VectHare/utils/durable-frequency-ledger.js",
+      "sha256": "4aad10ed923238a697acec860bc094a7ebabc074aa8b1bc6c015eb446b0dcc89"
+    },
+    {
+      "path": "VectHare/utils/e02-matrix-status.js",
+      "sha256": "7f6a2329b9d202420bf5734f7319557636197932d1f472fedf5ac7cb4fc151bf"
+    },
+    {
+      "path": "VectHare/utils/e02-vector-request-gateway.js",
+      "sha256": "655eec37317d3aeb69e06da7b5207ebc2fe202f6368a9d5ff9e06b2cab58c8fa"
+    },
+    {
+      "path": "VectHare/utils/e03-mutation-lock.js",
+      "sha256": "302898f2a9874d6e7d3b06ce880340c89246baf59caa0069ef388552a3c97e63"
+    },
+    {
+      "path": "VectHare/utils/e03-persistence.js",
+      "sha256": "bc22beeadbd7dae5a11cdd69544a5891ce5111f231d5a1a12d70f7dd9ebbf8b1"
+    },
+    {
+      "path": "VectHare/utils/e03-recovery.js",
+      "sha256": "fbd36603fd892589000bff83d4a4e10ec88bb1f02ad775ae7d092bf94ca7bd29"
+    },
+    {
+      "path": "VectHare/utils/e05-verified-write-contract.js",
+      "sha256": "459d3c3416c0b681a097137653236f378a75d96743d9cc9d5f7e9b1ee7a9193c"
+    },
+    {
+      "path": "VectHare/utils/e06-shared-read-contract.js",
+      "sha256": "462e8a67180a16b0fe0b7ea22c0fe08b845d7b906232682065738cad10de44c6"
+    },
+    {
+      "path": "VectHare/utils/f02-public-read-client.js",
+      "sha256": "60ff7a66050b06ea5add71e8c68e17ed7015bb6380a5c8bad5d1cf2241df1ca6"
+    },
+    {
+      "path": "VectHare/utils/f03-provision-client.js",
+      "sha256": "e7cc5d0346e5b0068b414e1c7890a8e9c9f0886e6d32101bd5e217a5fb676284"
+    },
+    {
+      "path": "VectHare/utils/f04-pilot-client.js",
+      "sha256": "3927152c4cb5904e92042275c300b9daa555f84a76131d820133a8a3dcdfb5b3"
+    },
+    {
+      "path": "VectHare/utils/feature-support.js",
+      "sha256": "7259fe8c4ef302af3b5bfba87145a6be3b2806d6249cab8ea4984b608e042a26"
+    },
+    {
+      "path": "VectHare/utils/h01-diagnostic-policy.js",
+      "sha256": "ca90cfe5af491646a46d3257beb2b523a3c5fc48e3a57cfa073f80c9adb12d40"
+    },
+    {
+      "path": "VectHare/utils/keyed-mutex.js",
+      "sha256": "8bf7527681f449d60ebebe3573956ce7444f04c526f59e1aea97212689edb687"
+    },
+    {
+      "path": "VectHare/utils/lexical-tokenization.js",
+      "sha256": "ac6c9843cc0e455805a3a250111cdac8acd133fbe6f84a10eee9695b091c406b"
+    },
+    {
+      "path": "VectHare/utils/operation-outcomes.js",
+      "sha256": "95ab591332cebce6e90bbd40f01315cad17da593e99b04f06d62d81e8978453e"
+    },
+    {
+      "path": "VectHare/utils/phase0-rollout.js",
+      "sha256": "286b44210bf7e36b143012a0a90a27050aa0c150a3d000b938c10e133c387dc2"
+    },
+    {
+      "path": "VectHare/utils/prompt-budget.js",
+      "sha256": "128d8d84a42e13182ad3f91c25feed5a1af2a7b5b5a0392c96117b8eae563290"
+    },
+    {
+      "path": "VectHare/utils/prompt-receipts.js",
+      "sha256": "cf90934b380999554c33f8b1887d1b46f45ca1d7d9bc2ced4bfeb1bbf02dd433"
+    },
+    {
+      "path": "VectHare/utils/record-identity.js",
+      "sha256": "db1caa57703dc4e2f01e598f9709e104df7a768e130006935693daed4dfac954"
+    },
+    {
+      "path": "VectHare/utils/replacement-safety.js",
+      "sha256": "6da8ada6a2f28c99e3b59f02b26eac0ba23327608dfad7e773334fe26ff468bb"
+    },
+    {
+      "path": "VectHare/utils/reverse-sync-throttle.js",
+      "sha256": "746579eeaf0de8efcff9339f2bc1855823202ed112db5b7f7fa4553d9ed08c5e"
+    },
+    {
+      "path": "VectHare/utils/s11-chat-fork-observer.js",
+      "sha256": "c6fe8b3657222a8b92771a1275dd4207878ccdd17e5f40d94a3925b57e900095"
+    },
+    {
+      "path": "VectHare/utils/s11-gui-connections.js",
+      "sha256": "ff2c663d90699ecd70495336c5fe93688c113a30d73bd12b659111ff2ecab087"
+    },
+    {
+      "path": "VectHare/utils/s11-plugin-compatibility.js",
+      "sha256": "b6cffb59604f02381ff879257a7e473c80b3887d5e1c3f8dda369c5fadb56742"
+    },
+    {
+      "path": "VectHare/utils/safe-png.js",
+      "sha256": "4d77c72200bf62a8b85894731daf4beac68ceabf7a9da6ea1376b58dc2dac031"
+    },
+    {
+      "path": "VectHare/utils/security.js",
+      "sha256": "f4bc65324e0661f92fb3a2cedeac9ef68e6661cb362afd06b89f86aa510e84a9"
+    },
+    {
+      "path": "VectHare/utils/storage-manager.js",
+      "sha256": "7580326f344d9bbdbb9a1937957a62e0447a37c72f3518315463d77465890a67"
+    },
+    {
+      "path": "VectHare/utils/string-utils.js",
+      "sha256": "7596b14456b37a327c2c1ab68684534467ee58607cde94423fd8b0a554f59290"
+    },
+    {
+      "path": "VectHare/utils/tenant-route.js",
+      "sha256": "3dfcbeb8836efdf4fc341a1e0efb07b68f6a9492803c1e23f5fd56d2a4d7f30f"
+    },
+    {
+      "path": "VectHare/utils/vector-distance.js",
+      "sha256": "227dd37137a519d5e0eab8f83b18f2cf4b83ffc342c3b8a4c61505b88b6f22db"
+    },
+    {
+      "path": "VectHare/utils/world-info-dedup.js",
+      "sha256": "9c0845b21c7c1c9ff26c7962fd224b5948ec79fe50c24e73be53c3ec6bcfa5c3"
+    },
+    {
+      "path": "VectHare/utils/world-info-identity.js",
+      "sha256": "2cd7796dfff2f21321dae6558bef9cbd1c18f17a48456f5205147a4dc7320fb6"
+    },
+    {
+      "path": "VectHare/vitest.config.js",
+      "sha256": "f5efde428dbb43e7bfa3aaf3f29c875f2481e0720bad504ab2dc03c476096166"
+    },
+    {
+      "path": "VectHare-Similharity/F01-CAPABILITY-MATRIX.json",
+      "sha256": "a2946a7f46e6eda670e0004ef25ec6c051d9865a9d73eb503129499d1c745653"
+    },
+    {
+      "path": "VectHare-Similharity/F01-SOURCE-MANIFEST.json",
+      "sha256": "baeaa16690da6e9dfaf99249c49b6adac8287d431d2be6d42d4a8e8e5bd56951"
+    },
+    {
+      "path": "VectHare-Similharity/F02-CAPABILITY-MATRIX.json",
+      "sha256": "8c3970ea49d523f00d4c2214eba52e63a355d3d7466f9231b96b12caa32e4c35"
+    },
+    {
+      "path": "VectHare-Similharity/F02-SOURCE-MANIFEST.json",
+      "sha256": "1cd3d364b741d5f81297f2058e5c95dcc9a3899c4bce02e23db00bc90aa33d3f"
+    },
+    {
+      "path": "VectHare-Similharity/F03-CAPABILITY-MATRIX.json",
+      "sha256": "8fce3bfaec6b1c4d476a724fd251b031b752dba5ae7e553cb6b591af8807eb34"
+    },
+    {
+      "path": "VectHare-Similharity/F03-SOURCE-MANIFEST.json",
+      "sha256": "e5026938c6b560bd7f7959164befe08b4e26a6bb1e807dca763a943d1a351315"
+    },
+    {
+      "path": "VectHare-Similharity/F04-CAPABILITY-MATRIX.json",
+      "sha256": "f98ec936c7bb31134f4f12e51df4e845683bc1fa09376775e75e04005f44481f"
+    },
+    {
+      "path": "VectHare-Similharity/S01-CAPABILITY-MATRIX.json",
+      "sha256": "b6d2077f7cacb7c7f2a3eac31df8282838101ca33deee8c7bd70bbf91357f01b"
+    },
+    {
+      "path": "VectHare-Similharity/S01-SOURCE-MANIFEST.json",
+      "sha256": "8024c3be6842fdb762be0eee5361f4387ef5b4a9c5a96b4cb254c7759f2d4658"
+    },
+    {
+      "path": "VectHare-Similharity/S02-CAPABILITY-MATRIX.json",
+      "sha256": "78c3f2d04d75c42d776c5dca0c569ee796bcf66d5df17f36ae6820ffe8d9ecac"
+    },
+    {
+      "path": "VectHare-Similharity/S02-SOURCE-MANIFEST.json",
+      "sha256": "6eedf72e12bc8447d8322fba55cfcc0d70020eb1bda73648f8d0667a96c8bf2d"
+    },
+    {
+      "path": "VectHare-Similharity/S03-CAPABILITY-MATRIX.json",
+      "sha256": "4b33edc8ad65e1602c84c0857beb38aa20fd180b08efdb9b679ac1362c5c266b"
+    },
+    {
+      "path": "VectHare-Similharity/S03-SOURCE-MANIFEST.json",
+      "sha256": "e63706a6d2dd606bc64b62fe6dacc7d66af0743782de9217640d601bd75287a9"
+    },
+    {
+      "path": "VectHare-Similharity/S04-CAPABILITY-MATRIX.json",
+      "sha256": "eb156807faef2a830232585877b16548fac0444de0056326c68fc0078f9e08e6"
+    },
+    {
+      "path": "VectHare-Similharity/S04-SOURCE-MANIFEST.json",
+      "sha256": "e0f75d69ab133003fc28a310a2aa9f2952f26690fa321629699aca865c61e71f"
+    },
+    {
+      "path": "VectHare-Similharity/S05-CAPABILITY-MATRIX.json",
+      "sha256": "56123e3688f6be0db172324531a4b94417180d33364013842447a0add9ceb619"
+    },
+    {
+      "path": "VectHare-Similharity/S05-SOURCE-MANIFEST.json",
+      "sha256": "aa48396d22765926bb49fb5192d74cc8d82928be85da17525ec70ffb46c9ae1e"
+    },
+    {
+      "path": "VectHare-Similharity/S06-CAPABILITY-MATRIX.json",
+      "sha256": "425154d2495f6817b4b0cf46ac4858d26583fe84dcf0c3cf112e84c727e9bae1"
+    },
+    {
+      "path": "VectHare-Similharity/S06-SOURCE-MANIFEST.json",
+      "sha256": "7098a4f0defde27e88e2c557cd21cb58ece430fd5afc922b1097378e462cf626"
+    },
+    {
+      "path": "VectHare-Similharity/S07-CAPABILITY-MATRIX.json",
+      "sha256": "56e9fdf9ae7f9281ef61dfbb6d43c58381699b20abae9398614c4970e8e6b3e1"
+    },
+    {
+      "path": "VectHare-Similharity/S07-SOURCE-MANIFEST.json",
+      "sha256": "ca609f373a446c91fe4fb976d373f90877420386b22d9bfdcac187d275c58f49"
+    },
+    {
+      "path": "VectHare-Similharity/S08-CAPABILITY-MATRIX.json",
+      "sha256": "0783478b2465c815f6c220ee3fbee73b223cf88d19a24f755d052d574f904aed"
+    },
+    {
+      "path": "VectHare-Similharity/S08-SOURCE-MANIFEST.json",
+      "sha256": "475c8411b36dec886b002b74a9141eab6b8b5010178255b21bcbcd739f9a2aef"
+    },
+    {
+      "path": "VectHare-Similharity/S09-CAPABILITY-MATRIX.json",
+      "sha256": "9bff1ddd7c74376cb91aed49e142e2ca401966f319976267de1421e03b7995f1"
+    },
+    {
+      "path": "VectHare-Similharity/S09-SOURCE-MANIFEST.json",
+      "sha256": "8bf841c07a1d22e94c364e64be0702f9a215caf00c45ba95308e54ecad2c892e"
+    },
+    {
+      "path": "VectHare-Similharity/S10-BUILD-MANIFEST.json",
+      "sha256": "ed6f176f543defd786658ba307ef0f38486e63aeb9e689584901fc59a9a17579"
+    },
+    {
+      "path": "VectHare-Similharity/S10-CAPABILITY-MATRIX.json",
+      "sha256": "39f8ec655e21a5bc926cd7db4025841a9a26b45a8e0dc57b49b09a12563854a0"
+    },
+    {
+      "path": "VectHare-Similharity/S10-SOURCE-MANIFEST.json",
+      "sha256": "b0fcb15b54764d18d5d84fc8a5f43f5155130e29817ebca7be7337bb9029703d"
+    },
+    {
+      "path": "VectHare-Similharity/S10.3-CAPABILITY-MATRIX.json",
+      "sha256": "cb437f3603d4d5d98379d0cb97c8b34d57d9137f37cf4ba8d02c85b17e5249c8"
+    },
+    {
+      "path": "VectHare-Similharity/index.js",
+      "sha256": "c7bc9a5df6e2578ee173151c2e8c6119604269dbe28bfc4b75a1f837466f9369"
+    },
+    {
+      "path": "VectHare-Similharity/lancedb-backend.js",
+      "sha256": "a3cd5b9cafd1686a6775b24345a48611b396e5cd2672a028b57b154335d499de"
+    },
+    {
+      "path": "VectHare-Similharity/lib/f01-host-sources.js",
+      "sha256": "af4c52a3d961a3befb7d2f7a42b08c5b9429ddfd8bb07022f067dd8820878c57"
+    },
+    {
+      "path": "VectHare-Similharity/lib/f02-public-reads.js",
+      "sha256": "dfab76bec6cd8a8c64ba97b17794853f84dd8c7c7d073cd8c5064c2bf94d2a5e"
+    },
+    {
+      "path": "VectHare-Similharity/lib/f03-provision.js",
+      "sha256": "be331c6268dbb301257117795f2610e1d8919ae7bb31d31a91a7b8489b07116a"
+    },
+    {
+      "path": "VectHare-Similharity/lib/f03-vector-evidence.js",
+      "sha256": "11452d572faa925a57e65146cc50e4606fc4c2d6f3e7fba3920058ecbf1c5407"
+    },
+    {
+      "path": "VectHare-Similharity/lib/f04-pilot-mutations.js",
+      "sha256": "4493d1a0b011b114451cbad95dec70fe8ed6a61a38e3b94576b47ebd1a093412"
+    },
+    {
+      "path": "VectHare-Similharity/lib/h01-qdrant-acceptance.js",
+      "sha256": "b6420fdf0e6524d7d4344ae2eff12b5ccbcfc484a35c6744920e5df4cb37d915"
+    },
+    {
+      "path": "VectHare-Similharity/lib/s01-safety.js",
+      "sha256": "559917c958cdc7f6573e0d38bbe04d22199da726224aa38b1e0d74fe3d086310"
+    },
+    {
+      "path": "VectHare-Similharity/lib/s02-identity.js",
+      "sha256": "fd525737359313609b40dc9493a9195f143d4da14396226aa4f6a6048ac582b0"
+    },
+    {
+      "path": "VectHare-Similharity/lib/s02-migration.js",
+      "sha256": "731c7df4d638f5147e47c24c5b6b49379bd9ffcf0676b94d8f2c1b4bde5f1e34"
+    },
+    {
+      "path": "VectHare-Similharity/lib/s02-registry.js",
+      "sha256": "809301de55a7fa7c15d4e783b2599e33a12db5b9612d442aaa82bfda168015c0"
+    },
+    {
+      "path": "VectHare-Similharity/lib/s03-backends.js",
+      "sha256": "05de0c8946b4b27f4d78716569fb89b1316d5e0a32ce9ac07d68770a1f019048"
+    },
+    {
+      "path": "VectHare-Similharity/lib/s03-security.js",
+      "sha256": "f72a44cc2d8927d72d0b746257dd0423f03f58e2fb1a796e010949e151be8d4b"
+    },
+    {
+      "path": "VectHare-Similharity/lib/s04-contract.js",
+      "sha256": "4a9cb6b0eecebeb7a5df171b00aadbf8b3c6869eb304c2c5bb5615eb24a2dad5"
+    },
+    {
+      "path": "VectHare-Similharity/lib/s04-engine.js",
+      "sha256": "d45ba77e0c02f8208ff2730889b903d68cf83eb8c179e7aa4fef47a9c1187202"
+    },
+    {
+      "path": "VectHare-Similharity/lib/s04-ledger.js",
+      "sha256": "b6ef4b1a0e4fd63b07a6bb54f88d8b251374c9b74379cba83835ae9b32b67dbf"
+    },
+    {
+      "path": "VectHare-Similharity/lib/s04-routes.js",
+      "sha256": "cde836fef03ea7e19cd2ef8f2f2f327aef35e13577cc12a36036c2990a73f40e"
+    },
+    {
+      "path": "VectHare-Similharity/lib/s05-backend-reads.js",
+      "sha256": "2db8457f3f91e8a7653f9a2ebc1202f4351bf3b8efe0aba091b950950c7f126e"
+    },
+    {
+      "path": "VectHare-Similharity/lib/s05-contract.js",
+      "sha256": "edd5e9e199316c93b6e874509f119ddd835edbde14c7560bef79c76bd01e3157"
+    },
+    {
+      "path": "VectHare-Similharity/lib/s05-routes.js",
+      "sha256": "f3f0eda963c8394713fe8bd8e7ea9dbdd9faf57bca62a41fc68a8e7c42881b8f"
+    },
+    {
+      "path": "VectHare-Similharity/lib/s06-qdrant.js",
+      "sha256": "a54b831f764e1ea7ea3f14c8fe26a1b0cc166ebd0bf794c5ee85a17623f721b1"
+    },
+    {
+      "path": "VectHare-Similharity/lib/s07-milvus.js",
+      "sha256": "383ea1bdf5d7ba655476381e6d244d6c9d390d4921f86c6df3b33aa28e976420"
+    },
+    {
+      "path": "VectHare-Similharity/lib/s08-lancedb.js",
+      "sha256": "ff995add6f3b9a909ec11d5df01462d101f9c05ba52bdeb29a520d3a390b3f30"
+    },
+    {
+      "path": "VectHare-Similharity/lib/s08-local-contract.js",
+      "sha256": "ca8b4b7cde249c03a8dbd9fe62a4702ec14b105202be9d35720a786c9e56a15b"
+    },
+    {
+      "path": "VectHare-Similharity/lib/s08-vectra.js",
+      "sha256": "f7575fbffeaefdf761bb4c6bdd828a7174626676019f3067c910191ab7a4b8d1"
+    },
+    {
+      "path": "VectHare-Similharity/lib/s09-fixture.js",
+      "sha256": "be09261e7dc79edf854232b59360d0c3e277f99f21d61a232509d6cfb0455848"
+    },
+    {
+      "path": "VectHare-Similharity/lib/s09-manifest.js",
+      "sha256": "9e27d35b82a8775e6a001fc8b001782a773fff7c7dcb909ff78712ddb1e86269"
+    },
+    {
+      "path": "VectHare-Similharity/lib/s10-build.js",
+      "sha256": "f724d07f0acdf40bc47715fdc4ce4c367ccd07a4bb211511ce87c979e2209eef"
+    },
+    {
+      "path": "VectHare-Similharity/lib/s10-contracts.js",
+      "sha256": "3525465e073fd1b2667550b1ce62f97e7f0b94a767aee429c87fde7470f925ea"
+    },
+    {
+      "path": "VectHare-Similharity/lib/s10-gui-connections.js",
+      "sha256": "e5a041abda59cdefd4f3556e58e9bfd8debbcba7309a2bac504b0c68d887ff58"
+    },
+    {
+      "path": "VectHare-Similharity/milvus-backend.js",
+      "sha256": "6cfee983eb34ab39a0f59f6ce2590a6c75d24a961f5a19ee4ae59d440427394e"
+    },
+    {
+      "path": "VectHare-Similharity/package.json",
+      "sha256": "83428e96a5cf921f7471c43368e3ce29139a96280e208211f43dac70e458a8d5"
+    },
+    {
+      "path": "VectHare-Similharity/qdrant-backend.js",
+      "sha256": "f6a71992d55288345f041ed5d30e38524fc8f58201150b0b92cab18cf3e3d72b"
+    },
+    {
+      "path": "VectHare-Similharity/tests/f01-host-sources.test.mjs",
+      "sha256": "ef61d43ead763b29ce581a206354ebb1eace0b65b2ab05e485a182b8d69c4f4c"
+    },
+    {
+      "path": "VectHare-Similharity/tests/f02-public-reads.test.mjs",
+      "sha256": "21b24c5f0475ac457ea9346f2e17fb2ae87668f33ca432b6d45750b13d1d120d"
+    },
+    {
+      "path": "VectHare-Similharity/tests/f03-mutation-foundations.test.mjs",
+      "sha256": "6308d1bf67228d8a5cf20baa22d1d727e70325a11e2d4a3c437e1be01d1f8f23"
+    },
+    {
+      "path": "VectHare-Similharity/tests/f04-pilot-mutations.test.mjs",
+      "sha256": "c26ad3f4c0ebdfead75eee56c7ecabaa08dcf5c63e696ecde6730f69fd6116ca"
+    },
+    {
+      "path": "VectHare-Similharity/tests/h01-qdrant-acceptance.test.mjs",
+      "sha256": "f691d616e58b5c0b94f0d6e757706f89d6c9a652a3e8288b6e9e07cff81846b8"
+    },
+    {
+      "path": "VectHare-Similharity/tests/s01-safety.test.mjs",
+      "sha256": "fc8070f78ddbf0649bac3917e544e21e8dda3de1dcd25be49694006ac4db69f6"
+    },
+    {
+      "path": "VectHare-Similharity/tests/s02-identity.test.mjs",
+      "sha256": "b43676260942e20564c8361a8675493550a12c68a913635ec3c88ef7eaded896"
+    },
+    {
+      "path": "VectHare-Similharity/tests/s03-isolation.test.mjs",
+      "sha256": "5a7dfbbe21ae0f44f12fe0b46ac1f24b62f368fa41a8f7dc6158a81302fbc426"
+    },
+    {
+      "path": "VectHare-Similharity/tests/s03-route.test.mjs",
+      "sha256": "a9a2b87b11868222b72441cdb568a750a02b84b357bf30dbed595729a4cf3eef"
+    },
+    {
+      "path": "VectHare-Similharity/tests/s04-contract.test.mjs",
+      "sha256": "962db78062f4f2bede8710852f95a9448af3fa4093c48316a856bd6717279dd2"
+    },
+    {
+      "path": "VectHare-Similharity/tests/s04-engine.test.mjs",
+      "sha256": "aac956b61fda2eb7477894a23867b0b96c68b94aafa2d3e5a7e45db88091c4c9"
+    },
+    {
+      "path": "VectHare-Similharity/tests/s04-ledger.test.mjs",
+      "sha256": "5b3e06397a3689d95e1766d52f3a512096bcb9f74d0ed06e6f537ee66c0a59a5"
+    },
+    {
+      "path": "VectHare-Similharity/tests/s04-route.test.mjs",
+      "sha256": "8ab79bb03634c1ba871df5616cea69e397d81b41c6c6f0624f23a06cdc5abd77"
+    },
+    {
+      "path": "VectHare-Similharity/tests/s05-backend.test.mjs",
+      "sha256": "a418dcdfe67e2a2829de6bec3c4d4a437b1d7b95f81dd4d024b98f5ece8e6d0d"
+    },
+    {
+      "path": "VectHare-Similharity/tests/s05-contract.test.mjs",
+      "sha256": "45e6584ef023a525762beb5f88e9389178010ca5a06a1d343682ce0d1a3cabe8"
+    },
+    {
+      "path": "VectHare-Similharity/tests/s05-route.test.mjs",
+      "sha256": "6e61968c9bc46434547fb6163decae96fe10bc88e4a236d7d283aea1223f1c3b"
+    },
+    {
+      "path": "VectHare-Similharity/tests/s06-qdrant.test.mjs",
+      "sha256": "318cf9c45a16b467ca5559c3d6644cfb7c54e463f862d4cb8ad91656ee4371cf"
+    },
+    {
+      "path": "VectHare-Similharity/tests/s07-milvus.test.mjs",
+      "sha256": "8417614c368463c8836a12c45df4e2c4588a21e0b543b114ecb8cc25ee752a12"
+    },
+    {
+      "path": "VectHare-Similharity/tests/s08-local.test.mjs",
+      "sha256": "4ab583a9ca31927dd519bf7d2fdaa5487e551b13406c02e880fbb3515ac45a23"
+    },
+    {
+      "path": "VectHare-Similharity/tests/s09-migration.test.mjs",
+      "sha256": "7ce28a39728af377fc2d76215eaf42eac290379986bff067bddec168853172d2"
+    },
+    {
+      "path": "VectHare-Similharity/tests/s10-api.test.mjs",
+      "sha256": "8cdafd7dca7770fa048e997156dbab9d4f2ace6bd8796d96289bf4083137171d"
+    },
+    {
+      "path": "VectHare-Similharity/tests/s10_1-host-paths.test.mjs",
+      "sha256": "95609d327f696993c7b03bfec02fcaa4139e58cb4f69ac860b2e491d6388a250"
+    },
+    {
+      "path": "VectHare-Similharity/tests/s10_2-local-qdrant.test.mjs",
+      "sha256": "c554ae85b7aec0b3f2268994c5314a5e560ec260b7681bfb6bc6a37f5217d3ee"
+    },
+    {
+      "path": "VectHare-Similharity/tests/s10_3-gui-connections.test.mjs",
+      "sha256": "f0b8b412dc804f861ab354a1f985c6af4e43cb0f99fff3885e6d1b9e421d2399"
+    },
+    {
+      "path": "VectHare-Similharity/tools/s02-migration-dry-run.mjs",
+      "sha256": "e74611d615d6c7e100fc2bd17dc70faaa54365b63be9981468314970dafcf243"
+    },
+    {
+      "path": "VectHare-Similharity/tools/s09-fixture-rehearsal.mjs",
+      "sha256": "97fe644c644447f81aab052d7deb33c43b7f1570798e7011d690c301736006a2"
+    },
+    {
+      "path": "VectHare-Similharity/tools/s09-plan.mjs",
+      "sha256": "c1834eeaab3583f93b7751c1eaff6bcb8812d01f01ed23aa2ffe439dceaed984"
+    },
+    {
+      "path": "VectHare-Similharity/tools/s10-build-manifest.mjs",
+      "sha256": "fa4a9a5d53a6a7db740a4f24f1cadb9638e13787e3570dc49a4bb010aef6e780"
+    }
+  ]
+}

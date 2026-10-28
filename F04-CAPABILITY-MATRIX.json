@@ -1,0 +1,57 @@
+{
+  "checkpoint": "F04",
+  "baseline": "F03",
+  "extensionVersion": "2.2.0-alpha.s11.9-f04",
+  "pluginVersion": "3.2.10-s10.8-f04",
+  "pluginSourceFingerprint": "1d13562e109129ca487f85eab24f1a5681b7b6f1fcb651c5d9c95bae35977e67",
+  "liveCertified": false,
+  "productionReady": false,
+  "sourceAttestation": "F01_SAVED_HOST_FILE_REATTESTED_BY_F02_ON_F03_REQUEST",
+  "crossProcessConcurrency": "LOCAL_USER_ROOT_ATOMIC_COLLECTION_LOCK_TESTED_OFFLINE",
+  "externalWriterCAS": "NOT_PROVEN_DENIED",
+  "vectorReadback": "NUMERIC_F32_AND_QDRANT_COSINE_EVIDENCE_OFFLINE_TESTED",
+  "provisioning": {
+    "qdrant": "EXPLICIT_SOURCE_BOUND_FRESH_V2_SCHEMA_AND_OWNER_INDEXES_OFFLINE_TESTED_LIVE_UNVERIFIED",
+    "milvus": "EXPLICIT_SOURCE_BOUND_FRESH_V2_SCHEMA_SDK_FIXTURE_TESTED_LIVE_UNVERIFIED",
+    "lancedb": "NOT_IMPLEMENTED",
+    "vectraPlugin": "NOT_IMPLEMENTED",
+    "standardNative": "NOT_PROBED"
+  },
+  "newRoutes": [
+    "POST /v2/collections/preview",
+    "POST /v2/collections/provision",
+    "POST /v2/collections/status",
+    "POST /v2/records/pilot-mutate",
+    "GET /v2/operations/:id (existing, now GUI accessible)"
+  ],
+  "ordinaryMemoryCreate": "DENIED",
+  "ordinaryMemoryUpdate": "DENIED",
+  "ordinaryMemoryDelete": "DENIED",
+  "revectorization": "DENIED",
+  "bulkPurge": "DENIED",
+  "verifiedFullInventory": "DENIED",
+  "verifiedExport": "DENIED",
+  "legacyMigration": "NOT_ACTIVATED",
+  "guardedV2Reads": "F02_EXISTING_SCHEMA_ONLY",
+  "termuxAcceptance": "NOT_RUN",
+  "windowsAcceptance": "NOT_RUN",
+  "linuxHostAcceptance": "NOT_RUN",
+  "next": "F05_QDRANT_REAL_HOST_ACCEPTANCE_AND_NORMAL_V2_WORKFLOW_INTEGRATION",
+  "pilotQdrantMutations": "LOCAL_ONLY_F03_PROVISIONED_V2_COLLECTIONS_EXPLICIT_CONSENT_SOURCE_REATTESTATION_LEDGER_QDRANT_ADAPTER_OFFLINE_TESTED_LIVE_UNVERIFIED",
+  "pilotActions": [
+    "insert",
+    "update",
+    "metadata",
+    "delete"
+  ],
+  "pilotProductionRights": false,
+  "pilotExternalWriterIsolation": "NOT_PROVEN",
+  "pilotCrashReconciliation": "NO_AUTO_RETRY_READ_ONLY_RECEIPTS",
+  "backendProductionWriteActivation": {
+    "qdrant": "DENIED",
+    "milvus": "DENIED",
+    "lancedb": "DENIED",
+    "vectraPlugin": "DENIED",
+    "standardNative": "DENIED"
+  }
+}

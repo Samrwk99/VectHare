@@ -12,6 +12,7 @@ import { safeLegacyPhysicalName } from '../lib/s02-identity.js';
 import {registerF01HostRoutes} from '../lib/f01-host-sources.js';
 import {registerF02Routes} from '../lib/f02-public-reads.js';
 import {registerF03ProvisionRoutes} from '../lib/f03-provision.js';
+import {registerF04PilotRoutes} from '../lib/f04-pilot-mutations.js';
 import { registerS04Routes } from '../lib/s04-routes.js';
 import {registerS05Routes} from '../lib/s05-routes.js';
 import {registerS10Routes} from '../lib/s10-contracts.js';
@@ -42,6 +43,7 @@ async function registered(pool) {
             './lib/f01-host-sources.js':{registerF01HostRoutes},
             './lib/f02-public-reads.js':{registerF02Routes},
             './lib/f03-provision.js':{registerF03ProvisionRoutes},
+            './lib/f04-pilot-mutations.js':{registerF04PilotRoutes},
             './lib/s10-gui-connections.js':{registerGuiConnectionRoutes:()=>{}}
         };
         assert.ok(objects[specifier],`unexpected import: ${specifier}`);

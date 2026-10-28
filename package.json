@@ -1,6 +1,6 @@
 {
   "name": "similharity",
-  "version": "3.2.10-s10.7-f03",
+  "version": "3.2.10-s10.8-f04",
   "description": "Vector database backend extensions for Similharity - LanceDB, Qdrant, and enhanced Vectra with full metadata storage",
   "main": "index.js",
   "type": "module",
@@ -50,6 +50,7 @@
     "build:s10": "node tools/s10-build-manifest.mjs",
     "test:f01": "node --experimental-vm-modules --test tests/*.test.mjs",
     "test:f02": "node --experimental-vm-modules --test tests/*.test.mjs",
-    "test:f03": "node --experimental-vm-modules --test tests/*.test.mjs"
+    "test:f03": "node --experimental-vm-modules --test tests/*.test.mjs",
+    "test:f04": "node --experimental-vm-modules --test tests/*.test.mjs"
   }
 }
