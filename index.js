@@ -7,21 +7,23 @@
  * All chunk operations go through unified /chunks/* endpoints.
  * Backend is specified via `backend` parameter in request body.
  *
- * @version 3.2.2-s02.0
+ * @version 3.2.3-s03.0
  */
 
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { exec } from 'node:child_process';
+
 import sanitize from 'sanitize-filename';
 import vectra from 'vectra';
-import lancedbBackend from './lancedb-backend.js';
-import qdrantBackend from './qdrant-backend.js';
-import milvusBackend from './milvus-backend.js';
 import { s01MutationGuard } from './lib/s01-safety.js';
+import { authenticatedContext, forbidOwnerSpoof, validateClientConfig,
+    lookupAuthorizedReservation, legacyReadBoundary, s03SensitiveRouteBoundary,
+    AccessError, exposedSafeSource } from './lib/s03-security.js';
+import { BackendPool } from './lib/s03-backends.js';
+import { safeLegacyPhysicalName } from './lib/s02-identity.js';
 
 const pluginName = 'similharity';
-const pluginVersion = '3.2.2-s02.0';
+const pluginVersion = '3.2.3-s03.0';
 
 /**
  * Initialize the plugin
@@ -31,6 +33,51 @@ export async function init(router) {
     console.log(`[${pluginName}] Initializing v${pluginVersion}...`);
     // S01: must run before ALL legacy routes, including /chunks/:hash/* and /purge-all.
     router.use(s01MutationGuard);
+    const backendPool = new BackendPool();
+    // Authentication is inherited from the SillyTavern host router. Do not
+    // accept a user identity from request body, query or headers.
+    router.use(async (req, res, next) => {
+        if (req.path === '/health' && req.method === 'GET') return next();
+        try {
+            req.s03 = await authenticatedContext(req);
+            forbidOwnerSpoof(req.body, req.s03);
+            forbidOwnerSpoof(req.query, req.s03);
+            next();
+        } catch (error) {
+            res.status(error.status || 403).json({success:false, code:error.code || 'S03_AUTH_UNVERIFIED',
+                error:'Authenticated user scope could not be verified.'});
+        }
+    });
+    router.use(s03SensitiveRouteBoundary);
+    router.use((req,res,next)=>{
+        if (req.path.startsWith('/chunks/') && req.method === 'POST') {
+            const forbidden=['apiKey','apiUrl','extrasKey','extrasUrl','token','baseUrl','address'];
+            if (forbidden.some(k => Object.hasOwn(req.body || {},k))) {
+                return res.status(403).json({success:false,code:'S03_CLIENT_CONNECTION_FORBIDDEN'});
+            }
+        }
+        next();
+    });
+    router.use(legacyReadBoundary);
+    // NOTE: S02 registry mappings are reservations only; this route exposes
+    // no mutation or claim that the physical collection belongs to the user.
+    router.post('/v2/identity/resolve', async (req,res) => {
+        try {
+            const info = await lookupAuthorizedReservation(req.s03,req.body);
+            res.json({success:true, schemaVersion:2, identity:info.identity,
+                reservation:info.entry ? {key:info.entry.key,status:info.entry.status} : null,
+                operational:false, writesEnabled:false});
+        } catch (error) {
+            res.status(error.status || 400).json({success:false,code:error.code || 'S03_IDENTITY_FAILED',error:error.message});
+        }
+    });
+
+    async function requestBackend(req, backend) {
+        if (!req.s03) throw new AccessError('S03_AUTH_UNVERIFIED', 'Trusted user context required');
+        if (backend === 'standard' || backend === 'vectra') return null;
+        return await backendPool.get(req.s03,backend);
+    }
+
 
     // ========================================================================
     // BACKEND HANDLER - Routes requests to appropriate backend
@@ -40,14 +87,15 @@ export async function init(router) {
      * Ensures LanceDB is initialized before use
      * @param {object} directories - User directories containing vectors path
      */
-    async function ensureLanceDBInitialized(directories) {
-        if (!lancedbBackend.basePath) {
-            console.log(`[${pluginName}] Auto-initializing LanceDB backend...`);
-            await lancedbBackend.initialize(directories.vectors);
-        }
+    async function ensureLanceDBInitialized(req) {
+        return await requestBackend(req, 'lancedb');
     }
 
-    function getBackendHandler(backend) {
+    function getBackendHandler(backend, req, scopedBackend = null) {
+        if (!req?.s03) throw new AccessError('S03_AUTH_UNVERIFIED', 'Trusted user context required');
+        const lancedbBackend = scopedBackend;
+        const qdrantBackend = scopedBackend;
+        const milvusBackend = scopedBackend;
         switch (backend) {
             case 'vectra':
             case 'standard':
@@ -536,8 +584,11 @@ export async function init(router) {
             plugin: pluginName,
             version: pluginVersion,
             backends: ['vectra', 'lancedb', 'qdrant', 'milvus'],
-            checkpoint: 'S01',
+            checkpoint: 'S03',
             legacyMutations: 'BLOCKED',
+            clientBackendCredentials: 'DENIED',
+            sharedLegacyReads: 'BLOCKED_UNVERIFIABLE',
+            authenticatedContext: 'REQUIRED_FOR_NON_HEALTH',
             productionCertified: false
         });
     });
@@ -546,49 +597,8 @@ export async function init(router) {
      * POST /api/plugins/similharity/open-folder
      * Opens collection folder in file explorer
      */
-    router.post('/open-folder', async (req, res) => {
-        try {
-            const { collectionId, backend, source } = req.body;
-
-            if (!collectionId || !backend) {
-                return res.status(400).json({ error: 'collectionId and backend are required' });
-            }
-
-            const vectorsPath = req.user.directories.vectors;
-            let folderPath;
-
-            if (backend === 'lancedb') {
-                // LanceDB structure: lancedb/{source}/{collectionId}.lance
-                const effectiveSource = source || 'bananabread';
-                folderPath = path.join(vectorsPath, 'lancedb', effectiveSource, `${collectionId}.lance`);
-            } else if (backend === 'qdrant') {
-                return res.status(400).json({ error: 'Qdrant collections are stored remotely' });
-            } else {
-                const effectiveSource = source || 'transformers';
-                folderPath = path.join(vectorsPath, effectiveSource, collectionId);
-            }
-
-            folderPath = path.resolve(folderPath);
-
-            try {
-                await fs.access(folderPath);
-            } catch {
-                return res.status(404).json({ error: `Folder not found: ${folderPath}` });
-            }
-
-            const platform = process.platform;
-            const cmd = platform === 'win32' ? `start "" "${folderPath}"`
-                : platform === 'darwin' ? `open "${folderPath}"`
-                : `xdg-open "${folderPath}"`;
-
-            exec(cmd, { shell: true });
-            res.json({ success: true, path: folderPath });
-
-        } catch (error) {
-            console.error(`[${pluginName}] open-folder error:`, error);
-            res.status(500).json({ error: error.message });
-        }
-    });
+    router.post('/open-folder', (req, res) => res.status(409).json({success:false,
+        code:'S03_SENSITIVE_ROUTE_BLOCKED', error:'Legacy shell-based folder launching is disabled.'}));
 
     /**
      * GET /api/plugins/similharity/collections
@@ -597,7 +607,7 @@ export async function init(router) {
     router.get('/collections', async (req, res) => {
         try {
             const vectorsPath = req.user.directories.vectors;
-            const allCollections = await scanAllSourcesForCollections(vectorsPath);
+            const allCollections = await scanAllSourcesForCollections(vectorsPath, req.s03, backendPool);
 
             res.json({
                 success: true,
@@ -618,7 +628,7 @@ export async function init(router) {
         try {
             const vectorsPath = req.user.directories.vectors;
             const entries = await fs.readdir(vectorsPath, { withFileTypes: true });
-            const sources = entries.filter(e => e.isDirectory()).map(e => e.name);
+            const sources = entries.filter(e => e.isDirectory() && !e.name.startsWith('.')).map(e => e.name);
 
             res.json({ success: true, sources });
         } catch (error) {
@@ -678,45 +688,19 @@ export async function init(router) {
      * Health check for specific backend
      */
     router.get('/backend/health/:backend', async (req, res) => {
+        const backend = req.params.backend;
         try {
-            const { backend } = req.params;
-            let healthy = false;
-            let message = '';
-
-            switch (backend) {
-                case 'vectra':
-                case 'standard':
-                    healthy = true;
-                    message = 'Vectra is always available (file-based)';
-                    break;
-
-                case 'lancedb':
-                    if (!lancedbBackend.basePath) {
-                        await lancedbBackend.initialize(req.user.directories.vectors);
-                    }
-                    healthy = lancedbBackend.basePath != null;
-                    message = healthy ? 'LanceDB initialized' : 'LanceDB not initialized';
-                    break;
-
-                case 'qdrant':
-                    healthy = await qdrantBackend.healthCheck();
-                    message = healthy ? 'Qdrant connected' : 'Qdrant not available';
-                    break;
-
-                case 'milvus':
-                    healthy = await milvusBackend.healthCheck();
-                    message = healthy ? 'Milvus connected' : 'Milvus not available';
-                    break;
-
-                default:
-                    return res.status(400).json({ error: `Unknown backend: ${backend}` });
+            if (!['vectra','standard','lancedb','qdrant','milvus'].includes(backend)) {
+                return res.status(400).json({success:false,code:'S03_BACKEND_UNKNOWN'});
             }
-
-            res.json({ backend, healthy, message });
-
+            const instance = await requestBackend(req,backend);
+            const healthy = instance ? (backend === 'lancedb'
+                ? !!instance.basePath : await instance.healthCheck()) : true;
+            res.json({backend,healthy,configuration:'server-only',userIsolated:true,
+                productionCertified:false});
         } catch (error) {
-            console.error(`[${pluginName}] backend/health error:`, error);
-            res.status(500).json({ backend: req.params.backend, healthy: false, error: error.message });
+            res.status(error.status||503).json({backend,healthy:false,code:error.code||'S03_BACKEND_UNAVAILABLE',
+                error:'Backend is not available in the authenticated server configuration.'});
         }
     });
 
@@ -725,258 +709,20 @@ export async function init(router) {
      * Initialize specific backend
      */
     router.post('/backend/init/:backend', async (req, res) => {
+        const backend = req.params.backend;
         try {
-            const { backend } = req.params;
-            const config = req.body;
-
-            switch (backend) {
-                case 'vectra':
-                case 'standard':
-                    res.json({ success: true, message: 'Vectra requires no initialization' });
-                    break;
-
-                case 'lancedb':
-                    await lancedbBackend.initialize(req.user.directories.vectors);
-                    res.json({ success: true, message: 'LanceDB initialized' });
-                    break;
-
-                case 'qdrant':
-                    await qdrantBackend.initialize(config);
-                    res.json({ success: true, message: 'Qdrant initialized' });
-                    break;
-
-                case 'milvus':
-                    await milvusBackend.initialize(config);
-                    res.json({ success: true, message: 'Milvus initialized' });
-                    break;
-
-                default:
-                    return res.status(400).json({ error: `Unknown backend: ${backend}` });
+            validateClientConfig(req.body ?? {});
+            const instance = await requestBackend(req,backend);
+            if (backend !== 'standard' && backend !== 'vectra' && !instance) {
+                throw new AccessError('S03_BACKEND_UNKNOWN','Unknown backend',400);
             }
-
+            res.json({success:true,backend,configuration:'server-only',initialized:true,
+                mutationsEnabled:false});
         } catch (error) {
-            console.error(`[${pluginName}] backend/init error:`, error);
-            res.status(500).json({ error: error.message });
+            res.status(error.status||503).json({success:false,code:error.code||'S03_BACKEND_UNAVAILABLE',
+                error:'Backend initialization rejected or unavailable.'});
         }
     });
-
-/**
- * Get multiple embeddings for texts from specified source
- */
-async function getVectorsForSource(source, texts, model, directories, req) {
-    // Specialized batch handling
-    if (source === 'bananabread') {
-        // BananaBread llama.cpp-compatible endpoint
-        let apiUrl = req.body.apiUrl || 'http://localhost:8008';
-        let apiKey = req.body.apiKey || '';
-
-        if (!apiUrl || typeof apiUrl !== 'string' || apiUrl.trim() === '') {
-            throw new Error('BananaBread: apiUrl is missing or invalid. Configure the embedding URL in VectHare settings.');
-        }
-        apiUrl = apiUrl.trim();
-
-        let url;
-        try {
-            url = new URL(apiUrl);
-            url.pathname = '/embedding';
-        } catch (e) {
-            throw new Error(`BananaBread: Invalid URL format "${apiUrl}" - ${e.message}`);
-        }
-
-        const headers = { 'Content-Type': 'application/json' };
-        if (apiKey) {
-            headers['Authorization'] = `Bearer ${apiKey}`;
-        }
-
-        const BATCH_SIZE = 20;
-        const allEmbeddings = [];
-
-        try {
-            for (let i = 0; i < texts.length; i += BATCH_SIZE) {
-                const batchTexts = texts.slice(i, i + BATCH_SIZE);
-                // console.log(`[BananaBread] Processing batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(texts.length / BATCH_SIZE)} (${batchTexts.length} items)`);
-
-                const response = await fetch(url.toString(), {
-                    method: 'POST',
-                    headers: headers,
-                    body: JSON.stringify({ content: batchTexts }),
-                });
-
-                if (!response.ok) {
-                    const errorText = await response.text();
-                    throw new Error(`BananaBread: ${response.statusText} ${errorText}`);
-                }
-
-                const data = await response.json();
-                const embeddings = data.embedding;
-
-                if (!embeddings) {
-                    throw new Error('BananaBread: Invalid response format (missing embedding)');
-                }
-
-                if (Array.isArray(embeddings)) {
-                    // Check for single item flattened response
-                    if (batchTexts.length === 1 && typeof embeddings[0] === 'number') {
-                        allEmbeddings.push(embeddings);
-                    } else if (Array.isArray(embeddings[0])) {
-                        allEmbeddings.push(...embeddings);
-                    } else {
-                         // Some providers might return a single vector for batch of 1 as a flat array even if asked in batch mode
-                         if (batchTexts.length === 1 && Array.isArray(embeddings)) {
-                             allEmbeddings.push(embeddings);
-                         } else {
-                            throw new Error('BananaBread: Unexpected embedding format');
-                         }
-                    }
-                } else {
-                    throw new Error('BananaBread: Unexpected embedding format (not array)');
-                }
-            }
-
-            return allEmbeddings;
-
-        } catch (e) {
-            console.error(`[BananaBread] Batch embedding error:`, e);
-            throw e;
-        }
-    }
-
-    // Default fallback: sequential processing for other sources
-    const results = [];
-    for (const text of texts) {
-        results.push(await _getLegacySingleEmbedding(source, text, model, directories, req));
-    }
-    return results;
-}
-
-/**
- * Wrapper for single embedding (backwards compatibility)
- */
-async function getEmbeddingForSource(source, text, model, directories, req) {
-    const vectors = await getVectorsForSource(source, [text], model, directories, req);
-    return vectors[0];
-}
-
-/**
- * Helper function for KoboldCpp embedding generation
- * @param {string} text - Text to embed
- * @param {string} model - Model name
- * @param {object} req - Request object containing apiUrl
- * @returns {Promise<number[]>} Embedding vector
- */
-async function _getKoboldCppEmbedding(text, model, req) {
-    const apiUrl = req.body?.apiUrl || 'http://localhost:5001';
-
-    let url;
-    try {
-        url = new URL(apiUrl);
-        // Ensure we're hitting the embeddings endpoint
-        if (!url.pathname.includes('/embeddings')) {
-            url.pathname = url.pathname.replace(/\/?$/, '/v1/embeddings').replace(/\/+/g, '/');
-        }
-    } catch (e) {
-        throw new Error(`KoboldCpp: Invalid URL format "${apiUrl}" - ${e.message}`);
-    }
-
-    const response = await fetch(url.toString(), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            input: text,
-            model: model || 'koboldcpp',
-        }),
-    });
-
-    if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`KoboldCpp: ${response.status} ${response.statusText} - ${errorText}`);
-    }
-
-    const data = await response.json();
-    // OpenAI format: { data: [{ embedding: [...] }] }
-    if (data?.data?.[0]?.embedding) {
-        return data.data[0].embedding;
-    }
-    // Fallback: direct embedding array
-    if (Array.isArray(data?.embedding)) {
-        return data.embedding;
-    }
-    throw new Error('KoboldCpp: Invalid response format - no embedding found');
-}
-
-/**
- * Legacy single embedding function (renamed)
- */
-async function _getLegacySingleEmbedding(source, text, model, directories, req) {
-    switch (source) {
-        case 'transformers': {
-            const { getTransformersVector } = await import('../../src/vectors/embedding.js');
-            return await getTransformersVector(text);
-        }
-        case 'openai':
-        case 'togetherai':
-        case 'mistral':
-        case 'electronhub':
-        case 'openrouter': {
-            const { getOpenAIVector } = await import('../../src/vectors/openai-vectors.js');
-            // ElectronHub requires a model name, provide default if empty
-            const effectiveModel = (source === 'electronhub' && !model) ? 'text-embedding-ada-002' : model;
-            return await getOpenAIVector(text, source, directories, effectiveModel);
-        }
-        case 'nomicai': {
-            const { getNomicAIVector } = await import('../../src/vectors/nomicai-vectors.js');
-            return await getNomicAIVector(text, source, directories);
-        }
-        case 'cohere': {
-            const { getCohereVector } = await import('../../src/vectors/cohere-vectors.js');
-            return await getCohereVector(text, true, directories, model);
-        }
-        case 'koboldcpp': {
-            return await _getKoboldCppEmbedding(text, model, req);
-        }
-        case 'ollama': {
-            const { getOllamaVector } = await import('../../src/vectors/ollama-vectors.js');
-            const apiUrl = req.body?.apiUrl || 'http://localhost:11434';
-            const keep = req.body?.keep || false;
-            return await getOllamaVector(text, apiUrl, model, keep, directories);
-        }
-        case 'llamacpp': {
-            const { getLlamaCppVector } = await import('../../src/vectors/llamacpp-vectors.js');
-            const apiUrl = req.body?.apiUrl || 'http://localhost:8080';
-            return await getLlamaCppVector(text, apiUrl, directories);
-        }
-        case 'bananabread': {
-            // Legacy single-item fallback (should normally be handled by batch handler)
-            return (await getVectorsForSource(source, [text], model, directories, req))[0];
-        }
-        case 'vllm': {
-            const { getVllmVector } = await import('../../src/vectors/vllm-vectors.js');
-            const apiUrl = req.body?.apiUrl || 'http://localhost:8000';
-            return await getVllmVector(text, apiUrl, model, directories);
-        }
-        case 'palm':
-        case 'vertexai': {
-            const googleVectors = await import('../../src/vectors/google-vectors.js');
-            if (source === 'palm') {
-                return await googleVectors.getMakerSuiteVector(text, model, req);
-            } else {
-                return await googleVectors.getVertexVector(text, model, req);
-            }
-        }
-        case 'extras': {
-            const { getExtrasVector } = await import('../../src/vectors/extras-vectors.js');
-            const extrasUrl = req.body?.extrasUrl || 'http://localhost:5100';
-            const extrasKey = req.body?.extrasKey || '';
-            return await getExtrasVector(text, extrasUrl, extrasKey);
-        }
-        default:
-            throw new Error(`Unknown vector source: ${source}`);
-    }
-}
-
-    // ========================================================================
-    // UNIFIED CHUNK ENDPOINTS
-    // ========================================================================
 
     /**
      * POST /api/plugins/similharity/chunks/list
@@ -1002,10 +748,11 @@ async function _getLegacySingleEmbedding(source, text, model, directories, req) 
 
             // Auto-init LanceDB if needed
             if (backend === 'lancedb') {
-                await ensureLanceDBInitialized(req.user.directories);
+                await ensureLanceDBInitialized(req);
             }
 
-            const handler = getBackendHandler(backend);
+            const scopedBackend = await requestBackend(req, backend);
+            const handler = getBackendHandler(backend, req, scopedBackend);
             const result = await handler.list(collectionId, source, model, req.user.directories, {
                 offset,
                 limit,
@@ -1050,10 +797,11 @@ async function _getLegacySingleEmbedding(source, text, model, directories, req) 
             }
 
             if (backend === 'lancedb') {
-                await ensureLanceDBInitialized(req.user.directories);
+                await ensureLanceDBInitialized(req);
             }
 
-            const handler = getBackendHandler(backend);
+            const scopedBackend = await requestBackend(req, backend);
+            const handler = getBackendHandler(backend, req, scopedBackend);
             const chunk = await handler.get(collectionId, hash, source, model, req.user.directories, filters);
 
             if (!chunk) {
@@ -1161,7 +909,7 @@ async function _getLegacySingleEmbedding(source, text, model, directories, req) 
             }
 
             if (backend === 'lancedb') {
-                await ensureLanceDBInitialized(req.user.directories);
+                await ensureLanceDBInitialized(req);
             }
 
             // Get query vector if not provided
@@ -1170,7 +918,8 @@ async function _getLegacySingleEmbedding(source, text, model, directories, req) 
                 vector = await getEmbeddingForSource(source, searchText, model, req.user.directories, req);
             }
 
-            const handler = getBackendHandler(backend);
+            const scopedBackend = await requestBackend(req, backend);
+            const handler = getBackendHandler(backend, req, scopedBackend);
             const results = await handler.query(collectionId, vector, topK, threshold, source, model, req.user.directories, {
                 includeVectors,
                 filters
@@ -1247,6 +996,7 @@ async function _getLegacySingleEmbedding(source, text, model, directories, req) 
             };
 
             if (backend === 'qdrant') {
+                const qdrantBackend = await requestBackend(req,'qdrant');
                 const results = await qdrantBackend.hybridQuery(
                     collectionId,
                     vector,
@@ -1273,6 +1023,7 @@ async function _getLegacySingleEmbedding(source, text, model, directories, req) 
                 });
             } else if (backend === 'milvus') {
                 // Milvus hybrid query implementation (if available)
+                const milvusBackend = await requestBackend(req,'milvus');
                 const results = await milvusBackend.hybridQuery(
                     collectionId,
                     vector,
@@ -1342,56 +1093,8 @@ async function _getLegacySingleEmbedding(source, text, model, directories, req) 
      * Rerank documents using BananaBread's reranking endpoint
      * Body: { apiUrl, query, documents, top_k? }
      */
-    router.post('/rerank', async (req, res) => {
-        try {
-            const {
-                apiUrl = 'http://localhost:8008',
-                apiKey = '',
-                query,
-                documents,
-                top_k = 10,
-                task_description
-            } = req.body;
-
-            if (!query || !documents || !Array.isArray(documents)) {
-                return res.status(400).json({ error: 'query and documents array required' });
-            }
-
-            const url = new URL(apiUrl);
-            url.pathname = '/v1/rerank';
-
-            // Default task description if not provided
-            const finalTaskDescription = task_description || "Given the following document from a role play, which of the following documents are most relevant to it?";
-
-            const headers = { 'Content-Type': 'application/json' };
-            if (apiKey) {
-                headers['Authorization'] = `Bearer ${apiKey}`;
-            }
-
-            const response = await fetch(url.toString(), {
-                method: 'POST',
-                headers: headers,
-                body: JSON.stringify({
-                    query,
-                    documents,
-                    top_k,
-                    return_documents: false,
-                    task_description: finalTaskDescription
-                }),
-            });
-
-            if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error(`BananaBread rerank failed: ${response.statusText} ${errorText}`);
-            }
-
-            const data = await response.json();
-            res.json(data);
-        } catch (error) {
-            console.error(`[${pluginName}] rerank error:`, error);
-            res.status(500).json({ error: error.message });
-        }
-    });
+    router.post('/rerank', (req, res) => res.status(409).json({success:false,
+        code:'S03_SENSITIVE_ROUTE_BLOCKED', error:'Legacy caller-supplied rerank endpoint is disabled.'}));
 
     /**
      * POST /api/plugins/similharity/chunks/stats
@@ -1413,10 +1116,11 @@ async function _getLegacySingleEmbedding(source, text, model, directories, req) 
             }
 
             if (backend === 'lancedb') {
-                await ensureLanceDBInitialized(req.user.directories);
+                await ensureLanceDBInitialized(req);
             }
 
-            const handler = getBackendHandler(backend);
+            const scopedBackend = await requestBackend(req, backend);
+            const handler = getBackendHandler(backend, req, scopedBackend);
             const stats = await handler.stats(collectionId, source, model, req.user.directories, filters);
 
             res.json({
@@ -1443,6 +1147,11 @@ async function _getLegacySingleEmbedding(source, text, model, directories, req) 
  * Get vectra index for a collection
  */
 async function getIndex(directories, collectionId, source, model) {
+    exposedSafeSource(source);
+    safeLegacyPhysicalName('vectra', collectionId);
+    if (model && (typeof model !== 'string' || sanitize(model) !== model)) {
+        throw new AccessError('S03_INVALID_MODEL_PATH', 'Unverified model path must not alias an existing index', 409);
+    }
     const pathToFile = model
         ? path.join(directories.vectors, sanitize(source), sanitize(collectionId), sanitize(model))
         : path.join(directories.vectors, sanitize(source), sanitize(collectionId));
@@ -1450,7 +1159,7 @@ async function getIndex(directories, collectionId, source, model) {
     const store = new vectra.LocalIndex(pathToFile);
 
     if (!await store.isIndexCreated()) {
-        await store.createIndex();
+        throw new AccessError('S03_INDEX_NOT_FOUND', 'Index does not exist; read must not create it', 404);
     }
 
     return store;
@@ -1579,7 +1288,7 @@ function getStringHash(str) {
 /**
  * Scan all sources for collections
  */
-async function scanAllSourcesForCollections(vectorsPath) {
+async function scanAllSourcesForCollections(vectorsPath, userContext, backendPool) {
     const allCollections = [];
 
     try {
@@ -1636,9 +1345,7 @@ async function scanAllSourcesForCollections(vectorsPath) {
         const lancedbPath = path.join(vectorsPath, 'lancedb');
         try {
             await fs.access(lancedbPath);
-            if (!lancedbBackend.basePath) {
-                await lancedbBackend.initialize(vectorsPath);
-            }
+            const lancedbBackend = await backendPool.get(userContext, 'lancedb');
 
             const sourceDirs = await fs.readdir(lancedbPath, { withFileTypes: true });
             const sources = sourceDirs.filter(d => d.isDirectory() && !d.name.endsWith('.lance')).map(d => d.name);
@@ -1674,65 +1381,8 @@ async function scanAllSourcesForCollections(vectorsPath) {
             console.debug(`[${pluginName}] LanceDB folder not found or not accessible:`, e.message);
         }
 
-        // Scan Qdrant (uses REST API, so check if initialized via baseUrl)
-        try {
-            if (qdrantBackend.baseUrl) {
-                const healthy = await qdrantBackend.healthCheck();
-                if (healthy) {
-                    // List items from vecthare_main collection
-                    const collections = await qdrantBackend.getCollections();
-                    const hasVecthareMain = collections.some(col => col.name === 'vecthare_main'); //just-in-case support for multitenancy?
-
-                    for (const collectionName of collections) {
-                        const items = await qdrantBackend.listItems(collectionName, {});
-                        console.log('Discovered Qdrant Collection:', collectionName + " " + items.length + " items");
-
-                        // Extract source from collection name (format: "source:id" or "backend:source:id")
-                        let source = 'unknown';
-                        const parts = collectionName.split(':');
-                        if (parts.length === 2) {
-                            // Format: "source:id"
-                            source = parts[0];
-                        } else if (parts.length === 3) {
-                            // Format: "backend:source:id"
-                            source = parts[1];
-                        } else if (items.length > 0 && items[0].metadata?.embeddingSource) {
-                            // Fallback: get from item metadata
-                            source = items[0].metadata.embeddingSource;
-                        }
-
-                         allCollections.push({
-                            id: collectionName,
-                            source: source,
-                            backend: 'qdrant',
-                            chunkCount: items.length,
-                            modelCount: 1
-                        });
-                    }
-                }
-            }
-        } catch (e) {
-            console.warn(`[${pluginName}] Qdrant: Failed to scan collections:`, e.message);
-        }
-
-        // Scan Milvus
-        try {
-            if (milvusBackend.isConnected) {
-                const items = await milvusBackend.listItems('vecthare_main', {}, { limit: 1 });
-                if (items.length > 0) {
-                    const stats = await milvusBackend.getCollectionStats('vecthare_main');
-                    allCollections.push({
-                        id: 'vecthare_main',
-                        source: 'milvus',
-                        backend: 'milvus',
-                        chunkCount: stats.chunkCount,
-                        modelCount: 1
-                    });
-                }
-            }
-        } catch (e) {
-            console.warn(`[${pluginName}] Milvus: Failed to scan collections:`, e.message);
-        }
+        // S03: no cross-tenant remote collection enumeration. Remote inventory
+        // requires S05 verified server-owned collection mapping and pagination.
 
     } catch (error) {
         console.error(`[${pluginName}] Error scanning collections:`, error);

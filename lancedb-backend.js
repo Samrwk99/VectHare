@@ -19,6 +19,7 @@
 import path from 'node:path';
 import { denyUnsafeBackendMutation } from './lib/s01-safety.js';
 import { safeLegacyPhysicalName } from './lib/s02-identity.js';
+import { exposedSafeSource, AccessError } from './lib/s03-security.js';
 import fs from 'node:fs/promises';
 import * as lancedb from '@lancedb/lancedb';
 
@@ -76,8 +77,15 @@ class LanceDBBackend {
         }
 
         // Create source-specific path
+        exposedSafeSource(source);
         const sourcePath = path.join(this.basePath, source);
         await fs.mkdir(sourcePath, { recursive: true });
+        // No symlinked source directories may escape this user's data root.
+        const physicalRoot = await fs.realpath(this.basePath);
+        const physicalSource = await fs.realpath(sourcePath);
+        if (path.dirname(physicalSource) !== physicalRoot) {
+            throw new AccessError('S03_LANCE_PATH_ESCAPE', 'LanceDB source escapes user storage root');
+        }
 
         // Connect to source-specific database
         const db = await lancedb.connect(sourcePath);
@@ -502,3 +510,6 @@ class LanceDBBackend {
 const backend = new LanceDBBackend();
 
 export default backend;
+
+/** S03 per-user factory; legacy default export retained for offline/source compatibility. */
+export function createLanceDBBackend() { return new LanceDBBackend(); }

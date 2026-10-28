@@ -309,3 +309,6 @@ class MilvusBackend {
 
 const milvusBackend = new MilvusBackend();
 export default milvusBackend;
+
+/** S03 per-user factory; legacy default export retained for offline/source compatibility. */
+export function createMilvusBackend() { return new MilvusBackend(); }

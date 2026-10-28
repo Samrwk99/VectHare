@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import qdrant from '../qdrant-backend.js';
 import { s01MutationGuard, SafetyError } from '../lib/s01-safety.js';
 import { safeLegacyPhysicalName } from '../lib/s02-identity.js';
+import { exposedSafeSource, AccessError } from '../lib/s03-security.js';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const quiet = { log() {}, warn() {}, error() {}, debug() {} };
@@ -234,7 +235,15 @@ test('plugin registration keeps legacy mutation endpoints blocked even without m
         './lancedb-backend.js':{default:fakeBackend},
         './qdrant-backend.js':{default:fakeBackend},
         './milvus-backend.js':{default:fakeBackend},
-        './lib/s01-safety.js':{s01MutationGuard:lib.s01MutationGuard}
+        './lib/s01-safety.js':{s01MutationGuard:lib.s01MutationGuard},
+        './lib/s03-security.js':{
+            authenticatedContext:async()=>({userScopeId:'tester',vectorsPath:'/tmp'}),
+            forbidOwnerSpoof:()=>{},validateClientConfig:()=>{},lookupAuthorizedReservation:async()=>({}),
+            legacyReadBoundary:(_r,_s,n)=>n(),s03SensitiveRouteBoundary:(_r,_s,n)=>n(),
+            AccessError,exposedSafeSource
+        },
+        './lib/s03-backends.js':{BackendPool:class {}},
+        './lib/s02-identity.js':{safeLegacyPhysicalName}
     });
     const routes=new Map(); const middleware=[];
     const router={
@@ -244,7 +253,7 @@ test('plugin registration keeps legacy mutation endpoints blocked even without m
         patch:(route,fn)=>routes.set(`PATCH ${route}`,fn),
     };
     await namespace.init(router);
-    assert.equal(middleware.length,1);
+    assert.ok(middleware.length>=2);
     for(const key of ['POST /chunks/insert','POST /chunks/delete','POST /chunks/purge','POST /purge-all','PATCH /chunks/:hash/text','PATCH /chunks/:hash/metadata']){
         const fn=routes.get(key);assert.equal(typeof fn,'function',key);
         const res=fakeResponse();
@@ -261,6 +270,7 @@ test('LanceDB direct destructive legacy methods refuse before database access', 
         '@lancedb/lancedb': {connect: async()=>{throw new Error('network should not be touched');}},
         './lib/s01-safety.js': {denyUnsafeBackendMutation: (_backend,operation)=>{throw new SafetyError('S01_MUTATION_BLOCKED',operation);}},
         './lib/s02-identity.js': {safeLegacyPhysicalName},
+        './lib/s03-security.js': {exposedSafeSource,AccessError},
     })).default;
     for(const [method,args] of [
         ['deleteVectors',['chat',[1]]],
@@ -279,6 +289,7 @@ test('LanceDB rejects entire malformed insert batch without opening database', a
         '@lancedb/lancedb': {connect: async()=>{touched++;return {}; }},
         './lib/s01-safety.js': {denyUnsafeBackendMutation: (_backend,operation)=>{throw new SafetyError('S01_MUTATION_BLOCKED',operation);}},
         './lib/s02-identity.js': {safeLegacyPhysicalName},
+        './lib/s03-security.js': {exposedSafeSource,AccessError},
     })).default;
     lance.basePath='/throwaway';
     await assert.rejects(lance.insertVectors('chat',[{hash:1,vector:[1,2]}, {hash:2,vector:[NaN,2]}]),/Invalid vector/);
@@ -310,6 +321,7 @@ test('S02 LanceDB refuses ambiguous legacy collection before opening any databas
         '@lancedb/lancedb': {connect: async()=>{touched++;return {}; }},
         './lib/s01-safety.js': {denyUnsafeBackendMutation: (_backend,operation)=>{throw new SafetyError('S01_MUTATION_BLOCKED',operation);}},
         './lib/s02-identity.js': {safeLegacyPhysicalName},
+        './lib/s03-security.js': {exposedSafeSource,AccessError},
     })).default;
     lance.basePath='/throwaway';
     await assert.rejects(lance.listItems('chat:a/b'),e=>e.code==='S02_AMBIGUOUS_LEGACY_NAME');

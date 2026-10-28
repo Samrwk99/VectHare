@@ -1112,3 +1112,6 @@ class QdrantBackend {
 // Export singleton instance
 const qdrantBackend = new QdrantBackend();
 export default qdrantBackend;
+
+/** S03 per-user factory; legacy default export retained for offline/source compatibility. */
+export function createQdrantBackend() { return new QdrantBackend(); }

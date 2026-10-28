@@ -985,3 +985,8 @@ Coneja-Chibi
 ## Repository
 
 [https://github.com/Conejachibi/VectHare](https://github.com/Conejachibi/VectHare)
+
+
+## S03 authorization/isolation checkpoint (development only)
+
+This checkpoint requires a host-authenticated SillyTavern `req.user` with `profile.handle` (or string `id`) and an existing user vectors directory on all non-health routes. Remote Qdrant/Milvus configuration is **administrator-only** via `SIMILHARITY_SERVER_CONFIG_DIR`, with no browser-supplied URL/API key/token. See `S03-SERVER-CONFIG-RUNBOOK.md`. A missing private configuration or unknown host identity refuses requests. The read-only `/v2/identity/resolve` response is **not** physical tenancy proof. S01 legacy mutations remain blocked, and S03 blocks legacy shared Qdrant/Milvus reads pending verified S05 ownership. No deployment, migration, write activation or live backend tests were conducted. Run `npm run test:s03` and `npm run check:s03` for offline tests.

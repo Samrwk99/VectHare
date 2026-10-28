@@ -1,0 +1,11 @@
+# S04 — Safe Mutations: Handoff from S03
+
+1. **Verify host integration first.** In disposable SillyTavern, confirm `req.user.profile.handle` or `req.user.id`, protected `directories.vectors`, router auth/CSRF, private server env path and two-user isolation. If any fails, adjust the host adapter *without* permitting client-controlled owner/credential fallbacks.
+2. **Complete authorized collection/source ownership mapping.** S03 derives the authenticated user ID and checks S02 reservations, but does not yet prove ownership of a client-selected chat, lorebook, branch or physical backend collection. Build a trusted server-side registered collection/source mapping and distinguish legacy owner claims from verified ownership. Branch creation itself remains S11 host/extension work.
+3. **Implement v2 mutation routes (NOT old legacy endpoints).** Implement scoped create/update/delete with immutable record ID, expected revision, durable operation ID, verified backend readback, uncertain-state reconciliation, and recoverable cancellation/restart. Keep S01 legacy mutation blocks intact.
+4. **Write adapters separately.** Ensure Qdrant, Milvus, LanceDB and Vectra apply the same authoritative scope and correct physical IDs. No hash-only delete, no dimension-mismatch recreation, no delete-before-insert replacement, no generic retries after uncertain mutations.
+5. **Keep reads conservative.** S05 must implement backend-authoritative owner projections and reliable pagination before shared Qdrant/Milvus reads are re-enabled; do not circumvent S03 guard to accelerate write tests.
+6. **Security follow-up.** Validate host credential retrieval and per-user config roots on a real deployment; review every embedding/rerank proxy route and local file opener before allowing caller-chosen remote URLs. Test multi-process behavior and credential rotation.
+7. **Evidence required.** Disposable per-backend insert → independent readback → delete → absence, duplicate/cross-tenant hashes, conflicting revisions, partial failures, restart and migration compatibility. Run twice including after restart. Update the runtime matrix by individual capability, not a global flag.
+
+**S03 state:** Identity and credential boundaries are implemented offline; the source is a guarded development checkpoint. No writes enabled, no production or live certification.
