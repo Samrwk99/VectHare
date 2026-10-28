@@ -24,6 +24,9 @@ import { getSavedHashes } from '../core/core-vector-api.js';
 import { eventSource, event_types } from '../../../../../script.js';
 import { getContext } from '../../../../extensions.js';
 import {currentChatIdentity} from '../core/chat-job-runtime.js';
+import {getVerifiedChatOriginId} from '../core/collection-ids.js';
+import {formatCollectionKey} from '../utils/collection-keys.js';
+import {acceptSceneTimelineSnapshot} from '../core/scene-timeline.js';
 
 // ============================================================================
 // CONSTANTS
@@ -75,9 +78,20 @@ export async function refreshSceneCache(settings) {
                     sceneEnd: m.sceneEnd,
                     containedHashes: m.containedHashes || [],
                     title: m.title || '',
+                    sceneId: m.sceneId,
+                    sceneStartRef:m.sceneStartRef,
+                    sceneEndRef:m.sceneEndRef,
                 }));
         } else {
             cachedSceneChunks = [];
+        }
+        const stableChatId = getVerifiedChatOriginId();
+        if (stableChatId && result?.metadataStatus !== 'unavailable') {
+            const key=formatCollectionKey({backend:currentSettings.vector_backend || 'standard',
+                source:currentSettings.source || 'transformers',collectionId});
+            // Read-only advisory scene timeline; does not certify pagination,
+            // ownership, or successful backend writes.
+            acceptSceneTimelineSnapshot(stableChatId,key,cachedSceneChunks);
         }
         console.log(`VectHare Scenes: Cached ${cachedSceneChunks.length} scenes`);
     } catch (error) {

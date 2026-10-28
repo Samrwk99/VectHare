@@ -739,7 +739,8 @@ function bindSceneDetailEvents() {
     $('#vecthare_scene_title').off('blur').on('blur', async function() {
         const title = $(this).val().trim();
         try {
-            await updateSceneChunkMetadata(scene.hash, { title }, currentSettings);
+            const receipt = await updateSceneChunkMetadata(scene.hash, { title }, currentSettings, scene);
+            if (!receipt.success) throw new Error(receipt.error || 'Scene title update not verified');
             // Update local chunk data
             if (scene.metadata) scene.metadata.title = title;
             renderSceneList();
@@ -754,7 +755,8 @@ function bindSceneDetailEvents() {
     $('#vecthare_scene_summary').off('blur').on('blur', async function() {
         const summary = $(this).val().trim();
         try {
-            await updateSceneChunkMetadata(scene.hash, { summary }, currentSettings);
+            const receipt = await updateSceneChunkMetadata(scene.hash, { summary }, currentSettings, scene);
+            if (!receipt.success) throw new Error(receipt.error || 'Scene summary reindex not verified');
             if (scene.metadata) scene.metadata.summary = summary;
             toastr.success('Summary saved', 'VectHare');
         } catch (error) {
@@ -768,7 +770,8 @@ function bindSceneDetailEvents() {
         const keywordsStr = $(this).val().trim();
         const keywords = keywordsStr ? keywordsStr.split(',').map(k => k.trim()).filter(Boolean) : [];
         try {
-            await updateSceneChunkMetadata(scene.hash, { keywords }, currentSettings);
+            const receipt = await updateSceneChunkMetadata(scene.hash, { keywords }, currentSettings, scene);
+            if (!receipt.success) throw new Error(receipt.error || 'Scene keywords update not verified');
             // Update local metadata to reflect saved changes
             if (scene.metadata) {
                 scene.metadata.keywords = keywords;

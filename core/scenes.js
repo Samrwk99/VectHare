@@ -1,4 +1,8 @@
 import {messageReference, fingerprint, reconcileSceneBoundaries} from '../utils/record-identity.js';
+import {formatCollectionKey} from '../utils/collection-keys.js';
+import {hasVerifiedCapability} from '../utils/backend-contracts.js';
+import {updateSceneAndReindex} from '../utils/c12-scene-update.js';
+import {rememberCommittedScene,forgetCommittedScene,getSceneTimeline} from './scene-timeline.js';
 import {getVerifiedChatOriginId} from './collection-ids.js';
 /**
  * ============================================================================
@@ -29,6 +33,7 @@ import {
     insertVectorItems,
     deleteVectorItems,
     replaceVectorRecords,
+    updateChunkMetadata,
 } from './core-vector-api.js';
 import { getChatCollectionId, getTextWithoutAttachments } from './chat-vectorization.js';
 import {
@@ -181,6 +186,7 @@ export async function createSceneChunk(start, end, sceneData, settings) {
         text: sceneText,
         metadata: {
             isScene: true,
+            sceneId: String(sceneHash),
             sceneStart: start,
             sceneEnd: end,
             ...(sceneStartRef && sceneEndRef ? {sceneStartRef,sceneEndRef} : {}),
@@ -213,6 +219,10 @@ export async function createSceneChunk(start, end, sceneData, settings) {
             });
         }
 
+        if (stableChatId) {
+            const key = formatCollectionKey({backend:settings?.vector_backend || 'standard',source:settings?.source || 'transformers',collectionId});
+            rememberCommittedScene(stableChatId,key,{...sceneChunk.metadata,hash:sceneHash});
+        }
         console.log(`VectHare Scenes: Created scene chunk ${sceneHash} (${start}-${end}), disabled ${containedHashes.length} chunks`);
         return { success: true, hash: sceneHash };
 
@@ -236,8 +246,12 @@ export async function deleteSceneChunk(sceneHash, containedHashes, settings) {
     }
 
     try {
-        // Delete scene chunk from vector DB
-        await deleteVectorItems(collectionId, [sceneHash], settings);
+        // C02 delete journal must prove scoped delete and final readback before
+        // re-enabling any disabled member. An HTTP acknowledgement is not proof.
+        const key=formatCollectionKey({backend:settings?.vector_backend||'standard',source:settings?.source||'transformers',collectionId});
+        const receipt=await replaceVectorRecords(key,[sceneHash],[],settings,{kind:'scene-delete'});
+        if (receipt?.status!=='committed') return {success:false,requiresReconciliation:true,
+            error:'Scene delete requires reconciliation; original member links preserved'};
 
         // Re-enable contained chunks
         for (const hash of containedHashes) {
@@ -252,6 +266,8 @@ export async function deleteSceneChunk(sceneHash, containedHashes, settings) {
             }
         }
 
+        const chatId=getVerifiedChatOriginId();
+        if (chatId) forgetCommittedScene(chatId,key,sceneHash);
         console.log(`VectHare Scenes: Deleted scene chunk ${sceneHash}, re-enabled ${containedHashes.length} chunks`);
         return { success: true };
 
@@ -269,21 +285,35 @@ export async function deleteSceneChunk(sceneHash, containedHashes, settings) {
  * @param {object} settings - VectHare settings
  * @returns {Promise<{success: boolean, error?: string}>}
  */
-export async function updateSceneChunkMetadata(sceneHash, updates, settings) {
-    // Scene metadata is stored in chunk metadata, not vector DB
-    const existing = getChunkMetadata(sceneHash) || {};
-
-    const updatedMeta = {
-        ...existing,
-        ...(updates.title !== undefined && { title: updates.title }),
-        ...(updates.summary !== undefined && { summary: updates.summary }),
-        ...(updates.keywords !== undefined && { keywords: updates.keywords }),
-        updatedAt: Date.now(),
-    };
-
-    saveChunkMetadata(sceneHash, updatedMeta);
-    console.log(`VectHare Scenes: Updated metadata for scene ${sceneHash}`);
-    return { success: true };
+export async function updateSceneChunkMetadata(sceneHash, updates, settings, scene = null) {
+    // The old path saved only local settings, leaving vector metadata and the
+    // search embedding unchanged. It cannot report a successful scene edit.
+    const collectionId = getCurrentCollectionId();
+    if (!collectionId) return {success:false,error:'No chat selected'};
+    if (!scene?.metadata?.isScene || String(scene.hash)!==String(sceneHash))
+        return {success:false,error:'Original scene record required for safe editing'};
+    const collectionKey = formatCollectionKey({backend:settings?.vector_backend || 'standard',
+        source:settings?.source || 'transformers',collectionId});
+    const backend = settings?.vector_backend || 'standard';
+    const result = await updateSceneAndReindex({
+        scene,patch:updates,collectionKey,
+        commitMetadata: async(hash, metadata, key) => {
+            if (!hasVerifiedCapability(backend,'updatePayload') || !hasVerifiedCapability(backend,'getByIds') ||
+                !hasVerifiedCapability(backend,'tenantFilter'))
+                throw new Error('Scene metadata update blocked: backend payload and scoped readback contracts unverified');
+            const ack = await updateChunkMetadata(collectionId,hash,metadata,settings);
+            // A transport-level response is not a verified point-level readback.
+            // The plugin supplies no authoritative confirmation yet.
+            return {status:'unverified',acknowledged:!!ack,scope:key,recordId:String(hash)};
+        },
+        replaceRecords:async(key,oldIds,items)=>replaceVectorRecords(key,oldIds,items,settings,{kind:'scene-summary-reindex'}),
+        // C07 cross-reference migration is a guarded plan, not a verified live
+        // transaction. Do not invent a confirmed reference-rewrite callback.
+        buildReplacement:()=>{throw new Error('Scene summary reindex blocked: verified C07 reference migration unavailable');},
+        commitLocal:async()=>{throw new Error('Host settings persistence not verified');},
+    });
+    return result.status === 'committed' ? {success:true,...result}
+        : {success:false,requiresReconciliation:true,error:result.reason || 'Scene update unverified'};
 }
 
 // ============================================================================

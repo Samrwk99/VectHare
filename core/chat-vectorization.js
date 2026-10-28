@@ -41,9 +41,12 @@ import { createScopedFacade } from '../utils/c06-scoped-facade.js';
 import { formatCollectionKey, parseCollectionKey } from '../utils/collection-keys.js';
 import { applyDecayToResults, applyNostalgiaToResults, applySceneAwareDecay } from './temporal-decay.js';
 import { isChunkDisabledByScene } from './scenes.js';
+import {getSceneTimeline} from './scene-timeline.js';
+import {weightChunksByCollection} from '../utils/c12-scene-temporal.js';
 import { registerCollection, getCollectionRegistry } from './collection-loader.js';
 import {
     isCollectionEnabled,
+    getCollectionDecaySettings,
     filterActiveCollections,
     getChatCollectionPolicy,
     applyChatCollectionPolicy,
@@ -1433,6 +1436,47 @@ function applyThresholdFilter(chunks, threshold, debugData) {
  * @returns {object[]} Chunks with decay applied
  */
 function applyTemporalDecayStage(chunks, chat, settings, threshold, debugData) {
+    // C12: actual retrieval records carry collection identity. Resolve their
+    // policies separately and load scene boundaries from the chat-owned scene
+    // timeline, not from which scene vectors happened to match this query.
+    // Anonymous legacy candidates retain the previous global-policy behavior.
+    if (chunks.some(c => c.collectionId || c.collectionKey)) {
+        const currentMessageId = chat.length - 1;
+        const chatOriginId = getVerifiedChatOriginId();
+        const backend = settings.vector_backend || 'standard';
+        const source = settings.source || 'transformers';
+        const weighted = weightChunksByCollection(chunks,currentMessageId,{
+            legacyPolicy:settings.temporal_decay,
+            getPolicy:key=> {
+                if (!key) return settings.temporal_decay;
+                // getCollectionDecaySettings accepts a collection ID or a
+                // registered qualified key; it resolves per-collection defaults.
+                return getCollectionDecaySettings(key);
+            },
+            getTimeline:key => {
+                if (!chatOriginId) return [];
+                const qualified = parseCollectionKey(key) ? key
+                    : formatCollectionKey({backend,source,collectionId:key});
+                return getSceneTimeline(chatOriginId,qualified,chat);
+            },
+            applyDecay:applyDecayToResults,
+            applyNostalgia:applyNostalgiaToResults,
+            applySceneDecay:applySceneAwareDecay,
+        });
+        const result = weighted.filter(chunk => chunk.score >= threshold)
+            .sort((a,b)=>b.score-a.score || String(a.recordId || a.hash).localeCompare(String(b.recordId || b.hash)));
+        for (const chunk of weighted) {
+            const passed = chunk.score >= threshold;
+            recordChunkFate(debugData,chunk.hash,'decay',passed?'passed':'dropped',
+                passed ? null : `Weighted score ${chunk.score.toFixed(3)} < threshold ${threshold}`,
+                {score:chunk.score,collectionId:chunk.collectionId,policy:'per_collection'});
+        }
+        addTrace(debugData,'decay','C12 per-collection temporal policies applied',{
+            decayType:'per_collection',before:chunks.length,after:result.length,
+            sceneSource:'chat_owned_timeline',dropped:chunks.length-result.length
+        });
+        return result;
+    }
     if (!settings.temporal_decay || !settings.temporal_decay.enabled) {
         addTrace(debugData, 'decay', 'Temporal decay skipped (disabled)', { enabled: false });
         chunks.forEach(chunk => {
