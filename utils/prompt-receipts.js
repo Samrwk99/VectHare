@@ -11,25 +11,32 @@ export function wrapPromptBlock(text, nonce, index) {
     if(!/^[0-9a-f]{32}$/i.test(String(nonce)) || !Number.isSafeInteger(index) || index<0) throw new Error('Invalid prompt receipt identity');
     return `<!-- VH:${nonce}:${index}:BEGIN -->\n${text}\n<!-- VH:${nonce}:${index}:END -->`;
 }
-function assembledText(event,kind) {
+/** Capture host-assembled text without joining *different chat messages*.
+ * The host can represent one message as several adjacent text parts; those
+ * parts may be joined, but separate messages cannot synthesize a whole block.
+ */
+function assembledSegments(event,kind) {
     if (!event || typeof event !== 'object' || event.dryRun === true || event.dry_run === true) return null;
-    const payload = kind==='chat' ? event.chat : event.prompt;
-    if (kind==='text') return typeof payload==='string' ? payload : null;
-    if (!Array.isArray(payload)) return null;
-    // Recurse through structured chat messages but never stringify arbitrary
-    // objects (which could produce false positive marker matches).
-    const strings=[];
-    function visit(v,depth=0) {
+    if (kind==='text') return typeof event.prompt==='string' ? [event.prompt] : null;
+    if (kind!=='chat' || !Array.isArray(event.chat)) return null;
+    const segments=[];
+    function visit(v,strings,depth=0) {
         if(depth>8)return;
         if(typeof v==='string'){strings.push(v);return;}
-        if(Array.isArray(v)){for(const part of v)visit(part,depth+1);return;}
+        if(Array.isArray(v)){for(const part of v)visit(part,strings,depth+1);return;}
         if (v && typeof v==='object') {
-            if (typeof v.text==='string') visit(v.text,depth+1);
-            if (typeof v.content==='string'||Array.isArray(v.content))visit(v.content,depth+1);
+            if(typeof v.text==='string')visit(v.text,strings,depth+1);
+            if(typeof v.content==='string'||Array.isArray(v.content))visit(v.content,strings,depth+1);
         }
     }
-    visit(payload);
-    return strings.join('\n');
+    for(const message of event.chat) {
+        const parts=[];
+        visit(message,parts);
+        // A structured chat payload may have non-text images and audio; they
+        // contribute no text and cannot be used as a bridge between messages.
+        if(parts.length)segments.push(parts.join('\n'));
+    }
+    return segments;
 }
 
 export function createPromptReceiptTracker({getChatId=()=>null,onReceipt=()=>{},now=()=>Date.now()}={}) {
@@ -49,10 +56,13 @@ export function createPromptReceiptTracker({getChatId=()=>null,onReceipt=()=>{},
             if(String(getChatId()??'')!==pending.chatId) {pending=null;last={status:'unknown',verified:false,reason:'chat-changed'};return {...last};}
             // A stale assembly event must never certify a newer registration.
             if(now()-pending.started>120000){pending=null;last={status:'unknown',verified:false,reason:'receipt-expired'};return {...last};}
-            const text=assembledText(event,kind);
-            if(text===null)return {status:'unknown',verified:false,reason:'unverifiable-or-dry-run'};
-            const result=pending.groups.map(g=>({tag:g.tag,status:text.includes(g.text)?'included':'notIncluded',verified:true,
-                recordIds:text.includes(g.text)?g.recordIds:[],frequencyEntries:text.includes(g.text)?(g.frequencyEntries||[]):[]}));
+            const segments=assembledSegments(event,kind);
+            if(segments===null)return {status:'unknown',verified:false,reason:'unverifiable-or-dry-run'};
+            const result=pending.groups.map(g=>{
+                const included=segments.some(segment=>segment.includes(g.text));
+                return {tag:g.tag,status:included?'included':'notIncluded',verified:true,
+                    recordIds:included?g.recordIds:[],frequencyEntries:included?(g.frequencyEntries||[]):[]};
+            });
             const allIncluded=result.every(g=>g.status==='included');
             const anyIncluded=result.some(g=>g.status==='included');
             const receipt={status:allIncluded?'included':anyIncluded?'partial':'notIncluded',verified:true,kind,

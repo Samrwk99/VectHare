@@ -71,8 +71,13 @@ export function createWorldInfoSnapshotStore() {
         capture(chatId, payload) {
             if (!chatId) return false;
             const entries = normalizeWorldInfoEntries(payload);
-            // Empty events are permitted if the host explicitly supplies an empty list.
-            if (!entries.length && !Array.isArray(payload)) return false;
+            // Only an explicitly empty, recognised activation container may
+            // clear a previous scan. Unknown objects are not evidence of zero.
+            const explicitList = payload instanceof Set || payload instanceof Map || Array.isArray(payload);
+            const nestedList = payload && typeof payload==='object' &&
+                ['entries','activatedEntries','activeEntries','worldInfo','activated']
+                    .some(name=>payload[name] instanceof Set || payload[name] instanceof Map || Array.isArray(payload[name]));
+            if (!entries.length && !explicitList && !nestedList) return false;
             snapshots.set(String(chatId),{entries,source:'previous-observed-scan'});
             return true;
         },

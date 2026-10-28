@@ -24,6 +24,7 @@ import { setExtensionPrompt, getCurrentChatId } from '../../../../../script.js';
 import { LEGACY_WORLD_INFO_PROMPT_TAG } from './constants.js';
 import { buildSearchContext } from './conditional-activation.js';
 import {normalizeWorldInfoEntries, normalizeWorldInfoEntry} from '../utils/world-info-identity.js';
+import {resolveExclusiveCollections} from './retrieval-planner.js';
 
 // ============================================================================
 // WORLD INFO ACTIVATION HOOKS
@@ -55,7 +56,8 @@ export async function getSemanticWorldInfoEntries(recentMessages, activeEntries,
     // Lower threshold for hybrid search since RRF fusion produces lower absolute scores
     const baseThreshold = settings.world_info_threshold ?? 0.3;
     const threshold = settings.hybrid_search_enabled ? baseThreshold * 0.8 : baseThreshold;
-    const topK = settings.world_info_top_k || 3;
+    const topK = Math.max(1,Math.min(100,Number.isFinite(Number(settings.world_info_top_k))
+        ? Math.trunc(Number(settings.world_info_top_k)) || 3 : 3));
 
     // Build search context for activation filter evaluation
     const context = getContext();
@@ -129,7 +131,8 @@ export async function getSemanticWorldInfoEntries(recentMessages, activeEntries,
 
     // Cap the number of entries actually returned for injection.
     const maxEntries = settings.world_info_max_entries ?? 10;
-    const limitedEntries = deduplicatedEntries.slice(0, maxEntries);
+    const limitedEntries = deduplicateSemanticWorldInfo(deduplicatedEntries)
+        .slice(0, Number.isFinite(Number(maxEntries)) ? Math.max(0,Math.min(1000,Math.trunc(Number(maxEntries)))) : 10);
 
     console.log(`VectHare: Found ${limitedEntries.length} semantic WI entries to activate` +
         (deduplicatedEntries.length > limitedEntries.length ? ` (capped from ${deduplicatedEntries.length} by Max Entries)` : ''));
@@ -175,20 +178,31 @@ async function getEnabledLorebookCollections(settings, searchContext) {
         collections.push({ id: collectionId, name });
     }
 
-    const exclusiveCollections = collections.filter(collection => {
-        const meta = getCollectionMeta(collection.id);
-        return meta?.exclusiveWhenActive === true;
-    });
-
-    if (exclusiveCollections.length > 0) {
-        const exclusiveIds = new Set(exclusiveCollections.map(collection => collection.id));
-        const filteredCollections = collections.filter(collection => exclusiveIds.has(collection.id));
-        console.log(`VectHare WI: Exclusive lorebook collection active, suppressing ${collections.length - filteredCollections.length} other lorebook collection(s)`);
-        return filteredCollections;
+    // C09's deterministic exclusive-collection resolver must apply here too:
+    // allowing *all* exclusive lorebooks would violate the one-winner rule.
+    const exclusive = resolveExclusiveCollections(collections.map(c=>c.id),getCollectionMeta);
+    if (exclusive.reasons.length) {
+        const accepted = new Set(exclusive.ids);
+        console.log(`VectHare WI: Exclusive lorebook policy suppressed ${collections.length-accepted.size} collection(s)`);
+        return collections.filter(c=>accepted.has(c.id));
     }
 
     console.log(`VectHare WI: ${collections.length} lorebook collection(s) passed activation filters`);
     return collections;
+}
+
+/** Read-only canonical WI dedup across distinct vector collections.
+ * Keep the highest ranked semantic result for each qualified entry identity.
+ * Missing identity cannot be used for cross-collection deduplication.
+ */
+export function deduplicateSemanticWorldInfo(entries=[]) {
+    const seen=new Set();
+    return entries.filter(entry=>{
+        const id=normalizeWorldInfoEntry(entry,entry.lorebookName)?.id;
+        if(!id)return true;
+        if(seen.has(id))return false;
+        seen.add(id);return true;
+    });
 }
 
 /**
@@ -200,7 +214,7 @@ async function getEnabledLorebookCollections(settings, searchContext) {
 function deduplicateWithActiveEntries(semanticEntries, activeEntries) {
     // UIDs alone are not unique across lorebooks.
     const activeIds = new Set(normalizeWorldInfoEntries(activeEntries).map(e => e.id));
-    const activeContents = new Set(activeEntries.map(e => e.content?.trim().toLowerCase()));
+    const activeContents = new Set((Array.isArray(activeEntries)?activeEntries:[]).map(e => typeof e?.content==='string' ? e.content.trim().toLowerCase() : null).filter(Boolean));
 
     return semanticEntries.filter(entry => {
         // Skip if UID already active

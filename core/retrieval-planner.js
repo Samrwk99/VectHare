@@ -102,7 +102,7 @@ export async function expandRequiredLinks(items,groups=[],{getByIds,maxIds=128,p
             reasons.push({code:'get-by-ids-unverified',collectionId});continue;
         }
         const requestedSet=new Set(requested);
-        if(result.items.some(c=>c?.collectionId!==collectionId || !requestedSet.has(String(c.hash??c.recordId)) || c.disabled===true || c.eligible===false) ||
+        if(result.items.some(c=>c?.collectionId!==collectionId || !requestedSet.has(String(c.hash??c.recordId)) || c.disabled===true || c.eligible===false || c.metadata?.disabled===true || c.metadata?.enabled===false) ||
             new Set(result.items.map(c=>String(c.hash??c.recordId))).size!==result.items.length) {
             reasons.push({code:'get-by-ids-scope-mismatch',collectionId});continue;
         }

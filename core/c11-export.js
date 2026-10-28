@@ -28,16 +28,35 @@ export async function exportCollectionNDJSON({key,settings,adapter,writer,mode='
         }});
 }
 
-export async function downloadVerifiedCollectionNDJSON({key,settings,adapter,capability,filename,signal}={}) {
+/** E04: a read-only preflight, before a browser save is opened.
+ * This is NOT a snapshot guarantee: the exporter independently recounts and
+ * checks the inventory while writing. Failures must not leave an empty file
+ * that a user might mistake for a successful backup.
+ */
+export async function preflightVerifiedCollectionExport({key,settings,adapter,capability=hasVerifiedCapability,signal}={}) {
     const parsed=parseCollectionKey(key);
-    if (!parsed) throw Error('C11: qualified collection identity required');
-    if (parsed.backend !== (settings?.vector_backend || 'standard') || parsed.source !== settings?.source)
-        throw Error('C11: qualified export route mismatch');
-    // Validate before opening the browser save dialog.
-    for (const flag of ['listPagination','completeInventory','tenantFilter','count']) {
-        if ((capability||hasVerifiedCapability)(parsed.backend,flag)!==true)
-            throw Error('C11: complete backend inventory is not verified; no full backup was produced');
+    if (!parsed || parsed.backend !== (settings?.vector_backend || 'standard') || parsed.source !== settings?.source)
+        return {ready:false,reason:'qualified-export-route-mismatch'};
+    for(const flag of ['listPagination','completeInventory','tenantFilter','count']){
+        if(capability(parsed.backend,flag)!==true)return {ready:false,reason:`unverified-${flag}`};
     }
+    if(typeof adapter?.listScopedPage!=='function'||typeof adapter?.countScopedRecords!=='function')
+        return {ready:false,reason:'scoped-inventory-adapter-missing'};
+    if(signal?.aborted)return {ready:false,reason:'aborted'};
+    try {
+        const result=await adapter.countScopedRecords(key,settings,{signal});
+        if(signal?.aborted)return {ready:false,reason:'aborted'};
+        if(result?.scope!==key||result.contractVerified!==true||!Number.isSafeInteger(result.count)||result.count<0)
+            return {ready:false,reason:'independent-count-unverified'};
+        return {ready:true,count:result.count,scope:key};
+    }catch(_){return {ready:false,reason:'independent-count-failed'};}
+}
+
+export async function downloadVerifiedCollectionNDJSON({key,settings,adapter,capability,filename,signal}={}) {
+    const preflight=await preflightVerifiedCollectionExport({key,settings,adapter,
+        capability:capability||hasVerifiedCapability,signal});
+    if(!preflight.ready)throw Error(`C11: verified export not verified or unavailable (${preflight.reason}); no backup file opened`);
+    const parsed=parseCollectionKey(key);
     const writer=await createBrowserExportWriter({filename:filename||`${parsed.collectionId}.vecthare.ndjson`});
     return exportCollectionNDJSON({key,settings,adapter,writer,capability,signal});
 }
