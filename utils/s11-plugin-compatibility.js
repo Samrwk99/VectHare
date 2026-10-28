@@ -5,9 +5,9 @@
  */
 import { guardedVectorFetch } from './e02-vector-request-gateway.js';
 export const S11_EXPECTED_PLUGIN = Object.freeze({
-    pluginVersion: '3.2.10-s10.13-f09',
+    pluginVersion: '3.2.10-s10.14-f10',
     contractVersion: 2,
-    sourceFingerprint: 'be5f8ede0b1eec9f4278540afa99f51bae54cf5d89e9eb80f812efbeacbaf373',
+    sourceFingerprint: '016d9b892b6a78ee2b751a1a6b815b73ffdaeb7218c1225282b384f17b76d6e4',
 });
 export const S11_BACKENDS = Object.freeze(['standard','lancedb','qdrant','milvus']);
 const ROOT = '/api/plugins/similharity';
@@ -47,6 +47,10 @@ export function validateS11Discovery(build,caps,contracts,expected=S11_EXPECTED_
         contracts.routes['POST /v2/diagnostics/milvus-f08']!=='F08_DISPOSABLE_MILVUS_ACCEPTANCE_NOT_PRODUCTION' ||
         contracts.routes['POST /v2/records/milvus-pilot-mutate']!=='F08_SOURCE_BOUND_LOCAL_MILVUS_PILOT_NOT_PRODUCTION' ||
         contracts.routes['POST /v2/workflows/preview']!=='F09_SOURCE_BOUND_V2_CANDIDATE_PREVIEW_ONLY' ||
+        contracts.routes['POST /v2/recovery/capture']!=='F10_TWO_PASS_SCOPED_EVIDENCE_NOT_FULL_BACKUP' ||
+        contracts.routes['POST /v2/recovery/status']!=='F10_CHECKSUM_AND_SOURCE_BOUND_RECEIPT_ONLY' ||
+        contracts.routes['POST /v2/recovery/download']!=='F10_NONAUTHORITATIVE_EVIDENCE_DOWNLOAD_ONLY' ||
+        caps.f10NonAuthoritativeEvidenceCaptureAvailable!==true ||
         caps.sourceBoundMilvusProvisioningAvailable!==true || caps.experimentalMilvusPilotMutationsAvailable!==true ||
         caps.disposableMilvusAcceptanceAvailable!==true)
         return refused('unexpected-execution-contract');
@@ -92,7 +96,7 @@ export function renderS11CompatibilityStatus(root,status,doc=globalThis.document
         node.setAttribute('role','status');node.style.padding='0.5em';
         node.style.marginBottom='0.5em';root.prepend(node);}
     node.textContent=status?.compatible
-        ? 'Similharity F09 detected. Source-bound v2 reads, F03 collection provisioning, an F04 disposable pilot, extended F05 Qdrant and F06 LanceDB, F07 Vectra, and F08 Milvus disposable host acceptance and F09 read-only scoped memory preview are available for testing. Automatic memory writes, legacy retrieval and exports remain blocked.'
+        ? 'Similharity F10 detected. F01–F09 guarded development capabilities and F10 source-bound record evidence capture are available. F10 is NOT a verified full backup, atomic inventory, migration, or restore. Automatic memory writes, legacy retrieval, and production exports remain blocked.'
         : 'Similharity S10 compatibility not verified. Unsafe operations remain disabled.';
     return true;
 }

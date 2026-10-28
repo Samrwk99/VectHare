@@ -1,0 +1,81 @@
+{
+  "checkpoint": "F10",
+  "baseline": "F09",
+  "candidateVersions": {
+    "extension": "2.2.0-alpha.s11.15-f10",
+    "plugin": "3.2.10-s10.14-f10"
+  },
+  "testing": {
+    "pluginTestsPassed": 323,
+    "extensionAssertionsPassed": 1137,
+    "extensionTestFilesPassed": 68,
+    "pluginJsSyntaxFiles": 77,
+    "extensionJsSyntaxFiles": 242,
+    "realTermuxAcceptance": false,
+    "realWindowsAcceptance": false,
+    "realMilvusAcceptance": false,
+    "realLanceAcceptance": false,
+    "realQdrantAcceptance": false
+  },
+  "f10": {
+    "sourceAttestedCapture": "IMPLEMENTED_OFFLINE",
+    "boundedTwoPassV2Traversal": "IMPLEMENTED_OFFLINE",
+    "perRecordUUIDReadback": "IMPLEMENTED_OFFLINE",
+    "privateHashedReceipt": "IMPLEMENTED_OFFLINE",
+    "receiptIntegrityStatus": "IMPLEMENTED_OFFLINE",
+    "guiEvidenceDownload": "IMPLEMENTED_OFFLINE",
+    "maxRecords": 300,
+    "maxPagesPerPass": 16,
+    "maxArtifactBytes": 8388608,
+    "authoritativeCompleteInventory": "DENIED_UNPROVEN",
+    "fullVerifiedExport": "DENIED_UNPROVEN",
+    "atomicSnapshot": "DENIED_UNPROVEN",
+    "productionRestore": "DENIED",
+    "legacyMigrationCutover": "DENIED",
+    "purge": "DENIED",
+    "automaticProductionWrites": "DENIED"
+  },
+  "backends": {
+    "qdrant": {
+      "sourceBoundV2EvidenceCapture": "GUARDED_REQUIRE_F01_F02_V2_COLLECTION",
+      "fullInventory": "DENIED",
+      "restore": "DENIED",
+      "productionMigration": "DENIED",
+      "liveCertified": false
+    },
+    "lancedb": {
+      "sourceBoundV2EvidenceCapture": "GUARDED_REQUIRE_F01_F02_V2_COLLECTION",
+      "fullInventory": "DENIED",
+      "restore": "DENIED",
+      "productionMigration": "DENIED",
+      "liveCertified": false
+    },
+    "vectra": {
+      "sourceBoundV2EvidenceCapture": "GUARDED_REQUIRE_F01_F02_V2_COLLECTION",
+      "fullInventory": "DENIED",
+      "restore": "DENIED",
+      "productionMigration": "DENIED",
+      "liveCertified": false
+    },
+    "milvus": {
+      "sourceBoundV2EvidenceCapture": "GUARDED_REQUIRE_F01_F02_V2_COLLECTION",
+      "fullInventory": "DENIED",
+      "restore": "DENIED",
+      "productionMigration": "DENIED",
+      "liveCertified": false
+    }
+  },
+  "nativeStandard": {
+    "pluginV2EvidenceCapture": "NOT_APPLICABLE",
+    "nativeMutationAndBackup": "UNVERIFIED"
+  },
+  "f09Outstanding": [
+    "serverManagedEmbeddingGeneration",
+    "hashFreeAutomaticChatSync",
+    "normalProductionMutationRoutes",
+    "summaryAndWorldInfoCRUD",
+    "verifiedPromptInjection",
+    "realBackendAcceptance"
+  ],
+  "releaseDecision": "PARTIAL_DEVELOPMENT_NO_PRODUCTION_BACKUP_OR_RESTORE"
+}

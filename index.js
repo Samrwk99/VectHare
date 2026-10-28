@@ -2,6 +2,7 @@ import {buildRecoveryReport} from './utils/e03-recovery.js';
 import { guardedVectorFetch as fetch } from './utils/e02-vector-request-gateway.js';
 import {renderF02ReadPanel} from './utils/f02-public-read-client.js';
 import {renderF09MemoryPreview} from './utils/f09-memory-workflow.js';
+import {renderF10RecoveryPanel} from './utils/f10-recovery-client.js';
 import {renderF03ProvisionPanel} from './utils/f03-provision-client.js';
 import {renderF04PilotPanel} from './utils/f04-pilot-client.js';
 import {renderF05QdrantAcceptance} from './utils/f05-acceptance-client.js';
@@ -585,6 +586,7 @@ jQuery(async () => {
         renderF01SourceAttestation(document.querySelector('.vecthare_settings'));
         renderF02ReadPanel(document.querySelector('.vecthare_settings'),()=>settings);
         renderF09MemoryPreview(document.querySelector('.vecthare_settings'),()=>settings);
+        renderF10RecoveryPanel(document.querySelector('.vecthare_settings'),()=>settings);
         renderF03ProvisionPanel(document.querySelector('.vecthare_settings'),()=>settings);
         renderF04PilotPanel(document.querySelector('.vecthare_settings'),()=>settings);
         renderF05QdrantAcceptance(document.querySelector('.vecthare_settings'));

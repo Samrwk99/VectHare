@@ -142,6 +142,29 @@ export function inspectVectorRequest(url, options={}) {
             fail(req,'f09-source-bound-preview-required');
         return {intercepted:true,allowed:true,transport:'plugin',operation:'f09CandidatePreview',backend:b.backend,method:'POST'};
     }
+    // F10: authenticated bounded RECORD EVIDENCE, never an authoritative export,
+    // restore, migration or production mutation permission. Strict body shape.
+    if(req.transport==='plugin'&&/^\/v2\/recovery\/(?:capture|status|download)$/.test(req.suffix)){
+        const b=req.body,source=b?.source,embedding=b?.embedding;
+        const kind=source?.kind;
+        const sourceKeys=kind==='chat'?['kind','avatar','chatFile']:
+          kind==='group-chat'?['kind','groupId','chatFile']:
+          kind==='lorebook'?['kind','name']:[];
+        const op=req.suffix.split('/').pop();
+        const allowed=['backend','source','embedding','configId',...(op==='capture'?['confirmCapture']:['captureId'])];
+        if(req.method!=='POST'||!b||!['qdrant','lancedb','vectra','milvus'].includes(b.backend)||
+           !sourceKeys.length||!source||Object.keys(source).some(k=>!sourceKeys.includes(k))||
+           sourceKeys.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220)||
+           !embedding||typeof embedding!=='object'||Array.isArray(embedding)||
+           Object.keys(embedding).some(k=>!['source','model','dimension','metric'].includes(k))||
+           Object.keys(b).some(k=>!allowed.includes(k))||
+           (b.configId!==undefined&&!['local','default'].includes(b.configId))||
+           (b.backend!=='qdrant'&&b.configId==='local')||
+           (op==='capture'&&b.confirmCapture!=='I UNDERSTAND THIS IS NOT A VERIFIED FULL BACKUP')||
+           (op!=='capture'&&!UUID_RE.test(b.captureId||'')))
+           fail(req,'f10-nonauthoritative-capture-shape-required');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:'f10Evidence'+op,backend:b.backend,method:'POST'};
+    }
     // F03: opt-in schema provisioning only (NO record writes, overwrite or purge).
     // Requires F01 source selector, derived physical name, and exact confirmation.
     if(req.transport==='plugin' && /^\/v2\/collections\/(?:preview|provision|status)$/.test(req.suffix)){
