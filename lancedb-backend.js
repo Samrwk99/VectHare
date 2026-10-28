@@ -18,6 +18,7 @@
 
 import path from 'node:path';
 import { denyUnsafeBackendMutation } from './lib/s01-safety.js';
+import { safeLegacyPhysicalName } from './lib/s02-identity.js';
 import fs from 'node:fs/promises';
 import * as lancedb from '@lancedb/lancedb';
 
@@ -28,9 +29,10 @@ import * as lancedb from '@lancedb/lancedb';
  * @returns {string} Sanitized table name
  */
 function sanitizeTableName(collectionId) {
-    // Replace invalid characters with underscores
-    // Keep: a-z, A-Z, 0-9, _, -, .
-    return collectionId.replace(/[^a-zA-Z0-9_.-]/g, '_');
+    // S02: a lossy substitution can merge two logical collections.
+    // Preserve unambiguous physical names; require explicit registry mapping
+    // for all colon/slash/otherwise lossy legacy names in S03/S09.
+    return safeLegacyPhysicalName('lancedb', collectionId);
 }
 
 /**

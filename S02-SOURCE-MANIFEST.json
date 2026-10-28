@@ -1,0 +1,33 @@
+{
+  "checkpoint": "S02",
+  "pluginVersion": "3.2.2-s02.0",
+  "baseline": "VectHare-Similharity-S01-Critical-Server-Safety.zip",
+  "extensionModified": false,
+  "sourceOnlyNotLiveCertified": true,
+  "writesUnlocked": false,
+  "fileSHA256": {
+    ".gitignore": "88b6b09796bc021a6f46b5964be1cbe30ef7a25d613ee43f868e720ee4d15587",
+    "README.md": "114954ab52fec12d366aa54d661be3b70183148f91c04f1bd07dd3a7b543fa3d",
+    "S01-CAPABILITY-MATRIX.json": "b6d2077f7cacb7c7f2a3eac31df8282838101ca33deee8c7bd70bbf91357f01b",
+    "S01-CHANGELOG.md": "26c5308e091a92f1e202c9b247bdb9d2601fc5ed830510960b385954ff4a96cf",
+    "S01-NEXT-STEPS.md": "ff13b524425340cf63cca518620f3552988f9beb75b273d8236976b847af34fc",
+    "S01-SOURCE-MANIFEST.json": "8024c3be6842fdb762be0eee5361f4387ef5b4a9c5a96b4cb254c7759f2d4658",
+    "S01-VERIFICATION.md": "471ecbe533b293a379b6d9dea669e32609276f26248604f90cbbc880587aadb0",
+    "S02-CAPABILITY-MATRIX.json": "78c3f2d04d75c42d776c5dca0c569ee796bcf66d5df17f36ae6820ffe8d9ecac",
+    "S02-CHANGELOG.md": "68f9866916410973fc5258dbd95f31a6b0918511e8e9040a436b79196bbb66e5",
+    "S02-NEXT-STEPS.md": "eb0128ad59bd33b1da42c3d8fb336af5fd525c234d5af70de039982713fd25f5",
+    "S02-VERIFICATION.md": "f039ef3661483238170c68a6443c823c8b428186c884f229fd85396bcdd4050c",
+    "index.js": "1ee59e8487574fa337a7d88db44ef7a0ead5f74e884cd20af811d90975eab043",
+    "lancedb-backend.js": "53ab9e63df9ddd0191d394e6089be3afd8e6ef01f32abc169c88f83db73926ff",
+    "lib/s01-safety.js": "9efbb75e5635f13441b3c01294d200e5442d8f3943cfd6fd7dffdb7e0f2248e3",
+    "lib/s02-identity.js": "fd525737359313609b40dc9493a9195f143d4da14396226aa4f6a6048ac582b0",
+    "lib/s02-migration.js": "731c7df4d638f5147e47c24c5b6b49379bd9ffcf0676b94d8f2c1b4bde5f1e34",
+    "lib/s02-registry.js": "809301de55a7fa7c15d4e783b2599e33a12db5b9612d442aaa82bfda168015c0",
+    "milvus-backend.js": "fd1a9e2655686f069bc7d82fadd419a9fd790b0baa8f41060fb71d72a0b4e47f",
+    "package.json": "5a00780ec3120ff374e565d6b206998a452e48567252eefa20d600b0af66549d",
+    "qdrant-backend.js": "494ed9004bb340800cab3a928ffd2e5f8b49c6718d31990b460ce9304138251d",
+    "tests/s01-safety.test.mjs": "8e4e9406cd5f80d79844c2bfc8f5a10195db99acc7e7d30bc231f6e2a386f9a5",
+    "tests/s02-identity.test.mjs": "b43676260942e20564c8361a8675493550a12c68a913635ec3c88ef7eaded896",
+    "tools/s02-migration-dry-run.mjs": "e74611d615d6c7e100fc2bd17dc70faaa54365b63be9981468314970dafcf243"
+  }
+}

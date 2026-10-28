@@ -1,6 +1,6 @@
 {
   "name": "similharity",
-  "version": "3.2.1-s01.0",
+  "version": "3.2.2-s02.0",
   "description": "Vector database backend extensions for Similharity - LanceDB, Qdrant, and enhanced Vectra with full metadata storage",
   "main": "index.js",
   "type": "module",
@@ -28,6 +28,8 @@
   },
   "scripts": {
     "test:s01": "node --experimental-vm-modules --test tests/s01-safety.test.mjs",
-    "check:s01": "node --check index.js && node --check qdrant-backend.js && node --check milvus-backend.js && node --check lancedb-backend.js && node --check lib/s01-safety.js"
+    "check:s01": "node --check index.js && node --check qdrant-backend.js && node --check milvus-backend.js && node --check lancedb-backend.js && node --check lib/s01-safety.js",
+    "test:s02": "node --experimental-vm-modules --test tests/s01-safety.test.mjs tests/s02-identity.test.mjs",
+    "check:s02": "node --check index.js && node --check qdrant-backend.js && node --check milvus-backend.js && node --check lancedb-backend.js && node --check lib/s01-safety.js && node --check lib/s02-identity.js && node --check lib/s02-registry.js && node --check lib/s02-migration.js && node --check tools/s02-migration-dry-run.mjs && node --check tests/s02-identity.test.mjs"
   }
 }

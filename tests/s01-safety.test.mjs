@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import qdrant from '../qdrant-backend.js';
 import { s01MutationGuard, SafetyError } from '../lib/s01-safety.js';
+import { safeLegacyPhysicalName } from '../lib/s02-identity.js';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const quiet = { log() {}, warn() {}, error() {}, debug() {} };
@@ -259,6 +260,7 @@ test('LanceDB direct destructive legacy methods refuse before database access', 
         'node:fs/promises': {default: fs},
         '@lancedb/lancedb': {connect: async()=>{throw new Error('network should not be touched');}},
         './lib/s01-safety.js': {denyUnsafeBackendMutation: (_backend,operation)=>{throw new SafetyError('S01_MUTATION_BLOCKED',operation);}},
+        './lib/s02-identity.js': {safeLegacyPhysicalName},
     })).default;
     for(const [method,args] of [
         ['deleteVectors',['chat',[1]]],
@@ -276,6 +278,7 @@ test('LanceDB rejects entire malformed insert batch without opening database', a
         'node:fs/promises': {default: fs},
         '@lancedb/lancedb': {connect: async()=>{touched++;return {}; }},
         './lib/s01-safety.js': {denyUnsafeBackendMutation: (_backend,operation)=>{throw new SafetyError('S01_MUTATION_BLOCKED',operation);}},
+        './lib/s02-identity.js': {safeLegacyPhysicalName},
     })).default;
     lance.basePath='/throwaway';
     await assert.rejects(lance.insertVectors('chat',[{hash:1,vector:[1,2]}, {hash:2,vector:[NaN,2]}]),/Invalid vector/);
@@ -297,4 +300,19 @@ test('Milvus absent collection does not create a legacy shared collection', asyn
     milvus.client={listCollections:async()=>({data:[]}),createCollection:async()=>calls.push('create')};
     await assert.rejects(milvus.ensureCollection('vecthare_main',768),e=>e.code==='S01_COLLECTION_CREATION_BLOCKED');
     assert.deepEqual(calls,[]);
+});
+
+test('S02 LanceDB refuses ambiguous legacy collection before opening any database', async () => {
+    let touched=0;
+    const lance=(await mockModule('lancedb-backend.js', {
+        'node:path': {default: path},
+        'node:fs/promises': {default: fs},
+        '@lancedb/lancedb': {connect: async()=>{touched++;return {}; }},
+        './lib/s01-safety.js': {denyUnsafeBackendMutation: (_backend,operation)=>{throw new SafetyError('S01_MUTATION_BLOCKED',operation);}},
+        './lib/s02-identity.js': {safeLegacyPhysicalName},
+    })).default;
+    lance.basePath='/throwaway';
+    await assert.rejects(lance.listItems('chat:a/b'),e=>e.code==='S02_AMBIGUOUS_LEGACY_NAME');
+    await assert.rejects(lance.getItem('chat:a:b',1),e=>e.code==='S02_AMBIGUOUS_LEGACY_NAME');
+    assert.equal(touched,0);
 });

@@ -1,8 +1,10 @@
+> **S02 identity checkpoint (28 October 2026): offline-only, not a write-enabled release.**  S02 introduces stable, scoped UUID identities, collision-resistant physical collection naming, a durable reservation registry, fail-closed ambiguous legacy names, and a read-only migration planner. No server-authoritative identity resolution exists yet; S03 must establish that before any new write route is opened. All S01 legacy mutation restrictions remain in force. Qualified legacy Qdrant and lossy LanceDB names can now be rejected pending explicit migration review. See `S02-CHANGELOG.md`, `S02-VERIFICATION.md`, and `S02-NEXT-STEPS.md`.
+
 > **S01 safety checkpoint (28 October 2026): Not a production-ready or functional write release.**  All legacy plugin write/edit/delete/purge HTTP routes return `409 S01_MUTATION_BLOCKED` until later S02–S04 contracts are implemented and tested.  Qdrant/Milvus direct legacy mutations are disabled, read failures propagate, destructive mismatch handling is removed.  See `S01-CHANGELOG.md` and `S01-VERIFICATION.md`.  Do not replace a valuable working installation without reviewing the restrictions.
 
 # Similharity Server Plugin
 
-**Version 2.0.0**
+**Checkpoint version 3.2.2-s02.0** (historical installation guidance below may reference older upstream versions).
 
 Server-side plugin for [the VectHare](https://github.com/Conejachibi/VectHare) extension that provides enhanced vector database backends and full metadata storage capabilities.
 

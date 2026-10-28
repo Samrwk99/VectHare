@@ -25,6 +25,7 @@
  */
 
 import { denyUnsafeBackendMutation, SafetyError } from './lib/s01-safety.js';
+import { safeLegacyPhysicalName } from './lib/s02-identity.js';
 
 /**
  * Qdrant Backend Manager
@@ -48,21 +49,10 @@ class QdrantBackend {
      * @returns {string} - Actual collection name (source:id)
      */
     _parseCollectionName(collectionName) {
-        if (!collectionName) return collectionName;
-
-        // New format: backend:source:id (e.g., "qdrant:bananabread:chat_123")
-        // Old format: source:id (e.g., "bananabread:chat_123")
-        if (collectionName.startsWith('qdrant:')) {
-            // Strip "qdrant:" prefix to get "source:id"
-            return collectionName.substring(7); // 'qdrant:'.length === 7
-        }
-        // Now strip the source prefix if present
-        if (collectionName.indexOf(':') !== -1) {
-            collectionName = collectionName.split(':')[1];
-        }
-
-        // Already in correct format or old format
-        return collectionName;
+        // S02: legacy unqualified plain names remain usable for read-only
+        // operations; colon-containing logical names require a registered
+        // explicit mapping. Never silently drop namespace components.
+        return safeLegacyPhysicalName('qdrant', collectionName);
     }
 
     /**
