@@ -249,6 +249,7 @@ test('plugin registration keeps legacy mutation endpoints blocked even without m
         './lib/s05-contract.js':{validateVector:()=>{}},
         './lib/s10-build.js':{loadS10Build:async()=>({pluginVersion:'3.2.10-s10.0',contractVersion:2,fingerprint:'test',verification:'MATCHED_LOCAL_SOURCE_MANIFEST'})},
         './lib/s10-contracts.js':{registerS10Routes:()=>{}},
+        './lib/h01-qdrant-acceptance.js':{registerH01AcceptanceRoutes:()=>{}},
         './lib/s10-gui-connections.js':{registerGuiConnectionRoutes:()=>{}}
     });
     const routes=new Map(); const middleware=[];

@@ -35,6 +35,7 @@ async function registered(pool) {
             './lib/s05-contract.js':{validateVector:validateS05Vector},
             './lib/s10-build.js':{loadS10Build},
             './lib/s10-contracts.js':{registerS10Routes},
+            './lib/h01-qdrant-acceptance.js':{registerH01AcceptanceRoutes:()=>{}},
             './lib/s10-gui-connections.js':{registerGuiConnectionRoutes:()=>{}}
         };
         assert.ok(objects[specifier],`unexpected import: ${specifier}`);

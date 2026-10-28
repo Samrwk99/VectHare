@@ -7,7 +7,7 @@
  * All chunk operations go through unified /chunks/* endpoints.
  * Backend is specified via `backend` parameter in request body.
  *
- * @version 3.2.10-s10.3
+ * @version 3.2.10-s10.4
  */
 
 import path from 'node:path';
@@ -26,10 +26,11 @@ import { registerS04Routes } from './lib/s04-routes.js';
 import { registerS05Routes } from './lib/s05-routes.js';
 import { loadS10Build } from './lib/s10-build.js';
 import { registerS10Routes } from './lib/s10-contracts.js';
+import {registerH01AcceptanceRoutes} from './lib/h01-qdrant-acceptance.js';
 import { validateVector as validateS05Vector } from './lib/s05-contract.js';
 
 const pluginName = 'similharity';
-const pluginVersion = '3.2.10-s10.3';
+const pluginVersion = '3.2.10-s10.4';
 
 /**
  * Initialize the plugin
@@ -72,6 +73,7 @@ export async function init(router) {
     registerS04Routes(router);
     registerS05Routes(router);
     registerS10Routes(router, s10Build);
+    registerH01AcceptanceRoutes(router,{backendPool});
     registerGuiConnectionRoutes(router,{backendPool});
     // NOTE: S02 registry mappings are reservations only; this route exposes
     // no mutation or claim that the physical collection belongs to the user.
