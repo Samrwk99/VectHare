@@ -19,7 +19,9 @@ const requests=[];
 const state={ vecthare:{ collections:{} } };
 const tracker = Object.fromEntries(['show','updateCurrentItem','updateProgress','updateChunks','complete','addError'].map(x=>[x,()=>{}]));
 const settings={source:'transformers',model:'test-model',vector_backend:'qdrant'};
+let testFetch;
 const exportedModules={
+    '../utils/e02-vector-request-gateway.js': {guardedVectorFetch:(...args)=>testFetch(...args)},
     '../utils/security.js': {redactSecrets:value=>value},
     '../utils/c04-ownership.js': {quarantineImportedOwnership:(meta)=>({...meta,enabled:false,ownershipReviewRequired:true})},
     '../utils/tenant-route.js': {adapterCollectionId:(key)=>key},
@@ -43,6 +45,7 @@ async function mod() {
             if(url.endsWith('/insert')) {imports.push({id:body.collectionId,items:body.items});return {ok:true,json:async()=>({success:true,inserted:body.items.length})};}
             throw new Error('unexpected request '+url);
         },Blob,URL,document:{},FileReader:class{}});
+        testFetch=context.fetch;
         const module=new vm.SourceTextModule(source('core/collection-export.js'),{context});
         await module.link(spec=>{
             assert.ok(exportedModules[spec],`Unknown dependency: ${spec}`);

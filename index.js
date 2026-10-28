@@ -1,3 +1,4 @@
+import { guardedVectorFetch as fetch } from './utils/e02-vector-request-gateway.js';
 import {recoverPendingC02Operations} from './core/core-vector-api.js';
 /**
  * ============================================================================

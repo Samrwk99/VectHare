@@ -69,6 +69,7 @@ async function makeExportHarness() {
         },
     });
     const extensionStubs = {
+        '../utils/e02-vector-request-gateway.js':{guardedVectorFetch:(...args)=>context.fetch(...args)},
         '../utils/security.js': {redactSecrets:value=>value},
     '../utils/c04-ownership.js': {quarantineImportedOwnership:(meta)=>({...meta,enabled:false,ownershipReviewRequired:true})},
     '../utils/tenant-route.js': {adapterCollectionId:(key)=>key},

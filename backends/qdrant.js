@@ -1,3 +1,4 @@
+import { guardedVectorFetch as fetch } from '../utils/e02-vector-request-gateway.js';
 import {adapterCollectionId,requireTenantScope,rejectUnscopedPointOperation} from '../utils/tenant-route.js';
 import {hasVerifiedCapability} from '../utils/backend-contracts.js';
 import {verifyServerSecretContract, ProtectedCredentialUnavailable, assertNoCredentialsInUrl} from '../utils/c05-protected-credentials.js';
@@ -61,6 +62,29 @@ function getActualCollectionId(collectionId, settings) {
         return MULTITENANCY_COLLECTION;
     }
     return collectionId;
+}
+
+/** E02: Similharity only understands `filters.type` + `filters.sourceId`.
+ * The old Qdrant `filter.must[].content_type` was ignored by the server.
+ * Unrecognized collection IDs are refused rather than guessed as a chat.
+ */
+function tenantFiltersFor(collectionId) {
+    let type, sourceId;
+    const canonical = /^vh:([^:]+):(.+)$/.exec(collectionId);
+    const legacy = /^vecthare_([^_]+)_(.+)$/.exec(collectionId);
+    if (canonical) [, type, sourceId] = canonical;
+    else if (legacy) [, type, sourceId] = legacy;
+    if (!type || !sourceId || type === 'unknown' || sourceId === 'unknown')
+        throw new Error('[Qdrant] Cannot prove tenant from collection ID; scoped read refused');
+    return { type, sourceId };
+}
+function verifyTenantResults(items, filters) {
+    for (const item of items) {
+        const owner = item?.metadata && typeof item.metadata === 'object' ? item.metadata : item;
+        if (owner?.type !== filters.type || owner?.sourceId !== filters.sourceId)
+            throw new Error('[Qdrant] Returned record has missing or mismatched tenant ownership');
+    }
+    return items;
 }
 
 export class QdrantBackend extends VectorBackend {
@@ -197,15 +221,7 @@ export class QdrantBackend extends VectorBackend {
             model: getModelFromSettings(settings),
             limit: VECTOR_LIST_LIMIT,
         };
-
-        // Add content_type filter for multitenancy mode
-        if (settings.qdrant_multitenancy) {
-            body.filter = {
-                must: [
-                    { key: 'content_type', match: { value: strippedCollectionId } }
-                ]
-            };
-        }
+        body.filters = tenantFiltersFor(strippedCollectionId);
 
         const response = await fetch('/api/plugins/similharity/chunks/list', {
             method: 'POST',
@@ -219,7 +235,7 @@ export class QdrantBackend extends VectorBackend {
         }
 
         const data = await response.json();
-        return requireListedItems(data, 'Qdrant').map(item => item.hash);
+        return verifyTenantResults(requireListedItems(data, 'Qdrant'), body.filters).map(item => item.hash);
     }
 
     async insertVectorItems(collectionId, items, settings) {
@@ -330,15 +346,7 @@ export class QdrantBackend extends VectorBackend {
             source: settings.source || 'transformers',
             model: getModelFromSettings(settings),
         };
-
-        // Add content_type filter for multitenancy mode
-        if (settings.qdrant_multitenancy) {
-            body.filter = {
-                must: [
-                    { key: 'content_type', match: { value: strippedCollectionId } }
-                ]
-            };
-        }
+        body.filters = tenantFiltersFor(strippedCollectionId);
 
         const response = await fetch('/api/plugins/similharity/chunks/delete', {
             method: 'POST',
@@ -377,15 +385,7 @@ export class QdrantBackend extends VectorBackend {
             console.warn('[Qdrant] No queryVector or searchText provided');
             return { hashes: [], metadata: [] };
         }
-
-        // Add content_type filter for multitenancy mode
-        if (settings.qdrant_multitenancy) {
-            body.filter = {
-                must: [
-                    { key: 'content_type', match: { value: strippedCollectionId } }
-                ]
-            };
-        }
+        body.filters = tenantFiltersFor(strippedCollectionId);
 
         const response = await fetch('/api/plugins/similharity/chunks/query', {
             method: 'POST',
@@ -401,7 +401,7 @@ export class QdrantBackend extends VectorBackend {
         const data = await response.json();
 
         // Reject application-level failures even when HTTP returned 200.
-        const items = requireQueryItems(data, 'qdrant');
+        const items = verifyTenantResults(requireQueryItems(data, 'qdrant'), body.filters);
         const hashes = items.map(r => r.hash);
         const metadata = items.map(r => trustedQueryMetadata(r));
 
@@ -439,15 +439,7 @@ export class QdrantBackend extends VectorBackend {
                     results[collectionId] = { hashes: [], metadata: [] };
                     continue;
                 }
-
-                // Add content_type filter for multitenancy mode
-                if (settings.qdrant_multitenancy) {
-                    body.filter = {
-                        must: [
-                            { key: 'content_type', match: { value: strippedCollectionId } }
-                        ]
-                    };
-                }
+        body.filters = tenantFiltersFor(strippedCollectionId);
 
                 const response = await fetch('/api/plugins/similharity/chunks/query', {
                     method: 'POST',
@@ -457,7 +449,7 @@ export class QdrantBackend extends VectorBackend {
 
                 if (response.ok) {
                     const data = await response.json();
-                    const resultArray = requireQueryItems(data, 'Qdrant');
+                    const resultArray = verifyTenantResults(requireQueryItems(data, 'Qdrant'), body.filters);
 
                     results[collectionId] = {
                         hashes: resultArray.map(r => r.hash),
@@ -526,6 +518,7 @@ export class QdrantBackend extends VectorBackend {
             collectionId: actualCollectionId, // Use separate collection per content type
             source: settings.source || 'transformers',
             model: getModelFromSettings(settings),
+            filters: JSON.stringify(tenantFiltersFor(actualCollectionId)),
         }), {
             headers: getRequestHeaders(),
         });
@@ -537,7 +530,7 @@ export class QdrantBackend extends VectorBackend {
         }
 
         const data = await response.json();
-        return data.chunk;
+        return verifyTenantResults([data.chunk], tenantFiltersFor(actualCollectionId))[0];
     }
 
     /**
@@ -562,14 +555,7 @@ export class QdrantBackend extends VectorBackend {
             limit: options.limit || 100,
             includeVectors: options.includeVectors || false,
         };
-
-        if (settings.qdrant_multitenancy) {
-            body.filter = {
-                must: [
-                    { key: 'content_type', match: { value: strippedCollectionId } }
-                ]
-            };
-        }
+        body.filters = tenantFiltersFor(strippedCollectionId);
 
         const response = await fetch('/api/plugins/similharity/chunks/list', {
             method: 'POST',
@@ -582,7 +568,9 @@ export class QdrantBackend extends VectorBackend {
             throw new Error(`[Qdrant] Failed to list chunks in ${collectionId}: ${response.status} ${response.statusText} - ${errorBody}`);
         }
 
-        return await response.json();
+        const data = await response.json();
+        verifyTenantResults(requireListedItems(data, 'Qdrant'), body.filters);
+        return data;
     }
 
     /**
@@ -718,15 +706,7 @@ export class QdrantBackend extends VectorBackend {
                 rrfK
             }
         };
-
-        // Add content_type filter for multitenancy mode
-        if (settings.qdrant_multitenancy) {
-            body.filter = {
-                must: [
-                    { key: 'content_type', match: { value: strippedCollectionId } }
-                ]
-            };
-        }
+        body.filters = tenantFiltersFor(strippedCollectionId);
 
         try {
             // Try the hybrid endpoint first
@@ -738,7 +718,7 @@ export class QdrantBackend extends VectorBackend {
 
             if (response.ok) {
                 const data = await response.json();
-                const hybridItems = requireQueryItems(data, 'Qdrant hybrid');
+                const hybridItems = verifyTenantResults(requireQueryItems(data, 'Qdrant hybrid'), body.filters);
                 console.log(`[Qdrant] Native hybrid search returned ${data.results?.length || 0} results`);
 
                 return {

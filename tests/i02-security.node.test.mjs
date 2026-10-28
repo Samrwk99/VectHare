@@ -139,6 +139,7 @@ async function qdrantWithMock(fetchImpl) {
     const logger = Object.fromEntries(['log','error','warn','debug'].map(level => [level, (...args) => messages.push(args.map(String).join(' '))]));
     const context = vm.createContext({ fetch: fetchImpl, console: logger, setTimeout, clearTimeout });
     const exports = {
+        '../utils/e02-vector-request-gateway.js':{guardedVectorFetch:(...args)=>context.fetch(...args)},
         '../../../../../script.js': { getRequestHeaders: () => ({}) },
         './backend-interface.js': { VectorBackend: class {} },
         '../core/providers.js': { getModelField: () => null },

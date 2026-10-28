@@ -1,3 +1,4 @@
+import { guardedVectorFetch as fetch } from '../utils/e02-vector-request-gateway.js';
 import {redactSecrets} from '../utils/security.js';
 import {quarantineImportedOwnership} from '../utils/c04-ownership.js';
 import {adapterCollectionId} from '../utils/tenant-route.js';

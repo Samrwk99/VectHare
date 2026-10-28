@@ -83,6 +83,7 @@ async function loadCollectionLoader({ registry = [], purge = async () => true } 
     const context = vm.createContext({ console: { log() {}, warn() {}, error() {} }, setTimeout, clearTimeout });
     const cache = new Map();
     const stubs = {
+        '../utils/e02-vector-request-gateway.js':{guardedVectorFetch:(...args)=>context.fetch(...args)},
         '../utils/keyed-mutex.js': {withCollectionLock: async (_key,fn)=>fn(),writeBarrier:{closeAndDrain:async()=>({verified:true}),reopen:()=>{}}},
         '../utils/c01-deletion.js': {deleteCollectionSafely:async()=>({success:false,status:'blocked',reason:'destructive-server-contract-unverified'}),recoverTombstones:()=>[]},
         '../utils/c01-inventory.js': {collectScopedInventory:async()=>({complete:false,status:'unavailable'})},

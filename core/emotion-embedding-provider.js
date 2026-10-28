@@ -1,3 +1,4 @@
+import { guardedVectorFetch } from '../utils/e02-vector-request-gateway.js';
 /** C14 read-only Similharity contract: POST /batch-embeddings {texts,source,model}.
  * The supplied plugin's Transformers path needs no browser-provided secrets or URL.
  * Other sources stay unsupported until their effective provider fields and credentials
@@ -16,9 +17,9 @@ export function createPluginEmotionEmbedder({settings={},request,signal}={}) {
     const profileKey=JSON.stringify(['similharity','transformers','server-model','ct-prototypes-v1']);
     async function embed(texts){
         if(!Array.isArray(texts) || !texts.length || texts.length>120 || texts.some(t=>typeof t!=='string'||!t.trim()))throw new Error('C14 invalid texts for embedding');
-        const response=await request('/api/plugins/similharity/batch-embeddings', {
+        const response=await guardedVectorFetch('/api/plugins/similharity/batch-embeddings', {
             method:'POST',body:JSON.stringify({texts,source:'transformers',model:''}),signal,
-        });
+        },request);
         if(!response?.ok)throw new Error(`C14 embedding endpoint failed (HTTP ${response?.status ?? 'unknown'})`);
         const result=await response.json();
         if(result?.success!==true || !Array.isArray(result.embeddings) || result.embeddings.length!==texts.length)throw new Error('C14 embedding endpoint returned an invalid acknowledgement or batch');

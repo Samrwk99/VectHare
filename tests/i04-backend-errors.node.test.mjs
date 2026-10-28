@@ -49,14 +49,14 @@ for (const file of ['qdrant', 'lancedb', 'milvus']) {
     test(`I04 #222: ${file} list rejects HTTP 200 application failure, malformed, and missing items`, async () => {
         for (const payload of [{ success: false, items: [] }, { foo: [] }, { items: null }, { error: 'database offline', items: [] }]) {
             const { backend } = adapter(file, [response(200, payload)]);
-            await assert.rejects(backend.getSavedHashes('abc', settings), /invalid or unsuccessful/);
+            await assert.rejects(backend.getSavedHashes(file === 'qdrant' ? 'vh:chat:abc' : 'abc', settings), /invalid or unsuccessful/);
         }
     });
     test(`I04 #222: ${file} list accepts explicit empty list and valid hashes`, async () => {
         let h = adapter(file, [response(200, { success: true, items: [] })]);
-        assert.deepEqual(await h.backend.getSavedHashes('abc', settings), []);
-        h = adapter(file, [response(200, { items: [{ hash: 55 }, { hash: 99 }] })]);
-        assert.deepEqual(Array.from(await h.backend.getSavedHashes('abc', settings)), [55, 99]);
+        assert.deepEqual(await h.backend.getSavedHashes(file === 'qdrant' ? 'vh:chat:abc' : 'abc', settings), []);
+        h = adapter(file, [response(200, { items: [{ hash: 55, metadata:{type:'chat',sourceId:'abc'} }, { hash: 99, metadata:{type:'chat',sourceId:'abc'} }] })]);
+        assert.deepEqual(Array.from(await h.backend.getSavedHashes(file === 'qdrant' ? 'vh:chat:abc' : 'abc', settings)), [55, 99]);
     });
 }
 
@@ -104,16 +104,16 @@ test('I04 #67: Standard rejected plugin init remains native-only', async () => {
 for (const file of ['qdrant', 'milvus']) {
     test(`I04 hybrid ${file}: fallback on unsupported endpoint only`, async () => {
         const a = adapter(file, [response(404), response(200, { results: [] })]);
-        const result = await a.backend.hybridQuery('abc', 'hello', 5, settings);
+        const result = await a.backend.hybridQuery(file === 'qdrant' ? 'vh:chat:abc' : 'abc', 'hello', 5, settings);
         assert.equal(result.hashes.length, 0);
         assert.equal(a.calls.length, 2);
         const b = adapter(file, [response(503)]);
-        await assert.rejects(b.backend.hybridQuery('abc', 'hello', 5, settings), /HTTP 503/);
+        await assert.rejects(b.backend.hybridQuery(file === 'qdrant' ? 'vh:chat:abc' : 'abc', 'hello', 5, settings), /HTTP 503/);
         assert.equal(b.calls.length, 1);
         const c = adapter(file, [new Error('connection broke')]);
-        await assert.rejects(c.backend.hybridQuery('abc', 'hello', 5, settings), /connection broke/);
+        await assert.rejects(c.backend.hybridQuery(file === 'qdrant' ? 'vh:chat:abc' : 'abc', 'hello', 5, settings), /connection broke/);
         const d = adapter(file, [response(200, { success: false, results: [] })]);
-        await assert.rejects(d.backend.hybridQuery('abc', 'hello', 5, settings), /unsuccessful/);
+        await assert.rejects(d.backend.hybridQuery(file === 'qdrant' ? 'vh:chat:abc' : 'abc', 'hello', 5, settings), /unsuccessful/);
     });
 }
 

@@ -1,3 +1,4 @@
+import { guardedVectorFetch as fetch } from '../utils/e02-vector-request-gateway.js';
 import {getBackendForCollection} from '../backends/backend-manager.js';
 import {inspectAdapterInventory} from '../utils/c11-adapter-inventory.js';
 import {withCollectionLock} from '../utils/keyed-mutex.js';

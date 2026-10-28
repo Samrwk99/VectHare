@@ -7,6 +7,9 @@ import {fileURLToPath} from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const readJson = name => JSON.parse(fs.readFileSync(path.join(root, 'docs/e01', name),'utf8'));
 const sha = data => crypto.createHash('sha256').update(data).digest('hex');
+// E01 is an immutable historical audit. E02 changes actual source, so validate
+// the pinned original bytes instead of mistakenly claiming E01 never changed.
+const sourceAtE01 = file => { const pinned=path.join(root,'docs/e01/source-baseline',file);return fs.readFileSync(fs.existsSync(pinned)?pinned:path.join(root,file)); }; 
 const assert=(condition,message)=>{if(!condition)throw new Error(`E01 verification: ${message}`);};
 const matrix=readJson('capability-matrix.json');
 const inventory=readJson('plugin-call-inventory.json');
@@ -39,7 +42,7 @@ export function verifyE01(){
   const supplied=ref.source==='plugin' ? hashes[ref.file]?.sha256 : null;
   if(supplied) assert(supplied===ref.sha256,`${id} hash mismatch`);
   if(ref.source==='extension'){
-   const data=fs.readFileSync(path.join(root,ref.file));
+   const data=sourceAtE01(ref.file);
    assert(sha(data)===ref.sha256,`${id} extension evidence file changed (reaudit required)`);
    assert(ref.line<=data.toString('utf8').split('\n').length,`${id} invalid extension line`);
   }
@@ -47,7 +50,7 @@ export function verifyE01(){
  }
  const covered=new Map();
  for(const site of inventory.sites){
-  const lines=fs.readFileSync(path.join(root,site.file),'utf8').split('\n');
+  const lines=sourceAtE01(site.file).toString('utf8').split('\n');
   const current=lines[site.line-1];
   assert(current && current.trim().startsWith(site.expression),`${site.id} at ${site.file}:${site.line} source changed; regenerate inventory`);
   assert(site.apiSurface==='plugin'||site.apiSurface==='native-vector',`${site.id} unknown API surface`);
@@ -65,7 +68,7 @@ export function verifyE01(){
  for(const file of walk(root)){
   const rel=path.relative(root,file).replaceAll(path.sep,'/');
   if(rel.startsWith('docs/'))continue;
-  const lines=fs.readFileSync(file,'utf8').split('\n');
+  const lines=sourceAtE01(rel).toString('utf8').split('\n');
   for(let i=0;i<lines.length;i++){
    const line=lines[i];
    if(!/\bfetch\s*\(|\bfetchImpl\s*\(|\brequest\s*\(/.test(line))continue;

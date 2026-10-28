@@ -1,3 +1,4 @@
+import { guardedVectorFetch } from './e02-vector-request-gateway.js';
 /**
  * C05: Write-only, fail-closed credentials interface.
  *
@@ -77,9 +78,9 @@ async function confirmedWrite(fetchImpl, getHeaders, key, value) {
  */
 export async function verifyServerSecretContract(fetchImpl, getHeaders) {
     try {
-        const response = await fetchImpl('/api/plugins/similharity/capabilities/secrets', {
+        const response = await guardedVectorFetch('/api/plugins/similharity/capabilities/secrets', {
             headers: getHeaders(), cache: 'no-store',
-        });
+        }, fetchImpl);
         if (!response?.ok) return { verified: false, reason: 'resolver-unavailable' };
         const data = await response.json();
         if (data?.protocol !== C05_CONTRACT || data?.userScope !== 'request-user'
@@ -110,10 +111,10 @@ export function createWriteOnlySecretAdapter({ fetchImpl, getHeaders, authentica
             if (await authenticatedProbe(field) !== true) throw new ProtectedCredentialUnavailable();
             return;
         }
-        const response = await fetchImpl('/api/plugins/similharity/capabilities/secrets/test', {
+        const response = await guardedVectorFetch('/api/plugins/similharity/capabilities/secrets/test', {
             method: 'POST', headers: getHeaders(),
             body: JSON.stringify({ key: C05_SECRETS[field] }),
-        });
+        }, fetchImpl);
         if (!response?.ok) throw new ProtectedCredentialUnavailable();
         const receipt = await response.json();
         if (receipt?.protocol !== C05_CONTRACT || receipt?.userScope !== 'request-user'

@@ -1,3 +1,4 @@
+import { guardedVectorFetch as fetch } from '../utils/e02-vector-request-gateway.js';
 import {adapterCollectionId} from '../utils/tenant-route.js';
 import {hasVerifiedCapability} from '../utils/backend-contracts.js';
 import { mergeDefinedChunkMetadata } from '../utils/chunk-record-metadata.js';

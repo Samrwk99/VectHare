@@ -11,6 +11,7 @@ async function makeExport(outcome='needs-reconcile'){
  const metadata=new Map(), registry=new Set(), writes=[];
  const context=vm.createContext({console:{log(){},warn(){},error(){}},Blob,URL,FileReader:class{},fetch:async()=>{throw Error('No direct write allowed');}});
  const imports={
+ '../utils/e02-vector-request-gateway.js':{guardedVectorFetch:(...args)=>context.fetch(...args)},
  '../utils/security.js':{redactSecrets:x=>x},
  '../utils/c04-ownership.js':{quarantineImportedOwnership:x=>({...x,enabled:false})},
  '../utils/tenant-route.js':{adapterCollectionId:x=>x},

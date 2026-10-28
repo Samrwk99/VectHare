@@ -57,19 +57,19 @@ for (const name of ['qdrant', 'milvus', 'lancedb', 'standard']) {
 for (const name of ['qdrant', 'milvus', 'lancedb']) {
     test(`#200: ${name} single/multi-query protects result identity and score`, async () => {
         const malicious = { hash: 'wrong', text: 'wrong text', score: 900, keywordBoost: 2 };
-        const r = { hash: 123, text: 'real text', score: 0.32, metadata: malicious };
+        const r = { hash: 123, text: 'real text', score: 0.32, metadata: {...malicious,type:'chat',sourceId:'collection'} };
         const a = makeAdapter(name, [{ results: [r] }]);
-        const single = await a.backend.queryCollection('collection', 'query', 5, settings);
+        const single = await a.backend.queryCollection(name === 'qdrant' ? 'vh:chat:collection' : 'collection', 'query', 5, settings);
         assert.deepEqual(Array.from(single.hashes), [123]);
         assert.equal(single.metadata[0].hash, 123);
         assert.equal(single.metadata[0].text, 'real text');
         assert.equal(single.metadata[0].score, 0.32);
         assert.equal(single.metadata[0].keywordBoost, 2);
         const b = makeAdapter(name, [{ results: [r] }]);
-        const multi = await b.backend.queryMultipleCollections(['collection'], 'query', 5, 0, settings);
-        assert.equal(multi.collection.metadata[0].hash, 123);
-        assert.equal(multi.collection.metadata[0].text, 'real text');
-        assert.equal(multi.collection.metadata[0].score, 0.32);
+        const multi = await b.backend.queryMultipleCollections([name === 'qdrant' ? 'vh:chat:collection' : 'collection'], 'query', 5, 0, settings);
+        assert.equal(multi[name === 'qdrant' ? 'vh:chat:collection' : 'collection'].metadata[0].hash, 123);
+        assert.equal(multi[name === 'qdrant' ? 'vh:chat:collection' : 'collection'].metadata[0].text, 'real text');
+        assert.equal(multi[name === 'qdrant' ? 'vh:chat:collection' : 'collection'].metadata[0].score, 0.32);
     });
 }
 

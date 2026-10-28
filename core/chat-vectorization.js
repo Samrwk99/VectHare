@@ -1,3 +1,4 @@
+import { guardedVectorFetch as fetch } from '../utils/e02-vector-request-gateway.js';
 import { requireServerCredentialResolution } from '../utils/c05-protected-credentials.js';
 import {recordId, fingerprint, stampMessageUids, messageReference, groupRecordLocalId, checkCollision, embeddingProfileFingerprint, MESSAGE_UID_FIELD} from '../utils/record-identity.js';
 import {hasVerifiedCapability} from '../utils/backend-contracts.js';
