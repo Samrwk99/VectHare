@@ -243,7 +243,8 @@ test('plugin registration keeps legacy mutation endpoints blocked even without m
             AccessError,exposedSafeSource
         },
         './lib/s03-backends.js':{BackendPool:class {}},
-        './lib/s02-identity.js':{safeLegacyPhysicalName}
+        './lib/s02-identity.js':{safeLegacyPhysicalName},
+        './lib/s04-routes.js':{registerS04Routes:()=>{}}
     });
     const routes=new Map(); const middleware=[];
     const router={

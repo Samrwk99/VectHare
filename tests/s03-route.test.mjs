@@ -9,6 +9,7 @@ import { s01MutationGuard } from '../lib/s01-safety.js';
 import { authenticatedContext, forbidOwnerSpoof, validateClientConfig,lookupAuthorizedReservation,
     legacyReadBoundary,s03SensitiveRouteBoundary,AccessError,exposedSafeSource } from '../lib/s03-security.js';
 import { safeLegacyPhysicalName } from '../lib/s02-identity.js';
+import { registerS04Routes } from '../lib/s04-routes.js';
 const root=path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const noop={log(){},warn(){},error(){},debug(){}};
 function resp(){return {statusCode:200,payload:null,status(n){this.statusCode=n;return this;},json(x){this.payload=x;return this;}};}
@@ -24,7 +25,8 @@ async function registered(pool) {
             './lib/s03-security.js':{authenticatedContext,forbidOwnerSpoof,validateClientConfig,lookupAuthorizedReservation,
                 legacyReadBoundary,s03SensitiveRouteBoundary,AccessError,exposedSafeSource},
             './lib/s03-backends.js':{BackendPool:class {constructor(){return pool;}}},
-            './lib/s02-identity.js':{safeLegacyPhysicalName}
+            './lib/s02-identity.js':{safeLegacyPhysicalName},
+            './lib/s04-routes.js':{registerS04Routes}
         };
         assert.ok(objects[specifier],`unexpected import: ${specifier}`);
         const obj=objects[specifier];
@@ -88,9 +90,24 @@ test('S03 actual init keeps S01 route blocks even with authenticated user and v2
     const write=await call('POST','/chunks/insert',{user,body:{backend:'qdrant'}});
     assert.equal(write.statusCode,409);assert.equal(write.payload.code,'S01_MUTATION_BLOCKED');
     const health=await call('GET','/health');
-    assert.equal(health.statusCode,200);assert.equal(health.payload.checkpoint,'S03');
+    assert.equal(health.statusCode,200);assert.equal(health.payload.checkpoint,'S04');
     const owner=await call('POST','/v2/identity/resolve',{user,body:{backend:'qdrant',
         scope:{userScopeId:'bob',collectionId:'chat-a',type:'chat',sourceId:'chat-a'},
         embedding:{source:'transformers',model:'x',dimension:384,metric:'cosine'}}});
     assert.equal(owner.statusCode,403);assert.equal(owner.payload.code,'S03_OWNER_CONFLICT');
+}));
+test('S04 real index routes validate with authenticated context but always refuse public submit',async()=>disposable(async dir=>{
+    let connections=0;
+    const call=await registered({async get(){connections++;throw Error('must not connect');}});
+    const user={profile:{handle:'alice'},directories:{vectors:dir}};
+    const payload={backend:'qdrant',scope:{collectionId:'chat-a',type:'chat',sourceId:'chat-a'},
+        embedding:{source:'transformers',model:'base',dimension:2,metric:'cosine'},
+        action:'insert',text:'private sample',vector:[1,0]};
+    const ready=await call('POST','/v2/operations/preflight',{user,body:payload});
+    assert.equal(ready.statusCode,200);assert.equal(ready.payload.executionAllowed,false);
+    assert.equal(ready.payload.authorized,false);
+    assert.ok(!JSON.stringify(ready.payload).includes('private sample'));
+    const denied=await call('POST','/v2/operations/submit',{user,body:{...payload,authorized:true}});
+    assert.equal(denied.statusCode,409);assert.equal(denied.payload.code,'S04_MUTATION_NOT_ACTIVATED');
+    assert.equal(connections,0);
 }));

@@ -990,3 +990,20 @@ Coneja-Chibi
 ## S03 authorization/isolation checkpoint (development only)
 
 This checkpoint requires a host-authenticated SillyTavern `req.user` with `profile.handle` (or string `id`) and an existing user vectors directory on all non-health routes. Remote Qdrant/Milvus configuration is **administrator-only** via `SIMILHARITY_SERVER_CONFIG_DIR`, with no browser-supplied URL/API key/token. See `S03-SERVER-CONFIG-RUNBOOK.md`. A missing private configuration or unknown host identity refuses requests. The read-only `/v2/identity/resolve` response is **not** physical tenancy proof. S01 legacy mutations remain blocked, and S03 blocks legacy shared Qdrant/Milvus reads pending verified S05 ownership. No deployment, migration, write activation or live backend tests were conducted. Run `npm run test:s03` and `npm run check:s03` for offline tests.
+
+## S04 guarded mutation foundation (2026-10-28)
+
+The S04 checkpoint (`3.2.4-s04.0`) adds v2 **preflight validation**, an internal
+on-disk operation ledger and a **mock-adapter-tested** insert/update/delete
+coordinator. This is *not* an activated vector-write implementation. All S01
+legacy mutation guards remain enabled, and public v2 `submit`/`reconcile`
+endpoints return HTTP 409. No real backend adapter is attached to the S04
+coordinator because host-authoritative source ownership, backend readback,
+concurrency and schema acceptance remain outstanding. Do not deploy this build
+as a replacement for a working production plugin without the appropriate
+SillyTavern and backend compatibility testing.
+
+Run `npm run test:s04` and `npm run check:s04` for cumulative offline checks.
+See `S04-CHANGELOG.md`, `S04-VERIFICATION.md`, `S04-CAPABILITY-MATRIX.json`,
+and `S04-NEXT-STEPS.md`. The authenticated preflight request validates a
+proposed operation; it does **not** grant permission or store vector data.
