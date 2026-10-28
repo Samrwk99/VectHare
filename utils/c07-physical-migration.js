@@ -52,6 +52,10 @@ export function planPhysicalIdMigration({collectionKey, inventory, identities, e
     if (map.size !== index.size) return {status:'blocked',reason:'incomplete-identity-map'};
     const oldIds = new Set(index.keys()), reserved = new Set(existingIds.map(asKey));
     for (const [oldId,next] of map) {
+        // A new ID must never overwrite another *existing* record before that
+        // record's own replacement is verified (the upsert is not atomic).
+        if (oldIds.has(next) && next!==oldId)
+            return {status:'blocked',reason:'target-id-overlaps-other-source'};
         if (reserved.has(next) && next!==oldId && !oldIds.has(next))
             return {status:'blocked',reason:'target-id-exists-outside-migration'};
     }

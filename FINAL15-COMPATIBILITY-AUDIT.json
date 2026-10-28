@@ -1,0 +1,20 @@
+{
+  "plugin_supplied_source_sha256": "51f74de9c7e57524cc3f1f881b03069805e654b162a8f5ccb77d012b0a2604a7",
+  "plugin_package_version": "2.0.0",
+  "source_only_not_live": true,
+  "source_checks": {
+    "qdrant_insert_dimension_mismatch_purge_all": true,
+    "qdrant_purge_deletes_physical_collection": true,
+    "milvus_schema_dimension_mismatch_collection_drop": true,
+    "milvus_purge_swallows_error": true,
+    "qdrant_route_passes_filters_to_unscoped_purgeAll": true,
+    "similharity_purge_generic_success": true,
+    "browser_supplied_credential_paths": true,
+    "extension_capability_registry_defaults_unknown": true
+  },
+  "authoritative_live_contracts_tested": false,
+  "host_assembled_prompt_tested": false,
+  "browser_indexeddb_and_storage_tested": false,
+  "server_embedding_model_accuracy_tested": false,
+  "warning": "Source-level tests assert observed behaviors, not that the deployed plugin is the inspected ZIP or that any live backend behaves identically."
+}

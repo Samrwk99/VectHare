@@ -1,0 +1,31 @@
+{
+  "checkpoint": "Step15 final verification",
+  "based_on": "VectHare-Step14-C14-Cumulative-Emotion-Similarity-Checkpoint.zip",
+  "baseline_sha256": "8f6662f628d4b86fe8bfefedba1e1d5b1a5a3711a09bb2c73143dfa699a620ab",
+  "plugin_read_only_source_sha256": "51f74de9c7e57524cc3f1f881b03069805e654b162a8f5ccb77d012b0a2604a7",
+  "node": "v22.16.0",
+  "regression": {
+    "test_files": 46,
+    "assertions": 863,
+    "passed": 863,
+    "failed": 0
+  },
+  "syntax": {
+    "javascript_files": 174,
+    "passed": 174
+  },
+  "source_changes": [
+    "utils/c04-registry-migration.js",
+    "utils/c07-physical-migration.js",
+    "utils/c02-operation-journal.js"
+  ],
+  "new_test": [
+    "tests/final15-integration.node.test.mjs"
+  ],
+  "original_files_deleted": [],
+  "production_certified": false,
+  "live_sillytavern_tested": false,
+  "real_backend_tested": false,
+  "similharity_plugin_modified": false,
+  "status": "local verification passed; server/host compatibility and destructive-operation acceptance blocked"
+}

@@ -43,6 +43,7 @@ const matches=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 export function planRegistryMigration(settings,{mapping={},owners={}}={}) {
     const before=snapshot(safeObject(settings));
     const after=copy(before),conflicts=[],quarantined=[],changes=[];
+    const targetSources=new Map();
     const sourceNames=new Set([...before.vecthare_collection_registry,
         ...Object.keys(before.collections),...Object.keys(before.vecthare_chunk_meta_by_collection),
         ...Object.values(before.chatCollectionPolicies).flatMap(p=>Array.isArray(p?.selectedCollections)?p.selectedCollections:[])]);
@@ -53,6 +54,13 @@ export function planRegistryMigration(settings,{mapping={},owners={}}={}) {
             quarantined.push({source,reason:'explicit-qualified-remap-required'});
             continue;
         }
+        // Even byte-identical legacy metadata represents separately owned records.
+        // Merging two sources into one target loses registry identity and policy rights.
+        const priorSource=targetSources.get(target);
+        if(priorSource && priorSource!==source) {
+            conflicts.push({source,target,reason:'multiple-legacy-owners'});continue;
+        }
+        targetSources.set(target,source);
         if(source===target) continue;
         const hasSource=own(before.collections,source),hasTarget=own(before.collections,target);
         const recordSource=own(before.vecthare_chunk_meta_by_collection,source),recordTarget=own(before.vecthare_chunk_meta_by_collection,target);
