@@ -7,7 +7,7 @@
  * All chunk operations go through unified /chunks/* endpoints.
  * Backend is specified via `backend` parameter in request body.
  *
- * @version 3.2.10-s10.13-f09
+ * @version 3.2.10-s10.14-f10
  */
 
 import path from 'node:path';
@@ -26,6 +26,7 @@ import { registerS04Routes } from './lib/s04-routes.js';
 import { registerS05Routes } from './lib/s05-routes.js';
 import {registerF02Routes} from './lib/f02-public-reads.js';
 import {registerF09WorkflowRoutes} from './lib/f09-workflows.js';
+import {registerF10Routes} from './lib/f10-recovery-capture.js';
 import {registerF03ProvisionRoutes} from './lib/f03-provision.js';
 import {registerF04PilotRoutes} from './lib/f04-pilot-mutations.js';
 import {registerF05AcceptanceRoutes} from './lib/f05-qdrant-acceptance.js';
@@ -43,7 +44,7 @@ import {registerF01HostRoutes} from './lib/f01-host-sources.js';
 import { validateVector as validateS05Vector } from './lib/s05-contract.js';
 
 const pluginName = 'similharity';
-const pluginVersion = '3.2.10-s10.13-f09';
+const pluginVersion = '3.2.10-s10.14-f10';
 
 /**
  * Initialize the plugin
@@ -90,6 +91,8 @@ export async function init(router) {
     }});
     registerS05Routes(router,{readHandler:f02ReadHandler});
     registerF09WorkflowRoutes(router,{backendPool,createVectra:async(req,binding)=>
+      f07SealedVectra(req,binding,{createIndex:folder=>new vectra.LocalIndex(folder)})});
+    registerF10Routes(router,{backendPool,createVectra:async(req,binding)=>
       f07SealedVectra(req,binding,{createIndex:folder=>new vectra.LocalIndex(folder)})});
     registerF03ProvisionRoutes(router,{backendPool,createVectra:async(req,binding)=>{
       const folder=await f07VectraLocation(req.s03,binding,{createRoot:true});

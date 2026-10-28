@@ -1,4 +1,5 @@
 import {registerF09WorkflowRoutes} from '../lib/f09-workflows.js';
+import {registerF10Routes} from '../lib/f10-recovery-capture.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
@@ -62,6 +63,7 @@ async function registered(pool) {
             './lib/f08-milvus.js':{registerF08MilvusPilotRoutes},
             './lib/f08-milvus-acceptance.js':{registerF08AcceptanceRoutes},
             './lib/f09-workflows.js':{registerF09WorkflowRoutes},
+            './lib/f10-recovery-capture.js':{registerF10Routes},
             './lib/s10-gui-connections.js':{registerGuiConnectionRoutes:()=>{}}
         };
         assert.ok(objects[specifier],`unexpected import: ${specifier}`);
