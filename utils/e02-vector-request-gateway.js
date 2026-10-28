@@ -145,6 +145,40 @@ export function inspectVectorRequest(url, options={}) {
         return {intercepted:true,allowed:true,transport:'plugin',operation:provision?'f03SchemaProvision':'f03SchemaPreview',
             backend:body.backend,method:'POST'};
     }
+    // S04 F04 receipt inspection is read-only, bound to the authenticated
+    // plugin user directory. A UUID never selects a vector collection.
+    if(req.transport==='plugin'&&/^\/v2\/operations\/[0-9a-f-]+$/i.test(req.suffix)){
+        if(req.method!=='GET'||req.body!=null||
+           !/^\/v2\/operations\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.suffix))
+            fail(req,'f04-operation-receipt-invalid');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:'s04OperationReceipt',backend:'none',method:'GET'};
+    }
+    // F04: manual, explicitly consented source-bound pilot for a NEW F03 Qdrant
+    // collection. This is NEVER an E02 matrix unlock or ordinary memory route.
+    if(req.transport==='plugin'&&req.suffix==='/v2/records/pilot-mutate'){
+        const b=req.body,source=b?.source,embedding=b?.embedding;
+        const kind=source?.kind;
+        const sourceKeys=kind==='chat'?['kind','avatar','chatFile']:
+            kind==='group-chat'?['kind','groupId','chatFile']:
+            kind==='lorebook'?['kind','name']:[];
+        const allowed=['backend','source','embedding','configId','action','recordId','expectedRevision',
+            'operationId','experimentalConsent','text','vector','metadata'];
+        const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+        if(req.method!=='POST'||!b||b.backend!=='qdrant'||b.configId!=='local'||
+           b.experimentalConsent!=='I ACCEPT DISPOSABLE V2 RECORD MUTATIONS'||
+           !['insert','update','metadata','delete'].includes(b.action)||
+           !uuid.test(b.recordId||'')||!uuid.test(b.operationId||'')||
+           !sourceKeys.length||!source||Object.keys(source).some(k=>!sourceKeys.includes(k))||
+           sourceKeys.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220)||
+           !embedding||typeof embedding!=='object'||Array.isArray(embedding)||
+           Object.keys(embedding).some(k=>!['source','model','dimension','metric'].includes(k))||
+           Object.keys(b).some(k=>!allowed.includes(k))||
+           (b.action==='insert'&&b.expectedRevision!==0)||
+           (b.action!=='insert'&&(!Number.isSafeInteger(b.expectedRevision)||b.expectedRevision<1))||
+           (['delete','metadata'].includes(b.action)&&(b.text!==undefined||b.vector!==undefined))||
+           (b.action==='delete'&&b.metadata!==undefined))fail(req,'f04-disposable-source-bound-pilot-required');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:'f04PilotMutation',backend:'qdrant',method:'POST'};
+    }
     // H01 is a narrowly bounded, explicitly confirmed disposable acceptance
     // diagnostic. It cannot select a collection, write real memories, or lift
     // any production capability matrix cell.

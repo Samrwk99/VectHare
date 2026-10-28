@@ -7,11 +7,12 @@ const root='/api/plugins/similharity';
 function reports(){
  const build={pluginVersion:S11_EXPECTED_PLUGIN.pluginVersion, contractVersion:2,sourceFingerprint:S11_EXPECTED_PLUGIN.sourceFingerprint,verification:'MATCHED_LOCAL_SOURCE_MANIFEST'};
  const operations=Object.fromEntries(['insert','delete','updateText','updateMetadata','operationSubmit'].map(v=>[v,'DENIED_NOT_LIVE_CERTIFIED']));
- const caps={...build,buildVerification:build.verification,capabilityClaimsArePermissions:false,productionCertified:false,publicV2MutationsEnabled:false,publicV2ReadsEnabled:false,publicV2ReadRoutesAvailable:true,guardedNewCollectionProvisioningAvailable:true,backends:Object.fromEntries(['standard','lancedb','qdrant','milvus'].map(b=>[b,{operations}]))};
+ const caps={...build,buildVerification:build.verification,capabilityClaimsArePermissions:false,productionCertified:false,publicV2MutationsEnabled:false,publicV2ReadsEnabled:false,publicV2ReadRoutesAvailable:true,guardedNewCollectionProvisioningAvailable:true,experimentalQdrantPilotMutationsAvailable:true,backends:Object.fromEntries(['standard','lancedb','qdrant','milvus'].map(b=>[b,{operations}]))};
  const contracts={contractVersion:2,executionCertified:false,routes:{'POST /v2/operations/submit':'DENIED','POST /v2/reads/get':'GUARDED_F02_HOST_SOURCE_V2_SCHEMA_ONLY',
  'POST /v2/collections/preview':'F03_SOURCE_BOUND_NEW_COLLECTION_PREVIEW_ONLY',
  'POST /v2/collections/provision':'F03_EXPLICIT_SOURCE_BOUND_EMPTY_SCHEMA_CREATION_UNCERTIFIED',
- 'POST /v2/collections/status':'F03_SOURCE_BOUND_PROVISION_RECEIPT_ONLY'}};
+ 'POST /v2/collections/status':'F03_SOURCE_BOUND_PROVISION_RECEIPT_ONLY',
+ 'POST /v2/records/pilot-mutate':'F04_DISPOSABLE_QDRANT_CONSENTED_V2_RECORDS_UNCERTIFIED'}};
  return {build,caps,contracts};
 }
 const stub=reports();
