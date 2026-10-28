@@ -5,6 +5,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import vm from 'node:vm';
+import * as similarityImplementation from '../core/emotion-similarity.js';
+import * as embeddingImplementation from '../core/emotion-embedding-provider.js';
 
 const file = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../core/emotion-classifier.js');
 const code = readFileSync(file, 'utf8');
@@ -18,7 +20,12 @@ async function setup(handler = async (text) => ({label: text, score: 0.8})) {
         emotion_custom_labels: [],
     }};
     const requests = [];
+    const embeddingRequests = [];
     const fetch = async (_url, init) => {
+        if (_url.endsWith('/batch-embeddings')) {
+            const {texts}=JSON.parse(init.body); embeddingRequests.push([...texts]);
+            return {ok:true,json:async()=>({success:true,embeddings:texts.map(()=>[1,0,0])})};
+        }
         const body = JSON.parse(init.body);
         requests.push(body.text);
         const classified = await handler(body.text);
@@ -42,13 +49,17 @@ async function setup(handler = async (text) => ({label: text, score: 0.8})) {
                 this.setExport('extension_settings', settings);
             }, {context});
         }
+        if (specifier.endsWith('emotion-similarity.js') || specifier.endsWith('emotion-embedding-provider.js')) {
+            const ns=specifier.endsWith('emotion-similarity.js')?similarityImplementation:embeddingImplementation;
+            return new vm.SyntheticModule(Object.keys(ns),function(){for(const k of Object.keys(ns))this.setExport(k,ns[k]);},{context});
+        }
         if (specifier.endsWith('feature-support.js')) {
             return new vm.SyntheticModule(['requireSupportedClassifierMode'],function(){this.setExport('requireSupportedClassifierMode',()=>{});},{context});
         }
         throw new Error(`Unmocked import ${specifier}`);
     });
     await script.evaluate();
-    return {api: script.namespace, settings, requests, context};
+    return {api: script.namespace, settings, requests, embeddingRequests, context};
 }
 
 test('#238: messages with equal first 100 chars use distinct classification calls and results', async () => {
@@ -73,47 +84,45 @@ test('#238: full-text cache identity avoids ambiguous separators and short-text 
     assert.deepEqual(requests, ['x:y', 'x|y', 'x:y!', 'x|y!', '👍 hello', '👍 hello!']);
 });
 
-test('#238: model, mode and custom labels distinguish otherwise identical text', async () => {
-    const {api, settings, requests} = await setup();
+test('#238/C14: model, mode and custom labels isolate cache and route through distinct endpoint', async () => {
+    const {api, settings, requests, embeddingRequests} = await setup();
     await api.classifyEmotion('same');
-    await api.classifyEmotion('same', {model: 'model-two'});
-    await api.classifyEmotion('same', {useEmbeddingSimilarity: true});
-    await api.classifyEmotion('same', {customLabels: ['joy']});
-    assert.equal(requests.length, 4);
-    await api.classifyEmotion('same', {model: 'model-two'});
-    assert.equal(requests.length, 4);
-    // Catch out-of-band changes (some older settings paths write directly).
-    settings.vecthare.emotion_classifier_model = 'model-three';
+    await api.classifyEmotion('same', {model:'model-two'});
+    const sim=await api.classifyEmotion('same', {useEmbeddingSimilarity:true});
+    assert.equal(sim.mode,'similarity');
+    assert.equal(sim.label,'neutral', 'ties produce an explicit neutral fallback');
+    await api.classifyEmotion('same',{customLabels:['joy']});
+    assert.equal(requests.length,3,'similarity cannot silently call classify');
+    assert.equal(embeddingRequests.length,2,'prototype and query embeddings sent');
+    await api.classifyEmotion('same',{useEmbeddingSimilarity:true});
+    assert.equal(embeddingRequests.length,2,'similarity cached independently');
+    settings.vecthare.emotion_classifier_model='model-three';
     await api.classifyEmotion('same');
-    settings.vecthare.emotion_use_similarity = true;
+    settings.vecthare.emotion_custom_labels=['sadness'];
     await api.classifyEmotion('same');
-    settings.vecthare.emotion_custom_labels = ['joy'];
-    await api.classifyEmotion('same');
-    assert.equal(requests.length, 7);
+    assert.equal(requests.length,5);
 });
 
-test('#238: changing any classifier setting invalidates cached classifications', async () => {
-    const {api, requests} = await setup();
-    const changes = [
-        ['model', 'another-model'],
-        ['useEmbeddingSimilarity', true],
-        ['customLabels', ['sadness']],
-        ['enabled', false],
-        ['enabled', true],
-    ];
+test('#238/C14: classifier setting changes invalidate caches and mode switches cannot reuse old response', async () => {
+    const {api, requests, embeddingRequests} = await setup();
+    assert.equal((await api.classifyEmotion('hello')).label,'hello');
+    api.updateClassifierSetting('model','another-model');
+    assert.equal((await api.classifyEmotion('hello')).label,'hello');
+    api.updateClassifierSetting('useEmbeddingSimilarity',true);
+    assert.equal((await api.classifyEmotion('hello')).mode,'similarity');
+    assert.equal(embeddingRequests.length,2);
+    api.updateClassifierSetting('customLabels',['sadness']);
+    assert.equal((await api.classifyEmotion('hello')).mode,'similarity');
+    assert.equal(embeddingRequests.length,4);
+    api.updateClassifierSetting('enabled',false);
+    assert.equal(await api.classifyEmotion('hello'),null);
+    api.updateClassifierSetting('enabled',true);
     await api.classifyEmotion('hello');
-    for (const [key, value] of changes) {
-        api.updateClassifierSetting(key, value);
-        const result = await api.classifyEmotion('hello');
-        if (key === 'enabled' && !value) assert.equal(result, null);
-        else assert.equal(result.label, 'hello');
-    }
-    assert.equal(requests.length, 5);
-    await api.classifyEmotion('hello');
-    assert.equal(requests.length, 5);
+    assert.equal(embeddingRequests.length,6);
+    assert.equal(requests.length,2);
     api.clearClassifierCache();
     await api.classifyEmotion('hello');
-    assert.equal(requests.length, 6);
+    assert.equal(embeddingRequests.length,8);
 });
 
 test('#238: a pending request cannot refill a cache after settings change', async () => {

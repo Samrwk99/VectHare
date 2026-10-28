@@ -21,12 +21,13 @@ export function validateChunkStrategy(strategy, type, source={}) {
     if (strategy==='per_page' && type!=='wiki') return {supported:false,reason:'Wiki-only strategy'};
     return {supported:true};
 }
-export function classifierCapabilities() {return {modes:['disabled','classifier'],modelSelectionSupported:false,similaritySupported:false};}
+export function classifierCapabilities({source='transformers'}={}) {return {modes:['disabled','classifier',...(source==='transformers'?['similarity']:[])],modelSelectionSupported:false,similaritySupported:source==='transformers',similarityRequiresPlugin:true};}
 export function requireSupportedChunkStrategy(strategy,type,source={}) {
     const support=validateChunkStrategy(strategy,type,source);
     if(!support.supported)throw new Error(`Unsupported chunking strategy (${strategy}): ${support.reason}`);
     return true;
 }
-export function requireSupportedClassifierMode({useEmbeddingSimilarity=false}={}) {
-    if(useEmbeddingSimilarity)throw new Error('Embedding similarity emotion classification is not implemented; choose classifier mode');
+export function requireSupportedClassifierMode({useEmbeddingSimilarity=false,source='transformers'}={}) {
+    if(useEmbeddingSimilarity && source!=='transformers') throw new Error('Embedding similarity requires the verified local Transformers source');
+    return true;
 }

@@ -132,8 +132,10 @@ test('P0-7 unsupported runtime modes are rejected rather than silently downgrade
   assert.equal(validateChunkStrategy('adaptive','chat',{kind:'upload',uploaded:true}).supported,true);
   assert.equal(validateChunkStrategy('per_scene','chat',{uploaded:true}).supported,false);
   assert.throws(()=>requireSupportedChunkStrategy('adaptive','chat',{kind:'live_chat'}),/Unsupported/);
-  assert.throws(()=>requireSupportedClassifierMode({useEmbeddingSimilarity:true}),/not implemented/);
-  assert.equal(classifierCapabilities().similaritySupported,false);
+  assert.equal(requireSupportedClassifierMode({useEmbeddingSimilarity:true,source:'transformers'}),true);
+  assert.throws(()=>requireSupportedClassifierMode({useEmbeddingSimilarity:true,source:'bananabread'}),/requires/);
+  assert.equal(classifierCapabilities({source:'transformers'}).similaritySupported,true);
+  assert.equal(classifierCapabilities({source:'bananabread'}).similaritySupported,false);
 });
 test('P0-8 quick wins have runtime/source regressions linked to each issue',()=>{
   const index=source('index.js'),conditional=source('core/conditional-activation.js'),

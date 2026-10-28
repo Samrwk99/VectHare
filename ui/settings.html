@@ -217,27 +217,12 @@
 
                 <!-- Dedicated Classifier Settings -->
                 <div id="vecthare_classifier_settings" style="display: none; margin-top: 10px; padding: 8px; background: rgba(0,0,0,0.1); border-radius: 4px;">
-                    <label for="vecthare_emotion_classifier_model">
-                        <small>Classifier Model</small>
-                    </label>
-                    <select id="vecthare_emotion_classifier_model" class="text_pole">
-                        <option value="SamLowe/roberta-base-go_emotions">RoBERTa GoEmotions (28 emotions) - Recommended</option>
-                        <option value="j-hartmann/emotion-english-distilroberta-base">DistilRoBERTa (7 emotions) - Faster</option>
-                        <option value="bhadresh-savani/distilbert-base-uncased-emotion">DistilBERT (6 emotions) - Lightweight</option>
-                        <option value="custom">Custom Model...</option>
-                    </select>
-
-                    <div id="vecthare_custom_classifier_model" class="flex-container flexFlowColumn marginTop5" style="display: none;">
-                        <label for="vecthare_emotion_classifier_custom">
-                            <small>Custom Model ID (HuggingFace)</small>
-                        </label>
-                        <input id="vecthare_emotion_classifier_custom" class="text_pole" type="text" placeholder="e.g., username/model-name" />
-                    </div>
+                    <small>Classifier model: <b>controlled by the SillyTavern server</b>. VectHare cannot select or load a model through /api/extra/classify.</small>
 
                     <div class="flex-container marginTop5">
                         <div id="vecthare_test_classifier" class="menu_button menu_button_icon" title="Test if the selected model outputs emotion labels">
                             <i class="fa-solid fa-flask"></i>
-                            <span>Test Classifier</span>
+                            <span>Test Selected Method</span>
                         </div>
                     </div>
 
@@ -250,11 +235,11 @@
                 <div id="vecthare_similarity_settings" style="display: none; margin-top: 10px; padding: 8px; background: rgba(0,0,0,0.1); border-radius: 4px;">
                     <small style="opacity: 0.8; display: block;">
                         <i class="fa-solid fa-info-circle"></i>
-                        Compares message text against emotion descriptions using your configured embedding model.
+                        Compares message text against versioned emotion prototypes with the plugin's local Transformers embeddings.
                         The emotion with the highest cosine similarity score is selected.
                     </small>
                     <small style="opacity: 0.6; display: block; margin-top: 5px;">
-                        Currently using: <b id="vecthare_similarity_source_display">transformers</b>
+                        Embedding source: <b id="vecthare_similarity_source_display">transformers</b> (server model). Scores are experimental; test on your own text.
                     </small>
                 </div>
             </div>

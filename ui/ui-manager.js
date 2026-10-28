@@ -2934,6 +2934,7 @@ async function initializeCottonTalesIntegration(settings) {
 
     // Determine initial method from settings
     function getCurrentMethod() {
+        if (!settings.emotion_classifier_enabled) return 'disabled';
         if (settings.emotion_classifier_enabled && !settings.emotion_use_similarity) {
             return 'classifier';
         } else if (settings.emotion_use_similarity) {
@@ -2942,11 +2943,13 @@ async function initializeCottonTalesIntegration(settings) {
         return 'disabled';
     }
 
-    // Phase 0: preserve legacy similarity setting, but do not execute or offer it.
-    $('#vecthare_emotion_method option[value="similarity"]').prop('disabled', true).text('Embedding similarity (not implemented)');
-    $('#vecthare_emotion_classifier_model').prop('disabled', true).attr('title', 'Classifier model is controlled by the server endpoint');
-    if (settings.emotion_use_similarity) {
-        $('#vecthare_similarity_settings').append('<small>Saved similarity mode is unavailable; select Classifier or Disabled.</small>');
+    // C14: enable only the read-only local Transformers embedding route.
+    const similarityCapability = emotionClassifier.getClassifierCapabilities().similarity;
+    $('#vecthare_emotion_method option[value="similarity"]')
+        .prop('disabled', !similarityCapability.supported)
+        .text(similarityCapability.supported ? 'Embedding Similarity (local Transformers)' : 'Embedding Similarity (requires local Transformers)');
+    if (settings.emotion_use_similarity && !similarityCapability.supported) {
+        $('#vecthare_similarity_settings').append('<small>Saved similarity mode cannot run with this embedding source. Choose local Transformers or disable classification.</small>');
     }
 
     // Classification method dropdown
@@ -2967,9 +2970,11 @@ async function initializeCottonTalesIntegration(settings) {
                 emotionClassifier.updateClassifierSetting('enabled', true);
                 emotionClassifier.updateClassifierSetting('useEmbeddingSimilarity', false);
             } else if (method === 'similarity') {
-                toastr.warning('Embedding similarity classification has not been implemented.');
-                $(this).val(getCurrentMethod());
-                return;
+                if (!emotionClassifier.getClassifierCapabilities().similarity.supported) {
+                    toastr.warning('Embedding similarity requires the local Transformers embedding source.');
+                    $(this).val(getCurrentMethod());
+                    return;
+                }
                 settings.emotion_classifier_enabled = true; // Still enabled, but uses similarity
                 settings.emotion_use_similarity = true;
                 emotionClassifier.updateClassifierSetting('enabled', true);
@@ -2984,40 +2989,8 @@ async function initializeCottonTalesIntegration(settings) {
     // Initialize UI for current method
     updateMethodUI(getCurrentMethod());
 
-    // Classifier model selection
-    $('#vecthare_emotion_classifier_model')
-        .val(settings.emotion_classifier_model || 'SamLowe/roberta-base-go_emotions')
-        .on('change', function() {
-            const value = $(this).val();
-
-            if (value === 'custom') {
-                $('#vecthare_custom_classifier_model').show();
-            } else {
-                $('#vecthare_custom_classifier_model').hide();
-                settings.emotion_classifier_model = value;
-                applySettingsSnapshot(settings);
-                saveSettingsDebounced();
-                emotionClassifier.updateClassifierSetting('model', value);
-            }
-        });
-
-    // Show custom model input if currently set to custom
-    if (settings.emotion_classifier_model &&
-        !['SamLowe/roberta-base-go_emotions', 'j-hartmann/emotion-english-distilroberta-base', 'bhadresh-savani/distilbert-base-uncased-emotion'].includes(settings.emotion_classifier_model)) {
-        $('#vecthare_emotion_classifier_model').val('custom');
-        $('#vecthare_custom_classifier_model').show();
-    }
-
-    // Custom model input
-    $('#vecthare_emotion_classifier_custom')
-        .val(settings.emotion_classifier_custom || '')
-        .on('input', function() {
-            settings.emotion_classifier_custom = $(this).val();
-            settings.emotion_classifier_model = $(this).val();
-            applySettingsSnapshot(settings);
-            saveSettingsDebounced();
-            emotionClassifier.updateClassifierSetting('model', $(this).val());
-        });
+    // C14 #237: model and custom-model controls were removed. This endpoint
+    // selects its model server-side and does not acknowledge client changes.
 
     // Test classifier button
     $('#vecthare_test_classifier').on('click', async function() {
@@ -3028,48 +3001,29 @@ async function initializeCottonTalesIntegration(settings) {
         $result.hide();
 
         try {
+            const mode = $('#vecthare_emotion_method').val();
+            if (mode === 'similarity') {
+                const report = await emotionClassifier.testSimilarityClassifier();
+                $result.show().css('background', 'rgba(34,197,94,0.2)').text(
+                    `Embedding similarity fixture accuracy: ${report.correct}/${report.evaluated} (${(100*report.accuracy).toFixed(1)}%). ` +
+                    `Unknown: ${report.unknown}. Local tests are not real-world validation.`);
+                return;
+            }
             const testResult = await emotionClassifier.testClassifierModel();
 
             $result.show();
 
             if (testResult.error) {
-                $result.css('background', 'rgba(239,68,68,0.2)').html(`
-                    <div style="color: #ef4444;">
-                        <i class="fa-solid fa-times-circle"></i>
-                        <b>Error:</b> ${testResult.error}
-                    </div>
-                `);
+                $result.css('background', 'rgba(239,68,68,0.2)').text(`Test error: ${testResult.error}`);
             } else if (testResult.isEmotionClassifier) {
-                const confidenceColor = testResult.confidence === 'high' ? '#22c55e' : '#eab308';
-                $result.css('background', 'rgba(34,197,94,0.2)').html(`
-                    <div style="color: #22c55e;">
-                        <i class="fa-solid fa-check-circle"></i>
-                        <b>Looks like an emotion classifier!</b>
-                    </div>
-                    <div style="margin-top: 4px; font-size: 0.9em;">
-                        <b>Confidence:</b> <span style="color: ${confidenceColor}">${testResult.confidence}</span><br>
-                        <b>Sample labels:</b> ${testResult.sampleLabels.join(', ')}
-                    </div>
-                `);
+                $result.css('background', 'rgba(34,197,94,0.2)').text(
+                    `Server-selected classifier: ${testResult.confidence} confidence. Labels: ${testResult.sampleLabels.join(', ')}. Model cannot be selected client-side.`);
             } else {
-                $result.css('background', 'rgba(234,179,8,0.2)').html(`
-                    <div style="color: #eab308;">
-                        <i class="fa-solid fa-exclamation-triangle"></i>
-                        <b>May not be an emotion classifier</b>
-                    </div>
-                    <div style="margin-top: 4px; font-size: 0.9em;">
-                        Labels don't look like emotions: ${testResult.sampleLabels.join(', ')}<br>
-                        Consider using a different model.
-                    </div>
-                `);
+                $result.css('background', 'rgba(234,179,8,0.2)').text(
+                    `Server-selected classifier could not be confirmed. Observed labels: ${testResult.sampleLabels.join(', ')}.`);
             }
         } catch (error) {
-            $result.show().css('background', 'rgba(239,68,68,0.2)').html(`
-                <div style="color: #ef4444;">
-                    <i class="fa-solid fa-times-circle"></i>
-                    <b>Test failed:</b> ${error.message}
-                </div>
-            `);
+            $result.show().css('background', 'rgba(239,68,68,0.2)').text(`Test failed: ${error.message}`);
         } finally {
             $btn.removeClass('disabled').find('i').removeClass('fa-spinner fa-spin').addClass('fa-flask');
         }

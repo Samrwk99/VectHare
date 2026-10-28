@@ -1,12 +1,14 @@
 import {requireSupportedClassifierMode} from '../utils/feature-support.js';
+import {createEmotionSimilarityClassifier, EMOTION_TEST_FIXTURES} from './emotion-similarity.js';
+import {createPluginEmotionEmbedder, emotionEmbeddingCapabilities} from './emotion-embedding-provider.js';
 /**
  * ============================================================================
  * VECTHARE EMOTION CLASSIFIER
  * ============================================================================
  * Provides emotion classification for Cotton-Tales integration.
  * Supports:
- * - Local transformers.js classifier models (no server needed)
- * - Using embedding similarity with emotion descriptions
+ * - SillyTavern server-managed emotion classifier endpoint
+ * - Read-only, server-managed local Transformers embedding similarity
  *
  * @author VectHare
  * @version 1.0.0
@@ -23,7 +25,8 @@ import { extension_settings } from '../../../../extensions.js';
 const MODULE_NAME = 'VectHare-EmotionClassifier';
 
 /**
- * Known emotion classifier models that work well
+ * Historical examples of classifier labels; the live endpoint is server-controlled.
+ * Client-side model selection is intentionally not offered.
  */
 export const RECOMMENDED_CLASSIFIER_MODELS = [
     {
@@ -100,6 +103,19 @@ let classifierCache = new Map();
 const CACHE_MAX_SIZE = 100;
 // Also protects against requests completing after a settings change/cache clear.
 let cacheGeneration = 0;
+let similarityRuntime = null;
+
+function activeSimilarity(settings) {
+    const source = extension_settings?.vecthare?.source || 'transformers';
+    requireSupportedClassifierMode({useEmbeddingSimilarity:true,source});
+    const provider = createPluginEmotionEmbedder({settings:{source},request:(url,options)=>fetch(url,{...options,headers:getRequestHeaders()})});
+    const signature = provider.profileKey;
+    if (similarityRuntime?.signature !== signature) {
+        similarityRuntime = {signature, classifier:createEmotionSimilarityClassifier(provider)};
+    }
+    return similarityRuntime.classifier;
+}
+
 
 /**
  * Use an unambiguous representation of the entire text and the configured
@@ -117,6 +133,8 @@ function classifierCacheKey(text, settings, options = {}) {
         options.model ?? settings.model,
         options.useEmbeddingSimilarity ?? settings.useEmbeddingSimilarity,
         options.customLabels ?? settings.customLabels,
+        extension_settings?.vecthare?.source ?? 'transformers',
+        'ct-basic-en-v1',
     ]);
 }
 
@@ -126,6 +144,8 @@ function classifierCacheKey(text, settings, options = {}) {
 export function clearClassifierCache() {
     cacheGeneration++;
     classifierCache.clear();
+    similarityRuntime?.classifier.clear();
+    similarityRuntime = null;
     console.log(`[${MODULE_NAME}] Classifier cache cleared`);
 }
 
@@ -150,7 +170,8 @@ export async function classifyEmotion(text, options = {}) {
     }
 
     // Check cache
-    requireSupportedClassifierMode({useEmbeddingSimilarity: options.useEmbeddingSimilarity ?? settings.useEmbeddingSimilarity});
+    const similarityMode = options.useEmbeddingSimilarity ?? settings.useEmbeddingSimilarity;
+    requireSupportedClassifierMode({useEmbeddingSimilarity: similarityMode,source:extension_settings?.vecthare?.source || 'transformers'});
     const cacheKey = classifierCacheKey(text, settings, options);
     const requestGeneration = cacheGeneration;
     if (classifierCache.has(cacheKey)) {
@@ -158,6 +179,14 @@ export async function classifyEmotion(text, options = {}) {
     }
 
     try {
+        if (similarityMode) {
+            const result = await activeSimilarity(settings).classify(text, {customLabels:options.customLabels ?? settings.customLabels});
+            if (requestGeneration === cacheGeneration && result) {
+                if (classifierCache.size >= CACHE_MAX_SIZE) classifierCache.delete(classifierCache.keys().next().value);
+                classifierCache.set(cacheKey, result);
+            }
+            return result;
+        }
         // Use ST's local classify endpoint
         const response = await fetch('/api/extra/classify', {
             method: 'POST',
@@ -288,6 +317,20 @@ export async function testClassifierModel() {
     };
 }
 
+/** C14: measured test set, not a fabricated accuracy estimate. */
+export async function testSimilarityClassifier(fixtures=EMOTION_TEST_FIXTURES) {
+    const settings=getClassifierSettings();
+    const classifier=activeSimilarity(settings);
+    return classifier.evaluate(fixtures,{customLabels:settings.customLabels});
+}
+
+/** Server controls the classifier model. The plugin embedding source is verified only for Transformers. */
+export function getClassifierCapabilities() {
+    const source=extension_settings?.vecthare?.source||'transformers';
+    return {classifier:{supported:true,modelHonored:false,model:'server-controlled'},
+        similarity:emotionEmbeddingCapabilities({source})};
+}
+
 // =============================================================================
 // SETTINGS MANAGEMENT
 // =============================================================================
@@ -349,6 +392,8 @@ export function updateClassifierSetting(key, value) {
 export const CottonTalesAPI = {
     classifyEmotion,
     testClassifierModel,
+    testSimilarityClassifier,
+    getClassifierCapabilities,
     getClassifierSettings,
     clearClassifierCache,
     isCottonTalesInstalled,
