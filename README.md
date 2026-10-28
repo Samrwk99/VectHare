@@ -1035,3 +1035,8 @@ writes stay denied until server-wide writer exclusion and live acceptance.
 
 Use `npm run test:s07` and `npm run check:s07` for offline checks. Read
 `S07-VERIFICATION.md` and `S07-NEXT-STEPS.md` before attempting integration.
+
+
+## S08 checkpoint — local backend v2 adapters (offline only)
+
+S08 adds internal LanceDB and plugin Vectra v2 adapters (`lib/s08-lancedb.js`, `lib/s08-vectra.js`), with canonical ownership, revision-aware disposable-fixture mutations, bounded read contracts, S04 ledger tests and no new public route activation. The native SillyTavern Standard API is separate. For safety restrictions see `S08-VERIFICATION.md` and `S08-NEXT-STEPS.md`.
