@@ -1,52 +1,29 @@
 {
-  "name": "vecthare-tests",
-  "version": "1.0.0",
-  "description": "Automated tests for VectHare RAG extension",
+  "name": "similharity",
+  "version": "2.0.0",
+  "description": "Vector database backend extensions for Similharity - LanceDB, Qdrant, and enhanced Vectra with full metadata storage",
+  "main": "index.js",
   "type": "module",
-  "scripts": {
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage",
-    "test:ui": "vitest --ui",
-    "test:i01": "node --experimental-vm-modules --test tests/i01-safety.node.test.mjs",
-    "test:i02": "node --experimental-vm-modules --test tests/i02-security.node.test.mjs",
-    "test:i03": "node --experimental-vm-modules --test tests/i03-chat-sync.node.test.mjs",
-    "test:repair": "node --experimental-vm-modules --test tests/i01-safety.node.test.mjs tests/i02-security.node.test.mjs tests/i03-chat-sync.node.test.mjs tests/i04-backend-errors.node.test.mjs tests/i05-metadata.node.test.mjs tests/i06-conditions.node.test.mjs tests/i07-backup.node.test.mjs tests/i08-provider-compat.node.test.mjs tests/i09-search-relevance.node.test.mjs tests/i10-prompt-correctness.node.test.mjs tests/i11-links-temporal.node.test.mjs tests/i12-content-vectorizer.node.test.mjs tests/i13-numeric-zero.node.test.mjs tests/i14-text-cleaning.node.test.mjs tests/i15-search-debugger.node.test.mjs tests/i16-diagnostics.node.test.mjs tests/i17-emotion-cache.node.test.mjs tests/i18-ui-lifecycle.node.test.mjs",
-    "test:i04": "node --experimental-vm-modules --test tests/i04-backend-errors.node.test.mjs",
-    "test:i05": "node --experimental-vm-modules --test tests/i05-metadata.node.test.mjs",
-    "test:i06": "node --experimental-vm-modules --test tests/i06-conditions.node.test.mjs",
-    "test:i07": "node --experimental-vm-modules --test tests/i07-backup.node.test.mjs",
-    "test:i08": "node --experimental-vm-modules --test tests/i08-provider-compat.node.test.mjs",
-    "test:i09": "node --experimental-vm-modules --test tests/i09-search-relevance.node.test.mjs",
-    "test:i10": "node --experimental-vm-modules --test tests/i10-prompt-correctness.node.test.mjs",
-    "test:i11": "node --experimental-vm-modules --test tests/i11-links-temporal.node.test.mjs",
-    "test:i12": "node --experimental-vm-modules --test tests/i12-content-vectorizer.node.test.mjs",
-    "test:i13": "node --experimental-vm-modules --test tests/i13-numeric-zero.node.test.mjs",
-    "test:i14": "node --experimental-vm-modules --test tests/i14-text-cleaning.node.test.mjs",
-    "test:i15": "node --experimental-vm-modules --test tests/i15-search-debugger.node.test.mjs",
-    "test:i16": "node --experimental-vm-modules --test tests/i16-diagnostics.node.test.mjs",
-    "test:i17": "node --experimental-vm-modules --test tests/i17-emotion-cache.node.test.mjs",
-    "test:i18": "node --experimental-vm-modules --test tests/i18-ui-lifecycle.node.test.mjs",
-    "test:p0": "node --experimental-vm-modules --test tests/p0-*.node.test.mjs",
-    "test:c01": "node --experimental-vm-modules --test tests/c01-*.node.test.mjs",
-    "test:dependencies": "node --experimental-vm-modules --test tests/c04-c06-c11.node.test.mjs",
-    "test:dependency-b": "node --experimental-vm-modules --test tests/c04b-c06b-c11b.node.test.mjs",
-    "test:c03": "node --experimental-vm-modules --test tests/c03-*.node.test.mjs",
-    "test:c07": "node --test tests/c07-*.node.test.mjs",
-    "test:c02": "node --test tests/c02-operations.node.test.mjs && node --experimental-vm-modules --test tests/c02-integration.node.test.mjs",
-    "test:step6": "node --test tests/c04-c06-c07-completion.node.test.mjs && node --experimental-vm-modules --test tests/c06-backend-cache.node.test.mjs",
-    "test:c05": "node --test tests/c05-credentials.node.test.mjs",
-    "test:c08": "node --test tests/c08-activation.node.test.mjs",
-    "test:c09": "node --experimental-vm-modules --test --test-concurrency=1 tests/c09-*.node.test.mjs",
-    "test:c10": "node --test tests/c10-*.node.test.mjs",
-    "test:c11": "node --test tests/c11-complete.node.test.mjs",
-    "test:c13": "node --test tests/c13-chunking.node.test.mjs",
-    "test:c14": "node --test tests/c14-similarity.node.test.mjs"
+  "author": "Coneja-Chibi",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
   },
-  "devDependencies": {
-    "@vitest/coverage-v8": "^2.1.0",
-    "@vitest/ui": "^2.1.0",
-    "jsdom": "^27.0.1",
-    "vitest": "^2.1.0"
+  "keywords": [
+    "sillytavern",
+    "plugin",
+    "vectors",
+    "embeddings",
+    "lancedb",
+    "qdrant",
+    "vectra",
+    "similarity"
+  ],
+  "dependencies": {
+    "@lancedb/lancedb": "^0.5.0",    
+    "@zilliz/milvus2-sdk-node": "^2.6.5"
+  },
+  "optionalDependencies": {
+    "@lancedb/lancedb-linux-x64-musl": "^0.23.0"
   }
 }

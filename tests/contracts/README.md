@@ -1,9 +1,0 @@
-# Phase 0 backend contract ledger
-
-These fixtures record **observed client-side request shapes only**. They do not assert that an installed server has the expected endpoint, shape, isolation, count completeness, response acknowledgment, or pagination behavior. The uploaded source ZIP contains no matching SillyTavern server or Similharity server plugin version/commit, and no live instance was supplied. All safety-critical unknowns therefore remain `unknown`, never `verified`.
-
-Status vocabulary: `verified` (pinned server source or tested disposable live fixture); `unsupported` (negative evidence); `unknown` (unverified). The adapters' existing assumptions are not upgraded to verification by local unit mocks. In particular, the native Standard Vectra server and Similharity-backed Qdrant/Milvus/LanceDB may return HTTP success without a count of accepted/deleted items. Browser timeouts cannot establish non-commit.
-
-External reference observed: https://github.com/SillyTavern/SillyTavern (public server implementation). Deployed version and source revision: **unknown**. Server plugin reference: https://github.com/Coneja-Chibi/VectHare/tree/Similharity-Plugin ; deployed commit **unknown**. Source was not present in supplied ZIP, and neither direct pinned server-source contract tracing nor live disposable-data testing was completed. `tests/contracts/*.json` consequently include negative scenario templates, not falsely attributed captured server responses.
-
-**Consequence:** destructive cleanup, overwrite and uncertain replacement follow-up must be unavailable where positive ownership, complete inventory, supported tenant scoping and definitive server ack cannot be established. `C01`, `C06`, `C11` must restore these workflows against actual pinned server contracts. Do not manually mark these fixture statuses `verified` without attaching the server version, provenance, tests and a non-production disposable-data run.

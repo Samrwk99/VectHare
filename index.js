@@ -1,727 +1,1930 @@
-import {buildRecoveryReport} from './utils/e03-recovery.js';
-import { guardedVectorFetch as fetch } from './utils/e02-vector-request-gateway.js';
-import {recoverPendingC02Operations} from './core/core-vector-api.js';
 /**
- * ============================================================================
- * VECTHARE - ADVANCED RAG SYSTEM
- * ============================================================================
- * Entry point - lean and clean
- * All logic is in separate modules - see project guidelines
+ * Similharity Server Plugin
  *
- * @author Coneja Chibi
- * @version 2.2.0-alpha
- * ============================================================================
- */
-
-import {
-    eventSource,
-    event_types,
-    extension_prompt_types,
-} from '../../../../script.js';
-import {
-    ModuleWorkerWrapper,
-    extension_settings,
-} from '../../../extensions.js';
-import { debounce } from '../../../utils.js';
-import { debounce_timeout } from '../../../constants.js';
-
-// VectHare modules - Core
-import { synchronizeChat, rearrangeChat, vectorizeAll, repairChatVectors, checkUnfinishedVectorization, isVectorizationActive, consumeWasLastRunStoppedByUser, flagImmediateReverseSync, parseRegistryKey } from './core/chat-vectorization.js';
-import { purgeAllVectorIndexes, purgeVectorIndex } from './core/core-vector-api.js';
-import { getChatCollectionId } from './core/chat-vectorization.js';
-import { getDefaultDecaySettings } from './core/temporal-decay.js';
-import { migrateOldEnabledKeys } from './core/collection-metadata.js';
-import { clearCollectionRegistry, discoverExistingCollections, getCollectionRegistry, getPendingCollectionDeletions } from './core/collection-loader.js';
-import AsyncUtils from './utils/async-utils.js';
-import {chatJobs,currentChatIdentity} from './core/chat-job-runtime.js';
-import {promptReceipts} from './core/prompt-receipt-runtime.js';
-import {worldInfoSnapshots} from './utils/world-info-identity.js';
-import {stopVectorization,resetControlState} from './core/vectorization-control.js';
-import { purgeAllAndResetSettings } from './core/destructive-safety.js';
-
-// VectHare modules - UI
-import { renderSettings, openDiagnosticsModal, loadWebLlmModels, updateWebLlmStatus, refreshAutoSyncCheckbox, updateContinueVectorizationButton, updateVectorizationStatus } from './ui/ui-manager.js';
-import { progressTracker } from './ui/progress-tracker.js';
-import { initializeVisualizer } from './ui/chunk-visualizer.js';
-import { initializeDatabaseBrowser } from './ui/database-browser.js';
-import { initializeSceneMarkers, updateAllMarkerStates, setSceneSettings } from './ui/scene-markers.js';
-import { initializeWorldInfoIntegration } from './core/world-info-integration.js';
-
-// VectHare modules - Cotton-Tales Integration
-import './core/emotion-classifier.js'; // Exposes window.VectHareEmotionClassifier
-
-// Constants
-const MODULE_NAME = 'VectHare';
-
-// Default settings
-const defaultSettings = {
-    // Core vector settings
-    source: 'transformers',
-    vector_backend: 'standard', // Backend: 'standard' (ST Vectra), 'lancedb', 'qdrant'
-    qdrant_host: 'localhost',
-    qdrant_port: 6333,
-    qdrant_url: '',
-    qdrant_use_cloud: false,
-    qdrant_multitenancy: false, // Use single collection with content_type field instead of separate collections
-    milvus_host: 'localhost',
-    milvus_port: 19530,
-    milvus_username: '',
-    milvus_address: '',
-    alt_endpoint_url: '',
-    use_alt_endpoint: false,
-    rate_limit_calls: 5,
-    rate_limit_interval: 60, // seconds
-
-    // VEC-6: Batch insert optimization
-    insert_batch_size: 50, // Chunks per insert batch (50-100 recommended)
-    togetherai_model: 'togethercomputer/m2-bert-80M-32k-retrieval',
-    openai_model: 'text-embedding-ada-002',
-    electronhub_model: 'text-embedding-3-small',
-    openrouter_model: 'openai/text-embedding-3-large',
-    cohere_model: 'embed-english-v3.0',
-    ollama_model: 'mxbai-embed-large',
-    ollama_keep: false,
-    vllm_model: '',
-    webllm_model: '',
-    google_model: 'text-embedding-005',
-    bananabread_rerank: false,
-
-    // Chat vectorization
-    enabled_chats: false,
-    chunking_strategy: 'per_message', // per_message, conversation_turns, message_batch, adaptive
-    batch_size: 4, // Messages per batch for message_batch strategy
-    conversation_turn_order: 'user_character', // Pairing order for conversation_turns
-    depth: 2,
-    position: extension_prompt_types.IN_PROMPT,
-    // I12: Legacy protect setting was never applied; removed rather than exposing a false safeguard.
-    insert: 3,
-    min_chat_length: 0, // Minimum number of messages in chat before injection starts (0 = no minimum)
-    // Number of top results to retrieve from vector DB (top-K)
-    top_k: 3,
-    // C10: upper bound on VectHare injection, with host-context headroom.
-    injection_token_cap: 1024,
-    injection_safety_margin: 128,
-    injection_context_reserve: 512,
-    query: 2,
-    chunk_size: 500, // For adaptive strategy only
-    score_threshold: 0.25,
-
-    // Deduplication settings
-    deduplication_depth: 50, // Number of recent messages to check for duplicates (0 = check all)
-
-    // Keyword scoring method
-    keyword_scoring_method: 'keyword', // 'keyword', 'bm25', or 'hybrid'
-
-    // BM25 parameters
-    bm25_k1: 1.5,  // Term frequency saturation (1.2-2.0 typical)
-    bm25_b: 0.75,  // Length normalization (0-1, 0.75 typical)
-
-    // Keyword extraction level for chat messages
-    keyword_extraction_level: 'balanced', // 'off', 'minimal', 'balanced', 'aggressive'
-
-    // Hybrid Search settings (combines vector + full-text search)
-    hybrid_search_enabled: false,       // Enable hybrid search mode
-    hybrid_fusion_method: 'rrf',        // 'rrf' (Reciprocal Rank Fusion) or 'weighted'
-    hybrid_vector_weight: 0.5,          // Weight for vector scores (0-1) - used in weighted mode
-    hybrid_text_weight: 0.5,            // Weight for text/BM25 scores (0-1) - used in weighted mode
-    hybrid_rrf_k: 60,                   // RRF constant (higher = more weight to top results)
-    hybrid_native_prefer: true,         // Prefer native backend hybrid if available (Qdrant/Milvus)
-
-    // Advanced features
-    temporal_decay: getDefaultDecaySettings(),
-
-    // Global defaults for new collections
-    default_decay_enabled: false,    // Whether new collections have temporal weighting enabled
-    default_decay_type: 'decay',     // 'decay' or 'nostalgia' for new collections
-
-    // RAG Prompt Context (Global level)
-    // Wraps ALL injected content with context prompts and/or XML tags
-    rag_context: '',      // Natural language context shown before all RAG content
-    rag_xml_tag: '',      // XML tag to wrap all RAG content (e.g., "retrieved_context")
-
-    // Collection-level metadata (managed by collection-metadata.js)
-    collections: {},
-
-    // Collection registry (list of known collection IDs)
-    vecthare_collection_registry: [],
-
-    // World Info Integration
-    enabled_world_info: false,          // Enable semantic WI activation
-    world_info_threshold: 0.3,          // Score threshold for WI activation
-    world_info_top_k: 3,                // Max entries to activate per lorebook
-    world_info_query_depth: 3,          // Recent messages to use for query
-    world_info_enabled_for_all: false,  // Bypass dedup so semantic WI can also include keyword-active entries
-    world_info_max_entries: 10,         // Cap on total semantic WI entries returned for injection
-
-    // Keyword Extraction
-    custom_stopwords: '',               // Custom stopwords (comma-separated)
-
-    // Diagnostics
-    include_production_tests: false,    // Default for production diagnostics checkbox
-};
-
-// Runtime settings (merged with saved settings)
-let settings = { ...defaultSettings };
-
-// Module worker for automatic syncing
-const moduleWorker = new ModuleWorkerWrapper(() => synchronizeChat(settings, getBatchSize()));
-
-// Batch size based on provider
-const getBatchSize = () => ['transformers', 'ollama'].includes(settings.source) ? 1 : 5;
-
-// Chat event handler (debounced)
-const debouncedChatEvent = debounce(async (identityAtEvent) => {
-    if (JSON.stringify(identityAtEvent) !== JSON.stringify(currentChatIdentity())) return;
-    await moduleWorker.update();
-}, debounce_timeout.relaxed);
-const onChatEvent = () => debouncedChatEvent(currentChatIdentity());
-
-/**
- * Generation interceptor - searches and injects relevant messages
- */
-async function vecthare_rearrangeChat(chat, _contextSize, _abort, type) {
-    chatJobs.bumpGeneration('new-generation');
-    await rearrangeChat(chat, settings, type);
-}
-
-// Export to window for ST to call
-window['vecthare_rearrangeChat'] = vecthare_rearrangeChat;
-
-/**
- * VectHare+ R12: Repair-only entry point (Repair Chunks button).
- * Fixes already-vectorized content (stale/duplicate vectors + replacements
- * of edited messages) WITHOUT continuing the backlog.
- */
-async function onRepairClick() {
-    await repairChatVectors(settings, getBatchSize());
-    await offerResumeOfUnfinishedVectorization(); // refresh status line + button
-}
-
-/**
- * Action: Vectorize all messages in current chat (full sync: repair + backlog)
- */
-async function onVectorizeAllClick() {
-    const result = await vectorizeAll(settings, getBatchSize());
-    // VectHare+ FIX: after a run ends (especially Stop / partial / failure),
-    // re-run the backlog check so the Continue button + toast reflect the
-    // CURRENT chat's state. Previously the check only fired on CHAT_CHANGED,
-    // so stopping mid-run and staying in the same chat left no resume
-    // affordance at all until the user switched chats or reloaded.
-    await offerResumeOfUnfinishedVectorization();
-    return result;
-}
-
-/**
- * VectHare+ Resume-on-load: detects unfinished vectorization work for the
- * current chat and offers continuation. Cursor-free by design — the vector
- * DB itself is the checkpoint, so any interruption (crash, page reload,
- * Stop button, closed browser) resumes exactly from what is missing.
+ * Unified vector database backend for VectHare extension.
+ * Supports multiple backends: Vectra (file-based), LanceDB, Qdrant
  *
- * Robust against startup ordering: the collection registry is populated
- * asynchronously (discoverExistingCollections runs with its own retries), so
- * this polls until the check yields a definitive answer or attempts run out.
+ * All chunk operations go through unified /chunks/* endpoints.
+ * Backend is specified via `backend` parameter in request body.
+ *
+ * @version 3.2.0
  */
-const RESUME_CHECK_MAX_ATTEMPTS = 5;   // covers slow collection discovery
-const RESUME_CHECK_RETRY_MS = 3000;
-let resumeCheckRequestId = 0;
 
-function showResumeToast(pending, total) {
-    // R7/R10: informational only - points at the (renamed) Repair Chunks button
-    toastr.info(
-        `${pending} of ${total} message groups not yet vectorized. Use the "Repair Chunks" button in VectHare's Actions panel to resume/repair from where it stopped.`,
-        'VectHare: Unfinished vectorization',
-        {
-            timeOut: 20000,
-            closeOnHover: false,
-            preventDuplicates: true, // CHAT_CHANGED fires at startup too - don't double-toast
-        }
-    );
-}
+import path from 'node:path';
+import fs from 'node:fs/promises';
+import { exec } from 'node:child_process';
+import sanitize from 'sanitize-filename';
+import vectra from 'vectra';
+import lancedbBackend from './lancedb-backend.js';
+import qdrantBackend from './qdrant-backend.js';
+import milvusBackend from './milvus-backend.js';
+
+const pluginName = 'similharity';
+const pluginVersion = '3.2.0';
 
 /**
- * VectHare+ R10: Updates the Actions-card status line.
- * States: running (live % from the tracker) / backlog % / fully vectorized /
- * no collection. Called from the resume check's definitive branch and by a
- * light 3s interval while a run is active.
- * @param {{hasBacklog?: boolean, pending?: number, total?: number}} [result]
+ * Initialize the plugin
+ * @param {import('express').Router} router - Express router for plugin endpoints
  */
-let lastDbStatus = null;
-let dbStatusRequestId = 0;
-let dbRefreshTimer = null;
+export async function init(router) {
+    console.log(`[${pluginName}] Initializing v${pluginVersion}...`);
 
-function refreshVectorizationStatusDisplay(result = null) {
-    if (result) lastDbStatus = { ...result, collectionId: getChatCollectionId() };
-    if (isVectorizationActive()) {
-        // Live progress from the tracker while a run is in flight
-        const s = progressTracker.stats;
-        const db = lastDbStatus?.collectionId === getChatCollectionId() ? lastDbStatus : null;
-        const done = db ? (db.total - db.pending) : (s.totalChunksToEmbed > 0 ? s.embeddedChunks : s.processedItems);
-        const total = db ? db.total : (s.totalChunksToEmbed > 0 ? s.totalChunksToEmbed : s.totalItems);
-        const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-        updateVectorizationStatus(`Running — ${pct}% (${done}/${total}) — click to view`);
-        return;
-    }
-    if (!result && lastDbStatus?.collectionId === getChatCollectionId()) result = lastDbStatus;
-    if (result && typeof result.total === 'number' && result.total > 0) {
-        if (result.hasBacklog) {
-            const doneCount = result.total - result.pending;
-            const pct = Math.round((doneCount / result.total) * 100);
-            updateVectorizationStatus(`Vectorized: ${pct}% (${doneCount}/${result.total}) — click for details`);
-        } else {
-            updateVectorizationStatus(`Fully vectorized (${result.total}/${result.total}) ✓`);
-        }
-        return;
-    }
-    updateVectorizationStatus('Status: no saved vector data for this chat');
-}
+    // ========================================================================
+    // BACKEND HANDLER - Routes requests to appropriate backend
+    // ========================================================================
 
-// Read the actual saved hashes, coalescing rapid writes into one DB query.
-// Runs after each committed insert/delete/purge and whenever Status opens.
-async function refreshSavedDatabaseStatus() {
-    const requestId = ++dbStatusRequestId;
-    const collectionId = getChatCollectionId();
-    const identityAtStart = JSON.stringify(currentChatIdentity());
-    let result = null;
-    try {
-        result = await checkUnfinishedVectorization(settings);
-    } catch (error) {
-        console.warn('VectHare: Status refresh failed:', error);
-    }
-    // Ignore replies from a previous chat or a superseded DB read.
-    if (requestId !== dbStatusRequestId || collectionId !== getChatCollectionId() ||
-        identityAtStart !== JSON.stringify(currentChatIdentity())) return;
-    lastDbStatus = result ? { ...result, collectionId } : null;
-
-    if (isVectorizationActive() && result && progressTracker.currentOperation === 'Vectorizing Chat') {
-        // This is collection-wide *persisted* progress, not just the last
-        // in-memory batch. Shows each saved chunk even mid-batch.
-        const done = result.total - result.pending;
-        progressTracker.stats.totalItems = result.total;
-        progressTracker.updateEmbeddingProgress(done, result.total);
-        progressTracker.updateProgress(done, progressTracker.isPaused ? '' : `${result.pending} message groups remaining`);
-    } else if (!isVectorizationActive() && progressTracker.isDatabaseSnapshot) {
-        progressTracker.setDatabaseStatus(result);
-    }
-    refreshVectorizationStatusDisplay(result);
-}
-
-function scheduleSavedDatabaseRefresh() {
-    clearTimeout(dbRefreshTimer);
-    dbRefreshTimer = setTimeout(() => { void refreshSavedDatabaseStatus(); }, 350);
-}
-
-// R10: light interval keeps the status line live during runs without the core
-// needing UI hooks. Only active while a run is in flight (cheap no-op otherwise).
-function ensureVectHareStatusInterval() {
-    if (globalThis.__vecthareStatusInterval) return;
-    globalThis.__vecthareStatusInterval = setInterval(() => {
-        if (isVectorizationActive()) refreshVectorizationStatusDisplay();
-    }, 3000);
-}
-
-async function offerResumeOfUnfinishedVectorization() {
-    // A newer refresh or a chat switch invalidates any prior asynchronous work.
-    const requestId = ++resumeCheckRequestId;
-    const collectionIdAtStart = getChatCollectionId();
-    const chatIdentityAtStart = JSON.stringify(currentChatIdentity());
-    const isCurrent = () => requestId === resumeCheckRequestId &&
-        collectionIdAtStart === getChatCollectionId() &&
-        chatIdentityAtStart === JSON.stringify(currentChatIdentity());
-    if (!isCurrent()) return;
-    // VectHare+ FIX (notification behavior): a run already in flight IS the
-    // resume — don't nag while it works. BUT we must not bail permanently:
-    // this can fire while a run is aborting (e.g. user switched chats mid-run,
-    // CHAT_CHANGED beats the "chat changed" cleanup), and a bare return would
-    // strand the NEW chat's backlog unchecked. So wait (bounded, up to 10 min)
-    // for the active run to finish, then proceed with the normal check.
-    if (isVectorizationActive()) {
-        console.debug('VectHare: Resume check waiting for active vectorization run to finish...');
-        let waitedMs = 0;
-        while (isCurrent() && isVectorizationActive() && waitedMs < 600000) {
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            waitedMs += 2000;
-        }
-        if (!isCurrent()) return;
-        if (isVectorizationActive()) {
-            console.debug('VectHare: Resume check gave up waiting (run exceeded 10 min wait window)');
-            return;
+    /**
+     * Ensures LanceDB is initialized before use
+     * @param {object} directories - User directories containing vectors path
+     */
+    async function ensureLanceDBInitialized(directories) {
+        if (!lancedbBackend.basePath) {
+            console.log(`[${pluginName}] Auto-initializing LanceDB backend...`);
+            await lancedbBackend.initialize(directories.vectors);
         }
     }
 
-    for (let attempt = 1; attempt <= RESUME_CHECK_MAX_ATTEMPTS; attempt++) {
-        if (!isCurrent()) return;
-        let result = null;
-        try {
-            result = await checkUnfinishedVectorization(settings);
-        } catch (error) {
-            console.warn('VectHare: Resume-on-load check failed:', error.message);
-        }
-        if (!isCurrent()) return;
+    function getBackendHandler(backend) {
+        switch (backend) {
+            case 'vectra':
+            case 'standard':
+                return {
+                    type: 'vectra',
 
-        if (result) {
-            // Definitive answer — reflect it in the UI (Repair Chunks button +
-            // R10 status line) and stop polling.
-            // R23: 'available' instead of hiding on no-backlog - the button is a
-            // working tool (repair is a safe no-op when clean), and the old
-            // hide-on-clean made it flicker away based on racy async timing.
-            updateContinueVectorizationButton(
-                result.hasBacklog ? 'backlog' : 'available',
-                result.pending,
-                result.total
-            );
-            refreshVectorizationStatusDisplay(result);
-            if (!isVectorizationActive() && progressTracker.isDatabaseSnapshot) progressTracker.setDatabaseStatus(result);
-            // R9: if the user just pressed Stop, they KNOW it's unfinished - don't
-            // immediately nag with the toast. Button still updates (persistent
-            // affordance). Flag is consume-on-read so later natural checks toast.
-            const justStoppedByUser = consumeWasLastRunStoppedByUser();
-            if (result.hasBacklog && !isVectorizationActive() && !justStoppedByUser) {
-                console.log(`VectHare: Unfinished vectorization detected (${result.pending}/${result.total} pending)`);
-                showResumeToast(result.pending, result.total);
-            }
-            return;
-        }
+                    list: async (collectionId, source, model, directories, options = {}) => {
+                        const store = await getIndex(directories, collectionId, source, model);
+                        const items = await store.listItems();
 
-        // Collection not discovered yet — wait for discovery and retry
-        if (attempt < RESUME_CHECK_MAX_ATTEMPTS) {
-            await new Promise(resolve => setTimeout(resolve, RESUME_CHECK_RETRY_MS));
+                        // Apply pagination
+                        const offset = options.offset || 0;
+                        const limit = options.limit || items.length;
+                        const paginatedItems = items.slice(offset, offset + limit);
+
+                        return {
+                            items: paginatedItems.map(item => ({
+                                hash: item.metadata.hash,
+                                text: item.metadata.text,
+                                index: item.metadata.index,
+                                vector: options.includeVectors ? item.vector : undefined,
+                                metadata: item.metadata
+                            })),
+                            total: items.length,
+                            offset,
+                            limit,
+                            hasMore: offset + limit < items.length
+                        };
+                    },
+
+                    get: async (collectionId, hash, source, model, directories) => {
+                        const store = await getIndex(directories, collectionId, source, model);
+                        const items = await store.listItems();
+                        const item = items.find(i => i.metadata.hash == hash);
+                        if (!item) return null;
+                        return {
+                            hash: item.metadata.hash,
+                            text: item.metadata.text,
+                            index: item.metadata.index,
+                            vector: item.vector,
+                            metadata: item.metadata
+                        };
+                    },
+
+                    insert: async (collectionId, items, source, model, directories, req) => {
+                        const store = await getIndex(directories, collectionId, source, model);
+
+                        // Generate embeddings if not provided
+                        let itemsWithVectors = [...items];
+                        const itemsNeedingVectors = itemsWithVectors.filter(i => !i.vector);
+
+                        if (itemsNeedingVectors.length > 0) {
+                            const texts = itemsNeedingVectors.map(i => i.text);
+                            const vectors = await getVectorsForSource(source, texts, model, directories, req);
+
+                            let vIndex = 0;
+                            itemsWithVectors = itemsWithVectors.map(item => {
+                                if (!item.vector) {
+                                    return { ...item, vector: vectors[vIndex++] };
+                                }
+                                return item;
+                            });
+                        }
+
+                        await store.beginUpdate();
+                        for (const item of itemsWithVectors) {
+                            await store.upsertItem({
+                                vector: item.vector,
+                                metadata: {
+                                    hash: item.hash,
+                                    text: item.text,
+                                    index: item.index,
+                                    ...item.metadata
+                                }
+                            });
+                        }
+                        await store.endUpdate();
+                    },
+
+                    updateText: async (collectionId, hash, newText, source, model, directories, req) => {
+                        const store = await getIndex(directories, collectionId, source, model);
+                        const items = await store.listItems();
+                        const item = items.find(i => i.metadata.hash == hash);
+                        if (!item) throw new Error('Chunk not found');
+
+                        // Generate new embedding for the new text
+                        const newVector = await getEmbeddingForSource(source, newText, model, directories, req);
+                        const newHash = getStringHash(newText);
+
+                        // Delete old item
+                        await store.deleteItem(item.id);
+
+                        // Insert updated item
+                        await store.beginUpdate();
+                        await store.upsertItem({
+                            vector: newVector,
+                            metadata: {
+                                ...item.metadata,
+                                hash: newHash,
+                                text: newText
+                            }
+                        });
+                        await store.endUpdate();
+
+                        return { oldHash: hash, newHash, text: newText };
+                    },
+
+                    updateMetadata: async (collectionId, hash, metadata, source, model, directories) => {
+                        const store = await getIndex(directories, collectionId, source, model);
+                        const items = await store.listItems();
+                        const item = items.find(i => i.metadata.hash == hash);
+                        if (!item) throw new Error('Chunk not found');
+
+                        // Delete and re-insert with same vector but updated metadata
+                        await store.deleteItem(item.id);
+
+                        await store.beginUpdate();
+                        await store.upsertItem({
+                            vector: item.vector,
+                            metadata: {
+                                ...item.metadata,
+                                ...metadata,
+                                hash: item.metadata.hash, // Preserve hash
+                                text: item.metadata.text   // Preserve text
+                            }
+                        });
+                        await store.endUpdate();
+
+                        return { hash, metadata };
+                    },
+
+                    delete: async (collectionId, hashes, source, model, directories) => {
+                        const store = await getIndex(directories, collectionId, source, model);
+                        const items = await store.listItems();
+
+                        let deleted = 0;
+                        for (const hash of hashes) {
+                            const item = items.find(i => i.metadata.hash == hash);
+                            if (item) {
+                                await store.deleteItem(item.id);
+                                deleted++;
+                            }
+                        }
+                        return deleted;
+                    },
+
+                    query: async (collectionId, queryVector, topK, threshold, source, model, directories, options = {}) => {
+                        const store = await getIndex(directories, collectionId, source, model);
+                        const results = await store.queryItems(queryVector, topK);
+                        return results
+                            .filter(r => r.score >= threshold)
+                            .map(r => ({
+                                hash: r.item.metadata.hash,
+                                score: r.score,
+                                text: r.item.metadata.text,
+                                vector: options.includeVectors ? r.item.vector : undefined,
+                                metadata: r.item.metadata
+                            }));
+                    },
+
+                    purge: async (collectionId, source, model, directories) => {
+                        const store = await getIndex(directories, collectionId, source, model);
+                        if (await store.isIndexCreated()) {
+                            await store.deleteIndex();
+                        }
+                    },
+
+                    stats: async (collectionId, source, model, directories) => {
+                        const store = await getIndex(directories, collectionId, source, model);
+                        const items = await store.listItems();
+
+                        let totalCharacters = 0;
+                        let totalTokens = 0;
+                        const sources = {};
+                        const messageHashes = new Set();
+                        let embeddingDimensions = 0;
+
+                        for (const item of items) {
+                            const text = item.metadata.text || '';
+                            totalCharacters += text.length;
+                            totalTokens += Math.ceil(text.length / 4); // Rough estimate
+
+                            const src = item.metadata.source || 'unknown';
+                            sources[src] = (sources[src] || 0) + 1;
+
+                            if (item.metadata.originalMessageHash) {
+                                messageHashes.add(item.metadata.originalMessageHash);
+                            }
+
+                            if (item.vector && item.vector.length > 0) {
+                                embeddingDimensions = item.vector.length;
+                            }
+                        }
+
+                        // Get file size
+                        const indexPath = model
+                            ? path.join(directories.vectors, sanitize(source), sanitize(collectionId), sanitize(model), 'index.json')
+                            : path.join(directories.vectors, sanitize(source), sanitize(collectionId), 'index.json');
+
+                        let storageSize = 0;
+                        try {
+                            const stat = await fs.stat(indexPath);
+                            storageSize = stat.size;
+                        } catch (e) {
+                            // File may not exist yet, which is fine
+                            console.debug(`[${pluginName}] Could not stat index file (may not exist): ${indexPath}`);
+                        }
+
+                        return {
+                            chunkCount: items.length,
+                            totalCharacters,
+                            totalTokens,
+                            storageSize,
+                            embeddingDimensions,
+                            avgChunkSize: items.length > 0 ? Math.round(totalCharacters / items.length) : 0,
+                            messageCount: messageHashes.size,
+                            sources,
+                            backend: 'vectra',
+                            model: model || '(default)'
+                        };
+                    }
+                };
+
+            case 'lancedb':
+                return {
+                    type: 'lancedb',
+
+                    list: async (collectionId, source, model, directories, options = {}) => {
+                        const items = await lancedbBackend.listItems(collectionId, source, options);
+                        // Return same format as Vectra handler for consistency
+                        const offset = options.offset || 0;
+                        const limit = options.limit || items.length;
+                        const paginatedItems = items.slice(offset, offset + limit);
+                        return {
+                            items: paginatedItems,
+                            total: items.length,
+                            offset,
+                            limit,
+                            hasMore: offset + limit < items.length
+                        };
+                    },
+
+                    get: async (collectionId, hash, source) => {
+                        return await lancedbBackend.getItem(collectionId, hash, source);
+                    },
+
+                    insert: async (collectionId, items, source, model, directories, req) => {
+                        // Generate embeddings if not provided
+                        let itemsWithVectors = [...items];
+                        const itemsNeedingVectors = itemsWithVectors.filter(i => !i.vector);
+
+                        if (itemsNeedingVectors.length > 0) {
+                            console.log(`[LanceDB] Generating embeddings for ${itemsNeedingVectors.length} items`);
+                            const texts = itemsNeedingVectors.map(i => i.text);
+                            const vectors = await getVectorsForSource(source, texts, model, directories, req);
+
+                            let vIndex = 0;
+                            itemsWithVectors = itemsWithVectors.map(item => {
+                                if (!item.vector) {
+                                    const vector = vectors[vIndex++];
+                                    if (!vector || !Array.isArray(vector) || vector.length === 0) {
+                                        console.error(`[LanceDB] Failed to generate valid vector for item hash=${item.hash}, source=${source}, model=${model}`);
+                                        throw new Error(`Failed to generate embedding for item. Source: ${source}, Model: ${model}`);
+                                    }
+                                    return { ...item, vector };
+                                }
+                                return item;
+                            });
+                        }
+
+                        await lancedbBackend.insertVectors(collectionId, itemsWithVectors, source);
+                    },
+
+                    updateText: async (collectionId, hash, newText, source, model, directories, req) => {
+                        // Get new embedding
+                        const newVector = await getEmbeddingForSource(source, newText, model, directories, req);
+                        const newHash = getStringHash(newText);
+                        await lancedbBackend.updateItem(collectionId, hash, { text: newText, hash: newHash, vector: newVector }, source);
+                        return { oldHash: hash, newHash, text: newText };
+                    },
+
+                    updateMetadata: async (collectionId, hash, metadata, source) => {
+                        await lancedbBackend.updateItemMetadata(collectionId, hash, metadata, source);
+                        return { hash, metadata };
+                    },
+
+                    delete: async (collectionId, hashes, source) => {
+                        await lancedbBackend.deleteVectors(collectionId, hashes, source);
+                        return hashes.length;
+                    },
+
+                    query: async (collectionId, queryVector, topK, threshold, source, model, directories, options = {}) => {
+                        const results = await lancedbBackend.queryVectors(collectionId, queryVector, topK, threshold, source);
+                        return results;
+                    },
+
+                    purge: async (collectionId, source) => {
+                        await lancedbBackend.purgeCollection(collectionId, source);
+                    },
+
+                    stats: async (collectionId, source) => {
+                        return await lancedbBackend.getCollectionStats(collectionId, source);
+                    }
+                };
+
+            case 'qdrant':
+                return {
+                    type: 'qdrant',
+
+                    list: async (collectionId, source, model, directories, options = {}) => {
+                        const items = await qdrantBackend.listItems(collectionId, options.filters || {}, options);
+                        // Return same format as Vectra handler for consistency
+                        const offset = options.offset || 0;
+                        const limit = options.limit || items.length;
+                        const paginatedItems = items.slice(offset, offset + limit);
+                        return {
+                            items: paginatedItems,
+                            total: items.length,
+                            offset,
+                            limit,
+                            hasMore: offset + limit < items.length
+                        };
+                    },
+
+                    get: async (collectionId, hash, source, model, directories, filters = {}) => {
+                        return await qdrantBackend.getItem(collectionId, hash, filters);
+                    },
+
+                    insert: async (collectionId, items, source, model, directories, req, filters = {}) => {
+                        // Generate embeddings if not provided
+                        let itemsWithVectors = [...items];
+                        const itemsNeedingVectors = itemsWithVectors.filter(i => !i.vector);
+
+                        if (itemsNeedingVectors.length > 0) {
+                            console.log(`[Qdrant] Generating embeddings for ${itemsNeedingVectors.length} items`);
+                            const texts = itemsNeedingVectors.map(i => i.text);
+                            const vectors = await getVectorsForSource(source, texts, model, directories, req);
+
+                            let vIndex = 0;
+                            itemsWithVectors = itemsWithVectors.map(item => {
+                                if (!item.vector) {
+                                    const vector = vectors[vIndex++];
+                                    if (!vector || !Array.isArray(vector) || vector.length === 0) {
+                                        console.error(`[Qdrant] Failed to generate valid vector for item hash=${item.hash}, source=${source}, model=${model}`);
+                                        throw new Error(`Failed to generate embedding for item. Source: ${source}, Model: ${model}`);
+                                    }
+                                    return { ...item, vector };
+                                }
+                                return item;
+                            });
+                        }
+
+                        // Pass source and model for embedding tracking
+                        await qdrantBackend.insertVectors(collectionId, itemsWithVectors, {
+                            ...filters,
+                            embeddingSource: source,
+                            embeddingModel: model,
+                        });
+                    },
+
+                    updateText: async (collectionId, hash, newText, source, model, directories, req, filters = {}) => {
+                        const newVector = await getEmbeddingForSource(source, newText, model, directories, req);
+                        const newHash = getStringHash(newText);
+                        await qdrantBackend.updateItem(collectionId, hash, { text: newText, hash: newHash, vector: newVector }, filters);
+                        return { oldHash: hash, newHash, text: newText };
+                    },
+
+                    updateMetadata: async (collectionId, hash, metadata, source, model, directories, filters = {}) => {
+                        await qdrantBackend.updateItemMetadata(collectionId, hash, metadata, filters);
+                        return { hash, metadata };
+                    },
+
+                    delete: async (collectionId, hashes, source, model, directories, filters = {}) => {
+                        await qdrantBackend.deleteVectors(collectionId, hashes);
+                        return hashes.length;
+                    },
+
+                    query: async (collectionId, queryVector, topK, threshold, source, model, directories, options = {}) => {
+                        const results = await qdrantBackend.queryVectors(collectionId, queryVector, topK, threshold, options.filters || {});
+                        return results;
+                    },
+
+                    purge: async (collectionId, source, model, directories, filters = {}) => {
+                        await qdrantBackend.purgeAll(collectionId, filters);
+                    },
+
+                    stats: async (collectionId, source, model, directories, filters = {}) => {
+                        return await qdrantBackend.getCollectionStats(collectionId, filters);
+                    }
+                };
+
+            case 'milvus':
+                return {
+                    type: 'milvus',
+
+                    list: async (collectionId, source, model, directories, options = {}) => {
+                        const items = await milvusBackend.listItems(collectionId, options.filters || {}, options);
+                        const offset = options.offset || 0;
+                        const limit = options.limit || items.length;
+                        return {
+                            items: items,
+                            total: items.length,
+                            offset,
+                            limit,
+                            hasMore: items.length >= limit
+                        };
+                    },
+
+                    get: async (collectionId, hash, source, model, directories, filters = {}) => {
+                        return await milvusBackend.getItem(collectionId, hash, filters);
+                    },
+
+                    insert: async (collectionId, items, source, model, directories, req, filters = {}) => {
+                        // Generate embeddings if not provided
+                        let itemsWithVectors = [...items];
+                        const itemsNeedingVectors = itemsWithVectors.filter(i => !i.vector);
+
+                        if (itemsNeedingVectors.length > 0) {
+                            console.log(`[Milvus] Generating embeddings for ${itemsNeedingVectors.length} items`);
+                            const texts = itemsNeedingVectors.map(i => i.text);
+                            const vectors = await getVectorsForSource(source, texts, model, directories, req);
+
+                            let vIndex = 0;
+                            itemsWithVectors = itemsWithVectors.map(item => {
+                                if (!item.vector) {
+                                    return { ...item, vector: vectors[vIndex++] };
+                                }
+                                return item;
+                            });
+                        }
+
+                        await milvusBackend.insertVectors(collectionId, itemsWithVectors, {
+                            ...filters,
+                            embeddingSource: source,
+                            embeddingModel: model,
+                        });
+                    },
+
+                    updateText: async (collectionId, hash, newText, source, model, directories, req, filters = {}) => {
+                        const newVector = await getEmbeddingForSource(source, newText, model, directories, req);
+                        const newHash = getStringHash(newText);
+                        await milvusBackend.updateItem(collectionId, hash, { text: newText, hash: newHash, vector: newVector }, filters);
+                        return { oldHash: hash, newHash, text: newText };
+                    },
+
+                    updateMetadata: async (collectionId, hash, metadata, source, model, directories, filters = {}) => {
+                        await milvusBackend.updateItem(collectionId, hash, metadata, filters);
+                        return { hash, metadata };
+                    },
+
+                    delete: async (collectionId, hashes, source, model, directories, filters = {}) => {
+                        await milvusBackend.deleteVectors(collectionId, hashes);
+                        return hashes.length;
+                    },
+
+                    query: async (collectionId, queryVector, topK, threshold, source, model, directories, options = {}) => {
+                        const results = await milvusBackend.queryCollection(collectionId, queryVector, topK, options.filters || {});
+                        return results.filter(r => r.score >= threshold);
+                    },
+
+                    purge: async (collectionId, source, model, directories, filters = {}) => {
+                        await milvusBackend.purgeCollection(collectionId, filters);
+                    },
+
+                    stats: async (collectionId, source, model, directories, filters = {}) => {
+                        return await milvusBackend.getCollectionStats(collectionId, filters);
+                    }
+                };
+
+            default:
+                throw new Error(`Unknown backend: ${backend}`);
         }
     }
-    if (!isCurrent()) return;
 
-    // Inconclusive: the check couldn't determine state (discovery/init still
-    // warming up, or chat truly has no collection).
-    // R23 FIX: previously "leave the button in whatever state it was" - which,
-    // combined with hide-on-clean calls elsewhere, is exactly how the user saw
-    // the Repair Chunks button vanish after actions and reappear after reload.
-    // Now: inconclusive state is resolved by REGISTRY TRUTH instead of timing.
-    // - Collection known to the registry -> button shows as 'available'
-    //   (repair is a safe no-op when clean; better a present harmless button
-    //   than a racy vanishing one)
-    // - Collection unknown -> genuinely no collection -> hidden (correct)
-    // R11 status-line refresh retained.
-    try {
-        const collectionId = getChatCollectionId();
-        const known = collectionId && getCollectionRegistry().some(
-            key => parseRegistryKey(key).collectionId === collectionId
-        );
-        updateContinueVectorizationButton(known ? 'available' : 'hide');
-    } catch (e) {
-        console.warn('VectHare: R23 inconclusive-state button resolution failed:', e.message);
-    }
-    refreshVectorizationStatusDisplay();
-    console.debug('VectHare: Resume check inconclusive after retries (no vector collection discovered yet)');
-}
+    // ========================================================================
+    // UTILITY ENDPOINTS
+    // ========================================================================
 
-/**
- * Action: Full purge - wipes ALL vector data and settings
- */
-async function onPurgeClick() {
-    const confirmed = confirm(
-        'WARNING: This will delete ALL vector data and reset VectHare settings.\n\n' +
-        'This cannot be undone. Continue?'
-    );
-
-    if (!confirmed) {
-        toastr.info('Purge cancelled');
-        return;
-    }
-
-    try {
-        const { getRequestHeaders } = await import('../../../../script.js');
-
-        // 1. Delete entire vectors folder
-        const { saveSettingsDebounced } = await import('../../../../script.js');
-        await purgeAllAndResetSettings({
-            requestPurge: () => fetch('/api/plugins/similharity/purge-all', {
-                method: 'POST',
-                headers: getRequestHeaders(),
-            }),
-            settings: extension_settings.vecthare,
-            persistSettings: saveSettingsDebounced,
-            cancelJobs: reason => chatJobs.cancelAll(reason),
-            awaitTrackedWrites: () => chatJobs.awaitInFlightWrites(),
+    /**
+     * GET /api/plugins/similharity/health
+     * Overall plugin health check
+     */
+    router.get('/health', (req, res) => {
+        res.json({
+            status: 'ok',
+            plugin: pluginName,
+            version: pluginVersion,
+            backends: ['vectra', 'lancedb', 'qdrant', 'milvus']
         });
-
-        toastr.success('All vector data purged', 'Purge Complete');
-
-    } catch (error) {
-        console.error('VectHare: Purge failed:', error);
-        toastr.error('Purge failed: ' + error.message);
-    }
-}
-
-/**
- * Action: Run diagnostics - opens the diagnostics modal
- */
-function onRunDiagnosticsClick() {
-    openDiagnosticsModal();
-}
-
-/**
- * Initialize VectHare extension
- */
-jQuery(async () => {
-    // C03: SillyTavern has no extension unload API. A second init must never
-    // register duplicate listeners, workers or delayed tasks.
-    if (globalThis.__vecthareRuntimeInitialized) return;
-    globalThis.__vecthareRuntimeInitialized = true;
-    try {
-    console.log('VectHare: Initializing...');
-    ensureVectHareStatusInterval();
-
-    // Load saved settings
-    if (!extension_settings.vecthare) {
-        extension_settings.vecthare = structuredClone(defaultSettings);
-    }
-
-    // Merge saved settings with defaults
-    settings = {
-        ...defaultSettings,
-        ...extension_settings.vecthare,
-        temporal_decay: {
-            ...defaultSettings.temporal_decay,
-            ...extension_settings.vecthare.temporal_decay
-        },
-        collections: {
-            ...defaultSettings.collections,
-            ...extension_settings.vecthare.collections
-        }
-    };
-
-    // All runtime modules and the UI must refer to the same current settings.
-    // Keep the saved object identity; copying it into a detached snapshot causes
-    // background jobs to use stale values after UI changes.
-    Object.assign(extension_settings.vecthare, settings);
-    settings = extension_settings.vecthare;
-
-    // Retire the inert legacy recent-message protection setting. Deduplication uses
-    // the separately configured deduplication_depth; this had no effect.
-    if (Object.hasOwn(settings, 'protect') || Object.hasOwn(extension_settings.vecthare, 'protect')) {
-        delete settings.protect;
-        delete extension_settings.vecthare.protect;
-        saveSettingsDebounced();
-    }
-
-    // Migrate old scattered enabled keys to new collections structure
-    const migrationResult = migrateOldEnabledKeys();
-    if (migrationResult.migrated > 0) {
-        console.log(`VectHare: Migrated ${migrationResult.migrated} old collection enabled keys`);
-    }
-
-    // C01: inspect durable deletion markers after settings load. Never silently
-    // retry a destructive operation until backend contracts can verify scope.
-    const pendingDeletions = getPendingCollectionDeletions();
-    if (pendingDeletions.length) {
-        console.warn('VectHare: Collection deletions require reconciliation', pendingDeletions.map(({key,stage})=>({key,stage})));
-        toastr.warning(`${pendingDeletions.length} collection deletion(s) require reconciliation; no automatic purge was attempted`, 'VectHare', {timeOut:12000});
-    }
-
-    let e03JournalEntries=[];
-    let e03JournalError=false;
-    // C02: durable write journal is inspected after settings load. No
-    // pending replacement is retried or cleaned up automatically.
-    try {
-        const pendingC02=await recoverPendingC02Operations();
-        e03JournalEntries=pendingC02;
-        if(pendingC02.length){
-            console.warn('VectHare: Journalled operations require reconciliation',pendingC02.map(op=>({operationId:op.operationId,kind:op.kind,phase:op.phase})));
-            toastr.warning(`${pendingC02.length} import/replacement operation(s) require reconciliation; existing vectors were not automatically deleted`, 'VectHare', {timeOut:15000});
-        }
-    } catch (_) {
-        e03JournalError=true;
-        console.warn('VectHare: C02 durable journal unavailable; imports and replacements must remain blocked');
-        toastr.warning('Durable vector-operation journal unavailable; unsafe replacements remain blocked', 'VectHare', {timeOut:15000});
-    }
-
-    // C03: pending in-flight requests from a crashed/unloaded tab are not proof
-    // that a backend operation failed. Never auto-clear the reconciliation marker.
-    const pendingWrites = chatJobs.pendingOperations();
-    if (pendingWrites.length) {
-        const pendingWriteCount = pendingWrites.reduce((sum,op)=>sum+(op.count||1),0);
-        console.warn('VectHare: Pending write operations require reconciliation', pendingWrites.map(({id,status})=>({id,status})));
-        toastr.warning(`${pendingWriteCount} interrupted or uncertain write(s) require reconciliation; destructive operations remain blocked`, 'VectHare', {timeOut:12000});
-    }
-
-    // E03: a consolidated, strictly read-only startup incident report. This
-    // object can be inspected in diagnostics; it never auto-replays mutations.
-    const recoveryReport=buildRecoveryReport({journal:e03JournalEntries,
-        journalError:e03JournalError,writeMarkers:pendingWrites,deletionMarkers:pendingDeletions});
-    globalThis.__vecthareRecoveryReport=recoveryReport;
-
-    // Render UI
-    renderSettings('extensions_settings2', settings, {
-        onVectorizeAll: onVectorizeAllClick,
-        // R12: Repair Chunks is now a DISTINCT operation - repairs existing
-        // vectors only, never continues the backlog (use Sync Chat for that)
-        onContinueVectorization: onRepairClick,
-        onVectorizationStatusClick: () => {
-            progressTracker.openStatus();
-            // Always re-read the actual DB on click (also works before first run).
-            if (!isVectorizationActive()) void refreshSavedDatabaseStatus();
-        },
-        onPurge: onPurgeClick,
-        onRunDiagnostics: onRunDiagnosticsClick
     });
 
-    progressTracker.setStartCallback(onVectorizeAllClick);
-    window.addEventListener('vecthare:database-changed', event => {
-        const collectionId = event.detail?.collectionId;
-        if (!collectionId || collectionId === getChatCollectionId()) scheduleSavedDatabaseRefresh();
-    });
-    // Catch changes made outside VectHare while the Status window is open.
-    setInterval(() => {
-        if (progressTracker.isVisible && !isVectorizationActive()) void refreshSavedDatabaseStatus();
-    }, 10000);
-
-    // Initialize auto-sync checkbox state for current chat (if any)
-    refreshAutoSyncCheckbox(settings);
-
-    // Initialize visualizer
-    initializeVisualizer();
-
-    // Initialize database browser
-    initializeDatabaseBrowser(settings);
-
-    // Initialize scene markers on chat messages (settings needed for DB operations)
-    setSceneSettings(settings);
-    initializeSceneMarkers();
-
-    // Initialize world info integration hooks
-    initializeWorldInfoIntegration();
-
-    // VEC-34: Discover existing collections with retry mechanism
-    // Uses exponential backoff to handle temporary backend unavailability
-    (async () => {
+    /**
+     * POST /api/plugins/similharity/open-folder
+     * Opens collection folder in file explorer
+     */
+    router.post('/open-folder', async (req, res) => {
         try {
-            const collections = await AsyncUtils.retry(
-                () => discoverExistingCollections(settings),
-                {
-                    maxAttempts: 3,
-                    delay: 2000,
-                    maxDelay: 10000,
-                    backoffFactor: 2,
-                    onRetry: (attempt, error) => {
-                        console.warn(`VectHare: Collection discovery attempt ${attempt} failed: ${error.message}. Retrying...`);
+            const { collectionId, backend, source } = req.body;
+
+            if (!collectionId || !backend) {
+                return res.status(400).json({ error: 'collectionId and backend are required' });
+            }
+
+            const vectorsPath = req.user.directories.vectors;
+            let folderPath;
+
+            if (backend === 'lancedb') {
+                // LanceDB structure: lancedb/{source}/{collectionId}.lance
+                const effectiveSource = source || 'bananabread';
+                folderPath = path.join(vectorsPath, 'lancedb', effectiveSource, `${collectionId}.lance`);
+            } else if (backend === 'qdrant') {
+                return res.status(400).json({ error: 'Qdrant collections are stored remotely' });
+            } else {
+                const effectiveSource = source || 'transformers';
+                folderPath = path.join(vectorsPath, effectiveSource, collectionId);
+            }
+
+            folderPath = path.resolve(folderPath);
+
+            try {
+                await fs.access(folderPath);
+            } catch {
+                return res.status(404).json({ error: `Folder not found: ${folderPath}` });
+            }
+
+            const platform = process.platform;
+            const cmd = platform === 'win32' ? `start "" "${folderPath}"`
+                : platform === 'darwin' ? `open "${folderPath}"`
+                : `xdg-open "${folderPath}"`;
+
+            exec(cmd, { shell: true });
+            res.json({ success: true, path: folderPath });
+
+        } catch (error) {
+            console.error(`[${pluginName}] open-folder error:`, error);
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    /**
+     * GET /api/plugins/similharity/collections
+     * Lists ALL collections across ALL backends
+     */
+    router.get('/collections', async (req, res) => {
+        try {
+            const vectorsPath = req.user.directories.vectors;
+            const allCollections = await scanAllSourcesForCollections(vectorsPath);
+
+            res.json({
+                success: true,
+                count: allCollections.length,
+                collections: allCollections
+            });
+        } catch (error) {
+            console.error(`[${pluginName}] collections error:`, error);
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    /**
+     * GET /api/plugins/similharity/sources
+     * Lists available embedding sources
+     */
+    router.get('/sources', async (req, res) => {
+        try {
+            const vectorsPath = req.user.directories.vectors;
+            const entries = await fs.readdir(vectorsPath, { withFileTypes: true });
+            const sources = entries.filter(e => e.isDirectory()).map(e => e.name);
+
+            res.json({ success: true, sources });
+        } catch (error) {
+            console.error(`[${pluginName}] sources error:`, error);
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    /**
+     * POST /api/plugins/similharity/get-embedding
+     * Get embedding for single text
+     */
+    router.post('/get-embedding', async (req, res) => {
+        try {
+            const { text, source, model = '' } = req.body;
+
+            if (!text || !source) {
+                return res.status(400).json({ error: 'text and source are required' });
+            }
+
+            const embedding = await getEmbeddingForSource(source, text, model, req.user.directories, req);
+            res.json({ success: true, embedding });
+
+        } catch (error) {
+            console.error(`[${pluginName}] get-embedding error:`, error);
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    /**
+     * POST /api/plugins/similharity/batch-embeddings
+     * Get embeddings for multiple texts
+     */
+    router.post('/batch-embeddings', async (req, res) => {
+        try {
+            const { texts, source, model = '' } = req.body;
+
+            if (!texts || !Array.isArray(texts) || !source) {
+                return res.status(400).json({ error: 'texts array and source are required' });
+            }
+
+            const embeddings = await getVectorsForSource(source, texts, model, req.user.directories, req);
+            res.json({ success: true, embeddings });
+
+        } catch (error) {
+            console.error(`[${pluginName}] batch-embeddings error:`, error);
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    // ========================================================================
+    // BACKEND MANAGEMENT ENDPOINTS
+    // ========================================================================
+
+    /**
+     * GET /api/plugins/similharity/backend/health/:backend
+     * Health check for specific backend
+     */
+    router.get('/backend/health/:backend', async (req, res) => {
+        try {
+            const { backend } = req.params;
+            let healthy = false;
+            let message = '';
+
+            switch (backend) {
+                case 'vectra':
+                case 'standard':
+                    healthy = true;
+                    message = 'Vectra is always available (file-based)';
+                    break;
+
+                case 'lancedb':
+                    if (!lancedbBackend.basePath) {
+                        await lancedbBackend.initialize(req.user.directories.vectors);
+                    }
+                    healthy = lancedbBackend.basePath != null;
+                    message = healthy ? 'LanceDB initialized' : 'LanceDB not initialized';
+                    break;
+
+                case 'qdrant':
+                    healthy = await qdrantBackend.healthCheck();
+                    message = healthy ? 'Qdrant connected' : 'Qdrant not available';
+                    break;
+
+                case 'milvus':
+                    healthy = await milvusBackend.healthCheck();
+                    message = healthy ? 'Milvus connected' : 'Milvus not available';
+                    break;
+
+                default:
+                    return res.status(400).json({ error: `Unknown backend: ${backend}` });
+            }
+
+            res.json({ backend, healthy, message });
+
+        } catch (error) {
+            console.error(`[${pluginName}] backend/health error:`, error);
+            res.status(500).json({ backend: req.params.backend, healthy: false, error: error.message });
+        }
+    });
+
+    /**
+     * POST /api/plugins/similharity/backend/init/:backend
+     * Initialize specific backend
+     */
+    router.post('/backend/init/:backend', async (req, res) => {
+        try {
+            const { backend } = req.params;
+            const config = req.body;
+
+            switch (backend) {
+                case 'vectra':
+                case 'standard':
+                    res.json({ success: true, message: 'Vectra requires no initialization' });
+                    break;
+
+                case 'lancedb':
+                    await lancedbBackend.initialize(req.user.directories.vectors);
+                    res.json({ success: true, message: 'LanceDB initialized' });
+                    break;
+
+                case 'qdrant':
+                    await qdrantBackend.initialize(config);
+                    res.json({ success: true, message: 'Qdrant initialized' });
+                    break;
+
+                case 'milvus':
+                    await milvusBackend.initialize(config);
+                    res.json({ success: true, message: 'Milvus initialized' });
+                    break;
+
+                default:
+                    return res.status(400).json({ error: `Unknown backend: ${backend}` });
+            }
+
+        } catch (error) {
+            console.error(`[${pluginName}] backend/init error:`, error);
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+/**
+ * Get multiple embeddings for texts from specified source
+ */
+async function getVectorsForSource(source, texts, model, directories, req) {
+    // Specialized batch handling
+    if (source === 'bananabread') {
+        // BananaBread llama.cpp-compatible endpoint
+        let apiUrl = req.body.apiUrl || 'http://localhost:8008';
+        let apiKey = req.body.apiKey || '';
+
+        if (!apiUrl || typeof apiUrl !== 'string' || apiUrl.trim() === '') {
+            throw new Error('BananaBread: apiUrl is missing or invalid. Configure the embedding URL in VectHare settings.');
+        }
+        apiUrl = apiUrl.trim();
+
+        let url;
+        try {
+            url = new URL(apiUrl);
+            url.pathname = '/embedding';
+        } catch (e) {
+            throw new Error(`BananaBread: Invalid URL format "${apiUrl}" - ${e.message}`);
+        }
+
+        const headers = { 'Content-Type': 'application/json' };
+        if (apiKey) {
+            headers['Authorization'] = `Bearer ${apiKey}`;
+        }
+
+        const BATCH_SIZE = 20;
+        const allEmbeddings = [];
+
+        try {
+            for (let i = 0; i < texts.length; i += BATCH_SIZE) {
+                const batchTexts = texts.slice(i, i + BATCH_SIZE);
+                // console.log(`[BananaBread] Processing batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(texts.length / BATCH_SIZE)} (${batchTexts.length} items)`);
+
+                const response = await fetch(url.toString(), {
+                    method: 'POST',
+                    headers: headers,
+                    body: JSON.stringify({ content: batchTexts }),
+                });
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`BananaBread: ${response.statusText} ${errorText}`);
+                }
+
+                const data = await response.json();
+                const embeddings = data.embedding;
+
+                if (!embeddings) {
+                    throw new Error('BananaBread: Invalid response format (missing embedding)');
+                }
+
+                if (Array.isArray(embeddings)) {
+                    // Check for single item flattened response
+                    if (batchTexts.length === 1 && typeof embeddings[0] === 'number') {
+                        allEmbeddings.push(embeddings);
+                    } else if (Array.isArray(embeddings[0])) {
+                        allEmbeddings.push(...embeddings);
+                    } else {
+                         // Some providers might return a single vector for batch of 1 as a flat array even if asked in batch mode
+                         if (batchTexts.length === 1 && Array.isArray(embeddings)) {
+                             allEmbeddings.push(embeddings);
+                         } else {
+                            throw new Error('BananaBread: Unexpected embedding format');
+                         }
+                    }
+                } else {
+                    throw new Error('BananaBread: Unexpected embedding format (not array)');
+                }
+            }
+
+            return allEmbeddings;
+
+        } catch (e) {
+            console.error(`[BananaBread] Batch embedding error:`, e);
+            throw e;
+        }
+    }
+
+    // Default fallback: sequential processing for other sources
+    const results = [];
+    for (const text of texts) {
+        results.push(await _getLegacySingleEmbedding(source, text, model, directories, req));
+    }
+    return results;
+}
+
+/**
+ * Wrapper for single embedding (backwards compatibility)
+ */
+async function getEmbeddingForSource(source, text, model, directories, req) {
+    const vectors = await getVectorsForSource(source, [text], model, directories, req);
+    return vectors[0];
+}
+
+/**
+ * Helper function for KoboldCpp embedding generation
+ * @param {string} text - Text to embed
+ * @param {string} model - Model name
+ * @param {object} req - Request object containing apiUrl
+ * @returns {Promise<number[]>} Embedding vector
+ */
+async function _getKoboldCppEmbedding(text, model, req) {
+    const apiUrl = req.body?.apiUrl || 'http://localhost:5001';
+
+    let url;
+    try {
+        url = new URL(apiUrl);
+        // Ensure we're hitting the embeddings endpoint
+        if (!url.pathname.includes('/embeddings')) {
+            url.pathname = url.pathname.replace(/\/?$/, '/v1/embeddings').replace(/\/+/g, '/');
+        }
+    } catch (e) {
+        throw new Error(`KoboldCpp: Invalid URL format "${apiUrl}" - ${e.message}`);
+    }
+
+    const response = await fetch(url.toString(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            input: text,
+            model: model || 'koboldcpp',
+        }),
+    });
+
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`KoboldCpp: ${response.status} ${response.statusText} - ${errorText}`);
+    }
+
+    const data = await response.json();
+    // OpenAI format: { data: [{ embedding: [...] }] }
+    if (data?.data?.[0]?.embedding) {
+        return data.data[0].embedding;
+    }
+    // Fallback: direct embedding array
+    if (Array.isArray(data?.embedding)) {
+        return data.embedding;
+    }
+    throw new Error('KoboldCpp: Invalid response format - no embedding found');
+}
+
+/**
+ * Legacy single embedding function (renamed)
+ */
+async function _getLegacySingleEmbedding(source, text, model, directories, req) {
+    switch (source) {
+        case 'transformers': {
+            const { getTransformersVector } = await import('../../src/vectors/embedding.js');
+            return await getTransformersVector(text);
+        }
+        case 'openai':
+        case 'togetherai':
+        case 'mistral':
+        case 'electronhub':
+        case 'openrouter': {
+            const { getOpenAIVector } = await import('../../src/vectors/openai-vectors.js');
+            // ElectronHub requires a model name, provide default if empty
+            const effectiveModel = (source === 'electronhub' && !model) ? 'text-embedding-ada-002' : model;
+            return await getOpenAIVector(text, source, directories, effectiveModel);
+        }
+        case 'nomicai': {
+            const { getNomicAIVector } = await import('../../src/vectors/nomicai-vectors.js');
+            return await getNomicAIVector(text, source, directories);
+        }
+        case 'cohere': {
+            const { getCohereVector } = await import('../../src/vectors/cohere-vectors.js');
+            return await getCohereVector(text, true, directories, model);
+        }
+        case 'koboldcpp': {
+            return await _getKoboldCppEmbedding(text, model, req);
+        }
+        case 'ollama': {
+            const { getOllamaVector } = await import('../../src/vectors/ollama-vectors.js');
+            const apiUrl = req.body?.apiUrl || 'http://localhost:11434';
+            const keep = req.body?.keep || false;
+            return await getOllamaVector(text, apiUrl, model, keep, directories);
+        }
+        case 'llamacpp': {
+            const { getLlamaCppVector } = await import('../../src/vectors/llamacpp-vectors.js');
+            const apiUrl = req.body?.apiUrl || 'http://localhost:8080';
+            return await getLlamaCppVector(text, apiUrl, directories);
+        }
+        case 'bananabread': {
+            // Legacy single-item fallback (should normally be handled by batch handler)
+            return (await getVectorsForSource(source, [text], model, directories, req))[0];
+        }
+        case 'vllm': {
+            const { getVllmVector } = await import('../../src/vectors/vllm-vectors.js');
+            const apiUrl = req.body?.apiUrl || 'http://localhost:8000';
+            return await getVllmVector(text, apiUrl, model, directories);
+        }
+        case 'palm':
+        case 'vertexai': {
+            const googleVectors = await import('../../src/vectors/google-vectors.js');
+            if (source === 'palm') {
+                return await googleVectors.getMakerSuiteVector(text, model, req);
+            } else {
+                return await googleVectors.getVertexVector(text, model, req);
+            }
+        }
+        case 'extras': {
+            const { getExtrasVector } = await import('../../src/vectors/extras-vectors.js');
+            const extrasUrl = req.body?.extrasUrl || 'http://localhost:5100';
+            const extrasKey = req.body?.extrasKey || '';
+            return await getExtrasVector(text, extrasUrl, extrasKey);
+        }
+        default:
+            throw new Error(`Unknown vector source: ${source}`);
+    }
+}
+
+    // ========================================================================
+    // UNIFIED CHUNK ENDPOINTS
+    // ========================================================================
+
+    /**
+     * POST /api/plugins/similharity/chunks/list
+     * List all chunks in a collection with pagination
+     * Body: { backend, collectionId, source?, model?, offset?, limit?, includeVectors?, filters? }
+     */
+    router.post('/chunks/list', async (req, res) => {
+        try {
+            const {
+                backend = 'vectra',
+                collectionId,
+                source = 'transformers',
+                model = '',
+                offset = 0,
+                limit = 100,
+                includeVectors = false,
+                filters = {}
+            } = req.body;
+
+            if (!collectionId) {
+                return res.status(400).json({ error: 'collectionId is required' });
+            }
+
+            // Auto-init LanceDB if needed
+            if (backend === 'lancedb') {
+                await ensureLanceDBInitialized(req.user.directories);
+            }
+
+            const handler = getBackendHandler(backend);
+            const result = await handler.list(collectionId, source, model, req.user.directories, {
+                offset,
+                limit,
+                includeVectors,
+                filters
+            });
+
+            res.json({
+                success: true,
+                backend: handler.type,
+                collectionId,
+                ...result
+            });
+
+        } catch (error) {
+            console.error(`[${pluginName}] chunks/list error:`, error);
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    /**
+     * GET /api/plugins/similharity/chunks/:hash
+     * Get single chunk by hash
+     * Query: backend, collectionId, source?, model?
+     */
+    router.get('/chunks/:hash', async (req, res) => {
+        try {
+            const { hash } = req.params;
+            const { backend = 'vectra', collectionId, source = 'transformers', model = '' } = req.query;
+            // Parse filters from query string (JSON encoded)
+            let filters = {};
+            if (req.query.filters) {
+                try {
+                    filters = JSON.parse(req.query.filters);
+                } catch (e) {
+                    console.warn(`[${pluginName}] Invalid filters JSON:`, req.query.filters);
+                }
+            }
+
+            if (!collectionId) {
+                return res.status(400).json({ error: 'collectionId is required' });
+            }
+
+            if (backend === 'lancedb') {
+                await ensureLanceDBInitialized(req.user.directories);
+            }
+
+            const handler = getBackendHandler(backend);
+            const chunk = await handler.get(collectionId, hash, source, model, req.user.directories, filters);
+
+            if (!chunk) {
+                return res.status(404).json({ error: 'Chunk not found' });
+            }
+
+            res.json({ success: true, chunk });
+
+        } catch (error) {
+            console.error(`[${pluginName}] chunks/:hash error:`, error);
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    /**
+     * POST /api/plugins/similharity/chunks/insert
+     * Insert new chunks
+     * Body: { backend, collectionId, items: [{hash, text, index, metadata?, vector?}], source?, model? }
+     */
+    router.post('/chunks/insert', async (req, res) => {
+        try {
+            const {
+                backend = 'vectra',
+                collectionId,
+                items,
+                source = 'transformers',
+                model = '',
+                filters = {}
+            } = req.body;
+
+            if (!collectionId) {
+                return res.status(400).json({ error: 'collectionId is required' });
+            }
+            if (!items || !Array.isArray(items)) {
+                return res.status(400).json({ error: 'items array is required' });
+            }
+
+            if (backend === 'lancedb') {
+                await ensureLanceDBInitialized(req.user.directories);
+            }
+
+            const handler = getBackendHandler(backend);
+            await handler.insert(collectionId, items, source, model, req.user.directories, req, filters);
+
+            res.json({
+                success: true,
+                backend: handler.type,
+                collectionId,
+                inserted: items.length
+            });
+
+        } catch (error) {
+            console.error(`[${pluginName}] chunks/insert error:`, error);
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    /**
+     * PATCH /api/plugins/similharity/chunks/:hash/text
+     * Update chunk text (triggers re-embedding)
+     * Body: { backend, collectionId, text, source?, model? }
+     */
+    router.patch('/chunks/:hash/text', async (req, res) => {
+        try {
+            const { hash } = req.params;
+            const {
+                backend = 'vectra',
+                collectionId,
+                text,
+                source = 'transformers',
+                model = '',
+                filters = {}
+            } = req.body;
+
+            if (!collectionId || !text) {
+                return res.status(400).json({ error: 'collectionId and text are required' });
+            }
+
+            if (backend === 'lancedb') {
+                await ensureLanceDBInitialized(req.user.directories);
+            }
+
+            const handler = getBackendHandler(backend);
+            const result = await handler.updateText(collectionId, hash, text, source, model, req.user.directories, req, filters);
+
+            res.json({
+                success: true,
+                backend: handler.type,
+                ...result
+            });
+
+        } catch (error) {
+            console.error(`[${pluginName}] chunks/:hash/text error:`, error);
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    /**
+     * PATCH /api/plugins/similharity/chunks/:hash/metadata
+     * Update chunk metadata (no re-embedding)
+     * Body: { backend, collectionId, metadata, source?, model? }
+     */
+    router.patch('/chunks/:hash/metadata', async (req, res) => {
+        try {
+            const { hash } = req.params;
+            const {
+                backend = 'vectra',
+                collectionId,
+                metadata,
+                source = 'transformers',
+                model = '',
+                filters = {}
+            } = req.body;
+
+            if (!collectionId || !metadata) {
+                return res.status(400).json({ error: 'collectionId and metadata are required' });
+            }
+
+            if (backend === 'lancedb') {
+                await ensureLanceDBInitialized(req.user.directories);
+            }
+
+            const handler = getBackendHandler(backend);
+            const result = await handler.updateMetadata(collectionId, hash, metadata, source, model, req.user.directories, filters);
+
+            res.json({
+                success: true,
+                backend: handler.type,
+                ...result
+            });
+
+        } catch (error) {
+            console.error(`[${pluginName}] chunks/:hash/metadata error:`, error);
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    /**
+     * POST /api/plugins/similharity/chunks/delete
+     * Delete chunks by hash
+     * Body: { backend, collectionId, hashes, source?, model? }
+     */
+    router.post('/chunks/delete', async (req, res) => {
+        try {
+            const {
+                backend = 'vectra',
+                collectionId,
+                hashes,
+                source = 'transformers',
+                model = '',
+                filters = {}
+            } = req.body;
+
+            if (!collectionId) {
+                return res.status(400).json({ error: 'collectionId is required' });
+            }
+            if (!hashes || !Array.isArray(hashes)) {
+                return res.status(400).json({ error: 'hashes array is required' });
+            }
+
+            if (backend === 'lancedb') {
+                await ensureLanceDBInitialized(req.user.directories);
+            }
+
+            const handler = getBackendHandler(backend);
+            const deleted = await handler.delete(collectionId, hashes, source, model, req.user.directories, filters);
+
+            res.json({
+                success: true,
+                backend: handler.type,
+                collectionId,
+                deleted
+            });
+
+        } catch (error) {
+            console.error(`[${pluginName}] chunks/delete error:`, error);
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    /**
+     * POST /api/plugins/similharity/chunks/query
+     * Query chunks by semantic similarity
+     * Body: { backend, collectionId, queryVector OR searchText, topK?, threshold?, source?, model?, includeVectors? }
+     */
+    router.post('/chunks/query', async (req, res) => {
+        try {
+            const {
+                backend = 'vectra',
+                collectionId,
+                queryVector,
+                searchText,
+                topK = 10,
+                threshold = 0.0,
+                source = 'transformers',
+                model = '',
+                includeVectors = false,
+                filters = {}
+            } = req.body;
+
+            if (!collectionId) {
+                return res.status(400).json({ error: 'collectionId is required' });
+            }
+            if (!queryVector && !searchText) {
+                return res.status(400).json({ error: 'queryVector or searchText is required' });
+            }
+
+            if (backend === 'lancedb') {
+                await ensureLanceDBInitialized(req.user.directories);
+            }
+
+            // Get query vector if not provided
+            let vector = queryVector;
+            if (!vector && searchText) {
+                vector = await getEmbeddingForSource(source, searchText, model, req.user.directories, req);
+            }
+
+            const handler = getBackendHandler(backend);
+            const results = await handler.query(collectionId, vector, topK, threshold, source, model, req.user.directories, {
+                includeVectors,
+                filters
+            });
+
+            res.json({
+                success: true,
+                backend: handler.type,
+                collectionId,
+                count: results.length,
+                results
+            });
+
+        } catch (error) {
+            console.error(`[${pluginName}] chunks/query error:`, error);
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    /**
+     * POST /api/plugins/similharity/chunks/hybrid-query
+     * Hybrid search combining vector similarity and keyword matching
+     * Body: { backend, collectionId, searchText OR queryVector, keywords?, topK?, options?, filters?, source?, model? }
+     */
+    router.post('/chunks/hybrid-query', async (req, res) => {
+        try {
+            const {
+                backend = 'qdrant',
+                collectionId,
+                queryVector,
+                searchText,
+                keywords,
+                topK = 10,
+                options = {},
+                filters = {},
+                source = 'transformers',
+                model = '',
+                hybridOptions = {}
+            } = req.body;
+
+            if (!collectionId) {
+                return res.status(400).json({ error: 'collectionId is required' });
+            }
+            if (!queryVector && !searchText) {
+                return res.status(400).json({ error: 'queryVector or searchText is required' });
+            }
+
+            // Only Qdrant, Milvus support native hybrid query
+            if (backend !== 'qdrant' && backend !== 'milvus') {
+                return res.status(400).json({ error: `Backend ${backend} does not support native hybrid query` });
+            }
+
+            // Generate embedding if searchText provided
+            let vector = queryVector;
+            if (!vector && searchText) {
+                vector = await getEmbeddingForSource(source, searchText, model, req.user.directories, req);
+            }
+
+            // Extract keywords if not provided
+            let extractedKeywords = keywords;
+            if (!extractedKeywords && searchText) {
+                // Simple keyword extraction: split by spaces, remove short words
+                extractedKeywords = searchText
+                    .toLowerCase()
+                    .split(/\s+/)
+                    .filter(word => word.length > 2)
+                    .slice(0, 10); // Limit to 10 keywords
+            }
+
+            // Merge hybridOptions with options
+            const mergedOptions = {
+                ...hybridOptions,
+                ...options
+            };
+
+            if (backend === 'qdrant') {
+                const results = await qdrantBackend.hybridQuery(
+                    collectionId,
+                    vector,
+                    extractedKeywords || [],
+                    topK,
+                    mergedOptions,
+                    filters
+                );
+
+                res.json({
+                    success: true,
+                    backend: 'qdrant',
+                    collectionId,
+                    count: results.length,
+                    results: results.map(r => ({
+                        hash: r.hash,
+                        text: r.text,
+                        score: r.score,
+                        metadata: r.metadata,
+                        vectorScore: r.debug?.vectorScore,
+                        textScore: r.debug?.keywordScore,
+                        debug: r.debug
+                    }))
+                });
+            } else if (backend === 'milvus') {
+                // Milvus hybrid query implementation (if available)
+                const results = await milvusBackend.hybridQuery(
+                    collectionId,
+                    vector,
+                    extractedKeywords || [],
+                    topK,
+                    mergedOptions,
+                    filters
+                );
+
+                res.json({
+                    success: true,
+                    backend: 'milvus',
+                    collectionId,
+                    count: results.length,
+                    results: results.map(r => ({
+                        hash: r.hash,
+                        text: r.text,
+                        score: r.score,
+                        metadata: r.metadata,
+                        vectorScore: r.debug?.vectorScore,
+                        textScore: r.debug?.keywordScore,
+                        debug: r.debug
+                    }))
+                });
+            }
+
+        } catch (error) {
+            console.error(`[${pluginName}] chunks/hybrid-query error:`, error);
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    /**
+     * POST /api/plugins/similharity/chunks/purge
+     * Purge all chunks in a collection
+     * Body: { backend, collectionId, source?, model? }
+     */
+    router.post('/chunks/purge', async (req, res) => {
+        try {
+            const {
+                backend = 'vectra',
+                collectionId,
+                source = 'transformers',
+                model = '',
+                filters = {}
+            } = req.body;
+
+            if (!collectionId) {
+                return res.status(400).json({ error: 'collectionId is required' });
+            }
+
+            if (backend === 'lancedb') {
+                await ensureLanceDBInitialized(req.user.directories);
+            }
+
+            const handler = getBackendHandler(backend);
+            await handler.purge(collectionId, source, model, req.user.directories, filters);
+
+            res.json({
+                success: true,
+                backend: handler.type,
+                collectionId,
+                message: `Collection ${collectionId} purged`
+            });
+
+        } catch (error) {
+            console.error(`[${pluginName}] chunks/purge error:`, error);
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    /**
+     * POST /api/plugins/similharity/purge-all
+     * Deletes the entire vectors folder
+     */
+    router.post('/purge-all', async (req, res) => {
+        try {
+            const vectorsPath = req.user.directories.vectors;
+            await fs.rm(vectorsPath, { recursive: true, force: true });
+            await fs.mkdir(vectorsPath, { recursive: true });
+            res.json({ success: true, message: 'All vectors purged' });
+        } catch (error) {
+            console.error(`[${pluginName}] purge-all error:`, error);
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    /**
+     * POST /api/plugins/similharity/rerank
+     * Rerank documents using BananaBread's reranking endpoint
+     * Body: { apiUrl, query, documents, top_k? }
+     */
+    router.post('/rerank', async (req, res) => {
+        try {
+            const {
+                apiUrl = 'http://localhost:8008',
+                apiKey = '',
+                query,
+                documents,
+                top_k = 10,
+                task_description
+            } = req.body;
+
+            if (!query || !documents || !Array.isArray(documents)) {
+                return res.status(400).json({ error: 'query and documents array required' });
+            }
+
+            const url = new URL(apiUrl);
+            url.pathname = '/v1/rerank';
+
+            // Default task description if not provided
+            const finalTaskDescription = task_description || "Given the following document from a role play, which of the following documents are most relevant to it?";
+
+            const headers = { 'Content-Type': 'application/json' };
+            if (apiKey) {
+                headers['Authorization'] = `Bearer ${apiKey}`;
+            }
+
+            const response = await fetch(url.toString(), {
+                method: 'POST',
+                headers: headers,
+                body: JSON.stringify({
+                    query,
+                    documents,
+                    top_k,
+                    return_documents: false,
+                    task_description: finalTaskDescription
+                }),
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`BananaBread rerank failed: ${response.statusText} ${errorText}`);
+            }
+
+            const data = await response.json();
+            res.json(data);
+        } catch (error) {
+            console.error(`[${pluginName}] rerank error:`, error);
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    /**
+     * POST /api/plugins/similharity/chunks/stats
+     * Get collection statistics
+     * Body: { backend, collectionId, source?, model? }
+     */
+    router.post('/chunks/stats', async (req, res) => {
+        try {
+            const {
+                backend = 'vectra',
+                collectionId,
+                source = 'transformers',
+                model = '',
+                filters = {}
+            } = req.body;
+
+            if (!collectionId) {
+                return res.status(400).json({ error: 'collectionId is required' });
+            }
+
+            if (backend === 'lancedb') {
+                await ensureLanceDBInitialized(req.user.directories);
+            }
+
+            const handler = getBackendHandler(backend);
+            const stats = await handler.stats(collectionId, source, model, req.user.directories, filters);
+
+            res.json({
+                success: true,
+                backend: handler.type,
+                collectionId,
+                stats
+            });
+
+        } catch (error) {
+            console.error(`[${pluginName}] chunks/stats error:`, error);
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    console.log(`[${pluginName}] Plugin initialized successfully`);
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Get vectra index for a collection
+ */
+async function getIndex(directories, collectionId, source, model) {
+    const pathToFile = model
+        ? path.join(directories.vectors, sanitize(source), sanitize(collectionId), sanitize(model))
+        : path.join(directories.vectors, sanitize(source), sanitize(collectionId));
+
+    const store = new vectra.LocalIndex(pathToFile);
+
+    if (!await store.isIndexCreated()) {
+        await store.createIndex();
+    }
+
+    return store;
+}
+
+/**
+ * Get embedding for text from specified source
+ */
+async function getEmbeddingForSource(source, text, model, directories, req) {
+    switch (source) {
+        case 'transformers': {
+            const { getTransformersVector } = await import('../../src/vectors/embedding.js');
+            return await getTransformersVector(text);
+        }
+        case 'openai':
+        case 'togetherai':
+        case 'mistral':
+        case 'electronhub':
+        case 'openrouter': {
+            const { getOpenAIVector } = await import('../../src/vectors/openai-vectors.js');
+            // ElectronHub requires a model name, provide default if empty
+            const effectiveModel = (source === 'electronhub' && !model) ? 'text-embedding-ada-002' : model;
+            return await getOpenAIVector(text, source, directories, effectiveModel);
+        }
+        case 'koboldcpp': {
+            return await _getKoboldCppEmbedding(text, model, req);
+        }
+        case 'nomicai': {
+            const { getNomicAIVector } = await import('../../src/vectors/nomicai-vectors.js');
+            return await getNomicAIVector(text, source, directories);
+        }
+        case 'cohere': {
+            const { getCohereVector } = await import('../../src/vectors/cohere-vectors.js');
+            return await getCohereVector(text, true, directories, model);
+        }
+        case 'ollama': {
+            const { getOllamaVector } = await import('../../src/vectors/ollama-vectors.js');
+            const apiUrl = req.body?.apiUrl || 'http://localhost:11434';
+            const keep = req.body?.keep || false;
+            return await getOllamaVector(text, apiUrl, model, keep, directories);
+        }
+        case 'llamacpp': {
+            const { getLlamaCppVector } = await import('../../src/vectors/llamacpp-vectors.js');
+            const apiUrl = req.body?.apiUrl || 'http://localhost:8080';
+            return await getLlamaCppVector(text, apiUrl, directories);
+        }
+        case 'bananabread': {
+            // BananaBread llama.cpp-compatible endpoint (no model param needed - uses server config)
+            let apiUrl = req.body.apiUrl || 'http://localhost:8008';
+            let apiKey = req.body.apiKey || '';
+
+            // Validate URL before attempting to use it
+            if (!apiUrl || typeof apiUrl !== 'string' || apiUrl.trim() === '') {
+                throw new Error('BananaBread: apiUrl is missing or invalid. Configure the embedding URL in VectHare settings.');
+            }
+            apiUrl = apiUrl.trim();
+
+            let url;
+            try {
+                url = new URL(apiUrl);
+                url.pathname = '/embedding';
+            } catch (e) {
+                throw new Error(`BananaBread: Invalid URL format "${apiUrl}" - ${e.message}`);
+            }
+
+            const headers = { 'Content-Type': 'application/json' };
+            if (apiKey) {
+                headers['Authorization'] = `Bearer ${apiKey}`;
+            }
+
+            const response = await fetch(url.toString(), {
+                method: 'POST',
+                headers: headers,
+                body: JSON.stringify({ content: text }),
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`BananaBread: ${response.statusText} ${errorText}`);
+            }
+
+            const data = await response.json();
+            if (!Array.isArray(data?.embedding)) {
+                throw new Error('BananaBread: Invalid response format');
+            }
+            return data.embedding;
+        }
+        case 'vllm': {
+            const { getVllmVector } = await import('../../src/vectors/vllm-vectors.js');
+            const apiUrl = req.body?.apiUrl || 'http://localhost:8000';
+            return await getVllmVector(text, apiUrl, model, directories);
+        }
+        case 'palm':
+        case 'vertexai': {
+            const googleVectors = await import('../../src/vectors/google-vectors.js');
+            if (source === 'palm') {
+                return await googleVectors.getMakerSuiteVector(text, model, req);
+            } else {
+                return await googleVectors.getVertexVector(text, model, req);
+            }
+        }
+        case 'extras': {
+            const { getExtrasVector } = await import('../../src/vectors/extras-vectors.js');
+            const extrasUrl = req.body?.extrasUrl || 'http://localhost:5100';
+            const extrasKey = req.body?.extrasKey || '';
+            return await getExtrasVector(text, extrasUrl, extrasKey);
+        }
+        default:
+            throw new Error(`Unknown vector source: ${source}`);
+    }
+}
+
+/**
+ * Simple string hash function
+ */
+function getStringHash(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+        const char = str.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash = hash & hash;
+    }
+    return Math.abs(hash);
+}
+
+/**
+ * Scan all sources for collections
+ */
+async function scanAllSourcesForCollections(vectorsPath) {
+    const allCollections = [];
+
+    try {
+        // Scan vectra indexes
+        const vectraIndexes = await findAllIndexes(vectorsPath);
+
+        const vectraCollectionMap = new Map();
+        for (const index of vectraIndexes) {
+            const key = `${index.source}:${index.collectionId}`;
+
+            if (!vectraCollectionMap.has(key)) {
+                vectraCollectionMap.set(key, {
+                    id: index.collectionId,
+                    source: index.source,
+                    backend: 'vectra',
+                    indexes: [],
+                    totalChunks: 0
+                });
+            }
+
+            const chunkCount = await getChunkCountFromIndex(index.indexPath);
+            vectraCollectionMap.get(key).indexes.push({
+                modelPath: index.modelPath,
+                chunkCount: chunkCount
+            });
+            vectraCollectionMap.get(key).totalChunks += chunkCount;
+        }
+
+        for (const [key, collection] of vectraCollectionMap) {
+            if (!collection.id) continue;
+
+            const primaryIndex = collection.indexes.reduce((best, curr) =>
+                curr.chunkCount > best.chunkCount ? curr : best
+            , collection.indexes[0]);
+
+            const models = collection.indexes.map(idx => ({
+                name: idx.modelPath || '(default)',
+                path: idx.modelPath,
+                chunkCount: idx.chunkCount
+            }));
+
+            allCollections.push({
+                id: collection.id,
+                source: collection.source,
+                backend: 'vectra',
+                chunkCount: collection.totalChunks,
+                modelCount: collection.indexes.length,
+                model: primaryIndex?.modelPath || '',
+                models: models
+            });
+        }
+
+        // Scan LanceDB
+        const lancedbPath = path.join(vectorsPath, 'lancedb');
+        try {
+            await fs.access(lancedbPath);
+            if (!lancedbBackend.basePath) {
+                await lancedbBackend.initialize(vectorsPath);
+            }
+
+            const sourceDirs = await fs.readdir(lancedbPath, { withFileTypes: true });
+            const sources = sourceDirs.filter(d => d.isDirectory() && !d.name.endsWith('.lance')).map(d => d.name);
+
+            for (const source of sources) {
+                try {
+                    const db = await lancedbBackend.getDatabase(source);
+                    const tableNames = await db.tableNames();
+
+                    for (const tableName of tableNames) {
+                        if (!tableName) continue;
+                        try {
+                            const table = await db.openTable(tableName);
+                            const count = await table.countRows();
+
+                            allCollections.push({
+                                id: tableName,
+                                source: source,
+                                backend: 'lancedb',
+                                chunkCount: count,
+                                modelCount: 1
+                            });
+                        } catch (e) {
+                            console.warn(`[${pluginName}] LanceDB: Failed to open table '${tableName}' in source '${source}':`, e.message);
+                        }
+                    }
+                } catch (e) {
+                    console.warn(`[${pluginName}] LanceDB: Failed to scan source '${source}':`, e.message);
+                }
+            }
+        } catch (e) {
+            // LanceDB folder doesn't exist - this is normal if LanceDB hasn't been used
+            console.debug(`[${pluginName}] LanceDB folder not found or not accessible:`, e.message);
+        }
+
+        // Scan Qdrant (uses REST API, so check if initialized via baseUrl)
+        try {
+            if (qdrantBackend.baseUrl) {
+                const healthy = await qdrantBackend.healthCheck();
+                if (healthy) {
+                    // List items from vecthare_main collection
+                    const collections = await qdrantBackend.getCollections();
+                    const hasVecthareMain = collections.some(col => col.name === 'vecthare_main'); //just-in-case support for multitenancy?
+
+                    for (const collectionName of collections) {
+                        const items = await qdrantBackend.listItems(collectionName, {});
+                        console.log('Discovered Qdrant Collection:', collectionName + " " + items.length + " items");
+
+                        // Extract source from collection name (format: "source:id" or "backend:source:id")
+                        let source = 'unknown';
+                        const parts = collectionName.split(':');
+                        if (parts.length === 2) {
+                            // Format: "source:id"
+                            source = parts[0];
+                        } else if (parts.length === 3) {
+                            // Format: "backend:source:id"
+                            source = parts[1];
+                        } else if (items.length > 0 && items[0].metadata?.embeddingSource) {
+                            // Fallback: get from item metadata
+                            source = items[0].metadata.embeddingSource;
+                        }
+
+                         allCollections.push({
+                            id: collectionName,
+                            source: source,
+                            backend: 'qdrant',
+                            chunkCount: items.length,
+                            modelCount: 1
+                        });
                     }
                 }
-            );
-            if (collections.length > 0) {
-                console.log(`VectHare: Discovered ${collections.length} existing collections`);
             }
-        } catch (err) {
-            console.error('VectHare: Collection discovery failed after retries:', err.message);
-            toastr.warning(
-                'Could not discover existing collections. Open Database Browser to refresh manually.',
-                'VectHare: Collection Discovery Failed',
-                { timeOut: 10000 }
-            );
+        } catch (e) {
+            console.warn(`[${pluginName}] Qdrant: Failed to scan collections:`, e.message);
         }
-    })();
 
-    // Register host listeners exactly once. Keep a registry to support a future
-    // explicit teardown without changing the host's extension lifecycle.
-    const vhListeners = [];
-    const onVhEvent = (type, handler) => {
-        if (!type) return;
-        eventSource.on(type, handler);
-        vhListeners.push({type,handler});
-    };
-    globalThis.__vecthareEventListeners = vhListeners;
-    // A chat switch invalidates every job, not merely its eventual toast.
-    const invalidateChat = () => {
-        promptReceipts.invalidate();
-        chatJobs.cancelAll('chat-changed');
-        worldInfoSnapshots.clear(); // Do not reuse stale WI observations across chat switches.
-        chatJobs.bumpGeneration('chat-changed');
-        if (isVectorizationActive()) stopVectorization();
-        else resetControlState();
-    };
-    const invalidateMessage = () => {
-        promptReceipts.invalidate();
-        chatJobs.cancelKinds(['retrieval','sync','repair','vectorize'],'message-changed');
-        chatJobs.bumpGeneration('message-changed');
-    };
-    onVhEvent(event_types.CHAT_CHANGED, invalidateChat);
-    // The event payload is the assembled host prompt, not the extension registry.
-    onVhEvent(event_types.CHAT_COMPLETION_PROMPT_READY, event=>promptReceipts.observe('chat',event));
-    onVhEvent(event_types.GENERATE_AFTER_COMBINE_PROMPTS, event=>promptReceipts.observe('text',event));
-    // C08: capture host WI activations for the *next* retrieval. Event ordering
-    // versus generate_interceptor is version-dependent and not assumed.
-    onVhEvent(event_types.WORLD_INFO_ACTIVATED, payload => {
-        const current = currentChatIdentity();
-        worldInfoSnapshots.capture(current.originId || current.chatId, payload);
-    });
+        // Scan Milvus
+        try {
+            if (milvusBackend.isConnected) {
+                const items = await milvusBackend.listItems('vecthare_main', {}, { limit: 1 });
+                if (items.length > 0) {
+                    const stats = await milvusBackend.getCollectionStats('vecthare_main');
+                    allCollections.push({
+                        id: 'vecthare_main',
+                        source: 'milvus',
+                        backend: 'milvus',
+                        chunkCount: stats.chunkCount,
+                        modelCount: 1
+                    });
+                }
+            }
+        } catch (e) {
+            console.warn(`[${pluginName}] Milvus: Failed to scan collections:`, e.message);
+        }
 
-    for (const name of ['GENERATION_STOPPED','GENERATION_ENDED','GENERATION_ABORTED']) {
-        onVhEvent(event_types[name], () => chatJobs.bumpGeneration(name.toLowerCase()));
+    } catch (error) {
+        console.error(`[${pluginName}] Error scanning collections:`, error);
     }
-    for (const name of ['MESSAGE_EDITED','MESSAGE_DELETED','MESSAGE_SWIPED']) {
-        onVhEvent(event_types[name], invalidateMessage);
+
+    return allCollections;
+}
+
+/**
+ * Find all vectra index.json files
+ */
+async function findAllIndexes(dir, relativePath = '') {
+    const results = [];
+
+    try {
+        const entries = await fs.readdir(dir, { withFileTypes: true });
+
+        for (const entry of entries) {
+            const fullPath = path.join(dir, entry.name);
+            const newRelativePath = relativePath ? path.join(relativePath, entry.name) : entry.name;
+
+            if (entry.isDirectory()) {
+                const subResults = await findAllIndexes(fullPath, newRelativePath);
+                results.push(...subResults);
+            } else if (entry.name === 'index.json') {
+                const pathParts = newRelativePath.split(path.sep);
+                if (pathParts.length >= 3) {
+                    results.push({
+                        indexPath: fullPath,
+                        collectionId: pathParts[1],
+                        source: pathParts[0],
+                        modelPath: pathParts.slice(2, -1).join(path.sep),
+                        relativePath: newRelativePath
+                    });
+                }
+            }
+        }
+    } catch (e) {
+        // Directory may not exist or not be readable - log at debug level since this is recursive
+        if (relativePath === '') {
+            console.warn(`[${pluginName}] Vectra: Failed to scan vectors directory:`, e.message);
+        }
     }
-    const onPageHide = () => {promptReceipts.invalidate();chatJobs.teardown();};
-    window.addEventListener('pagehide', onPageHide);
-    // Register event handlers
-    onVhEvent(event_types.MESSAGE_DELETED, onChatEvent);
-    onVhEvent(event_types.MESSAGE_EDITED, onChatEvent);
-    // VectHare+ R10: edits/deletes flag the reverse-sync (repair) pass to run
-    // on the very next sync instead of waiting out the 5-minute throttle -
-    // the DB is corrected as soon as anything observes the change.
-    onVhEvent(event_types.MESSAGE_EDITED, () => flagImmediateReverseSync(getChatCollectionId(), settings));
-    onVhEvent(event_types.MESSAGE_DELETED, () => flagImmediateReverseSync(getChatCollectionId(), settings));
-    // Run vector sync tasks on message events
-    // Note: Semantic WI injection happens in the generate_interceptor (rearrangeChat), not here
-    onVhEvent(event_types.MESSAGE_SENT, onChatEvent);
-    onVhEvent(event_types.MESSAGE_RECEIVED, onChatEvent);
-    onVhEvent(event_types.MESSAGE_SWIPED, onChatEvent);
-    onVhEvent(event_types.MESSAGE_SWIPED, () => flagImmediateReverseSync(getChatCollectionId(), settings));
-    // When a chat is deleted, purge its vectors (not full purge, just that chat)
-    onVhEvent(event_types.CHAT_DELETED, async (chatId) => {
-        if (chatId) {
-            const collectionId = getChatCollectionId(chatId);
-            if (collectionId) {
-                const confirmed = await purgeVectorIndex(collectionId, settings);
-                if (confirmed !== true) return;
-                console.log(`VectHare: Purged vectors for deleted chat: ${chatId}`);
-            }
+
+    return results;
+}
+
+/**
+ * Get chunk count from vectra index
+ */
+async function getChunkCountFromIndex(indexPath) {
+    try {
+        const modelDir = path.dirname(indexPath);
+        const store = new vectra.LocalIndex(modelDir);
+
+        if (!await store.isIndexCreated()) {
+            return 0;
         }
-    });
-    onVhEvent(event_types.GROUP_CHAT_DELETED, async (chatId) => {
-        if (chatId) {
-            const collectionId = getChatCollectionId(chatId);
-            if (collectionId) {
-                const confirmed = await purgeVectorIndex(collectionId, settings);
-                if (confirmed !== true) return;
-                console.log(`VectHare: Purged vectors for deleted group chat: ${chatId}`);
-            }
-        }
-    });
 
-    // When WebLLM extension is loaded, refresh the model list
-    onVhEvent(event_types.EXTENSION_SETTINGS_LOADED, async (manifest) => {
-        if (settings.source === 'webllm' && manifest?.display_name === 'WebLLM') {
-            console.log('VectHare: WebLLM extension loaded, refreshing models...');
-            updateWebLlmStatus();
-            await loadWebLlmModels(settings);
-        }
-    });
+        const items = await store.listItems();
+        return items.length;
+    } catch (e) {
+        console.warn(`[${pluginName}] Vectra: Failed to get chunk count from ${indexPath}:`, e.message);
+        return 0;
+    }
+}
 
-    // When chat changes, refresh UI state to match settings
-    onVhEvent(event_types.CHAT_CHANGED, () => {
-        ++resumeCheckRequestId; // Invalidate any pending resume check immediately.
-        console.log('VectHare: Chat changed, refreshing UI state');
-        refreshAutoSyncCheckbox(settings);
-        lastDbStatus = null;
-        ++dbStatusRequestId;
-        scheduleSavedDatabaseRefresh();
-        // VectHare+: check for interrupted vectorization on the loaded chat
-        offerResumeOfUnfinishedVectorization();
-    });
+export async function exit() {
+    console.log(`[${pluginName}] Plugin shutting down...`);
+}
 
-    // VectHare+: one-time resume check at startup (page reload / ST reopen)
-    setTimeout(offerResumeOfUnfinishedVectorization, 5000);
-    setTimeout(scheduleSavedDatabaseRefresh, 5000);
-
-    console.log('VectHare: ✅ Initialized successfully');
-    } catch (error) { globalThis.__vecthareRuntimeInitialized = false; throw error; }
-});
+export const info = {
+    id: pluginName,
+    name: 'Similharity',
+    description: 'Unified vector database backend for VectHare - supports Vectra, LanceDB, and Qdrant',
+    version: pluginVersion
+};
