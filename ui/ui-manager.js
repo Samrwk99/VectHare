@@ -1,4 +1,6 @@
+import { guardedVectorFetch as fetch } from '../utils/e02-vector-request-gateway.js';
 import {redactSecrets} from '../utils/security.js';
+import {saveGuiConnection,getGuiConnectionStatus,removeGuiConnection,testGuiConnection} from '../utils/s11-gui-connections.js';
 /**
  * ============================================================================
  * VECTHARE UI MANAGER
@@ -90,6 +92,11 @@ export function renderSettings(containerId, settings, callbacks) {
 
                             <!-- Qdrant Settings (shown only when Qdrant backend is selected) -->
                             <div id="vecthare_qdrant_settings" style="display: none;">
+                                <small class="vecthare-help-text" style="display:block; margin:5px 0 12px;">
+                                    Configure Qdrant here. Local defaults to 127.0.0.1:6333; change the loopback port and save if needed.
+                                    For Qdrant Cloud, provide the HTTPS URL and API key, then save securely to the SillyTavern server.
+                                    Credentials are never saved in VectHare extension settings or shown again.
+                                </small>
                                 <label class="checkbox_label">
                                     <input type="checkbox" id="vecthare_qdrant_use_cloud" />
                                     <span>Use Qdrant Cloud</span>
@@ -118,9 +125,14 @@ export function renderSettings(containerId, settings, callbacks) {
                                     <label for="vecthare_qdrant_api_key">
                                         <small>API Key:</small>
                                     </label>
-                                    <input type="password" id="vecthare_qdrant_api_key" class="vecthare-input" placeholder="Your Qdrant Cloud API key" />
+                                    <input type="password" id="vecthare_qdrant_api_key" class="vecthare-input" autocomplete="new-password" placeholder="Your Qdrant Cloud API key" />
                                 </div>
 
+                                <div style="margin: 10px 0;">
+                                    <button type="button" class="vecthare-btn-sm" id="vecthare_qdrant_save_connection">Save connection &amp; test</button>
+                                    <button type="button" class="vecthare-btn-sm" id="vecthare_qdrant_remove_connection">Remove saved connection</button>
+                                    <small id="vecthare_qdrant_connection_status" role="status" class="vecthare-help-text" style="display:block;margin-top:6px;">Connection not checked yet</small>
+                                </div>
                                 <!-- Qdrant Multitenancy Setting -->
                                 <div style="margin-top: 10px; padding: 8px; background: rgba(0,0,0,0.1); border-radius: 4px;">
                                     <label class="checkbox_label" title="When enabled, uses a single Qdrant collection with content_type filtering (multitenancy). When disabled, creates separate collections for each content type (better isolation).">
@@ -149,7 +161,7 @@ export function renderSettings(containerId, settings, callbacks) {
                                 <label for="vecthare_milvus_address">
                                     <small>Full Address (Optional):</small>
                                 </label>
-                                <input type="text" id="vecthare_milvus_address" class="vecthare-input" placeholder="http://localhost:19530" />
+                                <input type="text" id="vecthare_milvus_address" class="vecthare-input" placeholder="localhost:19530 or https://example.com" />
                                 <small class="vecthare_hint">Overrides Host/Port if set (e.g. for cloud instances)</small>
 
                                 <label for="vecthare_milvus_username">
@@ -172,6 +184,12 @@ export function renderSettings(containerId, settings, callbacks) {
                                 </label>
                                 <input type="number" id="vecthare_milvus_dimensions" class="vecthare-input" placeholder="Auto (768)" min="1" />
                                 <small class="vecthare_hint">Manually set dimension size if auto-detection fails (e.g. 1536, 4096). Required for some models on first run.</small>
+                                <div style="margin: 10px 0;">
+                                    <small class="vecthare_hint">Save Milvus connection settings to the server; the token is not stored in extension settings. Use token or username/password, not both.</small>
+                                    <button type="button" class="vecthare-btn-sm" id="vecthare_milvus_save_connection">Save connection &amp; test</button>
+                                    <button type="button" class="vecthare-btn-sm" id="vecthare_milvus_remove_connection">Remove saved connection</button>
+                                    <small id="vecthare_milvus_connection_status" role="status" class="vecthare-help-text" style="display:block;margin-top:6px;">Connection not checked yet</small>
+                                </div>
                             </div>
 
                             <label for="vecthare_source">
@@ -1961,22 +1979,12 @@ function bindSettingsEvents(settings, callbacks) {
             console.log('VectHare: Qdrant mode changed, forcing re-initialization...');
             resetBackendHealth('qdrant');
 
-            // Proactively reinitialize if Qdrant is the current backend
-            if (settings.vector_backend === 'qdrant') {
-                try {
-                    const { initializeBackend } = await import('../backends/backend-manager.js');
-                    await initializeBackend('qdrant', settings, false);
-                    toastr.success(
-                        `Qdrant re-initialized in ${settings.qdrant_use_cloud ? 'cloud' : 'local'} mode`,
-                        'VectHare'
-                    );
-                } catch (e) {
-                    console.error('VectHare: Failed to reinitialize Qdrant:', e);
-                    toastr.warning('Failed to reinitialize Qdrant: ' + e.message, 'VectHare');
-                }
-            }
-        })
-        .trigger('change');
+            $('#vecthare_qdrant_connection_status').text('Connection mode changed — save & test to apply.');
+        });
+    // Set initial visibility without simulating a user change. Previously the
+    // synthetic change event sent an unnecessary backend init during UI setup.
+    $('#vecthare_qdrant_local_settings').toggle(!settings.qdrant_use_cloud);
+    $('#vecthare_qdrant_cloud_settings').toggle(!!settings.qdrant_use_cloud);
 
     // Qdrant settings
     $('#vecthare_qdrant_host')
@@ -2010,10 +2018,8 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
         });
 
-    bindProtectedCredentialInput('vecthare_qdrant_api_key', 'qdrant_api_key', settings);
-    $('#vecthare_qdrant_api_key').parent().find('[data-c05-clear="qdrant_api_key"]').remove();
-    $('<button type="button" class="vecthare-btn-sm" data-c05-clear="qdrant_api_key">Clear credential</button>')
-        .insertAfter($('#vecthare_qdrant_api_key')).on('click', () => clearProtectedCredential('qdrant_api_key', settings));
+    // The Qdrant key is a write-only GUI input, never an extension setting.
+    $('#vecthare_qdrant_api_key').val('');
 
     // Qdrant multitenancy toggle
     $('#vecthare_qdrant_multitenancy')
@@ -2055,15 +2061,9 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
         });
 
-    bindProtectedCredentialInput('vecthare_milvus_password', 'milvus_password', settings);
-    $('#vecthare_milvus_password').parent().find('[data-c05-clear="milvus_password"]').remove();
-    $('<button type="button" class="vecthare-btn-sm" data-c05-clear="milvus_password">Clear credential</button>')
-        .insertAfter($('#vecthare_milvus_password')).on('click', () => clearProtectedCredential('milvus_password', settings));
-
-    bindProtectedCredentialInput('vecthare_milvus_token', 'milvus_token', settings);
-    $('#vecthare_milvus_token').parent().find('[data-c05-clear="milvus_token"]').remove();
-    $('<button type="button" class="vecthare-btn-sm" data-c05-clear="milvus_token">Clear credential</button>')
-        .insertAfter($('#vecthare_milvus_token')).on('click', () => clearProtectedCredential('milvus_token', settings));
+    // Milvus credentials are likewise write-only; they are submitted only by
+    // the explicit Save button to authenticated server-side storage.
+    $('#vecthare_milvus_password, #vecthare_milvus_token').val('');
 
     $('#vecthare_milvus_dimensions')
         .val(settings.milvus_dimensions || '')
@@ -2086,6 +2086,64 @@ function bindSettingsEvents(settings, callbacks) {
     if (settings.vector_backend === 'milvus') {
         $('#vecthare_milvus_settings').show();
     }
+
+    // S11.4: user-visible connection setup; a successful connection does NOT
+    // authorize memory insertion/edit/delete, which remain guarded by E02/S10.
+    async function refreshGuiStatus(backend,configId) {
+        const target=$(`#vecthare_${backend}_connection_status`);
+        try {
+            const result=await getGuiConnectionStatus(backend,configId,getRequestHeaders());
+            target.text(result.configured
+                ? `Saved on SillyTavern server: ${result.endpoint}; credential ${result.hasCredential?'set':'not set'}.`
+                : (result.localDefault ? 'Local default available: http://127.0.0.1:6333. No setup required unless you change the port.' : 'Not configured. Enter connection details and press Save & test.'));
+        } catch(e) { target.text(`Configuration status unavailable: ${e.message}`); }
+    }
+    async function saveOrRemoveConnection(backend,remove=false) {
+        const configId=backend==='qdrant' && !$('#vecthare_qdrant_use_cloud').prop('checked')?'local':'default';
+        const target=$(`#vecthare_${backend}_connection_status`);
+        const buttons=$(`#vecthare_${backend}_save_connection, #vecthare_${backend}_remove_connection`);
+        buttons.prop('disabled',true);target.text(remove?'Removing saved configuration...':'Saving and testing connection...');
+        try {
+            if(remove) await removeGuiConnection(backend,configId,getRequestHeaders());
+            else {
+                let config;
+                if(backend==='qdrant') {
+                    config=configId==='local'
+                        ? {configId,host:String($('#vecthare_qdrant_host').val()).trim()||'127.0.0.1',port:Number($('#vecthare_qdrant_port').val()||6333)}
+                        : {configId,url:String($('#vecthare_qdrant_url').val()).trim(),apiKey:String($('#vecthare_qdrant_api_key').val())};
+                } else {
+                    const entered=String($('#vecthare_milvus_address').val()).trim();
+                    const secureUrl=entered.startsWith('https://');
+                    let normalized=entered;
+                    if(/^https?:\/\//i.test(entered)){const u=new URL(entered);if(u.username||u.password||u.search||u.hash||u.pathname!=='/')throw Error('Milvus address must not include credentials, path, or query');normalized=`${u.hostname}:${u.port||(u.protocol==='https:'?'443':'19530')}`;}
+                    const address=normalized||`${String($('#vecthare_milvus_host').val()).trim()||'localhost'}:${Number($('#vecthare_milvus_port').val()||19530)}`;
+                    const user=String($('#vecthare_milvus_username').val()).trim();
+                    const password=String($('#vecthare_milvus_password').val());
+                    const token=String($('#vecthare_milvus_token').val())||(user&&password?`${user}:${password}`:'');
+                    const host=address.slice(0,address.lastIndexOf(':'));
+                    config={configId:'default',address,ssl:secureUrl||!['localhost','127.0.0.1','::1'].includes(host),token};
+                }
+                await saveGuiConnection(backend,config,getRequestHeaders());
+            }
+            $('#vecthare_qdrant_api_key, #vecthare_milvus_password, #vecthare_milvus_token').val('');
+            if(!remove) {
+                // Test the exact saved profile, never browser-side credentials.
+                await testGuiConnection(backend,configId,getRequestHeaders());
+            }
+            resetBackendHealth(backend);
+            await refreshGuiStatus(backend,configId);
+            target.text(`${remove?'Saved connection removed.':'Connection saved and health check passed.'} ${target.text()} Memory writes remain restricted pending live backend acceptance.`);
+        } catch(e) {
+            target.text(e.message);
+            toastr.error(`${backend.toUpperCase()}: ${e.message}`,'VectHare');
+        } finally {buttons.prop('disabled',false);}
+    }
+    $('#vecthare_qdrant_save_connection').off('click.s11gui').on('click.s11gui',()=>void saveOrRemoveConnection('qdrant'));
+    $('#vecthare_qdrant_remove_connection').off('click.s11gui').on('click.s11gui',()=>void saveOrRemoveConnection('qdrant',true));
+    $('#vecthare_milvus_save_connection').off('click.s11gui').on('click.s11gui',()=>void saveOrRemoveConnection('milvus'));
+    $('#vecthare_milvus_remove_connection').off('click.s11gui').on('click.s11gui',()=>void saveOrRemoveConnection('milvus',true));
+    void refreshGuiStatus('qdrant',settings.qdrant_use_cloud?'default':'local');
+    void refreshGuiStatus('milvus','default');
 
     // Embedding provider
     $('#vecthare_source')
@@ -3269,7 +3327,7 @@ function renderDiagnosticsContent(results, filter = 'all') {
  * Respects the current filter selection
  * @param {object} results - Diagnostics results object
  */
-function copyDiagnosticsReport(results) {
+async function copyDiagnosticsReport(results) {
     if (!results) {
         toastr.warning('No diagnostic results to copy');
         return;
@@ -3316,9 +3374,16 @@ function copyDiagnosticsReport(results) {
     const modelField = getModelField(source);
     const model = modelField ? (settings[modelField] || 'not set') : 'n/a (provider handles it)';
     const qdrantMode = settings.qdrant_use_cloud ? 'cloud' : 'local';
-    const qdrantUrl = backend === 'qdrant'
-        ? settings.qdrant_url
-        : null;
+    // Report the server's effective selected endpoint, never an ignored or
+    // stale browser-side setting. The API does not return stored credentials.
+    let qdrantUrl = null;
+    if (backend === 'qdrant') {
+        const selected = settings.qdrant_use_cloud ? 'default' : 'local';
+        try {
+            const state = await getGuiConnectionStatus('qdrant',selected,getRequestHeaders());
+            qdrantUrl = state.endpoint || (state.localDefault ? 'http://127.0.0.1:6333 (default)' : 'not configured');
+        } catch { qdrantUrl='server configuration unavailable'; }
+    }
 
     // Build provider URL info
     let providerUrl = 'n/a';

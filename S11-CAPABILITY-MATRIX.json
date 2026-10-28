@@ -1,10 +1,10 @@
 {
-  "checkpoint": "S11",
+  "checkpoint": "S11.2",
   "date": "2026-10-28",
   "mode": "INTEGRATION_ONLY_NOT_RUNTIME_PERMISSION",
-  "pluginVersion": "3.2.10-s10.0",
+  "pluginVersion": "3.2.10-s10.1",
   "vecthareVersion": "2.2.0-alpha.s11.0",
-  "pluginSourceFingerprint": "fc0b3c4209b8b8c04cfa43fb11ea78e9a4aa74b52158cc7941e3b2cf48b505c5",
+  "pluginSourceFingerprint": "12a04b322c1a6eccd9a083c8791bfd6a27603723b876ba6eb604f27cba2e537c",
   "pluginModified": false,
   "liveHostTested": false,
   "realBackendsTested": false,
@@ -85,5 +85,8 @@
       "transport": "SIMILHARITY_PLUGIN"
     }
   },
-  "activation": "NO_E02_CELLS_WIDENED"
+  "activation": "NO_E02_CELLS_WIDENED",
+  "pairedPlugin": "3.2.10-s10.1",
+  "publicWritesEnabled": false,
+  "hostAccepted": false
 }

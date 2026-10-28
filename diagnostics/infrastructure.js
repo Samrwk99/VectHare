@@ -389,62 +389,25 @@ export async function checkQdrantBackend(settings) {
         };
     }
 
-    // Check configuration
-    if (isCloud) {
-        if (!settings.qdrant_url) {
-            return {
-                name: backendName,
-                status: 'fail',
-                message: 'Qdrant Cloud URL not configured',
-                fixable: true,
-                fixAction: 'configure_qdrant',
-                category: 'infrastructure'
-            };
-        }
-        if (!settings.qdrant_api_key) {
-            return {
-                name: backendName,
-                status: 'fail',
-                message: 'Qdrant Cloud API key not configured',
-                fixable: true,
-                fixAction: 'configure_qdrant',
-                category: 'infrastructure'
-            };
-        }
-    } else {
-        if (!settings.qdrant_host || !settings.qdrant_port) {
-            return {
-                name: backendName,
-                status: 'fail',
-                message: 'Qdrant local host/port not configured (default: localhost:6333)',
-                fixable: true,
-                fixAction: 'configure_qdrant',
-                category: 'infrastructure'
-            };
-        }
-    }
-
-    // First, try to initialize Qdrant with current settings
+    // S11.3: local is a server-defined loopback preset, cloud requires the
+    // protected default per-user server configuration. Browser settings are not credentials.
+    const configId = isCloud ? 'default' : 'local';
     try {
-        const initConfig = {
-            host: settings.qdrant_host || 'localhost',
-            port: settings.qdrant_port || 6333,
-            url: isCloud ? settings.qdrant_url : null,
-            apiKey: settings.qdrant_api_key || null,
-        };
-
         const initResponse = await fetch('/api/plugins/similharity/backend/init/qdrant', {
             method: 'POST',
             headers: getRequestHeaders(),
-            body: JSON.stringify(initConfig)
+            body: JSON.stringify({ configId }),
         });
-
         if (!initResponse.ok) {
-            const errorText = await initResponse.text();
+            const result = await initResponse.json().catch(() => null);
+            const code = typeof result?.code === 'string' && /^[A-Z0-9_]{1,80}$/.test(result.code)
+                ? result.code : 'UNKNOWN_ERROR';
             return {
                 name: backendName,
                 status: 'fail',
-                message: `Qdrant init failed: ${errorText}`,
+                message: isCloud
+                    ? `Qdrant cloud configuration/init refused (HTTP ${initResponse.status}; ${code}). Set up the private server-side cloud connection.`
+                    : `Local Qdrant init refused (HTTP ${initResponse.status}; ${code}). Confirm Qdrant is listening on the server's loopback address; default port 6333.`,
                 fixable: true,
                 fixAction: 'configure_qdrant',
                 category: 'infrastructure'
@@ -454,16 +417,14 @@ export async function checkQdrantBackend(settings) {
         return {
             name: backendName,
             status: 'fail',
-            message: `Qdrant init error: ${error.message}`,
-            fixable: true,
-            fixAction: 'configure_qdrant',
+            message: `Qdrant init request failed: ${error.message}`,
             category: 'infrastructure'
         };
     }
 
     // Then check health
     try {
-        const healthResponse = await fetch('/api/plugins/similharity/backend/health/qdrant', {
+        const healthResponse = await fetch(`/api/plugins/similharity/backend/health/qdrant?configId=${configId}`, {
             method: 'GET',
             headers: getRequestHeaders()
         });
@@ -482,7 +443,7 @@ export async function checkQdrantBackend(settings) {
         const healthData = await healthResponse.json();
 
         if (healthData.healthy) {
-            const target = isCloud ? settings.qdrant_url : `${settings.qdrant_host}:${settings.qdrant_port}`;
+            const target = isCloud ? 'server-configured Qdrant endpoint' : 'server loopback Qdrant endpoint';
             return {
                 name: backendName,
                 status: 'pass',

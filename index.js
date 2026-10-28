@@ -1,6 +1,6 @@
 import {buildRecoveryReport} from './utils/e03-recovery.js';
 import { guardedVectorFetch as fetch } from './utils/e02-vector-request-gateway.js';
-import {discoverS11Plugin, renderS11CompatibilityStatus} from './utils/s11-plugin-compatibility.js';
+import {discoverS11Plugin, renderS11CompatibilityStatus, renderH01QdrantButton} from './utils/s11-plugin-compatibility.js';
 import {recoverPendingC02Operations} from './core/core-vector-api.js';
 /**
  * ============================================================================
@@ -570,6 +570,7 @@ jQuery(async () => {
     // to reactivate any backend operation. Failure remains visibly blocked.
     void discoverS11Plugin().then(status=>{
         renderS11CompatibilityStatus(document.querySelector('.vecthare_settings'),status);
+        renderH01QdrantButton(document.querySelector('.vecthare_settings'));
         if (!status.compatible) console.warn('VectHare: Similharity S10 compatibility unavailable:',status.reason);
     });
 

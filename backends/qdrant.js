@@ -1,7 +1,7 @@
 import { guardedVectorFetch as fetch } from '../utils/e02-vector-request-gateway.js';
 import {adapterCollectionId,requireTenantScope,rejectUnscopedPointOperation} from '../utils/tenant-route.js';
 import {hasVerifiedCapability} from '../utils/backend-contracts.js';
-import {verifyServerSecretContract, ProtectedCredentialUnavailable, assertNoCredentialsInUrl} from '../utils/c05-protected-credentials.js';
+import {assertNoCredentialsInUrl} from '../utils/c05-protected-credentials.js';
 import { mergeDefinedChunkMetadata, trustedQueryMetadata } from '../utils/chunk-record-metadata.js';
 import {sharedTenantFromCollection,markSharedDisplayPage,denyUnverifiedSharedInventory,labelSharedQuery} from '../utils/e06-shared-read-contract.js';
 /**
@@ -77,56 +77,35 @@ function verifyTenantResults(items, filters) {
 
 export class QdrantBackend extends VectorBackend {
     async initialize(settings) {
-        // Get Qdrant config from settings
-        // Only send relevant config based on cloud vs local mode
-        let config;
-
-        if (settings.qdrant_use_cloud) {
+        // S11.1 / S10: the plugin reads connection URL and credentials from its
+        // private server-side per-user configuration. Never send browser settings.
+        // Preserve the client's URL sanity check without using it for the connection.
+        if (settings?.qdrant_use_cloud && settings?.qdrant_url) {
             assertNoCredentialsInUrl(settings.qdrant_url);
-            // Cloud credentials must be looked up by the server, never sent by the browser.
-            if (settings.qdrant_api_key) throw new ProtectedCredentialUnavailable();
-            if (!(await verifyServerSecretContract(fetch, getRequestHeaders)).verified) throw new ProtectedCredentialUnavailable();
-            // Cloud mode: use URL only
-            config = {
-                url: settings.qdrant_url || null,
-                // The server-side plugin resolves the API key from its protected store.
-                // Explicitly clear local settings to prevent conflicts
-                host: null,
-                port: null,
-            };
-            console.log('VectHare: Initializing Qdrant Cloud');
-        } else {
-            // Local mode: use host and port
-            config = {
-                host: settings.qdrant_host || 'localhost',
-                port: settings.qdrant_port || 6333,
-                // Explicitly clear cloud settings to prevent conflicts
-                url: null,
-                apiKey: null,
-            };
-            console.log('VectHare: Initializing local Qdrant:', `${config.host}:${config.port}`);
         }
-
-        // Never log initialization payloads: they may contain Qdrant credentials.
-
+        // 'local' is a fixed server-side loopback preset; 'default' loads the
+        // administrator-provisioned per-user private remote config.
+        this._qdrantConfigId = settings?.qdrant_use_cloud ? 'default' : 'local';
         const response = await fetch('/api/plugins/similharity/backend/init/qdrant', {
             method: 'POST',
             headers: getRequestHeaders(),
-            body: JSON.stringify(config),
+            body: JSON.stringify({ configId: this._qdrantConfigId }),
         });
 
         if (!response.ok) {
-            // Backend responses may echo API keys or authenticated URLs. Do not log the body.
-            throw new Error(`[Qdrant] Failed to initialize Qdrant (HTTP ${response.status})`);
+            // S10 exposes machine-readable error codes; avoid echoing response
+            // messages or configuration details into browser logs.
+            const body = typeof response.json==='function' ? await response.json().catch(() => null) : null;
+            const code = typeof body?.code === 'string' && /^[A-Z0-9_]{1,80}$/.test(body.code)
+                ? `; ${body.code}` : '';
+            throw new Error(`[Qdrant] Failed to initialize Qdrant (HTTP ${response.status}${code})`);
         }
-
-        // Do not log arbitrary backend response fields; they may echo credentials.
-        console.log('VectHare: Using Qdrant backend (production-grade vector search)');
+        console.log(`VectHare: Qdrant ${this._qdrantConfigId === 'local' ? 'loopback' : 'private server'} connection initialized (read-only checkpoint)`);
     }
 
     async healthCheck() {
         try {
-            const response = await fetch('/api/plugins/similharity/backend/health/qdrant', {
+            const response = await fetch(`/api/plugins/similharity/backend/health/qdrant?configId=${this._qdrantConfigId || 'default'}`, {
                 headers: getRequestHeaders(),
             });
 

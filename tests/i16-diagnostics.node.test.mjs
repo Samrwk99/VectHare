@@ -20,6 +20,7 @@ function extracted(file,name,context={},deps={}) {
   // Substitute module imports only in an isolated test fixture; production code is unchanged.
   code=code.replace(/await import\((['"])([^'"]+)\1\)/g,(_,q,spec)=>`__mocks[${JSON.stringify(spec)}]`);
   const scope=vm.createContext({console:silent,Date,Math,Set,Map,JSON,Object,RegExp,Number,String,Promise,__mocks:{'../core/collection-ids.js':{parseRegistryKey:(value)=>({collectionId: value.startsWith('source:') ? value.slice(7) : value.split(':').slice(2).join(':') || value})},...deps},
+    mutationDiagnosticRestriction:()=>null,
     parseRegistryKey: (value)=>({collectionId: value.startsWith('source:') ? value.slice(7) : value.split(':').slice(2).join(':') || value}),...context});
   return vm.runInContext(`${code}\n${name}`,scope);
 }
@@ -175,11 +176,12 @@ test('#196: usage counter updates the exact key and refuses ambiguous aliases',(
  const core=read('core/core-vector-api.js');assert.match(core,/recordCollectionUsage\(collectionId\)/);
 });
 
-test('#219: report uses live qdrant_use_cloud and qdrant_url fields',()=>{
+test('#219: diagnostics no longer treats browser Qdrant URL as actual server connection',()=>{
  const src=read('ui/ui-manager.js');
  const i=src.indexOf('const qdrantMode = settings.qdrant_use_cloud');
  assert.ok(i>0);
- assert.match(src.slice(i,i+200),/settings\.qdrant_url/);
+ assert.match(src.slice(i,i+750),/getGuiConnectionStatus/);
+ assert.doesNotMatch(src.slice(i,i+200),/settings\.qdrant_url/);
  assert.doesNotMatch(src.slice(i,i+200),/qdrant_cloud_url|settings\.qdrant_mode/);
 });
 

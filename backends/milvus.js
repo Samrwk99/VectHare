@@ -75,41 +75,18 @@ export class MilvusBackend extends VectorBackend {
     }
 
     async initialize(settings) {
-        assertNoCredentialsInUrl(settings.milvus_address);
-        // Authenticated Milvus must resolve credentials server-side; never forward legacy plaintext.
-        if (settings.milvus_password || settings.milvus_token) throw new ProtectedCredentialUnavailable();
-        if (settings.milvus_username) {
-            if (!(await verifyServerSecretContract(fetch, getRequestHeaders)).verified) throw new ProtectedCredentialUnavailable();
-        }
-        // Determine dimensions: Manual setting > Auto-detect > Default (null)
-        let dimensions = settings.milvus_dimensions ? parseInt(settings.milvus_dimensions) : null;
-        
-        if (!dimensions || isNaN(dimensions)) {
-            dimensions = await this._autoDetectDimensions(settings);
-        }
-
-        // Get Milvus config from settings
-        const config = {
-            host: settings.milvus_host || 'localhost',
-            port: settings.milvus_port || 19530,
-            address: settings.milvus_address || (settings.milvus_host ? `${settings.milvus_host}:${settings.milvus_port || 19530}` : 'localhost:19530'),
-            username: settings.milvus_username || null,
-            // Password/token are resolved from server-side protected storage.
-            dimensions: dimensions,
-        };
-
+        // S11.4: the database connection (including any token) is configured
+        // via authenticated VectHare GUI and stored exclusively by Similharity.
+        // Do not send legacy browser host, username, dimensions, or secrets.
         const response = await fetch('/api/plugins/similharity/backend/init/milvus', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-            body: JSON.stringify(config),
+            method: 'POST', headers: getRequestHeaders(),
+            body: JSON.stringify({configId:'default'}),
         });
-
         if (!response.ok) {
-            // Server errors may echo configured secrets; never relay their bodies.
-            throw new Error(`[Milvus] Failed to initialize Milvus (HTTP ${response.status})`);
+            const result=typeof response.json==='function'?await response.json().catch(()=>null):null;
+            const code=typeof result?.code==='string'&&/^[A-Z0-9_]{1,80}$/.test(result.code)?result.code:'UNKNOWN_ERROR';
+            throw new Error(`[Milvus] Failed to initialize Milvus (HTTP ${response.status}; ${code})`);
         }
-
-        console.log('VectHare: Using Milvus backend (production-grade vector search)');
     }
 
     async healthCheck() {

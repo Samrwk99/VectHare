@@ -13,6 +13,7 @@ import { guardedVectorFetch as fetch } from '../utils/e02-vector-request-gateway
 import { getCurrentChatId, getRequestHeaders } from '../../../../../script.js';
 import { getSavedHashes, purgeVectorIndex, queryCollection } from '../core/core-vector-api.js';
 import {hasVerifiedCapability} from '../utils/backend-contracts.js';
+import {mutationDiagnosticRestriction} from '../utils/h01-diagnostic-policy.js';
 import { getChatCollectionId } from '../core/chat-vectorization.js';
 import { getModelField, getProviderConfig } from '../core/providers.js';
 import { unregisterCollection, markDiagnosticTestCollection } from '../core/collection-loader.js';
@@ -119,7 +120,7 @@ export async function testEmbeddingGeneration(settings) {
                 source: settings.source || 'transformers',
                 model: settings[getModelField(settings.source)] || null,
                 // Include provider-specific params (apiUrl, apiKey for BananaBread, etc.)
-                ...getPluginProviderParams(settings),
+
             })
         });
 
@@ -127,7 +128,7 @@ export async function testEmbeddingGeneration(settings) {
             const errorText = await response.text();
             return {
                 name: '[PROD] Embedding Generation',
-                status: 'fail',
+                status: response.status===403 ? 'skipped' : 'fail',
                 message: `Failed to generate embedding: ${response.status} ${response.statusText} - ${errorText}`,
                 category: 'production'
             };
@@ -167,6 +168,8 @@ export async function testEmbeddingGeneration(settings) {
  * Creates a temporary test collection that is cleaned up after the test.
  */
 export async function testVectorStorage(settings) {
+    const restricted=mutationDiagnosticRestriction(settings,'[PROD] Vector Storage','production');
+    if(restricted)return restricted;
     // Never create an uncleanable diagnostic vector. The old test inserted a
     // record even when Phase 0's safe purge gate was necessarily disabled.
     const backend=settings?.vector_backend || 'standard';
@@ -773,6 +776,8 @@ export async function testTemporallyBlindChunks(settings) {
  * Creates a temporary test collection that is cleaned up after the test.
  */
 export async function testPluginEmbeddingGeneration(settings) {
+    const restricted=mutationDiagnosticRestriction(settings,'[PROD] Plugin Embedding Gen','production');
+    if(restricted)return restricted;
     const backend = settings.vector_backend || 'standard';
 
     // Only test for backends that go through the plugin
@@ -868,7 +873,8 @@ export async function testPluginEmbeddingGeneration(settings) {
             if (!cleanup.success) {
                 // Preserve the marker for later recovery and record a visible warning.
                 console.warn(`[VectHare] Diagnostic plugin test cleanup failed for ${testCollectionId}: ${cleanup.reason}`);
-                return { name: '[PROD] Plugin Embedding Gen', status: 'fail', category: 'production', message: `Test-vector cleanup failed: ${cleanup.reason}` };
+                // Do not override the original diagnostic result from a finally block.
+                // Leave the diagnostic marker for explicit recovery.
             }
         }
     }

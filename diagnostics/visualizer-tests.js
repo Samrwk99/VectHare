@@ -24,6 +24,7 @@ import {
 } from '../core/collection-metadata.js';
 import { unregisterCollection, markDiagnosticTestCollection } from '../core/collection-loader.js';
 import { getStringHash } from '../../../../utils.js';
+import {mutationDiagnosticRestriction} from '../utils/h01-diagnostic-policy.js';
 
 // Test collection prefix using new vh: format for proper multitenancy parsing
 // Format: vh:{type}:{sourceId} - Qdrant backend parses this correctly
@@ -35,16 +36,15 @@ const TEST_COLLECTION_PREFIX = 'vh:test:visualizer_';
  * @param {object} settings - VectHare settings
  */
 async function cleanupTestCollection(collectionId, settings) {
+    if(typeof collectionId!=='string'||!/^vh:test:visualizer_\d{13}$/.test(collectionId))
+        return {success:false,reason:'non-disposable collection cannot be cleaned automatically'};
     try {
-        // Purge all vectors from the backend
-        await purgeVectorIndex(collectionId, settings);
-    } catch (e) {
-        // Ignore purge errors - collection might already be empty
-    }
-    // Always unregister from registry to prevent ghost entries
-    const registryKey = `${settings.source}:${collectionId}`;
-    unregisterCollection(registryKey);
-    unregisterCollection(collectionId); // Also try without source prefix
+        const purged=await purgeVectorIndex(collectionId,settings);
+        if(purged!==true)return {success:false,reason:'deletion not independently confirmed; retained registry marker'};
+        const registryKey=`${settings.source}:${collectionId}`;
+        unregisterCollection(registryKey);unregisterCollection(collectionId);
+        return {success:true};
+    }catch(error){return {success:false,reason:'cleanup unsuccessful; registry marker retained'};}
 }
 
 /**
@@ -223,6 +223,8 @@ export function checkMetadataOperations() {
  * Check: Vector insert capability
  */
 export async function checkVectorInsert(settings) {
+    const restricted=mutationDiagnosticRestriction(settings,'Vector Insert');
+    if(restricted)return restricted;
     if (!settings || !settings.source) {
         return {
             name: 'Vector Insert',
@@ -281,6 +283,8 @@ export async function checkVectorInsert(settings) {
  * Check: Vector delete capability
  */
 export async function checkVectorDelete(settings) {
+    const restricted=mutationDiagnosticRestriction(settings,'Vector Delete');
+    if(restricted)return restricted;
     if (!settings || !settings.source) {
         return {
             name: 'Vector Delete',
@@ -356,6 +360,8 @@ export async function checkVectorDelete(settings) {
  * Tests: delete old → insert new → migrate metadata
  */
 export async function checkReVectorization(settings) {
+    const restricted=mutationDiagnosticRestriction(settings,'Re-Vectorization');
+    if(restricted)return restricted;
     if (!settings || !settings.source) {
         return {
             name: 'Re-Vectorization',
@@ -468,6 +474,8 @@ export async function checkReVectorization(settings) {
  * Check: Summary vector creation (dual-vector)
  */
 export async function checkSummaryVectorCreate(settings) {
+    const restricted=mutationDiagnosticRestriction(settings,'Summary Vector Create');
+    if(restricted)return restricted;
     if (!settings || !settings.source) {
         return {
             name: 'Summary Vector Create',
@@ -558,6 +566,8 @@ export async function checkSummaryVectorCreate(settings) {
  * Check: Summary vector deletion
  */
 export async function checkSummaryVectorDelete(settings) {
+    const restricted=mutationDiagnosticRestriction(settings,'Summary Vector Delete');
+    if(restricted)return restricted;
     if (!settings || !settings.source) {
         return {
             name: 'Summary Vector Delete',
@@ -642,6 +652,8 @@ export async function checkSummaryVectorDelete(settings) {
  * Tests how quickly the backend responds to basic operations
  */
 export async function checkBackendResponsiveness(settings) {
+    const restricted=mutationDiagnosticRestriction(settings,'Backend Responsiveness');
+    if(restricted)return restricted;
     if (!settings || !settings.source) {
         return {
             name: 'Backend Responsiveness',

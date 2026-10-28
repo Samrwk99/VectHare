@@ -5,9 +5,9 @@
  */
 import { guardedVectorFetch } from './e02-vector-request-gateway.js';
 export const S11_EXPECTED_PLUGIN = Object.freeze({
-    pluginVersion: '3.2.10-s10.0',
+    pluginVersion: '3.2.10-s10.4',
     contractVersion: 2,
-    sourceFingerprint: 'fc0b3c4209b8b8c04cfa43fb11ea78e9a4aa74b52158cc7941e3b2cf48b505c5',
+    sourceFingerprint: 'e96b5b0d43693110b9c5701716d95539e7ab859903e2b749ad50a53e480f8dd6',
 });
 export const S11_BACKENDS = Object.freeze(['standard','lancedb','qdrant','milvus']);
 const ROOT = '/api/plugins/similharity';
@@ -75,4 +75,37 @@ export function renderS11CompatibilityStatus(root,status,doc=globalThis.document
         ? 'Similharity S10 detected (inspection only). Vector writes and unverified v2 reads remain disabled; live host acceptance required.'
         : 'Similharity S10 compatibility not verified. Unsafe operations remain disabled.';
     return true;
+}
+
+/** Explicit user-triggered, disposable-only Qdrant contract acceptance. */
+export async function runH01QdrantAcceptance(configId,headers,fetchImpl=globalThis.fetch) {
+    if (!['default','local'].includes(configId)) throw new Error('H01_CONFIG_SELECTOR_INVALID');
+    const response=await guardedVectorFetch(`${ROOT}/v2/diagnostics/qdrant-contract`,{
+        method:'POST',credentials:'same-origin',cache:'no-store',headers:{...headers,'Content-Type':'application/json'},
+        body:JSON.stringify({configId,confirmDisposable:true})},fetchImpl);
+    const result=await response.json();
+    if(!result||typeof result!=='object'||result.productionWritesEnabled!==false)throw new Error('H01_RESPONSE_UNVERIFIED');
+    return result;
+}
+/** One-click GUI acceptance with no arbitrary server endpoint, scope, or secrets. */
+export function renderH01QdrantButton(root,doc=globalThis.document){
+    if(!root || !doc?.createElement || root.querySelector?.('#vecthare_h01_test'))return false;
+    const wrap=doc.createElement('div');wrap.id='vecthare_h01_test';
+    const button=doc.createElement('button');button.type='button';button.textContent='Test disposable Qdrant write/read contract';
+    const status=doc.createElement('div');status.setAttribute('role','status');
+    button.addEventListener('click',async()=>{
+        if(typeof globalThis.confirm==='function' && !globalThis.confirm(
+            'This test creates a NEW isolated Qdrant collection and inserts, edits and deletes ONE synthetic test vector. No existing collection is touched. The empty test collection is retained. Continue?'))return;
+        button.disabled=true;status.textContent='Testing a new disposable Qdrant collection…';
+        try{
+            const {getRequestHeaders}=await import('../../../../script.js');
+            const selector=doc.querySelector?.('#vecthare_qdrant_use_cloud')?.checked===true?'default':'local';
+            const result=await runH01QdrantAcceptance(selector,getRequestHeaders());
+            status.textContent=result.success
+                ? `Qdrant disposable test passed. Production writes remain disabled. Test collection: ${result.disposableCollection}`
+                : `Qdrant test ${result.code||'failed'} (${(result.stages||[]).map(x=>x.name+':'+x.result).join(', ')}). Test collection: ${result.disposableCollection||'not created'}`;
+        }catch(error){status.textContent=`Qdrant acceptance unavailable: ${error?.message||'unknown error'}`;}
+        finally{button.disabled=false;}
+    });
+    wrap.append(button,status);root.prepend(wrap);return true;
 }
