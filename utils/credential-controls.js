@@ -1,30 +1,19 @@
 /**
- * Clear BananaBread's active custom secret AND its VectHare settings copy.
- * Do not mutate local settings if the server rejects the request; otherwise a
- * still-active server secret could be used even though the UI says "cleared".
- * @param {object} settings VectHare settings snapshot
- * @param {Function} fetchImpl fetch-compatible transport
- * @param {object} headers SillyTavern request headers
- * @param {Function} commit Save/update settings callback
+ * Legacy compatibility wrapper, retained for callers of the old BananaBread
+ * clear API. C05 never accepts the old HTTP-only revocation acknowledgement.
+ * A confirmed protected-store revocation AND acknowledged settings persistence
+ * are required before this can report completion.
  */
-export async function clearBananaBreadKey(settings, fetchImpl, headers, commit) {
-    const response = await fetchImpl('/api/secrets/write', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ key: 'bananabread_api_key', value: '' }),
-    });
-    if (!response.ok) {
-        throw new Error('BananaBread secret revocation was rejected');
+import { createWriteOnlySecretAdapter, scrubCredentialSettings, ProtectedCredentialUnavailable } from './c05-protected-credentials.js';
+
+export async function clearBananaBreadKey(settings, fetchImpl, headers, persistSettings) {
+    const adapter = createWriteOnlySecretAdapter({fetchImpl, getHeaders: () => headers});
+    await adapter.deleteSecret('bananabread_api_key');
+    if (typeof persistSettings !== 'function' || await persistSettings(scrubCredentialSettings(settings)) !== true) {
+        // Secret may have been revoked; legacy setting must remain until
+        // a durable settings update can be confirmed (no false "cleared").
+        throw new ProtectedCredentialUnavailable();
     }
-    const message = (await response.text()).trim();
-    if (message && message !== 'ok') {
-        // Do not treat an application-level failure as a successful revocation.
-        let result;
-        try { result = JSON.parse(message); } catch { /* plain success response */ }
-        if (result?.success === false || /^error|^fail/i.test(message)) {
-            throw new Error('BananaBread secret revocation was not confirmed');
-        }
-    }
-    settings.bananabread_api_key = '';
-    commit();
+    delete settings.bananabread_api_key;
+    return { confirmed: true };
 }

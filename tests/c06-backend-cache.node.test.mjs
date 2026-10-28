@@ -18,6 +18,7 @@ async function makeHarness() {
  const stubs={
   '../../../../extensions.js':{extension_settings:{vecthare:{}}},
   '../utils/backend-configuration.js':{backendConfigurationFingerprint},
+  '../utils/c05-protected-credentials.js':{assertNoLegacyCredentialFallback:()=>{}},
   './standard.js':{StandardBackend:FakeBackend},
   './lancedb.js':{LanceDBBackend:FakeBackend},
   './qdrant.js':{QdrantBackend:FakeBackend},

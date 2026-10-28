@@ -12,6 +12,7 @@
 
 import { extension_settings } from '../../../../extensions.js';
 import { backendConfigurationFingerprint } from '../utils/backend-configuration.js';
+import {assertNoLegacyCredentialFallback} from '../utils/c05-protected-credentials.js';
 import { StandardBackend } from './standard.js';
 import { LanceDBBackend } from './lancedb.js';
 import { QdrantBackend } from './qdrant.js';
@@ -274,6 +275,8 @@ function evictLRUBackendIfNeeded() {
 export async function initializeBackend(backendName, settings, throwOnFail = true) {
     // Normalize backend name (vectra -> standard, etc.)
     const normalizedName = normalizeBackendName(backendName);
+    // Enforce before cached healthy instances or provider requests are reused.
+    assertNoLegacyCredentialFallback(settings || {}, normalizedName);
     const configuration = backendConfigurationFingerprint(normalizedName, settings || {});
     // A health-checked instance is NOT reusable for a different source,
     // model, tenant mode, endpoint or credential. Nor is an old health failure
@@ -423,6 +426,8 @@ export async function getBackendForCollection(collectionBackend, settings) {
  */
 export async function isBackendAvailable(backendName, settings) {
     const normalizedName = normalizeBackendName(backendName);
+    try { assertNoLegacyCredentialFallback(settings || {}, normalizedName); }
+    catch { return false; }
 
     // A previous failed health check applies only to the same configuration.
     if (backendConfigurationFingerprints[normalizedName] !== backendConfigurationFingerprint(normalizedName,settings || {})) {

@@ -26,7 +26,7 @@ import { getChatCollectionId } from '../core/chat-vectorization.js';
 import { doesChatHaveVectors } from '../core/collection-loader.js';
 import { getModelField } from '../core/providers.js';
 import { getChunkingStrategies } from '../core/content-types.js';
-import { clearBananaBreadKey } from '../utils/credential-controls.js';
+import { createWriteOnlySecretAdapter, verifyServerSecretContract, legacyCredentialFields, scrubCredentialSettings, credentialBearingUrl } from '../utils/c05-protected-credentials.js';
 
 /**
  * Applies the current settings snapshot without overwriting collection metadata
@@ -34,7 +34,7 @@ import { clearBananaBreadKey } from '../utils/credential-controls.js';
  * @param {object} settingsSnapshot
  */
 function applySettingsSnapshot(settingsSnapshot) {
-    const { collections, vecthare_collection_registry, ...safeSettings } = settingsSnapshot;
+    const { collections, vecthare_collection_registry, ...safeSettings } = scrubCredentialSettings(settingsSnapshot);
     Object.assign(extension_settings.vecthare, safeSettings);
 }
 
@@ -1679,6 +1679,79 @@ async function showAutoSyncConfirmModal(allMatches, settings) {
  * @param {object} settings - VectHare settings object
  * @param {object} callbacks - Callback functions
  */
+/** C05: host secret store is write-only from the browser. The pinned
+ * Similharity plugin does NOT advertise the required server-side resolver. */
+function c05Adapter() {
+    return createWriteOnlySecretAdapter({ fetchImpl: fetch, getHeaders: getRequestHeaders });
+}
+
+async function clearProtectedCredential(field, settings) {
+    try {
+        await c05Adapter().deleteSecret(field);
+        // Only after server revocation is proven remove the legacy settings copy.
+        delete settings[field];
+        delete extension_settings.vecthare[field];
+        saveSettingsDebounced();
+        resetBackendHealth();
+        toastr.warning('Server credential revoked; local settings cleanup queued. Durable save must be verified after reload.');
+    } catch {
+        toastr.error('Secure revocation could not be verified. Legacy value was preserved; check your server setup.');
+    }
+}
+
+/** C05 explicit escape hatch for users who choose to discard an old plaintext
+ * copy while secure migration is blocked. This does NOT revoke a server key,
+ * and a debounced host save is not proof of durable removal. */
+function removeLegacyPlaintextOnly(field, settings) {
+    if (!legacyCredentialFields(settings).includes(field)) return;
+    if (!confirm('Remove this legacy plaintext copy from current VectHare settings?\n\n'
+        + 'This DOES NOT revoke a server-side secret. A queued SillyTavern save is not proof of permanent removal. '
+        + 'Verify after reload and review earlier settings backups. Authenticated access will remain disabled.')) return;
+    delete settings[field];
+    delete extension_settings.vecthare[field];
+    saveSettingsDebounced();
+    resetBackendHealth();
+    toastr.warning('Legacy plaintext removed in memory; save queued. Verify after reload and review settings backups.');
+}
+
+function bindProtectedCredentialInput(id, field, settings) {
+    const input = $('#' + id);
+    // Do not expose old plaintext even inside the password input DOM value.
+    input.val('').prop('disabled', true).attr('autocomplete', 'new-password');
+    const legacy = legacyCredentialFields(settings).includes(field);
+    input.attr('placeholder', legacy ? 'Legacy insecure key present — migration blocked' : 'Requires server-side secret support');
+    const note = $('<small class="vecthare_hint vecthare-c05-state"></small>').text(
+        legacy
+            ? 'Legacy credential is still in saved settings. Authenticated access is disabled until safe migration and server verification.'
+            : 'Secure setup unavailable with the current Similharity plugin. No credential will be saved in extension settings.'
+    );
+    input.next('.vecthare-c05-state').remove();
+    input.after(note);
+    input.parent().find('[data-c05-legacy-remove="' + field + '"]').remove();
+    if (legacy) {
+        $('<button type="button" class="vecthare-btn-sm" data-c05-legacy-remove="' + field + '">Remove legacy plaintext only</button>')
+            .insertAfter(note).on('click.vecthareC05', () => removeLegacyPlaintextOnly(field, settings));
+    }
+    input.off('change.vecthareC05').on('change.vecthareC05', async function () {
+        const secret = String(input.val()).trim();
+        input.val('');
+        if (!secret) return;
+        try {
+            await c05Adapter().setSecret(field, secret);
+            resetBackendHealth();
+            toastr.success('Credential saved and server authentication verified');
+        } catch {
+            toastr.error('Secure credential setup unavailable; nothing was saved to ordinary settings');
+        }
+    });
+    // Check read-only capability. No custom secret is sent during discovery.
+    verifyServerSecretContract(fetch, getRequestHeaders).then(({ verified }) => {
+        if (!verified || !document.getElementById(id)) return;
+        input.prop('disabled', false);
+        note.text('Protected store available. Browser never receives saved credential values.');
+    });
+}
+
 function bindSettingsEvents(settings, callbacks) {
     // Auto-sync enable/disable - now per-collection instead of global
     // Initial state is set by refreshAutoSyncCheckbox() after chat loads
@@ -1913,18 +1986,21 @@ function bindSettingsEvents(settings, callbacks) {
     $('#vecthare_qdrant_url')
         .val(settings.qdrant_url || '')
         .on('input', function() {
-            settings.qdrant_url = String($(this).val());
+            const nextUrl = String($(this).val());
+            if (credentialBearingUrl(nextUrl)) {
+                toastr.error('Do not embed credentials in URLs; use protected secret storage when supported');
+                $(this).val(settings.qdrant_url || '');
+                return;
+            }
+            settings.qdrant_url = nextUrl;
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
-    $('#vecthare_qdrant_api_key')
-        .val(settings.qdrant_api_key || '')
-        .on('input', function() {
-            settings.qdrant_api_key = String($(this).val());
-            applySettingsSnapshot(settings);
-            saveSettingsDebounced();
-        });
+    bindProtectedCredentialInput('vecthare_qdrant_api_key', 'qdrant_api_key', settings);
+    $('#vecthare_qdrant_api_key').parent().find('[data-c05-clear="qdrant_api_key"]').remove();
+    $('<button type="button" class="vecthare-btn-sm" data-c05-clear="qdrant_api_key">Clear credential</button>')
+        .insertAfter($('#vecthare_qdrant_api_key')).on('click', () => clearProtectedCredential('qdrant_api_key', settings));
 
     // Qdrant multitenancy toggle
     $('#vecthare_qdrant_multitenancy')
@@ -1966,21 +2042,15 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
         });
 
-    $('#vecthare_milvus_password')
-        .val(settings.milvus_password || '')
-        .on('input', function() {
-            settings.milvus_password = String($(this).val());
-            applySettingsSnapshot(settings);
-            saveSettingsDebounced();
-        });
+    bindProtectedCredentialInput('vecthare_milvus_password', 'milvus_password', settings);
+    $('#vecthare_milvus_password').parent().find('[data-c05-clear="milvus_password"]').remove();
+    $('<button type="button" class="vecthare-btn-sm" data-c05-clear="milvus_password">Clear credential</button>')
+        .insertAfter($('#vecthare_milvus_password')).on('click', () => clearProtectedCredential('milvus_password', settings));
 
-    $('#vecthare_milvus_token')
-        .val(settings.milvus_token || '')
-        .on('input', function() {
-            settings.milvus_token = String($(this).val());
-            applySettingsSnapshot(settings);
-            saveSettingsDebounced();
-        });
+    bindProtectedCredentialInput('vecthare_milvus_token', 'milvus_token', settings);
+    $('#vecthare_milvus_token').parent().find('[data-c05-clear="milvus_token"]').remove();
+    $('<button type="button" class="vecthare-btn-sm" data-c05-clear="milvus_token">Clear credential</button>')
+        .insertAfter($('#vecthare_milvus_token')).on('click', () => clearProtectedCredential('milvus_token', settings));
 
     $('#vecthare_milvus_dimensions')
         .val(settings.milvus_dimensions || '')
@@ -2635,66 +2705,11 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
         });
 
-    // BananaBread API key
-    // Note: We store in extension settings because custom keys aren't returned by ST's readSecretState()
-    const updateBananaBreadKeyDisplay = () => {
-        const savedKey = settings.bananabread_api_key;
-        if (savedKey) {
-            // Mask the key for display (show last 4 chars)
-            $('#vecthare_bananabread_apikey').attr('placeholder', 'API key saved');
-        } else {
-            $('#vecthare_bananabread_apikey').attr('placeholder', 'Paste key here to save...');
-        }
-    };
-    updateBananaBreadKeyDisplay();
-
-    $('#vecthare_bananabread_apikey')
-        .off('change.vecthareBananaBread')
-        .on('change.vecthareBananaBread', async function() {
-            const input = $(this);
-            const value = String(input.val()).trim();
-            if (!value) return; // Clearing is an explicit operation, not a no-op edit.
-            try {
-                // Keep both stores consistent: only update settings after ST accepts the write.
-                await writeSecret('bananabread_api_key', value);
-                settings.bananabread_api_key = value;
-                applySettingsSnapshot(settings);
-                saveSettingsDebounced();
-                toastr.success('BananaBread API key saved');
-                input.val('');
-                updateBananaBreadKeyDisplay();
-            } catch (error) {
-                // Never log secrets or server error payloads that may contain them.
-                console.error('VectHare: Could not save BananaBread API key');
-                toastr.error('BananaBread API key could not be saved');
-            }
-        });
-
+    // C05: never save or re-display BananaBread plaintext in browser settings.
+    bindProtectedCredentialInput('vecthare_bananabread_apikey', 'bananabread_api_key', settings);
     $('#vecthare_bananabread_clear_apikey')
-        .off('click.vecthareBananaBread')
-        .on('click.vecthareBananaBread', async function() {
-            const button = $(this);
-            button.prop('disabled', true);
-            try {
-                // Confirm the server revoked the secret before clearing local state.
-                await clearBananaBreadKey(settings, fetch, getRequestHeaders(), () => {
-                    applySettingsSnapshot(settings);
-                    saveSettingsDebounced();
-                });
-                // The ST UI caches a boolean for this custom secret when available.
-                if (secret_state && Object.hasOwn(secret_state, 'bananabread_api_key')) {
-                    secret_state.bananabread_api_key = false;
-                }
-                $('#vecthare_bananabread_apikey').val('');
-                updateBananaBreadKeyDisplay();
-                toastr.success('BananaBread API key cleared');
-            } catch (error) {
-                console.error('VectHare: Could not clear BananaBread secret');
-                toastr.error('Could not clear BananaBread API key in secret storage; saved settings were preserved');
-            } finally {
-                button.prop('disabled', false);
-            }
-        });
+        .off('click.vecthareC05')
+        .on('click.vecthareC05', async () => clearProtectedCredential('bananabread_api_key', settings));
 
     // OpenAI model
     $('#vecthare_openai_model')

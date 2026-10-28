@@ -1,5 +1,6 @@
 import {adapterCollectionId,requireTenantScope,rejectUnscopedPointOperation} from '../utils/tenant-route.js';
 import {hasVerifiedCapability} from '../utils/backend-contracts.js';
+import {verifyServerSecretContract, ProtectedCredentialUnavailable, assertNoCredentialsInUrl} from '../utils/c05-protected-credentials.js';
 import { mergeDefinedChunkMetadata, trustedQueryMetadata } from '../utils/chunk-record-metadata.js';
 /**
  * ============================================================================
@@ -70,6 +71,12 @@ export class MilvusBackend extends VectorBackend {
     }
 
     async initialize(settings) {
+        assertNoCredentialsInUrl(settings.milvus_address);
+        // Authenticated Milvus must resolve credentials server-side; never forward legacy plaintext.
+        if (settings.milvus_password || settings.milvus_token) throw new ProtectedCredentialUnavailable();
+        if (settings.milvus_username) {
+            if (!(await verifyServerSecretContract(fetch, getRequestHeaders)).verified) throw new ProtectedCredentialUnavailable();
+        }
         // Determine dimensions: Manual setting > Auto-detect > Default (null)
         let dimensions = settings.milvus_dimensions ? parseInt(settings.milvus_dimensions) : null;
         
@@ -83,8 +90,7 @@ export class MilvusBackend extends VectorBackend {
             port: settings.milvus_port || 19530,
             address: settings.milvus_address || (settings.milvus_host ? `${settings.milvus_host}:${settings.milvus_port || 19530}` : 'localhost:19530'),
             username: settings.milvus_username || null,
-            password: settings.milvus_password || null,
-            token: settings.milvus_token || null,
+            // Password/token are resolved from server-side protected storage.
             dimensions: dimensions,
         };
 
@@ -95,8 +101,8 @@ export class MilvusBackend extends VectorBackend {
         });
 
         if (!response.ok) {
-            const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`[Milvus] Failed to initialize Milvus: ${response.status} ${response.statusText} - ${errorBody}`);
+            // Server errors may echo configured secrets; never relay their bodies.
+            throw new Error(`[Milvus] Failed to initialize Milvus (HTTP ${response.status})`);
         }
 
         console.log('VectHare: Using Milvus backend (production-grade vector search)');

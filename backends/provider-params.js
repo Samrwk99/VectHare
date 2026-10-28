@@ -7,7 +7,7 @@
 import { extension_settings } from '../../../../extensions.js';
 import { textgen_types, textgenerationwebui_settings } from '../../../../textgen-settings.js';
 import { oai_settings } from '../../../../openai.js';
-import { secret_state } from '../../../../secrets.js';
+import { requireServerCredentialResolution } from '../utils/c05-protected-credentials.js';
 
 /**
  * Build provider-specific parameters for API requests.
@@ -53,13 +53,8 @@ export function getProviderSpecificParams(settings, isQuery = false) {
             params.apiUrl = settings.use_alt_endpoint
                 ? settings.alt_endpoint_url
                 : 'http://localhost:8008';
-            if (secret_state['bananabread_api_key']) {
-                const secrets = secret_state['bananabread_api_key'];
-                const activeSecret = Array.isArray(secrets) ? (secrets.find(s => s.active) || secrets[0]) : null;
-                if (activeSecret) {
-                    params.apiKey = activeSecret.value;
-                }
-            }
+            // Client-side server plugin cannot resolve BananaBread credentials yet.
+            requireServerCredentialResolution();
             break;
 
         case 'palm':

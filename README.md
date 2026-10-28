@@ -372,3 +372,18 @@ If VectHare helps your roleplay:
 ---
 
 *"It's like having a memory that actually works."* 🐰✨
+
+
+## C05 protected credentials (security checkpoint)
+
+VectHare no longer writes Qdrant API keys, Milvus passwords/tokens, or
+BananaBread API keys into new ordinary extension settings. New credentials
+use a write-only host-secret adapter which requires a per-user server-side
+resolver and authenticated proof. **The supplied unmodified Similharity plugin
+has no verified resolver.** Consequently, affected authenticated features are
+**disabled**, rather than transmitting plaintext or silently falling back to
+unauthenticated calls. Previously saved plaintext credentials are preserved
+until an authenticated, durably acknowledged migration is possible: upgrading
+the extension alone does not remove historical settings backups. Do not enable
+`allowKeysExposure`, and do not use real credentials in this development build.
+See `C05-CHECKLIST.md` and `C05-SERVER-CONTRACT.md` for blockers.

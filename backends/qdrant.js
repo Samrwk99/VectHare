@@ -1,5 +1,6 @@
 import {adapterCollectionId,requireTenantScope,rejectUnscopedPointOperation} from '../utils/tenant-route.js';
 import {hasVerifiedCapability} from '../utils/backend-contracts.js';
+import {verifyServerSecretContract, ProtectedCredentialUnavailable, assertNoCredentialsInUrl} from '../utils/c05-protected-credentials.js';
 import { mergeDefinedChunkMetadata, trustedQueryMetadata } from '../utils/chunk-record-metadata.js';
 /**
  * ============================================================================
@@ -69,10 +70,14 @@ export class QdrantBackend extends VectorBackend {
         let config;
 
         if (settings.qdrant_use_cloud) {
-            // Cloud mode: use URL and API key
+            assertNoCredentialsInUrl(settings.qdrant_url);
+            // Cloud credentials must be looked up by the server, never sent by the browser.
+            if (settings.qdrant_api_key) throw new ProtectedCredentialUnavailable();
+            if (!(await verifyServerSecretContract(fetch, getRequestHeaders)).verified) throw new ProtectedCredentialUnavailable();
+            // Cloud mode: use URL only
             config = {
                 url: settings.qdrant_url || null,
-                apiKey: settings.qdrant_api_key || null,
+                // The server-side plugin resolves the API key from its protected store.
                 // Explicitly clear local settings to prevent conflicts
                 host: null,
                 port: null,

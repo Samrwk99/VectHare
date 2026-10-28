@@ -168,13 +168,14 @@ test('C07 transport failure after dispatch retains uncertainty',async()=>{
  assert.equal(res.status,'needs-reconcile');
 });
 import {backendConfigurationFingerprint} from '../utils/backend-configuration.js';
-test('C06 backend cache key changes for provider, endpoint, tenant, model and credential',()=>{
+test('C06 backend cache key changes for provider, endpoint, tenant and model, without hashing raw credentials',()=>{
  const base={source:'openai',qdrant_host:'localhost',qdrant_multitenancy:false,openai_model:'a',qdrant_api_key:'a'};
  const original=backendConfigurationFingerprint('qdrant',base);
- for (const change of [{source:'cohere'},{qdrant_host:'other'},{qdrant_multitenancy:true},{openai_model:'b'},{qdrant_api_key:'rotated'}]) {
+ for (const change of [{source:'cohere'},{qdrant_host:'other'},{qdrant_multitenancy:true},{openai_model:'b'}]) {
   assert.notEqual(backendConfigurationFingerprint('qdrant',{...base,...change}),original);
  }
  assert.notEqual(backendConfigurationFingerprint('milvus',base),original);
+ assert.equal(backendConfigurationFingerprint('qdrant',{...base,qdrant_api_key:'rotated'}),original);
 });
 test('C06 backend cache fingerprint is insensitive to unrelated UI configuration',()=>{
  const x={source:'openai',qdrant_host:'localhost'};

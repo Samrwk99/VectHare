@@ -1,3 +1,4 @@
+import { requireServerCredentialResolution } from '../utils/c05-protected-credentials.js';
 import {recordId, fingerprint, stampMessageUids, messageReference, groupRecordLocalId, checkCollision, embeddingProfileFingerprint, MESSAGE_UID_FIELD} from '../utils/record-identity.js';
 import {hasVerifiedCapability} from '../utils/backend-contracts.js';
 import {chatJobs, anyJobSignal,currentChatIdentity} from './chat-job-runtime.js';
@@ -614,6 +615,8 @@ async function applyChunkConditions(chunks, chat, settings) {
  */
 async function rerankWithBananaBread(query, chunks, settings) {
     if (!chunks.length) return chunks;
+    // No rerank request can carry a browser-side credential.
+    requireServerCredentialResolution();
 
     const apiUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : 'http://localhost:8008';
     const documents = chunks.map(c => c.text);
@@ -624,7 +627,6 @@ async function rerankWithBananaBread(query, chunks, settings) {
             headers: getRequestHeaders(),
             body: JSON.stringify({
                 apiUrl,
-                apiKey: settings.bananabread_api_key || '', // Include API key for authentication
                 query,
                 documents,
                 top_k: chunks.length

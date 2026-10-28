@@ -1,3 +1,4 @@
+import { requireServerCredentialResolution } from '../utils/c05-protected-credentials.js';
 import {inspectAdapterInventory} from '../utils/c11-adapter-inventory.js';
 import {createC02Coordinator} from '../utils/c02-replacement.js';
 import {createIndexedDBOperationJournal} from '../utils/c02-operation-journal.js';
@@ -311,10 +312,8 @@ export function getVectorsRequestBody(args = {}, settings) {
             break;
         case 'bananabread':
             body.apiUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : 'http://localhost:8008';
-            // Use extension settings for API key (custom keys aren't returned by ST's readSecretState)
-            if (settings.bananabread_api_key) {
-                body.apiKey = settings.bananabread_api_key;
-            }
+            // The pinned plugin cannot resolve protected BananaBread credentials.
+            requireServerCredentialResolution();
             break;
         case 'webllm':
             body.model = settings.webllm_model;
@@ -542,10 +541,8 @@ async function createBananaBreadEmbeddings(items, settings, abortSignal = null) 
                 'Content-Type': 'application/json',
             };
 
-            // Use extension settings for API key (custom keys aren't returned by ST's readSecretState)
-            if (settings.bananabread_api_key) {
-                headers['Authorization'] = `Bearer ${settings.bananabread_api_key}`;
-            }
+            // Direct browser requests cannot use a protected server-side secret.
+            requireServerCredentialResolution();
 
             // R13: signalAbort - Stop truly cancels client-side embedding fetches
             const fetchPromise = fetch(`${cleanUrl}/v1/embeddings`, {
@@ -1006,6 +1003,8 @@ export async function deleteVectorItems(collectionId, hashes, settings, abortSig
  * @returns {Promise<{ hashes: number[], metadata: object[]}>} - Hashes and metadata of the results
  */
 export async function queryCollection(collectionId, searchText, topK, settings) {
+    // A rejected protected credential must not fall back to unauthenticated embedding.
+    if (settings?.source === 'bananabread') requireServerCredentialResolution();
     const backend = await getBackend(settings);
 
     // Sources that require client-side embedding generation
@@ -1148,6 +1147,7 @@ function scoreResults(resultsForBoost, searchText, topK, settings, overfetchAmou
  * @returns {Promise<Record<string, { hashes: number[], metadata: object[] }>>} - Results mapped to collection IDs
  */
 export async function queryMultipleCollections(collectionIds, searchText, topK, threshold, settings) {
+    if (settings?.source === 'bananabread') requireServerCredentialResolution();
     const backend = await getBackend(settings);
 
     // Sources that require client-side embedding generation

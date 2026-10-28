@@ -1,11 +1,11 @@
-/** C06 #7: invalidate backend instances when relevant provider/server settings change.
- * Fingerprints are opaque, held in memory only, and never logged or persisted.
- * The comparison includes credentials so a rotated key cannot reuse an old
- * connection, but credentials are not returned by this function.
+/** C06/C05: invalidate instances when public backend configuration changes.
+ * Never feed secrets into a short, non-cryptographic configuration hash.
+ * C05 secure writes explicitly invalidate the cached backend instead.
  */
 import {fingerprint} from './record-identity.js';
+import { C05_SECRET_FIELDS } from './c05-protected-credentials.js';
 const SHARED = new Set(['source','vector_backend','embedding_model','model','model_id','provider','provider_model',
-    'embedding_dimensions','embedding_provider','embedding_settings','api_url','api_key',
+    'embedding_dimensions','embedding_provider','embedding_settings','api_url',
     'openai_model','cohere_model','ollama_model','ollama_url','transformers_model',
     'nomicai_model','openrouter_model','llamacpp_model','vllm_model','koboldcpp_model']);
 const PREFIXES = ['qdrant_','milvus_','lancedb_','vectra_','embedding_','provider_'];
@@ -15,6 +15,7 @@ export function backendConfigurationFingerprint(backend, settings={}) {
     const picked={};
     for (const name of Object.keys(settings).sort()) {
         if (!SHARED.has(name) && !PREFIXES.some(prefix=>name.startsWith(prefix))) continue;
+        if (C05_SECRET_FIELDS.includes(name) || /(?:api[_-]?key|password|token|secret|credential)/i.test(name)) continue;
         const v=settings[name];
         if (v === undefined || typeof v==='function' || typeof v==='symbol') continue;
         // Only stable JSON values are relevant for settings. Nonserializable

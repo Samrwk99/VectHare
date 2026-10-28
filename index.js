@@ -57,14 +57,11 @@ const defaultSettings = {
     qdrant_host: 'localhost',
     qdrant_port: 6333,
     qdrant_url: '',
-    qdrant_api_key: '',
     qdrant_use_cloud: false,
     qdrant_multitenancy: false, // Use single collection with content_type field instead of separate collections
     milvus_host: 'localhost',
     milvus_port: 19530,
     milvus_username: '',
-    milvus_password: '',
-    milvus_token: '',
     milvus_address: '',
     alt_endpoint_url: '',
     use_alt_endpoint: false,
@@ -84,7 +81,6 @@ const defaultSettings = {
     webllm_model: '',
     google_model: 'text-embedding-005',
     bananabread_rerank: false,
-    bananabread_api_key: '', // Stored here since custom keys aren't returned by ST's readSecretState()
 
     // Chat vectorization
     enabled_chats: false,

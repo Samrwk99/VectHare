@@ -1,0 +1,13 @@
+{
+  "source_archive": "VectHare-Similharity-Plugin.zip",
+  "archive_sha256": "51f74de9c7e57524cc3f1f881b03069805e654b162a8f5ccb77d012b0a2604a7",
+  "plugin_index_sha256": "32a2aba3a83511a61c34620c600db5a91c04b4d638c02919a4d0bf7217a5a287",
+  "mode": "read-only source inspection; NOT a live-server test",
+  "findings": {
+    "backend_initialization_consumes_request_body": true,
+    "bananabread_embedding_reads_body_apiKey": true,
+    "bananabread_rerank_reads_body_apiKey": true,
+    "c05_resolver_route_declared": false,
+    "c05_authenticated_probe_route_declared": false
+  }
+}

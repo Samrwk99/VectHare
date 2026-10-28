@@ -94,29 +94,43 @@ test('I02 #180: debugger escapes hostile collection IDs, keyword badges, scores 
     assert.ok(!html.includes('onmouseover="alert(1)'), 'No attribute breakout');
 });
 
-test('I02 #131: clears both server secret and settings only on acknowledged success', async () => {
+test('I02 #131: clear requires protected server revocation, state proof and durable save', async () => {
     const settings = { bananabread_api_key: 'should-not-remain' };
     let commitCount = 0;
+    const contract={protocol:'vecthare-user-scoped-secrets-v1',userScope:'request-user',writeOnlyBrowser:true,
+        serverSideResolution:true,authenticatedProbe:true,
+        supportedKeys:['vecthare_qdrant_api_key','vecthare_milvus_password','vecthare_milvus_token','bananabread_api_key']};
     await clearBananaBreadKey(settings, async (url, request) => {
+        if (url.endsWith('/capabilities/secrets')) return {ok:true,json:async()=>contract};
+        if (url==='/api/secrets/read') return {ok:true,json:async()=>({bananabread_api_key:false})};
         assert.equal(url, '/api/secrets/write');
-        assert.equal(request.method, 'POST');
         assert.deepEqual(JSON.parse(request.body), { key: 'bananabread_api_key', value: '' });
         return { ok: true, text: async () => 'ok' };
-    }, { 'Content-Type': 'application/json' }, () => commitCount++);
-    assert.equal(settings.bananabread_api_key, '');
+    }, { 'Content-Type': 'application/json' }, snapshot => {
+        commitCount++;
+        assert.equal(snapshot.bananabread_api_key, undefined);
+        return true;
+    });
+    assert.equal(settings.bananabread_api_key, undefined);
     assert.equal(commitCount, 1);
 });
 
-test('I02 #131: rejection or application-level failure keeps both local settings and save state', async () => {
-    for (const response of [
-        { ok: false, text: async () => 'error' },
-        { ok: true, text: async () => '{"success":false}' },
-    ]) {
-        const settings = { bananabread_api_key: 'retain-this-key' };
-        let commits = 0;
-        await assert.rejects(clearBananaBreadKey(settings, async () => response, {}, () => commits++));
-        assert.equal(settings.bananabread_api_key, 'retain-this-key');
-        assert.equal(commits, 0);
+test('I02 #131: rejection, missing proof or unacknowledged persistence preserves legacy copy', async () => {
+    const contract={protocol:'vecthare-user-scoped-secrets-v1',userScope:'request-user',writeOnlyBrowser:true,
+        serverSideResolution:true,authenticatedProbe:true,
+        supportedKeys:['vecthare_qdrant_api_key','vecthare_milvus_password','vecthare_milvus_token','bananabread_api_key']};
+    for (const fail of ['missing-plugin','bad-write','still-set','unacknowledged-save']) {
+        const settings={bananabread_api_key:'retain-this-key'};
+        let commits=0;
+        const fetchImpl=async url=>{
+            if (url.endsWith('/capabilities/secrets')) return {ok:fail!=='missing-plugin',json:async()=>contract};
+            if (url==='/api/secrets/write') return {ok:true,text:async()=>fail==='bad-write'?'error':'ok'};
+            if (url==='/api/secrets/read') return {ok:true,json:async()=>({bananabread_api_key:fail==='still-set'})};
+            throw new Error('Unknown endpoint');
+        };
+        await assert.rejects(clearBananaBreadKey(settings,fetchImpl,{},()=>{commits++;return false;}));
+        assert.equal(settings.bananabread_api_key,'retain-this-key');
+        if (fail!=='unacknowledged-save') assert.equal(commits,0);
     }
 });
 
@@ -132,6 +146,7 @@ async function qdrantWithMock(fetchImpl) {
         '../core/constants.js': { VECTOR_LIST_LIMIT: 10000 },
         '../utils/backend-response-validation.js': { requireListedItems, requireQueryItems, hybridEndpointUnsupported },
         '../utils/chunk-record-metadata.js': { mergeDefinedChunkMetadata, trustedQueryMetadata },
+        '../utils/c05-protected-credentials.js': { verifyServerSecretContract: async () => ({ verified: true }), ProtectedCredentialUnavailable: class extends Error {}, assertNoCredentialsInUrl: () => {} },
     };
     const mod = new vm.SourceTextModule(source('backends/qdrant.js'), { context });
     await mod.link(spec => {
@@ -157,10 +172,10 @@ async function qdrantWithMock(fetchImpl) {
 test('I02 #48: Qdrant initializes without logging API key or echoed server secret', async () => {
     const secret = 'qdrant-secret-sentinel';
     const { Backend, messages } = await qdrantWithMock(async (url, options) => {
-        assert.equal(JSON.parse(options.body).apiKey, secret, 'Server still receives the key');
+        assert.equal(Object.hasOwn(JSON.parse(options.body), 'apiKey'), false, 'Browser must not send credentials');
         return { ok: true, json: async () => ({ apiKey: secret }) };
     });
-    await new Backend().initialize({ qdrant_use_cloud: true, qdrant_url: 'https://server.example', qdrant_api_key: secret });
+    await new Backend().initialize({ qdrant_use_cloud: true, qdrant_url: 'https://server.example' });
     assert.ok(!messages.join('\n').includes(secret));
 });
 
@@ -169,7 +184,7 @@ test('I02 #48: Qdrant init errors never echo backend response body or credential
     const { Backend, messages } = await qdrantWithMock(async () => ({
         ok: false, status: 500, text: async () => `Auth error: ${secret}`,
     }));
-    await assert.rejects(new Backend().initialize({ qdrant_use_cloud: true, qdrant_api_key: secret }), error => {
+    await assert.rejects(new Backend().initialize({ qdrant_use_cloud: true }), error => {
         assert.ok(!error.message.includes(secret));
         assert.match(error.message, /HTTP 500/);
         return true;
