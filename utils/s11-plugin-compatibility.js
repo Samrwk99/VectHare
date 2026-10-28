@@ -5,9 +5,9 @@
  */
 import { guardedVectorFetch } from './e02-vector-request-gateway.js';
 export const S11_EXPECTED_PLUGIN = Object.freeze({
-    pluginVersion: '3.2.10-s10.16-f12',
+    pluginVersion: '3.2.10-s10.21-f09b4c',
     contractVersion: 2,
-    sourceFingerprint: 'b69848c2e8b2c1e0ed2c78558f609271fdfc5d7614d44296700b7034704a320a',
+    sourceFingerprint: 'b773c4cbc1c4799b76635f6e09054da419601dd85f174ea7f90ffcd3e4c33090',
 });
 export const S11_BACKENDS = Object.freeze(['standard','lancedb','qdrant','milvus']);
 const ROOT = '/api/plugins/similharity';
@@ -47,6 +47,15 @@ export function validateS11Discovery(build,caps,contracts,expected=S11_EXPECTED_
         contracts.routes['POST /v2/diagnostics/milvus-f08']!=='F08_DISPOSABLE_MILVUS_ACCEPTANCE_NOT_PRODUCTION' ||
         contracts.routes['POST /v2/records/milvus-pilot-mutate']!=='F08_SOURCE_BOUND_LOCAL_MILVUS_PILOT_NOT_PRODUCTION' ||
         contracts.routes['POST /v2/workflows/preview']!=='F09_SOURCE_BOUND_V2_CANDIDATE_PREVIEW_ONLY' ||
+        contracts.routes['POST /v2/workflows/retrieve']!=='F09B_VERIFIED_SOURCE_BOUND_READ_ONLY_PROMPT_CANDIDATES' ||
+        contracts.routes['POST /v2/workflows/chat-sync-plan']!=='F09B_SAVED_HOST_CHAT_READ_ONLY_STABLE_ID_SYNC_PLAN' ||
+        caps.f09bReadOnlyChatSyncPlannerAvailable!==true ||
+        caps.f09b3ExplicitLocalChatSyncPilotAvailable!==true ||
+        caps.f09b4ExactMessageLifecyclePilotAvailable!==true || caps.f09b4ManagedOrphanPilotAvailable!==true ||
+        contracts.routes['POST /v2/workflows/chat-lifecycle-pilot']!=='F09B4_EXACT_SAVED_MESSAGE_DELETE_REVECTOR_AND_RECEIPT_INSPECTION_PILOT' ||
+        contracts.routes['POST /v2/workflows/chat-orphan-pilot']!=='F09B4_MANAGED_RECORD_MANIFEST_SOURCE_ATTESTED_ORPHAN_PREVIEW_AND_EXPLICIT_DELETE_PILOT' ||
+        contracts.routes['POST /v2/workflows/chat-sync-pilot-apply']!=='F09B3_LOCAL_PLUGIN_ONE_RECORD_SERVER_EMBEDDED_PILOT_NOT_PRODUCTION' ||
+        caps.f09bSourceBoundPromptRetrievalAvailable!==true ||
         contracts.routes['POST /v2/recovery/capture']!=='F10_TWO_PASS_SCOPED_EVIDENCE_NOT_FULL_BACKUP' ||
         contracts.routes['POST /v2/recovery/status']!=='F10_CHECKSUM_AND_SOURCE_BOUND_RECEIPT_ONLY' ||
         contracts.routes['POST /v2/recovery/download']!=='F10_NONAUTHORITATIVE_EVIDENCE_DOWNLOAD_ONLY' ||
@@ -99,7 +108,7 @@ export function renderS11CompatibilityStatus(root,status,doc=globalThis.document
         node.setAttribute('role','status');node.style.padding='0.5em';
         node.style.marginBottom='0.5em';root.prepend(node);}
     node.textContent=status?.compatible
-        ? 'Similharity F12 detected. Release gate and GUI readiness reporting, guarded F01–F09 development tools and F10 non-authoritative record evidence are available. Automatic writes, native Standard mutations, legacy migration, complete backup and restore remain blocked.'
+        ? 'Similharity F09b.4 completion detected. Verified v2 read-only prompt integration and release gate and GUI readiness reporting, guarded F01–F09 development tools and F10 non-authoritative record evidence are available. Automatic writes, native Standard mutations, legacy migration, complete backup and restore remain blocked.'
         : 'Similharity S10 compatibility not verified. Unsafe operations remain disabled.';
     return true;
 }

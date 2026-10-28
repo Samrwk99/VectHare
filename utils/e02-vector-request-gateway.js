@@ -156,6 +156,120 @@ export function inspectVectorRequest(url, options={}) {
             fail(req,'f09-source-bound-preview-required');
         return {intercepted:true,allowed:true,transport:'plugin',operation:'f09CandidatePreview',backend:b.backend,method:'POST'};
     }
+    // F09b continuation: server-read saved-chat synchronization PLAN, never
+    // a mutation, legacy inventory, or a browser-provided message body.
+    if(req.transport==='plugin'&&req.suffix==='/v2/workflows/chat-sync-plan'){
+        const b=req.body,source=b?.source,embedding=b?.embedding;
+        const keys=source?.kind==='chat'?['kind','avatar','chatFile']:
+            source?.kind==='group-chat'?['kind','groupId','chatFile']:[];
+        if(req.method!=='POST'||!b||!keys.length||!source||
+           Object.keys(source).some(k=>!keys.includes(k))||
+           keys.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220)||
+           !embedding||typeof embedding!=='object'||Array.isArray(embedding)||
+           Object.keys(embedding).some(k=>!['source','model','dimension','metric'].includes(k))||
+           !['qdrant','milvus','lancedb','vectra'].includes(b.backend)||
+           (b.configId!==undefined&&!['local','default'].includes(b.configId))||
+           Object.keys(b).some(k=>!['backend','source','embedding','configId'].includes(k)))
+            fail(req,'f09b-host-chat-sync-plan-shape-required');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:'f09bChatSyncPlan',backend:b.backend,method:'POST'};
+    }
+    // F09b.3: explicitly confirmed, one-record saved-chat sync PILOT.
+    // Server owns text, vector, record and operation IDs. This is not normal
+    // automatic vectorization and does not enable general E02 mutations.
+    if(req.transport==='plugin'&&req.suffix==='/v2/workflows/chat-sync-pilot-apply'){
+        const b=req.body,source=b?.source,embedding=b?.embedding;
+        const keys=source?.kind==='chat'?['kind','avatar','chatFile']:
+          source?.kind==='group-chat'?['kind','groupId','chatFile']:[];
+        if(req.method!=='POST'||!['qdrant','lancedb','vectra','milvus'].includes(b?.backend)||
+           b.configId!==(b.backend==='qdrant'?'local':'default')||!keys.length||
+           Object.keys(source).some(k=>!keys.includes(k))||
+           keys.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220)||
+           !embedding||typeof embedding!=='object'||Array.isArray(embedding)||
+           Object.keys(embedding).some(k=>!['source','model','dimension','metric'].includes(k))||
+           !['transformers','openai','togetherai','mistral','electronhub','openrouter','nomicai','cohere'].includes(embedding.source)||
+           !Number.isSafeInteger(embedding.dimension)||embedding.dimension<1||embedding.dimension>65536||
+           typeof embedding.model!=='string'||!embedding.model||
+           !['cosine','dot','euclid'].includes(embedding.metric)||
+           b.experimentalConsent!=='I ACCEPT LOCAL CHAT SYNC PILOT'||
+           !/^[a-f0-9]{64}$/.test(b.sourceRevisionFingerprint||'')||
+           Object.keys(b).some(k=>!['backend','source','embedding','configId','experimentalConsent','sourceRevisionFingerprint'].includes(k)))
+            fail(req,'f09b3-source-owned-sync-pilot-required');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:'f09b3OneRecordSyncPilot',backend:b.backend,method:'POST'};
+    }
+    // F09b.4: exact host-saved message lifecycle pilot. Browser may specify a
+    // bounded ordinal only; it cannot nominate a record, vector or owner.
+    // F09b.4 completion: a source-attested, exact MANAGED orphan pilot.
+    // Browser sends only a bounded ordinal and a snapshot fingerprint;
+    // records and ownership are selected exclusively by the server.
+    if(req.transport==='plugin'&&req.suffix==='/v2/workflows/chat-orphan-pilot'){
+        const b=req.body,source=b?.source,embedding=b?.embedding;
+        const keys=source?.kind==='chat'?['kind','avatar','chatFile']:
+          source?.kind==='group-chat'?['kind','groupId','chatFile']:[];
+        if(req.method!=='POST'||!['qdrant','lancedb','vectra','milvus'].includes(b?.backend)||
+           b.configId!==(b.backend==='qdrant'?'local':'default')||!keys.length||
+           Object.keys(source).some(k=>!keys.includes(k))||
+           keys.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220)||
+           !embedding||typeof embedding!=='object'||Array.isArray(embedding)||
+           Object.keys(embedding).some(k=>!['source','model','dimension','metric'].includes(k))||
+           !['transformers','openai','togetherai','mistral','electronhub','openrouter','nomicai','cohere'].includes(embedding.source)||
+           !Number.isSafeInteger(embedding.dimension)||embedding.dimension<1||embedding.dimension>65536||
+           typeof embedding.model!=='string'||!embedding.model||
+           !['cosine','dot','euclid'].includes(embedding.metric)||
+           !['preview','delete','inspect'].includes(b.mode)||
+           (b.mode==='delete'&&!/^[a-f0-9]{64}$/.test(b.sourceRevisionFingerprint||''))||
+           (b.mode==='preview'&&(b.orphanIndex!==undefined||b.registryFingerprint!==undefined||b.operationId!==undefined||b.experimentalConsent!==undefined||b.sourceRevisionFingerprint!==undefined))||
+           (b.mode==='inspect'&&(!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(b.operationId||'')||b.orphanIndex!==undefined||b.registryFingerprint!==undefined||b.experimentalConsent!==undefined||b.sourceRevisionFingerprint!==undefined))||
+           (b.mode==='delete'&&(!Number.isSafeInteger(b.orphanIndex)||b.orphanIndex<0||b.orphanIndex>=2000||
+             !/^[a-f0-9]{64}$/.test(b.registryFingerprint||'')||
+             b.experimentalConsent!=='I ACCEPT VERIFIED MANAGED ORPHAN DELETE PILOT'))||
+           Object.keys(b).some(k=>!['backend','source','embedding','configId','mode','sourceRevisionFingerprint',
+             'registryFingerprint','orphanIndex','operationId','experimentalConsent'].includes(k)))
+            fail(req,'f09b4-managed-orphan-pilot-required');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:'f09b4ManagedOrphanPilot',backend:b.backend,method:'POST'};
+    }
+    if(req.transport==='plugin'&&req.suffix==='/v2/workflows/chat-lifecycle-pilot'){
+        const b=req.body,source=b?.source,embedding=b?.embedding;
+        const keys=source?.kind==='chat'?['kind','avatar','chatFile']:
+          source?.kind==='group-chat'?['kind','groupId','chatFile']:[];
+        if(req.method!=='POST'||!['qdrant','lancedb','vectra','milvus'].includes(b?.backend)||
+           b.configId!==(b.backend==='qdrant'?'local':'default')||!keys.length||
+           Object.keys(source).some(k=>!keys.includes(k))||
+           keys.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220)||
+           !embedding||typeof embedding!=='object'||Array.isArray(embedding)||
+           Object.keys(embedding).some(k=>!['source','model','dimension','metric'].includes(k))||
+           !['transformers','openai','togetherai','mistral','electronhub','openrouter','nomicai','cohere'].includes(embedding.source)||
+           !Number.isSafeInteger(embedding.dimension)||embedding.dimension<1||embedding.dimension>65536||
+           typeof embedding.model!=='string'||!embedding.model||
+           !['cosine','dot','euclid'].includes(embedding.metric)||
+           !Number.isSafeInteger(b.messageIndex)||b.messageIndex<0||b.messageIndex>=80||
+           !/^[a-f0-9]{64}$/.test(b.sourceRevisionFingerprint||'')||
+           !['delete','revector','inspect'].includes(b.action)||
+           (b.action==='delete'&&(b.experimentalConsent!=='I ACCEPT EXACT MESSAGE VECTOR DELETE PILOT'||b.operationId!==undefined))||
+           (b.action==='revector'&&(b.experimentalConsent!=='I ACCEPT EXACT MESSAGE REVECTOR PILOT'||b.operationId!==undefined))||
+           (b.action==='inspect'&&(!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(b.operationId||'')||b.experimentalConsent!==undefined))||
+           Object.keys(b).some(k=>!['backend','source','embedding','configId','sourceRevisionFingerprint','messageIndex','action','experimentalConsent','operationId'].includes(k)))
+            fail(req,'f09b4-exact-message-lifecycle-shape-required');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:'f09b4ExactMessagePilot',backend:b.backend,method:'POST'};
+    }
+    // F09b: source-attested read-only retrieval for an opt-in, token-budgeted
+    // prompt path. This does NOT permit memory mutation or arbitrary scope.
+    if(req.transport==='plugin'&&req.suffix==='/v2/workflows/retrieve'){
+        const b=req.body,source=b?.source,embedding=b?.embedding;
+        const sourceKeys=source?.kind==='chat'?['kind','avatar','chatFile']:
+            source?.kind==='group-chat'?['kind','groupId','chatFile']:
+            source?.kind==='lorebook'?['kind','name']:[];
+        if(req.method!=='POST'||!b||!sourceKeys.length||!source||
+           Object.keys(source).some(k=>!sourceKeys.includes(k))||
+           sourceKeys.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220)||
+           !embedding||typeof embedding!=='object'||Array.isArray(embedding)||
+           Object.keys(embedding).some(k=>!['source','model','dimension','metric'].includes(k))||
+           !['qdrant','milvus','lancedb','vectra'].includes(b.backend)||
+           (b.configId!==undefined&&!['local','default'].includes(b.configId))||
+           !Array.isArray(b.vector)||!Number.isInteger(b.topK)||b.topK<1||b.topK>30||
+           Object.keys(b).some(k=>!['backend','source','embedding','configId','vector','topK'].includes(k)))
+            fail(req,'f09b-source-bound-retrieval-required');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:'f09bVerifiedRetrieval',backend:b.backend,method:'POST'};
+    }
     // F10: authenticated bounded RECORD EVIDENCE, never an authoritative export,
     // restore, migration or production mutation permission. Strict body shape.
     if(req.transport==='plugin'&&/^\/v2\/recovery\/(?:capture|status|download)$/.test(req.suffix)){

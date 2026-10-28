@@ -27,7 +27,7 @@ function coreScope(options={}) {
   console:quiet,
   chatJobs: {startJob: () => ({assertCurrent(){},finish(){},signal:{aborted:false}})},
   StaleJobError: class StaleJobError extends Error {},
-  EXTENSION_PROMPT_TAG:'3_vecthare',LEGACY_WORLD_INFO_PROMPT_TAG:'vecthare_world_info',extension_prompts:{},
+  F09B_PROMPT_TAG:'vecthare_f09b_verified_v2', EXTENSION_PROMPT_TAG:'3_vecthare',LEGACY_WORLD_INFO_PROMPT_TAG:'vecthare_world_info',extension_prompts:{},
   promptReceipts:{invalidate(){}},makePromptSentinel:()=> '0123456789abcdef0123456789abcdef',
   wrapPromptBlock:(text,nonce,i)=>`<!-- VH:${nonce}:${i}:BEGIN -->\n${text}\n<!-- VH:${nonce}:${i}:END -->`,
   frequencyRecordKey:chunk=>String(chunk.recordId??chunk.hash),

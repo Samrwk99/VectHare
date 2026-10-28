@@ -45,7 +45,7 @@ function makeRuntime() {
         console: quiet, settings, extension_prompts,
         chatJobs: {startJob: () => ({assertCurrent(){},finish(){},signal:{aborted:false}})},
         StaleJobError: class StaleJobError extends Error {},
-        EXTENSION_PROMPT_TAG: '3_vecthare', LEGACY_WORLD_INFO_PROMPT_TAG: 'vecthare_world_info',
+        F09B_PROMPT_TAG:'vecthare_f09b_verified_v2', EXTENSION_PROMPT_TAG: '3_vecthare', LEGACY_WORLD_INFO_PROMPT_TAG: 'vecthare_world_info',
         setExtensionPrompt: (tag, text, position, depth, scan) => {
             calls.push({ tag, text, position, depth, scan });
             extension_prompts[tag] = { value: text, position, depth };

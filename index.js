@@ -2,6 +2,8 @@ import {buildRecoveryReport} from './utils/e03-recovery.js';
 import { guardedVectorFetch as fetch } from './utils/e02-vector-request-gateway.js';
 import {renderF02ReadPanel} from './utils/f02-public-read-client.js';
 import {renderF09MemoryPreview} from './utils/f09-memory-workflow.js';
+import {renderF09bV2Controls} from './utils/f09b-v2-controls.js';
+import {renderF09bChatSyncPreview} from './utils/f09b-sync-preview.js';
 import {renderF10RecoveryPanel} from './utils/f10-recovery-client.js';
 import {renderF11SetupCenter,groupF11DeveloperPanels} from './utils/f11-setup-center.js';
 import {renderF12ReleaseCenter} from './utils/f12-release-center.js';
@@ -32,6 +34,7 @@ import {
     eventSource,
     event_types,
     getRequestHeaders,
+    saveSettingsDebounced,
     extension_prompt_types,
 } from '../../../../script.js';
 import {
@@ -102,6 +105,13 @@ const defaultSettings = {
     webllm_model: '',
     google_model: 'text-embedding-005',
     bananabread_rerank: false,
+
+    // F09b opt-in verified-v2 retrieval; no automatic mutation activation.
+    f09b_v2_prompt_enabled:false,
+    f09b_backend:'qdrant',
+    f09b_embedding_model:'',
+    f09b_embedding_dimension:0,
+    f09b_embedding_metric:'cosine',
 
     // Chat vectorization
     enabled_chats: false,
@@ -589,6 +599,8 @@ jQuery(async () => {
         renderF01SourceAttestation(document.querySelector('.vecthare_settings'));
         renderF02ReadPanel(document.querySelector('.vecthare_settings'),()=>settings);
         renderF09MemoryPreview(document.querySelector('.vecthare_settings'),()=>settings);
+        renderF09bV2Controls(document.querySelector('.vecthare_settings'),()=>settings,saveSettingsDebounced);
+        renderF09bChatSyncPreview(document.querySelector('.vecthare_settings'),()=>settings);
         renderF10RecoveryPanel(document.querySelector('.vecthare_settings'),()=>settings);
         renderF03ProvisionPanel(document.querySelector('.vecthare_settings'),()=>settings);
         renderF04PilotPanel(document.querySelector('.vecthare_settings'),()=>settings);

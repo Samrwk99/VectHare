@@ -10,6 +10,7 @@ import {promptReceipts} from './prompt-receipt-runtime.js';
 import {worldInfoSnapshots} from '../utils/world-info-identity.js';
 import {StaleJobError} from './job-context.js';
 import {planReplacement} from '../utils/replacement-safety.js';
+import {injectF09bV2,F09B_PROMPT_TAG} from '../utils/f09b-v2-injection.js';
 /**
  * ============================================================================
  * VECTHARE CHAT VECTORIZATION
@@ -32,6 +33,7 @@ import { mergeSemanticWorldInfoChunks } from '../utils/world-info-dedup.js';
 import { cleanText } from './text-cleaning.js';
 import {
     getSavedHashes,
+    getAdditionalArgs,
     insertVectorItems,
     queryCollection,
     queryActiveCollections,
@@ -723,6 +725,10 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
 
 async function synchronizeChatScoped(settings,batchSize,bypassAutoSync,job) {
     job.assertCurrent();
+    // F09b uses source-attested UUID records; never feed those records into the
+    // legacy numeric-hash chat synchronizer. F09c owns safe v2 auto-mutations.
+    if(settings.f09b_v2_prompt_enabled===true)return {remaining:-1,messagesProcessed:0,chunksCreated:0,
+        blocked:true,reason:'F09B_V2_MUTATIONS_PENDING_F09C_ACCEPTANCE'};
     // Build proper collection ID using chat UUID first
     const collectionId = getChatCollectionId();
     job.assertCurrent();
@@ -1984,6 +1990,7 @@ function hasInjectableText(chunk) {
 /** Clear every prompt tag created by VectHare, including legacy WI injection. */
 function clearVectHarePrompts(settings) {
     promptReceipts.invalidate();
+    setExtensionPrompt(F09B_PROMPT_TAG,'',settings?.position ?? 0,settings?.depth ?? 2,false);
     setExtensionPrompt(EXTENSION_PROMPT_TAG, '', settings?.position ?? 0, settings?.depth ?? 2, false);
     // Enumerate actual registered tags: a previous turn might have created >10 positions.
     const prefix = `${EXTENSION_PROMPT_TAG}_pos`;
@@ -2349,6 +2356,60 @@ export async function rearrangeChat(chat, settings, type) {
         if (minChatLength > 0 && chat.length < minChatLength) {
             console.warn(`⚠️ VectHare: Not enough messages to inject chunks (${chat.length} < ${minChatLength})`);
             console.log(`   💡 You need at least ${minChatLength} messages before chunk injection starts`);
+            return;
+        }
+
+        // F09b: fully separate source-attested v2 prompt path (opt-in).
+        // Never fall back to legacy hash-based retrieval when the v2 path fails:
+        // that would mix incompatible identity and ownership contracts.
+        if (settings.f09b_v2_prompt_enabled === true) {
+            try {
+                const queryText=buildSearchQuery(chat,settings);
+                const result=await injectF09bV2({chat,settings,queryText,
+                    getChatId:getCurrentChatId,getContext,getHeaders:getRequestHeaders,
+                    embedText:async(text,profile)=>{
+                        // Only a locally configured provider with direct embeddings is
+                        // supported in F09b. The protected server credentials for other
+                        // providers belong to F11b, not browser-side workarounds.
+                        if(profile.source!=='webllm')throw Error('F09B_PROVIDER_NOT_YET_SERVER_MANAGED');
+                        const args=await getAdditionalArgs([text],profile);
+                        return args.embeddings?.[text];
+                    },setPrompt:setExtensionPrompt,prompts:extension_prompts,
+                    assertCurrent:()=>job.assertCurrent(),
+                    tokenizer:typeof getContext()?.getTokenCountAsync==='function'?
+                        text=>getContext().getTokenCountAsync(text):
+                        typeof getContext()?.getTokenCount==='function'?
+                        text=>getContext().getTokenCount(text):null,
+                    maxContext:getContext()?.maxContext,signal:job.signal});
+                job.assertCurrent();
+                if(result.status==='REGISTERED_UNWITNESSED'){
+                    const lastUser=[...chat].reverse().find(m=>m?.is_user);
+                    const registered=promptReceipts.register({chatId:chatIdForActivation(),
+                        turnId:lastUser?.extra?.vecthareMessageUid??null,
+                        nonce:result.nonce,groups:[{tag:F09B_PROMPT_TAG,text:result.block,
+                            recordIds:result.recordIds,frequencyEntries:[]}]});
+                    if(registered.status!=='registered')throw Error('F09B_RECEIPT_REGISTRATION_FAILED');
+                }
+                const debug=createDebugData();debug.stopReason='f09b_v2_retrieval';
+                debug.f09b={status:result.status,candidateCount:result.candidateCount??0,
+                    registeredIds:result.recordIds??[],finalAssemblyVerified:false};
+                if(result.status==='REGISTERED_UNWITNESSED')debug.injection={verified:false,
+                    finalReceipt:{status:'registered',verified:false},receiptNonce:result.nonce,
+                    groups:[{tag:F09B_PROMPT_TAG,recordIds:result.recordIds,text:result.block}],
+                    charCount:result.block.length,readOnlyV2:true};
+                setLastSearchDebug(debug);
+            } catch(error) {
+                // A cancelled older job must NOT clear a newer chat's prompt.
+                let stillCurrent=false;try{job.assertCurrent();stillCurrent=true;}catch{}
+                if(stillCurrent){
+                    setExtensionPrompt(F09B_PROMPT_TAG,'',settings.position??0,settings.depth??2,false);
+                    promptReceipts.invalidate();
+                }
+                console.warn('VectHare F09b verified v2 retrieval unavailable:',error?.message);
+                const debug=createDebugData();debug.stopReason='f09b_v2_fail_closed';
+                debug.f09b={status:'BLOCKED',reason:error?.message||'unknown'};
+                if(stillCurrent)setLastSearchDebug(debug);
+            }
             return;
         }
 

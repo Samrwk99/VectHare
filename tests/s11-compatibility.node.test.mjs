@@ -7,7 +7,7 @@ const root='/api/plugins/similharity';
 function reports(){
  const build={pluginVersion:S11_EXPECTED_PLUGIN.pluginVersion, contractVersion:2,sourceFingerprint:S11_EXPECTED_PLUGIN.sourceFingerprint,verification:'MATCHED_LOCAL_SOURCE_MANIFEST'};
  const operations=Object.fromEntries(['insert','delete','updateText','updateMetadata','operationSubmit'].map(v=>[v,'DENIED_NOT_LIVE_CERTIFIED']));
- const caps={...build,buildVerification:build.verification,capabilityClaimsArePermissions:false,productionCertified:false,publicV2MutationsEnabled:false,publicV2ReadsEnabled:false,publicV2ReadRoutesAvailable:true,guardedNewCollectionProvisioningAvailable:true,experimentalQdrantPilotMutationsAvailable:true,extendedQdrantDisposableAcceptanceAvailable:true,disposableLanceDBAcceptanceAvailable:true,sourceBoundLanceDBProvisioningAvailable:true,experimentalLanceDBPilotMutationsAvailable:true,sourceBoundVectraProvisioningAvailable:true,experimentalVectraPilotMutationsAvailable:true,disposableVectraAcceptanceAvailable:true,sourceBoundMilvusProvisioningAvailable:true,experimentalMilvusPilotMutationsAvailable:true,disposableMilvusAcceptanceAvailable:true,f10NonAuthoritativeEvidenceCaptureAvailable:true,f11GuiReadinessAvailable:true,f12ReadOnlyReleaseAssessmentAvailable:true,backends:Object.fromEntries(['standard','lancedb','qdrant','milvus'].map(b=>[b,{operations}]))};
+ const caps={...build,buildVerification:build.verification,capabilityClaimsArePermissions:false,productionCertified:false,publicV2MutationsEnabled:false,publicV2ReadsEnabled:false,publicV2ReadRoutesAvailable:true,guardedNewCollectionProvisioningAvailable:true,experimentalQdrantPilotMutationsAvailable:true,extendedQdrantDisposableAcceptanceAvailable:true,disposableLanceDBAcceptanceAvailable:true,sourceBoundLanceDBProvisioningAvailable:true,experimentalLanceDBPilotMutationsAvailable:true,sourceBoundVectraProvisioningAvailable:true,experimentalVectraPilotMutationsAvailable:true,disposableVectraAcceptanceAvailable:true,sourceBoundMilvusProvisioningAvailable:true,experimentalMilvusPilotMutationsAvailable:true,disposableMilvusAcceptanceAvailable:true,f09bSourceBoundPromptRetrievalAvailable:true,f09bReadOnlyChatSyncPlannerAvailable:true,f09b3ExplicitLocalChatSyncPilotAvailable:true,f09b4ExactMessageLifecyclePilotAvailable:true,f09b4ManagedOrphanPilotAvailable:true,f10NonAuthoritativeEvidenceCaptureAvailable:true,f11GuiReadinessAvailable:true,f12ReadOnlyReleaseAssessmentAvailable:true,backends:Object.fromEntries(['standard','lancedb','qdrant','milvus'].map(b=>[b,{operations}]))};
  const contracts={contractVersion:2,executionCertified:false,routes:{'POST /v2/operations/submit':'DENIED','POST /v2/reads/get':'GUARDED_F02_HOST_SOURCE_V2_SCHEMA_ONLY',
  'POST /v2/collections/preview':'F03_SOURCE_BOUND_NEW_COLLECTION_PREVIEW_ONLY',
  'POST /v2/collections/provision':'F03_EXPLICIT_SOURCE_BOUND_EMPTY_SCHEMA_CREATION_UNCERTIFIED',
@@ -19,6 +19,11 @@ function reports(){
  'POST /v2/diagnostics/vectra-f07':'F07_LOCAL_VECTRA_DISPOSABLE_ACCEPTANCE_NOT_PRODUCTION',
  'POST /v2/records/vectra-pilot-mutate':'F07_SOURCE_BOUND_LOCAL_PLUGIN_VECTRA_PILOT_NOT_NATIVE_STANDARD',
  'POST /v2/workflows/preview':'F09_SOURCE_BOUND_V2_CANDIDATE_PREVIEW_ONLY',
+ 'POST /v2/workflows/retrieve':'F09B_VERIFIED_SOURCE_BOUND_READ_ONLY_PROMPT_CANDIDATES',
+ 'POST /v2/workflows/chat-sync-plan':'F09B_SAVED_HOST_CHAT_READ_ONLY_STABLE_ID_SYNC_PLAN',
+ 'POST /v2/workflows/chat-sync-pilot-apply':'F09B3_LOCAL_PLUGIN_ONE_RECORD_SERVER_EMBEDDED_PILOT_NOT_PRODUCTION',
+ 'POST /v2/workflows/chat-lifecycle-pilot':'F09B4_EXACT_SAVED_MESSAGE_DELETE_REVECTOR_AND_RECEIPT_INSPECTION_PILOT',
+ 'POST /v2/workflows/chat-orphan-pilot':'F09B4_MANAGED_RECORD_MANIFEST_SOURCE_ATTESTED_ORPHAN_PREVIEW_AND_EXPLICIT_DELETE_PILOT',
  'GET /v2/setup/readiness':'F11_REDACTED_GUI_DEVELOPMENT_READINESS_NO_HEALTH_OR_WRITE_GRANT',
  'GET /v2/release/assessment':'F12_READ_ONLY_NO_GO_NO_HOST_EVIDENCE_OR_ACTIVATION',
  'POST /v2/recovery/capture':'F10_TWO_PASS_SCOPED_EVIDENCE_NOT_FULL_BACKUP',
