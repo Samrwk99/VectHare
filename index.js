@@ -7,7 +7,7 @@
  * All chunk operations go through unified /chunks/* endpoints.
  * Backend is specified via `backend` parameter in request body.
  *
- * @version 3.2.10-s10.5-f01
+ * @version 3.2.10-s10.6-f02
  */
 
 import path from 'node:path';
@@ -24,6 +24,7 @@ import { registerGuiConnectionRoutes } from './lib/s10-gui-connections.js';
 import { safeLegacyPhysicalName } from './lib/s02-identity.js';
 import { registerS04Routes } from './lib/s04-routes.js';
 import { registerS05Routes } from './lib/s05-routes.js';
+import {registerF02Routes} from './lib/f02-public-reads.js';
 import { loadS10Build } from './lib/s10-build.js';
 import { registerS10Routes } from './lib/s10-contracts.js';
 import {registerH01AcceptanceRoutes} from './lib/h01-qdrant-acceptance.js';
@@ -31,7 +32,7 @@ import {registerF01HostRoutes} from './lib/f01-host-sources.js';
 import { validateVector as validateS05Vector } from './lib/s05-contract.js';
 
 const pluginName = 'similharity';
-const pluginVersion = '3.2.10-s10.5-f01';
+const pluginVersion = '3.2.10-s10.6-f02';
 
 /**
  * Initialize the plugin
@@ -72,7 +73,12 @@ export async function init(router) {
     router.use(legacyReadBoundary);
     // S04 endpoints are preflight/status-only. No public mutation dispatch.
     registerS04Routes(router);
-    registerS05Routes(router);
+    const f02ReadHandler=registerF02Routes(router,{backendPool,createVectra:async(req,binding)=>{
+        // No fabricated index seal or auto-creation: S08 refuses unprovisioned Vectra.
+        const index=new vectra.LocalIndex(path.join(req.s03.vectorsPath,'vectra-v2',binding.collection.physicalName));
+        return {index};
+    }});
+    registerS05Routes(router,{readHandler:f02ReadHandler});
     registerS10Routes(router, s10Build);
     registerH01AcceptanceRoutes(router,{backendPool});
     registerF01HostRoutes(router);

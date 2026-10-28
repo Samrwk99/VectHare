@@ -10,6 +10,7 @@ import { authenticatedContext, forbidOwnerSpoof, validateClientConfig,lookupAuth
     legacyReadBoundary,s03SensitiveRouteBoundary,AccessError,exposedSafeSource } from '../lib/s03-security.js';
 import { safeLegacyPhysicalName } from '../lib/s02-identity.js';
 import {registerF01HostRoutes} from '../lib/f01-host-sources.js';
+import {registerF02Routes} from '../lib/f02-public-reads.js';
 import { registerS04Routes } from '../lib/s04-routes.js';
 import {registerS05Routes} from '../lib/s05-routes.js';
 import {registerS10Routes} from '../lib/s10-contracts.js';
@@ -38,6 +39,7 @@ async function registered(pool) {
             './lib/s10-contracts.js':{registerS10Routes},
             './lib/h01-qdrant-acceptance.js':{registerH01AcceptanceRoutes:()=>{}},
             './lib/f01-host-sources.js':{registerF01HostRoutes},
+            './lib/f02-public-reads.js':{registerF02Routes},
             './lib/s10-gui-connections.js':{registerGuiConnectionRoutes:()=>{}}
         };
         assert.ok(objects[specifier],`unexpected import: ${specifier}`);
@@ -176,4 +178,31 @@ test('F01 real plugin router authenticates user and attests only an owned source
   assert.equal(okay.statusCode,200);assert.equal(okay.payload.hostSourceOwnerVerified,true);
   assert.equal(okay.payload.scope.branchId,okay.payload.sourceId);
   assert.equal(okay.payload.publicWritesEnabled,false);
+}));
+
+test('F02 actual plugin router requires authenticated owned-file bind and never invokes backend for forgery',async()=>disposable(async dir=>{
+ const root=path.join(dir,'alice'),vectors=path.join(root,'vectors'),chats=path.join(root,'chats'),characters=path.join(root,'characters');
+ for(const d of [vectors,path.join(chats,'Nina'),characters,path.join(root,'worlds'),path.join(root,'groups'),path.join(root,'groupChats')])await fs.mkdir(d,{recursive:true});
+ await fs.writeFile(path.join(characters,'Nina.png'),'avatar');
+ await fs.writeFile(path.join(chats,'Nina','one.jsonl'),JSON.stringify({chat_metadata:{integrity:'original'}})+'\n');
+ const user={profile:{handle:'alice'},directories:{root,vectors,chats,characters,worlds:path.join(root,'worlds'),groups:path.join(root,'groups'),groupChats:path.join(root,'groupChats')}};
+ let called=0;
+ const pool={get:async()=>{called++;return {_request:async(m,p,b)=>{
+  if(m==='GET')return {result:{config:{params:{vectors:{size:3,distance:'Cosine'}}}}};
+  if(p.endsWith('/points/scroll'))return {result:{points:[],next_page_offset:null}};
+  throw Error('unexpected API');
+ }};}};
+ const call=await registered(pool);
+ const request={backend:'qdrant',configId:'local',source:{kind:'chat',avatar:'Nina.png',chatFile:'one'},
+   embedding:{source:'transformers',model:'small',dimension:3,metric:'cosine'}};
+ const bad=await call('POST','/v2/reads/bind',{body:request});
+ assert.equal(bad.statusCode,401);assert.equal(called,0);
+ const bind=await call('POST','/v2/reads/bind',{body:request,user});
+ assert.equal(bind.statusCode,200);assert.equal(bind.payload.physicalCollectionProvisioned,false);
+ const spoof=await call('POST','/v2/reads/list',{body:{...request,collectionId:'elsewhere'},user});
+ assert.equal(spoof.statusCode,403);assert.equal(spoof.payload.code,'F02_CLIENT_SCOPE_FORBIDDEN');assert.equal(called,0);
+ const page=await call('POST','/v2/reads/list',{body:{...request,page:{limit:4}},user});
+ assert.equal(page.statusCode,200);assert.deepEqual(page.payload.data.items,[]);assert.equal(called,1);
+ const legacy=await call('POST','/chunks/query',{body:{backend:'qdrant'},user});
+ assert.equal(legacy.statusCode,409);assert.equal(legacy.payload.code,'S03_SHARED_LEGACY_READ_UNVERIFIED');
 }));
