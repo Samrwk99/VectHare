@@ -1,17 +1,17 @@
 {
   "formatVersion": 1,
   "contractVersion": 2,
-  "pluginVersion": "3.2.10-s10.0",
+  "pluginVersion": "3.2.10-s10.1",
   "algorithm": "sha256",
   "files": {
-    "index.js": "e82fe10e3c10ab5cc1e42ce9450ba25dd67be0ada3980b86065f15e16ff37b55",
+    "index.js": "0c115a82b75af9bf1d1e179066d107b3d53793f6f8d12a52e1fddf627b9ee5b5",
     "lancedb-backend.js": "a3cd5b9cafd1686a6775b24345a48611b396e5cd2672a028b57b154335d499de",
     "lib/s01-safety.js": "559917c958cdc7f6573e0d38bbe04d22199da726224aa38b1e0d74fe3d086310",
     "lib/s02-identity.js": "fd525737359313609b40dc9493a9195f143d4da14396226aa4f6a6048ac582b0",
     "lib/s02-migration.js": "731c7df4d638f5147e47c24c5b6b49379bd9ffcf0676b94d8f2c1b4bde5f1e34",
     "lib/s02-registry.js": "809301de55a7fa7c15d4e783b2599e33a12db5b9612d442aaa82bfda168015c0",
     "lib/s03-backends.js": "e78f6cd3001b4acc42456a9d3b83a4fd2fd532c752573bdaa9a8cb7fc7bcbd62",
-    "lib/s03-security.js": "4e3ce59a4bc1e2bf406046b138c37bb36424ddd2b406127de8aab571e83b4cff",
+    "lib/s03-security.js": "cf697fecbfd1a62717946309b0582cb251274d929cc7859d4cb8887c01cc6a83",
     "lib/s04-contract.js": "bc63fd34f5f63eb54c024f7ae90e353101443abf7c6585f899a243e5b6ef01b1",
     "lib/s04-engine.js": "2c9c7fe5cc19b5e4256f501b0d619c2da7b50af5cfef5a9bf825f70bee43a905",
     "lib/s04-ledger.js": "d51e3e11d8aeffadf165d40252d138f71917ef3f1988a92d4fc3696a5032a736",
@@ -29,8 +29,8 @@
     "lib/s10-build.js": "f724d07f0acdf40bc47715fdc4ce4c367ccd07a4bb211511ce87c979e2209eef",
     "lib/s10-contracts.js": "e5a587b9df3233c01420d76444dcf3eb4805de07f86b9d5c065ae1107ab9a9f4",
     "milvus-backend.js": "6cfee983eb34ab39a0f59f6ce2590a6c75d24a961f5a19ee4ae59d440427394e",
-    "package.json": "80e40099eeaaed5b540bc38b736a1732b5c06ca7571acada9cb8dab61ae694bd",
+    "package.json": "e889ac62e281d487a476ff4e0b7d1a883b721e69583b6f26489323182580e579",
     "qdrant-backend.js": "dea5fdb49c3e34d06456b4760fdb0bfcee8fc087780c4d78debb7b294c239087"
   },
-  "sourceFingerprint": "fc0b3c4209b8b8c04cfa43fb11ea78e9a4aa74b52158cc7941e3b2cf48b505c5"
+  "sourceFingerprint": "12a04b322c1a6eccd9a083c8791bfd6a27603723b876ba6eb604f27cba2e537c"
 }

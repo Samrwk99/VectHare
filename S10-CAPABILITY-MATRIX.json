@@ -1,7 +1,7 @@
 {
-  "checkpoint": "S10",
+  "checkpoint": "S10.1",
   "asOf": "2026-10-28",
-  "pluginVersion": "3.2.10-s10.0",
+  "pluginVersion": "3.2.10-s10.1",
   "extensionModified": false,
   "pluginModified": true,
   "status": "OFFLINE_FAIL_CLOSED_API_AND_LOCAL_SOURCE_FINGERPRINT_NOT_LIVE_CERTIFIED",
@@ -452,5 +452,6 @@
     "POST /v2/collections/clear": "DENIED",
     "POST /v2/collections/migrate": "DENIED",
     "POST /v2/operations/execute": "DENIED"
-  }
+  },
+  "directoryContext": "HOST_ROOT_RELATIVE_OR_ABSOLUTE_PATH_CANONICALIZED; VERIFIED_VECTORS_CHILD; NO_BROWSER_PATHS; OFFLINE_TESTED_ONLY"
 }

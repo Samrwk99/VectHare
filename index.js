@@ -7,7 +7,7 @@
  * All chunk operations go through unified /chunks/* endpoints.
  * Backend is specified via `backend` parameter in request body.
  *
- * @version 3.2.10-s10.0
+ * @version 3.2.10-s10.1
  */
 
 import path from 'node:path';
@@ -28,7 +28,7 @@ import { registerS10Routes } from './lib/s10-contracts.js';
 import { validateVector as validateS05Vector } from './lib/s05-contract.js';
 
 const pluginName = 'similharity';
-const pluginVersion = '3.2.10-s10.0';
+const pluginVersion = '3.2.10-s10.1';
 
 /**
  * Initialize the plugin
