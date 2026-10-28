@@ -1,0 +1,1342 @@
+
+> similharity@3.2.10-s10.0 test:s10
+> node --experimental-vm-modules --test tests/*.test.mjs
+
+TAP version 13
+# [Qdrant] Query failed for vecthare_main: backend unavailable
+# [Qdrant] getItem failed: backend unavailable
+# [Qdrant] Failed to list items from vecthare_main: backend unavailable
+# vecthare_main
+# Subtest: S01 middleware denies every legacy mutation URL before any handler, for every backend
+ok 1 - S01 middleware denies every legacy mutation URL before any handler, for every backend
+  ---
+  duration_ms: 1.679564
+  type: 'test'
+  ...
+# Subtest: S01 middleware leaves nonmutating routes reachable
+ok 2 - S01 middleware leaves nonmutating routes reachable
+  ---
+  duration_ms: 0.198599
+  type: 'test'
+  ...
+# Subtest: Qdrant dimension mismatch never attempts purge or write
+ok 3 - Qdrant dimension mismatch never attempts purge or write
+  ---
+  duration_ms: 1.278362
+  type: 'test'
+  ...
+# Subtest: Qdrant unknown vector schema fails closed
+ok 4 - Qdrant unknown vector schema fails closed
+  ---
+  duration_ms: 0.249606
+  type: 'test'
+  ...
+# Subtest: Qdrant matching collection schema succeeds without destructive changes
+ok 5 - Qdrant matching collection schema succeeds without destructive changes
+  ---
+  duration_ms: 0.167021
+  type: 'test'
+  ...
+# Subtest: Qdrant direct legacy writes, purge and edits refuse without any network call
+ok 6 - Qdrant direct legacy writes, purge and edits refuse without any network call
+  ---
+  duration_ms: 0.3994
+  type: 'test'
+  ...
+# Subtest: Qdrant failed search and get are errors rather than empty/absent
+ok 7 - Qdrant failed search and get are errors rather than empty/absent
+  ---
+  duration_ms: 1.871112
+  type: 'test'
+  ...
+# Subtest: Qdrant POST failure is not transparently retried
+ok 8 - Qdrant POST failure is not transparently retried
+  ---
+  duration_ms: 0.751699
+  type: 'test'
+  ...
+# (node:20467) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: load Milvus adapter with dependency-isolated SDK mock
+ok 9 - load Milvus adapter with dependency-isolated SDK mock
+  ---
+  duration_ms: 12.846136
+  type: 'test'
+  ...
+# Subtest: Milvus dimension mismatch preserves collection and no drop/create call
+ok 10 - Milvus dimension mismatch preserves collection and no drop/create call
+  ---
+  duration_ms: 0.694955
+  type: 'test'
+  ...
+# Subtest: Milvus missing vector field never drops collection
+ok 11 - Milvus missing vector field never drops collection
+  ---
+  duration_ms: 0.479461
+  type: 'test'
+  ...
+# Subtest: Milvus description failures propagate and cannot recreate
+ok 12 - Milvus description failures propagate and cannot recreate
+  ---
+  duration_ms: 0.305549
+  type: 'test'
+  ...
+# Subtest: Milvus direct insert/delete/update/purge are fail-closed
+ok 13 - Milvus direct insert/delete/update/purge are fail-closed
+  ---
+  duration_ms: 0.606752
+  type: 'test'
+  ...
+# Subtest: Milvus backend search/list/get failures propagate
+ok 14 - Milvus backend search/list/get failures propagate
+  ---
+  duration_ms: 0.922807
+  type: 'test'
+  ...
+# Subtest: Milvus initialization only reads collections; never auto creates/drops
+ok 15 - Milvus initialization only reads collections; never auto creates/drops
+  ---
+  duration_ms: 4.630043
+  type: 'test'
+  ...
+# Subtest: plugin registration keeps legacy mutation endpoints blocked even without middleware
+ok 16 - plugin registration keeps legacy mutation endpoints blocked even without middleware
+  ---
+  duration_ms: 6.855904
+  type: 'test'
+  ...
+# Subtest: LanceDB direct destructive legacy methods refuse before database access
+ok 17 - LanceDB direct destructive legacy methods refuse before database access
+  ---
+  duration_ms: 6.200158
+  type: 'test'
+  ...
+# Subtest: LanceDB rejects entire malformed insert batch without opening database
+ok 18 - LanceDB rejects entire malformed insert batch without opening database
+  ---
+  duration_ms: 3.1072
+  type: 'test'
+  ...
+# Subtest: Qdrant absent collection does not trigger automatic creation
+ok 19 - Qdrant absent collection does not trigger automatic creation
+  ---
+  duration_ms: 0.385469
+  type: 'test'
+  ...
+# Subtest: Milvus absent collection does not create a legacy shared collection
+ok 20 - Milvus absent collection does not create a legacy shared collection
+  ---
+  duration_ms: 0.159129
+  type: 'test'
+  ...
+# Subtest: S02 LanceDB refuses ambiguous legacy collection before opening any database
+ok 21 - S02 LanceDB refuses ambiguous legacy collection before opening any database
+  ---
+  duration_ms: 3.597487
+  type: 'test'
+  ...
+# Subtest: S02 canonical scope preserves full path-like names without lossy splitting
+ok 22 - S02 canonical scope preserves full path-like names without lossy splitting
+  ---
+  duration_ms: 2.812838
+  type: 'test'
+  ...
+# Subtest: S02 scope rejects missing owner, unknown type, paths and bogus branch type
+ok 23 - S02 scope rejects missing owner, unknown type, paths and bogus branch type
+  ---
+  duration_ms: 0.605911
+  type: 'test'
+  ...
+# Subtest: S02 embedding requires explicit source/model/dimension/metric
+ok 24 - S02 embedding requires explicit source/model/dimension/metric
+  ---
+  duration_ms: 0.346261
+  type: 'test'
+  ...
+# Subtest: S02 collection key stable across object property order
+ok 25 - S02 collection key stable across object property order
+  ---
+  duration_ms: 1.036988
+  type: 'test'
+  ...
+# Subtest: S02 collection IDs are separated across users, branches, backends and models
+ok 26 - S02 collection IDs are separated across users, branches, backends and models
+  ---
+  duration_ms: 0.545079
+  type: 'test'
+  ...
+# Subtest: S02 record IDs are stable across text edits and backend-UUID compatible
+ok 27 - S02 record IDs are stable across text edits and backend-UUID compatible
+  ---
+  duration_ms: 0.693182
+  type: 'test'
+  ...
+# Subtest: S02 duplicate content across scopes and branches has distinct physical IDs
+ok 28 - S02 duplicate content across scopes and branches has distinct physical IDs
+  ---
+  duration_ms: 0.330407
+  type: 'test'
+  ...
+# Subtest: S02 record ID format enforced, with UUID generated only when absent
+ok 29 - S02 record ID format enforced, with UUID generated only when absent
+  ---
+  duration_ms: 0.736096
+  type: 'test'
+  ...
+# Subtest: S02 no parseInt or hash as primary ID, content fingerprint remains separate
+ok 30 - S02 no parseInt or hash as primary ID, content fingerprint remains separate
+  ---
+  duration_ms: 0.713272
+  type: 'test'
+  ...
+# Subtest: S02 accepts safe physical legacy names without rewriting
+ok 31 - S02 accepts safe physical legacy names without rewriting
+  ---
+  duration_ms: 0.474293
+  type: 'test'
+  ...
+# Subtest: S02 denies ambiguous old names rather than collapsing unrelated collections
+ok 32 - S02 denies ambiguous old names rather than collapsing unrelated collections
+  ---
+  duration_ms: 0.367533
+  type: 'test'
+  ...
+# Subtest: S02 Qdrant adapter rejects lossy paths before any backend request
+ok 33 - S02 Qdrant adapter rejects lossy paths before any backend request
+  ---
+  duration_ms: 0.377768
+  type: 'test'
+  ...
+# Subtest: S02 registry reservation persists and returns identical mapping across instances
+ok 34 - S02 registry reservation persists and returns identical mapping across instances
+  ---
+  duration_ms: 25.909355
+  type: 'test'
+  ...
+# Subtest: S02 registry reserves distinct source/branch identities without collision
+ok 35 - S02 registry reserves distinct source/branch identities without collision
+  ---
+  duration_ms: 25.270454
+  type: 'test'
+  ...
+# Subtest: S02 registry lock contention fails closed, no overwrites
+ok 36 - S02 registry lock contention fails closed, no overwrites
+  ---
+  duration_ms: 6.910926
+  type: 'test'
+  ...
+# Subtest: S02 registry modified fingerprint refuses access, never silently repairs
+ok 37 - S02 registry modified fingerprint refuses access, never silently repairs
+  ---
+  duration_ms: 15.329419
+  type: 'test'
+  ...
+# Subtest: S02 registry rejects symlink file, instead of following it
+ok 38 - S02 registry rejects symlink file, instead of following it
+  ---
+  duration_ms: 2.8946
+  type: 'test'
+  ...
+# Subtest: S02 legacy migration manifest refuses unknown ownership without guessing
+ok 39 - S02 legacy migration manifest refuses unknown ownership without guessing
+  ---
+  duration_ms: 0.492521
+  type: 'test'
+  ...
+# Subtest: S02 migration allows duplicate content from separate scopes but no duplicate target ID
+ok 40 - S02 migration allows duplicate content from separate scopes but no duplicate target ID
+  ---
+  duration_ms: 0.538059
+  type: 'test'
+  ...
+# Subtest: S02 migration only emits planning evidence, no backend/cutover action
+ok 41 - S02 migration only emits planning evidence, no backend/cutover action
+  ---
+  duration_ms: 0.129434
+  type: 'test'
+  ...
+# Subtest: S02 deleted registry cannot be recreated silently after initialization
+ok 42 - S02 deleted registry cannot be recreated silently after initialization
+  ---
+  duration_ms: 19.499686
+  type: 'test'
+  ...
+# Subtest: S02 registry cannot accept fabricated mapping that changes owner or source
+ok 43 - S02 registry cannot accept fabricated mapping that changes owner or source
+  ---
+  duration_ms: 17.85843
+  type: 'test'
+  ...
+# Subtest: S02 normalized names with ambiguous separators cannot collide in new IDs
+ok 44 - S02 normalized names with ambiguous separators cannot collide in new IDs
+  ---
+  duration_ms: 0.280262
+  type: 'test'
+  ...
+# Subtest: S02 legacy hash zero is preserved without integer coercion
+ok 45 - S02 legacy hash zero is preserved without integer coercion
+  ---
+  duration_ms: 0.259359
+  type: 'test'
+  ...
+# Subtest: S03 rejects missing host user, unverified IDs and client owner impersonation
+ok 46 - S03 rejects missing host user, unverified IDs and client owner impersonation
+  ---
+  duration_ms: 3.29406
+  type: 'test'
+  ...
+# Subtest: S03 resolves authenticated path from host only and refuses request-selected roots
+ok 47 - S03 resolves authenticated path from host only and refuses request-selected roots
+  ---
+  duration_ms: 12.202239
+  type: 'test'
+  ...
+# Subtest: S03 refuses two different host users mapped to the same physical vectors root
+ok 48 - S03 refuses two different host users mapped to the same physical vectors root
+  ---
+  duration_ms: 5.696721
+  type: 'test'
+  ...
+# Subtest: S03 permits only default server-provisioned config selector
+ok 49 - S03 permits only default server-provisioned config selector
+  ---
+  duration_ms: 0.589265
+  type: 'test'
+  ...
+# Subtest: S03 server configuration must be private, regular, user-scoped
+ok 50 - S03 server configuration must be private, regular, user-scoped
+  ---
+  duration_ms: 23.462652
+  type: 'test'
+  ...
+# Subtest: S03 remote configurations reject unexpected fields and unsafe schemes
+ok 51 - S03 remote configurations reject unexpected fields and unsafe schemes
+  ---
+  duration_ms: 17.64263
+  type: 'test'
+  ...
+# Subtest: S03 backend pool isolates connections for users, directory roots and changed credentials
+ok 52 - S03 backend pool isolates connections for users, directory roots and changed credentials
+  ---
+  duration_ms: 11.915207
+  type: 'test'
+  ...
+# Subtest: S03 same user concurrent requests share one initialization, failed init does not poison pool
+ok 53 - S03 same user concurrent requests share one initialization, failed init does not poison pool
+  ---
+  duration_ms: 15.955436
+  type: 'test'
+  ...
+# Subtest: S03 request ownership protected at registry lookup, and reservation does not enable writes
+ok 54 - S03 request ownership protected at registry lookup, and reservation does not enable writes
+  ---
+  duration_ms: 8.720686
+  type: 'test'
+  ...
+# Subtest: S03 shared legacy reads and sensitive routes fail before backend invocation
+ok 55 - S03 shared legacy reads and sensitive routes fail before backend invocation
+  ---
+  duration_ms: 1.012602
+  type: 'test'
+  ...
+# Subtest: S03 source name traversal refused
+ok 56 - S03 source name traversal refused
+  ---
+  duration_ms: 0.358289
+  type: 'test'
+  ...
+# Subtest: S03 no protected remote configuration is implicitly created from user vector files
+ok 57 - S03 no protected remote configuration is implicitly created from user vector files
+  ---
+  duration_ms: 6.364756
+  type: 'test'
+  ...
+# Subtest: S03 no admin configuration setting produces explicit missing-config refusal
+ok 58 - S03 no admin configuration setting produces explicit missing-config refusal
+  ---
+  duration_ms: 0.256846
+  type: 'test'
+  ...
+# [Qdrant] Initializing with URL: http://127.0.0.1:6333
+# [Qdrant] API Key: (set)
+# [Qdrant] Connection successful
+# [Qdrant] Initializing with URL: https://qdrant.example.com
+# [Qdrant] API Key: (set)
+# [Qdrant] Connection successful
+# Subtest: S03 Qdrant backend factories have distinct mutable connection state
+ok 59 - S03 Qdrant backend factories have distinct mutable connection state
+  ---
+  duration_ms: 6.08799
+  type: 'test'
+  ...
+# (node:20500) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: S03 actual init middleware denies unauthenticated identity even for an allowed read endpoint
+ok 60 - S03 actual init middleware denies unauthenticated identity even for an allowed read endpoint
+  ---
+  duration_ms: 34.908795
+  type: 'test'
+  ...
+# Subtest: S03 actual init rejects browser supplied config before any backend connection
+ok 61 - S03 actual init rejects browser supplied config before any backend connection
+  ---
+  duration_ms: 18.622859
+  type: 'test'
+  ...
+# Subtest: S03 actual init blocks Qdrant legacy query before connection, but permits local source listing
+ok 62 - S03 actual init blocks Qdrant legacy query before connection, but permits local source listing
+  ---
+  duration_ms: 23.526829
+  type: 'test'
+  ...
+# Subtest: S03 actual init keeps S01 route blocks even with authenticated user and v2 routes
+ok 63 - S03 actual init keeps S01 route blocks even with authenticated user and v2 routes
+  ---
+  duration_ms: 15.93519
+  type: 'test'
+  ...
+# Subtest: S04 real index routes validate with authenticated context but always refuse public submit
+ok 64 - S04 real index routes validate with authenticated context but always refuse public submit
+  ---
+  duration_ms: 16.444856
+  type: 'test'
+  ...
+# Subtest: S10 actual index registers build/capabilities routes behind S03 authentication
+ok 65 - S10 actual index registers build/capabilities routes behind S03 authentication
+  ---
+  duration_ms: 22.312328
+  type: 'test'
+  ...
+# Subtest: S04 creates scope-qualified deterministic IDs and never persists raw text/vector
+ok 66 - S04 creates scope-qualified deterministic IDs and never persists raw text/vector
+  ---
+  duration_ms: 4.619132
+  type: 'test'
+  ...
+# Subtest: S04 enforces exact owner binding, required revision, stable UUIDs
+ok 67 - S04 enforces exact owner binding, required revision, stable UUIDs
+  ---
+  duration_ms: 0.901936
+  type: 'test'
+  ...
+# Subtest: S04 forbids invalid vectors, protected fields, malformed metadata, and partial batches
+ok 68 - S04 forbids invalid vectors, protected fields, malformed metadata, and partial batches
+  ---
+  duration_ms: 0.950158
+  type: 'test'
+  ...
+# Subtest: S04 independent readback verifies physical ID, owner, revision, content, embedding, metadata
+ok 69 - S04 independent readback verifies physical ID, owner, revision, content, embedding, metadata
+  ---
+  duration_ms: 0.303596
+  type: 'test'
+  ...
+# Subtest: S04 creates scope-qualified deterministic IDs and never persists raw text/vector
+ok 70 - S04 creates scope-qualified deterministic IDs and never persists raw text/vector
+  ---
+  duration_ms: 3.984729
+  type: 'test'
+  ...
+# Subtest: S04 enforces exact owner binding, required revision, stable UUIDs
+ok 71 - S04 enforces exact owner binding, required revision, stable UUIDs
+  ---
+  duration_ms: 2.716443
+  type: 'test'
+  ...
+# Subtest: S04 forbids invalid vectors, protected fields, malformed metadata, and partial batches
+ok 72 - S04 forbids invalid vectors, protected fields, malformed metadata, and partial batches
+  ---
+  duration_ms: 1.800677
+  type: 'test'
+  ...
+# Subtest: S04 independent readback verifies physical ID, owner, revision, content, embedding, metadata
+ok 73 - S04 independent readback verifies physical ID, owner, revision, content, embedding, metadata
+  ---
+  duration_ms: 0.491739
+  type: 'test'
+  ...
+# Subtest: S04 engine inserts, updates and deletes using independent mock-backend readback
+ok 74 - S04 engine inserts, updates and deletes using independent mock-backend readback
+  ---
+  duration_ms: 86.245911
+  type: 'test'
+  ...
+# Subtest: S04 rejects authorization or altered payload before persisting/dispatching
+ok 75 - S04 rejects authorization or altered payload before persisting/dispatching
+  ---
+  duration_ms: 1.7028
+  type: 'test'
+  ...
+# Subtest: S04 stale revision is failed before mutation, and replay never repeats write
+ok 76 - S04 stale revision is failed before mutation, and replay never repeats write
+  ---
+  duration_ms: 37.852469
+  type: 'test'
+  ...
+# Subtest: S04 lost response is UNCERTAIN and only readback reconciliation may verify
+ok 77 - S04 lost response is UNCERTAIN and only readback reconciliation may verify
+  ---
+  duration_ms: 21.932803
+  type: 'test'
+  ...
+# Subtest: S04 backend readback error leaves uncertainty, no auto retry
+ok 78 - S04 backend readback error leaves uncertainty, no auto retry
+  ---
+  duration_ms: 12.537202
+  type: 'test'
+  ...
+# Subtest: S04 revalidation denies forged physical point identity and protected payload keys
+ok 79 - S04 revalidation denies forged physical point identity and protected payload keys
+  ---
+  duration_ms: 1.582659
+  type: 'test'
+  ...
+# Subtest: S04 mismatched owner at readback stays UNCERTAIN, never falsely VERIFIED
+ok 80 - S04 mismatched owner at readback stays UNCERTAIN, never falsely VERIFIED
+  ---
+  duration_ms: 14.649727
+  type: 'test'
+  ...
+# Subtest: S04 metadata revision succeeds only with verified metadata fingerprint
+ok 81 - S04 metadata revision succeeds only with verified metadata fingerprint
+  ---
+  duration_ms: 30.601361
+  type: 'test'
+  ...
+# Subtest: S04 record identity collision across two branches is prevented
+ok 82 - S04 record identity collision across two branches is prevented
+  ---
+  duration_ms: 28.946475
+  type: 'test'
+  ...
+# Subtest: S04 creates scope-qualified deterministic IDs and never persists raw text/vector
+ok 83 - S04 creates scope-qualified deterministic IDs and never persists raw text/vector
+  ---
+  duration_ms: 3.351477
+  type: 'test'
+  ...
+# Subtest: S04 enforces exact owner binding, required revision, stable UUIDs
+ok 84 - S04 enforces exact owner binding, required revision, stable UUIDs
+  ---
+  duration_ms: 2.90761
+  type: 'test'
+  ...
+# Subtest: S04 forbids invalid vectors, protected fields, malformed metadata, and partial batches
+ok 85 - S04 forbids invalid vectors, protected fields, malformed metadata, and partial batches
+  ---
+  duration_ms: 1.10422
+  type: 'test'
+  ...
+# Subtest: S04 independent readback verifies physical ID, owner, revision, content, embedding, metadata
+ok 86 - S04 independent readback verifies physical ID, owner, revision, content, embedding, metadata
+  ---
+  duration_ms: 0.318378
+  type: 'test'
+  ...
+# Subtest: S04 ledger persists private, hashed receipts after new instance and enforces legal transitions
+ok 87 - S04 ledger persists private, hashed receipts after new instance and enforces legal transitions
+  ---
+  duration_ms: 35.852238
+  type: 'test'
+  ...
+# Subtest: S04 ledger detects tampered receipts and rejects wrong user or symlink
+ok 88 - S04 ledger detects tampered receipts and rejects wrong user or symlink
+  ---
+  duration_ms: 11.443123
+  type: 'test'
+  ...
+# Subtest: S04 lock refuses competing processes and never performs operation twice
+ok 89 - S04 lock refuses competing processes and never performs operation twice
+  ---
+  duration_ms: 12.812747
+  type: 'test'
+  ...
+# Subtest: S04 creates scope-qualified deterministic IDs and never persists raw text/vector
+ok 90 - S04 creates scope-qualified deterministic IDs and never persists raw text/vector
+  ---
+  duration_ms: 3.782254
+  type: 'test'
+  ...
+# Subtest: S04 enforces exact owner binding, required revision, stable UUIDs
+ok 91 - S04 enforces exact owner binding, required revision, stable UUIDs
+  ---
+  duration_ms: 1.165592
+  type: 'test'
+  ...
+# Subtest: S04 forbids invalid vectors, protected fields, malformed metadata, and partial batches
+ok 92 - S04 forbids invalid vectors, protected fields, malformed metadata, and partial batches
+  ---
+  duration_ms: 1.264891
+  type: 'test'
+  ...
+# Subtest: S04 independent readback verifies physical ID, owner, revision, content, embedding, metadata
+ok 93 - S04 independent readback verifies physical ID, owner, revision, content, embedding, metadata
+  ---
+  duration_ms: 0.510097
+  type: 'test'
+  ...
+# Subtest: S04 public preflight validates but does not authorize or dispatch a mutation
+ok 94 - S04 public preflight validates but does not authorize or dispatch a mutation
+  ---
+  duration_ms: 0.82544
+  type: 'test'
+  ...
+# Subtest: S04 public submit/reconcile refuse even if client provides forged attestation
+ok 95 - S04 public submit/reconcile refuse even if client provides forged attestation
+  ---
+  duration_ms: 0.289946
+  type: 'test'
+  ...
+# Subtest: S04 status endpoint fails closed for missing operations
+ok 96 - S04 status endpoint fails closed for missing operations
+  ---
+  duration_ms: 13.386484
+  type: 'test'
+  ...
+# Subtest: S05 trusted binding required; raw client assertion alone not accepted by route
+ok 97 - S05 trusted binding required; raw client assertion alone not accepted by route
+  ---
+  duration_ms: 1.36412
+  type: 'test'
+  ...
+# Subtest: S05 strict vector validates finite values, shape and dimension
+ok 98 - S05 strict vector validates finite values, shape and dimension
+  ---
+  duration_ms: 0.882276
+  type: 'test'
+  ...
+# Subtest: S05 owner assertions require authoritative physical fields and correct branch
+ok 99 - S05 owner assertions require authoritative physical fields and correct branch
+  ---
+  duration_ms: 2.704384
+  type: 'test'
+  ...
+# Subtest: S05 physical id, revision and fingerprints independently verified
+ok 100 - S05 physical id, revision and fingerprints independently verified
+  ---
+  duration_ms: 0.703056
+  type: 'test'
+  ...
+# Subtest: S05 strict pagination bounds and duplicate/page owner proof
+ok 101 - S05 strict pagination bounds and duplicate/page owner proof
+  ---
+  duration_ms: 0.624889
+  type: 'test'
+  ...
+# Subtest: S05 inventory traverses >1050 records without claiming a consistent snapshot
+ok 102 - S05 inventory traverses >1050 records without claiming a consistent snapshot
+  ---
+  duration_ms: 58.030395
+  type: 'test'
+  ...
+# Subtest: S05 inventory refuses non-advancing cursor and repeated IDs
+ok 103 - S05 inventory refuses non-advancing cursor and repeated IDs
+  ---
+  duration_ms: 1.048967
+  type: 'test'
+  ...
+# Subtest: S05 inventory backend errors are never interpreted as empty results
+ok 104 - S05 inventory backend errors are never interpreted as empty results
+  ---
+  duration_ms: 0.307612
+  type: 'test'
+  ...
+# Subtest: S05 Qdrant query always sends full owner filter incl branch; verifies returned payload
+ok 105 - S05 Qdrant query always sends full owner filter incl branch; verifies returned payload
+  ---
+  duration_ms: 1.588427
+  type: 'test'
+  ...
+# Subtest: S05 Qdrant get returns null only for real empty response and refuses backend malformed
+ok 106 - S05 Qdrant get returns null only for real empty response and refuses backend malformed
+  ---
+  duration_ms: 1.306123
+  type: 'test'
+  ...
+# Subtest: S05 Qdrant scoped cursor paging never returns authoritative inventory
+ok 107 - S05 Qdrant scoped cursor paging never returns authoritative inventory
+  ---
+  duration_ms: 0.594563
+  type: 'test'
+  ...
+# Subtest: S05 Qdrant and Milvus deny invalid vectors before any backend call
+ok 108 - S05 Qdrant and Milvus deny invalid vectors before any backend call
+  ---
+  duration_ms: 0.488124
+  type: 'test'
+  ...
+# Subtest: S05 Milvus query includes complete owner columns and enforced scope
+ok 109 - S05 Milvus query includes complete owner columns and enforced scope
+  ---
+  duration_ms: 0.780213
+  type: 'test'
+  ...
+# Subtest: S05 Milvus get is scoped by recordId and owner; missing owner refused
+ok 110 - S05 Milvus get is scoped by recordId and owner; missing owner refused
+  ---
+  duration_ms: 0.653452
+  type: 'test'
+  ...
+# Subtest: S05 Milvus offset pagination declares consistency unverified and provides next cursor
+ok 111 - S05 Milvus offset pagination declares consistency unverified and provides next cursor
+  ---
+  duration_ms: 0.597918
+  type: 'test'
+  ...
+# Subtest: S05 backend failures propagate and are not treated as no hits
+ok 112 - S05 backend failures propagate and are not treated as no hits
+  ---
+  duration_ms: 0.440472
+  type: 'test'
+  ...
+# Subtest: S05 trusted binding required; raw client assertion alone not accepted by route
+ok 113 - S05 trusted binding required; raw client assertion alone not accepted by route
+  ---
+  duration_ms: 2.017532
+  type: 'test'
+  ...
+# Subtest: S05 strict vector validates finite values, shape and dimension
+ok 114 - S05 strict vector validates finite values, shape and dimension
+  ---
+  duration_ms: 0.980834
+  type: 'test'
+  ...
+# Subtest: S05 owner assertions require authoritative physical fields and correct branch
+ok 115 - S05 owner assertions require authoritative physical fields and correct branch
+  ---
+  duration_ms: 2.230762
+  type: 'test'
+  ...
+# Subtest: S05 physical id, revision and fingerprints independently verified
+ok 116 - S05 physical id, revision and fingerprints independently verified
+  ---
+  duration_ms: 1.092772
+  type: 'test'
+  ...
+# Subtest: S05 strict pagination bounds and duplicate/page owner proof
+ok 117 - S05 strict pagination bounds and duplicate/page owner proof
+  ---
+  duration_ms: 2.20245
+  type: 'test'
+  ...
+# Subtest: S05 inventory traverses >1050 records without claiming a consistent snapshot
+ok 118 - S05 inventory traverses >1050 records without claiming a consistent snapshot
+  ---
+  duration_ms: 49.167174
+  type: 'test'
+  ...
+# Subtest: S05 inventory refuses non-advancing cursor and repeated IDs
+ok 119 - S05 inventory refuses non-advancing cursor and repeated IDs
+  ---
+  duration_ms: 1.057399
+  type: 'test'
+  ...
+# Subtest: S05 inventory backend errors are never interpreted as empty results
+ok 120 - S05 inventory backend errors are never interpreted as empty results
+  ---
+  duration_ms: 0.225789
+  type: 'test'
+  ...
+# Subtest: S05 trusted binding required; raw client assertion alone not accepted by route
+ok 121 - S05 trusted binding required; raw client assertion alone not accepted by route
+  ---
+  duration_ms: 1.974127
+  type: 'test'
+  ...
+# Subtest: S05 strict vector validates finite values, shape and dimension
+ok 122 - S05 strict vector validates finite values, shape and dimension
+  ---
+  duration_ms: 1.007324
+  type: 'test'
+  ...
+# Subtest: S05 owner assertions require authoritative physical fields and correct branch
+ok 123 - S05 owner assertions require authoritative physical fields and correct branch
+  ---
+  duration_ms: 3.086308
+  type: 'test'
+  ...
+# Subtest: S05 physical id, revision and fingerprints independently verified
+ok 124 - S05 physical id, revision and fingerprints independently verified
+  ---
+  duration_ms: 0.859422
+  type: 'test'
+  ...
+# Subtest: S05 strict pagination bounds and duplicate/page owner proof
+ok 125 - S05 strict pagination bounds and duplicate/page owner proof
+  ---
+  duration_ms: 0.967393
+  type: 'test'
+  ...
+# Subtest: S05 inventory traverses >1050 records without claiming a consistent snapshot
+ok 126 - S05 inventory traverses >1050 records without claiming a consistent snapshot
+  ---
+  duration_ms: 53.814865
+  type: 'test'
+  ...
+# Subtest: S05 inventory refuses non-advancing cursor and repeated IDs
+ok 127 - S05 inventory refuses non-advancing cursor and repeated IDs
+  ---
+  duration_ms: 1.57735
+  type: 'test'
+  ...
+# Subtest: S05 inventory backend errors are never interpreted as empty results
+ok 128 - S05 inventory backend errors are never interpreted as empty results
+  ---
+  duration_ms: 0.324247
+  type: 'test'
+  ...
+# Subtest: S05 public v2 read APIs are disabled regardless of forged attestations
+ok 129 - S05 public v2 read APIs are disabled regardless of forged attestations
+  ---
+  duration_ms: 0.661113
+  type: 'test'
+  ...
+# Subtest: S05 preflight validates query dimension but does not authorize source
+ok 130 - S05 preflight validates query dimension but does not authorize source
+  ---
+  duration_ms: 0.844219
+  type: 'test'
+  ...
+# Subtest: S06 Qdrant scope filters include every owner component, record id, revision and stable point id
+ok 131 - S06 Qdrant scope filters include every owner component, record id, revision and stable point id
+  ---
+  duration_ms: 2.627288
+  type: 'test'
+  ...
+# Subtest: S06 Qdrant schema inspection is read-only and rejects mismatch without mutation
+ok 132 - S06 Qdrant schema inspection is read-only and rejects mismatch without mutation
+  ---
+  duration_ms: 2.56147
+  type: 'test'
+  ...
+# Subtest: S06 public-production mutation mode is not enabled: reject before any write
+ok 133 - S06 public-production mutation mode is not enabled: reject before any write
+  ---
+  duration_ms: 1.456379
+  type: 'test'
+  ...
+# Subtest: S06 disposable insert -> authoritative readback -> edit -> metadata update -> scoped delete
+ok 134 - S06 disposable insert -> authoritative readback -> edit -> metadata update -> scoped delete
+  ---
+  duration_ms: 4.588566
+  type: 'test'
+  ...
+# Subtest: S06 physical isolation: same text in distinct branches yields unique point ID and no cross-access
+ok 135 - S06 physical isolation: same text in distinct branches yields unique point ID and no cross-access
+  ---
+  duration_ms: 0.786672
+  type: 'test'
+  ...
+# Subtest: S06 reject forged plan, changed vector and stale update before write
+ok 136 - S06 reject forged plan, changed vector and stale update before write
+  ---
+  duration_ms: 1.426534
+  type: 'test'
+  ...
+# Subtest: S06 backend write failure and partial acknowledgement never become verified
+ok 137 - S06 backend write failure and partial acknowledgement never become verified
+  ---
+  duration_ms: 1.01105
+  type: 'test'
+  ...
+# Subtest: S06 read errors and conflicting physical payload IDs are not treated as empty
+ok 138 - S06 read errors and conflicting physical payload IDs are not treated as empty
+  ---
+  duration_ms: 2.154868
+  type: 'test'
+  ...
+# Subtest: S06 unbranched records use explicit empty-branch value end-to-end
+ok 139 - S06 unbranched records use explicit empty-branch value end-to-end
+  ---
+  duration_ms: 1.210549
+  type: 'test'
+  ...
+# Subtest: S06 schema mismatch and missing collection fail before insert or deletion
+ok 140 - S06 schema mismatch and missing collection fail before insert or deletion
+  ---
+  duration_ms: 1.15123
+  type: 'test'
+  ...
+# Subtest: S06 production provisioning prohibited without internal disposable fixture
+ok 141 - S06 production provisioning prohibited without internal disposable fixture
+  ---
+  duration_ms: 0.614894
+  type: 'test'
+  ...
+# Subtest: S06 provisioning creates a brand-new disposable schema and owner indices, never resets existing
+ok 142 - S06 provisioning creates a brand-new disposable schema and owner indices, never resets existing
+  ---
+  duration_ms: 0.7256
+  type: 'test'
+  ...
+# Subtest: S06 S04 engine integrates with disposable Qdrant adapter and private operation ledger only
+ok 143 - S06 S04 engine integrates with disposable Qdrant adapter and private operation ledger only
+  ---
+  duration_ms: 68.47102
+  type: 'test'
+  ...
+# Subtest: S07 schema inspection verifies full physical ownership fields, primary key and dimension without writes
+ok 144 - S07 schema inspection verifies full physical ownership fields, primary key and dimension without writes
+  ---
+  duration_ms: 5.023119
+  type: 'test'
+  ...
+# Subtest: S07 physical filter includes user, collection, type, source, explicit branch, record, primary id, revision
+ok 145 - S07 physical filter includes user, collection, type, source, explicit branch, record, primary id, revision
+  ---
+  duration_ms: 2.78179
+  type: 'test'
+  ...
+# Subtest: S07 public mutation permissions stay closed before any backend request
+ok 146 - S07 public mutation permissions stay closed before any backend request
+  ---
+  duration_ms: 0.829377
+  type: 'test'
+  ...
+# Subtest: S07 disposable insert, text update, metadata revision update and fully scoped delete
+ok 147 - S07 disposable insert, text update, metadata revision update and fully scoped delete
+  ---
+  duration_ms: 5.054977
+  type: 'test'
+  ...
+# Subtest: S07 cross-user and branch isolation with identical contents and hashes
+ok 148 - S07 cross-user and branch isolation with identical contents and hashes
+  ---
+  duration_ms: 1.957983
+  type: 'test'
+  ...
+# Subtest: S07 forged ownership or missing physical ownership columns are rejected
+ok 149 - S07 forged ownership or missing physical ownership columns are rejected
+  ---
+  duration_ms: 0.817829
+  type: 'test'
+  ...
+# Subtest: S07 stale revisions and changed payloads refuse updates without write dispatch
+ok 150 - S07 stale revisions and changed payloads refuse updates without write dispatch
+  ---
+  duration_ms: 1.445232
+  type: 'test'
+  ...
+# Subtest: S07 failed/uncertain acknowledgements never become verified
+ok 151 - S07 failed/uncertain acknowledgements never become verified
+  ---
+  duration_ms: 1.551632
+  type: 'test'
+  ...
+# Subtest: S07 backend query exceptions and status errors do not turn into empty record result
+ok 152 - S07 backend query exceptions and status errors do not turn into empty record result
+  ---
+  duration_ms: 0.837949
+  type: 'test'
+  ...
+# Subtest: S07 ordinary page traversal is bounded and cannot certify consistent export
+ok 153 - S07 ordinary page traversal is bounded and cannot certify consistent export
+  ---
+  duration_ms: 101.40881
+  type: 'test'
+  ...
+# Subtest: S07 disposable provisioning refuses existing physical collection without modification
+ok 154 - S07 disposable provisioning refuses existing physical collection without modification
+  ---
+  duration_ms: 0.3792
+  type: 'test'
+  ...
+# Subtest: S07 disposable provisioning explicitly builds v2 schema; never drops on mismatched dimension
+ok 155 - S07 disposable provisioning explicitly builds v2 schema; never drops on mismatched dimension
+  ---
+  duration_ms: 0.804409
+  type: 'test'
+  ...
+# Subtest: S07 internal adapter works with S04 ledger and remains disabled on public routes
+ok 156 - S07 internal adapter works with S04 ledger and remains disabled on public routes
+  ---
+  duration_ms: 32.937324
+  type: 'test'
+  ...
+# Subtest: S07 error and non-disposable mutation routes remain gated in index.js
+ok 157 - S07 error and non-disposable mutation routes remain gated in index.js
+  ---
+  duration_ms: 5.275278
+  type: 'test'
+  ...
+# Subtest: S07 scoped get and search request strong consistency and physical owner fields
+ok 158 - S07 scoped get and search request strong consistency and physical owner fields
+  ---
+  duration_ms: 1.100915
+  type: 'test'
+  ...
+# Subtest: S07 unbranched chat records use explicit empty branch for all reads and mutations
+ok 159 - S07 unbranched chat records use explicit empty branch for all reads and mutations
+  ---
+  duration_ms: 1.159703
+  type: 'test'
+  ...
+# Subtest: S07 failed scoped delete preserves physical data and propagates failure
+ok 160 - S07 failed scoped delete preserves physical data and propagates failure
+  ---
+  duration_ms: 0.968536
+  type: 'test'
+  ...
+# Subtest: S07 post-ack readback failure cannot report a verified insertion
+ok 161 - S07 post-ack readback failure cannot report a verified insertion
+  ---
+  duration_ms: 0.640302
+  type: 'test'
+  ...
+# Subtest: S07 v2 API remains unavailable despite a caller providing its own provenance flag
+ok 162 - S07 v2 API remains unavailable despite a caller providing its own provenance flag
+  ---
+  duration_ms: 0.295074
+  type: 'test'
+  ...
+# Subtest: S07 schema inspection refuses insufficient owner string capacity or absent index
+ok 163 - S07 schema inspection refuses insufficient owner string capacity or absent index
+  ---
+  duration_ms: 0.377517
+  type: 'test'
+  ...
+# Subtest: S07 malformed or truncated response cannot be treated as an empty successful read
+ok 164 - S07 malformed or truncated response cannot be treated as an empty successful read
+  ---
+  duration_ms: 0.384398
+  type: 'test'
+  ...
+# Subtest: S07 operation ledger survives a simulated process restart after verified insert
+ok 165 - S07 operation ledger survives a simulated process restart after verified insert
+  ---
+  duration_ms: 31.961533
+  type: 'test'
+  ...
+# Subtest: S08 LanceDB public mutations refuse before physical write
+ok 166 - S08 LanceDB public mutations refuse before physical write
+  ---
+  duration_ms: 3.704247
+  type: 'test'
+  ...
+# Subtest: S08 LanceDB disposable insert, text update, metadata update, scoped delete
+ok 167 - S08 LanceDB disposable insert, text update, metadata update, scoped delete
+  ---
+  duration_ms: 8.115146
+  type: 'test'
+  ...
+# Subtest: S08 LanceDB stale revision and forged scope refuse changes
+ok 168 - S08 LanceDB stale revision and forged scope refuse changes
+  ---
+  duration_ms: 2.751055
+  type: 'test'
+  ...
+# Subtest: S08 LanceDB rejects altered payloads and non-float32 before writing
+ok 169 - S08 LanceDB rejects altered payloads and non-float32 before writing
+  ---
+  duration_ms: 1.010138
+  type: 'test'
+  ...
+# Subtest: S08 LanceDB read backend exception never becomes empty result
+ok 170 - S08 LanceDB read backend exception never becomes empty result
+  ---
+  duration_ms: 0.506361
+  type: 'test'
+  ...
+# Subtest: S08 LanceDB bounded pagination cannot certify full export
+ok 171 - S08 LanceDB bounded pagination cannot certify full export
+  ---
+  duration_ms: 41.728785
+  type: 'test'
+  ...
+# Subtest: S08 Vectra public mutations refuse before physical write
+ok 172 - S08 Vectra public mutations refuse before physical write
+  ---
+  duration_ms: 0.80505
+  type: 'test'
+  ...
+# Subtest: S08 Vectra disposable insert, text update, metadata update, scoped delete
+ok 173 - S08 Vectra disposable insert, text update, metadata update, scoped delete
+  ---
+  duration_ms: 3.391116
+  type: 'test'
+  ...
+# Subtest: S08 Vectra stale revision and forged scope refuse changes
+ok 174 - S08 Vectra stale revision and forged scope refuse changes
+  ---
+  duration_ms: 1.090349
+  type: 'test'
+  ...
+# Subtest: S08 Vectra rejects altered payloads and non-float32 before writing
+ok 175 - S08 Vectra rejects altered payloads and non-float32 before writing
+  ---
+  duration_ms: 0.600072
+  type: 'test'
+  ...
+# Subtest: S08 Vectra read backend exception never becomes empty result
+ok 176 - S08 Vectra read backend exception never becomes empty result
+  ---
+  duration_ms: 0.233381
+  type: 'test'
+  ...
+# Subtest: S08 Vectra bounded pagination cannot certify full export
+ok 177 - S08 Vectra bounded pagination cannot certify full export
+  ---
+  duration_ms: 43.830395
+  type: 'test'
+  ...
+# Subtest: S08 LanceDB predicate rejects injected scope and requires five ownership dimensions
+ok 178 - S08 LanceDB predicate rejects injected scope and requires five ownership dimensions
+  ---
+  duration_ms: 0.448024
+  type: 'test'
+  ...
+# Subtest: S08 LanceDB refuses legacy table alias and missing vector schema
+ok 179 - S08 LanceDB refuses legacy table alias and missing vector schema
+  ---
+  duration_ms: 0.516586
+  type: 'test'
+  ...
+# Subtest: S08 LanceDB rejects ambiguous legacy names at old boundary
+ok 180 - S08 LanceDB rejects ambiguous legacy names at old boundary
+  ---
+  duration_ms: 18.860775
+  type: 'test'
+  ...
+# Subtest: S08 LanceDB refuses uncertain update ack and retains uncertainty
+ok 181 - S08 LanceDB refuses uncertain update ack and retains uncertainty
+  ---
+  duration_ms: 1.15142
+  type: 'test'
+  ...
+# Subtest: S08 Vectra aborts transaction and propagates error on failed insert
+ok 182 - S08 Vectra aborts transaction and propagates error on failed insert
+  ---
+  duration_ms: 2.097101
+  type: 'test'
+  ...
+# Subtest: S08 Vectra rejects forged or absent registry-seal before index read
+ok 183 - S08 Vectra rejects forged or absent registry-seal before index read
+  ---
+  duration_ms: 0.245439
+  type: 'test'
+  ...
+# Subtest: S08 Vectra and LanceDB cannot claim native SillyTavern Standard routes
+ok 184 - S08 Vectra and LanceDB cannot claim native SillyTavern Standard routes
+  ---
+  duration_ms: 3.091727
+  type: 'test'
+  ...
+# Subtest: S08 both backends refuse cross-branch physical identity and owner spoofing
+ok 185 - S08 both backends refuse cross-branch physical identity and owner spoofing
+  ---
+  duration_ms: 2.08922
+  type: 'test'
+  ...
+# Subtest: S08 both backends handle 1,090-record traversal without verified inventory claims
+ok 186 - S08 both backends handle 1,090-record traversal without verified inventory claims
+  ---
+  duration_ms: 396.815262
+  type: 'test'
+  ...
+# Subtest: S08 new adapters can use S04 ledger engine for disposable insert
+ok 187 - S08 new adapters can use S04 ledger engine for disposable insert
+  ---
+  duration_ms: 34.615121
+  type: 'test'
+  ...
+# Subtest: S08 legacy mutation gates remain explicit, new adapters not registered on HTTP
+ok 188 - S08 legacy mutation gates remain explicit, new adapters not registered on HTTP
+  ---
+  duration_ms: 5.291111
+  type: 'test'
+  ...
+# Subtest: S09 refuses ownerVerified client metadata without separate owner mapping
+ok 189 - S09 refuses ownerVerified client metadata without separate owner mapping
+  ---
+  duration_ms: 2.890344
+  type: 'test'
+  ...
+# Subtest: S09 stable manifest and source integrity verification
+ok 190 - S09 stable manifest and source integrity verification
+  ---
+  duration_ms: 2.132855
+  type: 'test'
+  ...
+# Subtest: S09 detects modified manifest even with reused original input
+ok 191 - S09 detects modified manifest even with reused original input
+  ---
+  duration_ms: 0.801695
+  type: 'test'
+  ...
+# Subtest: S09 detects changed input despite unchanged manifest
+ok 192 - S09 detects changed input despite unchanged manifest
+  ---
+  duration_ms: 0.977409
+  type: 'test'
+  ...
+# Subtest: S09 quarantines duplicate physical hash locator, including first occurrence
+ok 193 - S09 quarantines duplicate physical hash locator, including first occurrence
+  ---
+  duration_ms: 0.549606
+  type: 'test'
+  ...
+# Subtest: S09 permits equal content hashes in different legacy physical collections and branches
+ok 194 - S09 permits equal content hashes in different legacy physical collections and branches
+  ---
+  duration_ms: 0.695465
+  type: 'test'
+  ...
+# Subtest: S09 refuses ambiguous independent owner mapping claims
+ok 195 - S09 refuses ambiguous independent owner mapping claims
+  ---
+  duration_ms: 0.282194
+  type: 'test'
+  ...
+# Subtest: S09 quarantines missing or malformed evidence ref
+ok 196 - S09 quarantines missing or malformed evidence ref
+  ---
+  duration_ms: 0.221293
+  type: 'test'
+  ...
+# Subtest: S09 refuses large or malformed hashes without JS numeric truncation
+ok 197 - S09 refuses large or malformed hashes without JS numeric truncation
+  ---
+  duration_ms: 0.536656
+  type: 'test'
+  ...
+# Subtest: S09 detects conflicting stable physical target IDs across legacy collections
+ok 198 - S09 detects conflicting stable physical target IDs across legacy collections
+  ---
+  duration_ms: 0.73187
+  type: 'test'
+  ...
+# Subtest: S09 dangling references quarantine owners, rather than dropping links
+ok 199 - S09 dangling references quarantine owners, rather than dropping links
+  ---
+  duration_ms: 0.391138
+  type: 'test'
+  ...
+# Subtest: S09 blocks cross-user legacy links instead of silently migrating leaked references
+ok 200 - S09 blocks cross-user legacy links instead of silently migrating leaked references
+  ---
+  duration_ms: 0.357657
+  type: 'test'
+  ...
+# Subtest: S09 quarantines transitive references of ambiguous records
+ok 201 - S09 quarantines transitive references of ambiguous records
+  ---
+  duration_ms: 0.280362
+  type: 'test'
+  ...
+# Subtest: S09 rejects unsafe or ambiguous physical legacy collection names
+ok 202 - S09 rejects unsafe or ambiguous physical legacy collection names
+  ---
+  duration_ms: 0.224197
+  type: 'test'
+  ...
+# Subtest: S09 rejects excessive inventory rather than truncate
+ok 203 - S09 rejects excessive inventory rather than truncate
+  ---
+  duration_ms: 0.387362
+  type: 'test'
+  ...
+# Subtest: S09 requires explicit disposable permission before staging
+ok 204 - S09 requires explicit disposable permission before staging
+  ---
+  duration_ms: 2.037202
+  type: 'test'
+  ...
+# Subtest: S09 isolated staging independently reads backup and staged files, never cuts over
+ok 205 - S09 isolated staging independently reads backup and staged files, never cuts over
+  ---
+  duration_ms: 42.956146
+  type: 'test'
+  ...
+# Subtest: S09 refuses fixture staging when unresolved items exist
+ok 206 - S09 refuses fixture staging when unresolved items exist
+  ---
+  duration_ms: 1.190008
+  type: 'test'
+  ...
+# Subtest: S09 staging refuses nonempty destination
+ok 207 - S09 staging refuses nonempty destination
+  ---
+  duration_ms: 8.434706
+  type: 'test'
+  ...
+# Subtest: S09 fixture verification rejects tampered staged records
+ok 208 - S09 fixture verification rejects tampered staged records
+  ---
+  duration_ms: 22.325441
+  type: 'test'
+  ...
+# Subtest: S09 refuses incomplete legacy vector data instead of producing an invalid v2 record
+ok 209 - S09 refuses incomplete legacy vector data instead of producing an invalid v2 record
+  ---
+  duration_ms: 4.761557
+  type: 'test'
+  ...
+# Subtest: S09 fixture rejects symlinked directory
+ok 210 - S09 fixture rejects symlinked directory
+  ---
+  duration_ms: 5.976031
+  type: 'test'
+  ...
+# Subtest: S09 plugin keeps legacy write-route blocks and no migration endpoints exposed
+ok 211 - S09 plugin keeps legacy write-route blocks and no migration endpoints exposed
+  ---
+  duration_ms: 13.891788
+  type: 'test'
+  ...
+# Subtest: S10 packaged executable fingerprint matches generated manifest and live package version
+ok 212 - S10 packaged executable fingerprint matches generated manifest and live package version
+  ---
+  duration_ms: 40.427756
+  type: 'test'
+  ...
+# Subtest: S10 refuses modified executable source and does not accept version-only equality
+ok 213 - S10 refuses modified executable source and does not accept version-only equality
+  ---
+  duration_ms: 26.854958
+  type: 'test'
+  ...
+# Subtest: S10 refuses an unexpected executable file, and cannot be bypassed by deleting a file
+ok 214 - S10 refuses an unexpected executable file, and cannot be bypassed by deleting a file
+  ---
+  duration_ms: 10.474432
+  type: 'test'
+  ...
+# Subtest: S10 rejects altered package, incompatible declared version or damaged manifest
+ok 215 - S10 rejects altered package, incompatible declared version or damaged manifest
+  ---
+  duration_ms: 12.005011
+  type: 'test'
+  ...
+# Subtest: S10 refuses symlinked executable files and symlinked manifest
+ok 216 - S10 refuses symlinked executable files and symlinked manifest
+  ---
+  duration_ms: 5.379885
+  type: 'test'
+  ...
+# Subtest: S10 capability matrix never advertises an unproven backend mutation or native Standard
+ok 217 - S10 capability matrix never advertises an unproven backend mutation or native Standard
+  ---
+  duration_ms: 6.378977
+  type: 'test'
+  ...
+# Subtest: S10 route contracts give stable, authenticated inspection and explicit denied mutation endpoints
+ok 218 - S10 route contracts give stable, authenticated inspection and explicit denied mutation endpoints
+  ---
+  duration_ms: 6.035029
+  type: 'test'
+  ...
+# Subtest: S10 future PUT/PATCH/DELETE legacy chunk paths fail closed without dispatch
+ok 219 - S10 future PUT/PATCH/DELETE legacy chunk paths fail closed without dispatch
+  ---
+  duration_ms: 0.532501
+  type: 'test'
+  ...
+1..219
+# tests 219
+# suites 0
+# pass 219
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1343.782109

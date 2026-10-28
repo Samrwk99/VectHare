@@ -1046,3 +1046,25 @@ S08 adds internal LanceDB and plugin Vectra v2 adapters (`lib/s08-lancedb.js`, `
 S09 introduces `lib/s09-manifest.js` for strict read-only legacy identity mapping, collision and dependency quarantine, and an integrity-checked manifest, plus `lib/s09-fixture.js` for an **isolated disposable local-file rehearsal** of snapshot backup, v2 row transformation, readback and staged rollback. It does **not** copy any real Qdrant, Milvus, LanceDB or Vectra collection, change server registry activation, authorize a cutover, or restore public mutation routes.
 
 Run `node tools/s09-plan.mjs inventory.json` with an explicitly prepared local inventory. A valid manifest still contains `cutoverAllowed: false`: its owner mapping references are *unverified claims* until a trusted live host and independently verified backend inventory establish ownership and completeness. See `S09-MIGRATION-RUNBOOK.md` for limitations, mandatory proofs, and the disposable fixture procedure.
+
+## S10 checkpoint: API and build identity (not live-certified)
+
+This cumulative S01–S10 development build deliberately refuses all legacy vector mutations,
+public v2 record reads and mutations, and production migration/cutover. It is **not a
+production-ready upgrade** for an installation containing valuable vector data.
+
+After installing the plugin, the HTTP `GET /health` response reports the S10 checkpoint and
+runtime-measured source fingerprint. All other S10 inspection endpoints inherit the
+authenticated SillyTavern request context: `GET /capabilities`, `GET /v2/capabilities`,
+`GET /v2/contracts`, and `GET /v2/build`. Capabilities report implementation
+status, **not** authorization to execute a request. New v2 record-mutation routes
+explicitly return HTTP 409 until later live acceptance. Full details: `S10-API-RUNBOOK.md`.
+
+The plugin reads `S10-BUILD-MANIFEST.json` at startup and refuses registration if
+installed source hashes do not match. Regenerate this file *only after intentional source
+changes*: `npm run build:s10`. This verifies local source consistency only; it is not
+cryptographic remote attestation, does not attest dependencies or the SillyTavern host,
+and does not constitute permission to enable writes. Operators must independently
+verify the installed artifact and versions against trusted release evidence.
+
+Test offline contracts with `npm run test:s10` and `npm run check:s10`.

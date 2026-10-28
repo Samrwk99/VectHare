@@ -7,7 +7,7 @@
  * All chunk operations go through unified /chunks/* endpoints.
  * Backend is specified via `backend` parameter in request body.
  *
- * @version 3.2.5-s05.0
+ * @version 3.2.10-s10.0
  */
 
 import path from 'node:path';
@@ -23,16 +23,21 @@ import { BackendPool } from './lib/s03-backends.js';
 import { safeLegacyPhysicalName } from './lib/s02-identity.js';
 import { registerS04Routes } from './lib/s04-routes.js';
 import { registerS05Routes } from './lib/s05-routes.js';
+import { loadS10Build } from './lib/s10-build.js';
+import { registerS10Routes } from './lib/s10-contracts.js';
 import { validateVector as validateS05Vector } from './lib/s05-contract.js';
 
 const pluginName = 'similharity';
-const pluginVersion = '3.2.5-s05.0';
+const pluginVersion = '3.2.10-s10.0';
 
 /**
  * Initialize the plugin
  * @param {import('express').Router} router - Express router for plugin endpoints
  */
 export async function init(router) {
+    // Refuse to register any routes if the installed executable source does not match
+    // its generated S10 build manifest. This is local integrity, not remote attestation.
+    const s10Build = await loadS10Build(undefined, pluginVersion);
     console.log(`[${pluginName}] Initializing v${pluginVersion}...`);
     // S01: must run before ALL legacy routes, including /chunks/:hash/* and /purge-all.
     router.use(s01MutationGuard);
@@ -65,6 +70,7 @@ export async function init(router) {
     // S04 endpoints are preflight/status-only. No public mutation dispatch.
     registerS04Routes(router);
     registerS05Routes(router);
+    registerS10Routes(router, s10Build);
     // NOTE: S02 registry mappings are reservations only; this route exposes
     // no mutation or claim that the physical collection belongs to the user.
     router.post('/v2/identity/resolve', async (req,res) => {
@@ -590,7 +596,11 @@ export async function init(router) {
             plugin: pluginName,
             version: pluginVersion,
             backends: ['vectra', 'lancedb', 'qdrant', 'milvus'],
-            checkpoint: 'S04',
+            checkpoint: 'S10',
+            contractVersion: s10Build.contractVersion,
+            sourceFingerprint: s10Build.fingerprint,
+            buildVerification: s10Build.verification,
+            deployedSourceAttested: false,
             legacyMutations: 'BLOCKED',
             clientBackendCredentials: 'DENIED',
             sharedLegacyReads: 'BLOCKED_UNVERIFIABLE',

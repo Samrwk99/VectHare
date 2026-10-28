@@ -11,6 +11,8 @@ import { authenticatedContext, forbidOwnerSpoof, validateClientConfig,lookupAuth
 import { safeLegacyPhysicalName } from '../lib/s02-identity.js';
 import { registerS04Routes } from '../lib/s04-routes.js';
 import {registerS05Routes} from '../lib/s05-routes.js';
+import {registerS10Routes} from '../lib/s10-contracts.js';
+import {loadS10Build} from '../lib/s10-build.js';
 import {validateVector as validateS05Vector} from '../lib/s05-contract.js';
 const root=path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const noop={log(){},warn(){},error(){},debug(){}};
@@ -30,7 +32,9 @@ async function registered(pool) {
             './lib/s02-identity.js':{safeLegacyPhysicalName},
             './lib/s04-routes.js':{registerS04Routes},
             './lib/s05-routes.js':{registerS05Routes},
-            './lib/s05-contract.js':{validateVector:validateS05Vector}
+            './lib/s05-contract.js':{validateVector:validateS05Vector},
+            './lib/s10-build.js':{loadS10Build},
+            './lib/s10-contracts.js':{registerS10Routes}
         };
         assert.ok(objects[specifier],`unexpected import: ${specifier}`);
         const obj=objects[specifier];
@@ -94,7 +98,7 @@ test('S03 actual init keeps S01 route blocks even with authenticated user and v2
     const write=await call('POST','/chunks/insert',{user,body:{backend:'qdrant'}});
     assert.equal(write.statusCode,409);assert.equal(write.payload.code,'S01_MUTATION_BLOCKED');
     const health=await call('GET','/health');
-    assert.equal(health.statusCode,200);assert.equal(health.payload.checkpoint,'S04');
+    assert.equal(health.statusCode,200);assert.equal(health.payload.checkpoint,'S10');
     const owner=await call('POST','/v2/identity/resolve',{user,body:{backend:'qdrant',
         scope:{userScopeId:'bob',collectionId:'chat-a',type:'chat',sourceId:'chat-a'},
         embedding:{source:'transformers',model:'x',dimension:384,metric:'cosine'}}});
@@ -114,4 +118,22 @@ test('S04 real index routes validate with authenticated context but always refus
     const denied=await call('POST','/v2/operations/submit',{user,body:{...payload,authorized:true}});
     assert.equal(denied.statusCode,409);assert.equal(denied.payload.code,'S04_MUTATION_NOT_ACTIVATED');
     assert.equal(connections,0);
+}));
+
+test('S10 actual index registers build/capabilities routes behind S03 authentication',async()=>disposable(async dir=>{
+    const call=await registered({async get(){throw Error('no backend request');}});
+    const unauth=await call('GET','/v2/capabilities');
+    assert.equal(unauth.statusCode,401);
+    const user={profile:{handle:'alice'},directories:{vectors:dir}};
+    const caps=await call('GET','/v2/capabilities',{user});
+    assert.equal(caps.statusCode,200);
+    assert.equal(caps.payload.checkpoint,'S10');
+    assert.equal(caps.payload.publicV2MutationsEnabled,false);
+    assert.equal(caps.payload.backends.qdrant.operations.insert,'DENIED_NOT_LIVE_CERTIFIED');
+    const build=await call('GET','/v2/build',{user});
+    assert.equal(build.statusCode,200);
+    assert.match(build.payload.sourceFingerprint,/^[0-9a-f]{64}$/);
+    const blocked=await call('POST','/v2/records/insert',{user,body:{verified:true}});
+    assert.equal(blocked.statusCode,409);
+    assert.equal(blocked.payload.code,'S10_OPERATION_NOT_CERTIFIED');
 }));
