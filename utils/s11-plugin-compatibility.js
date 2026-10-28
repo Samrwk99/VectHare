@@ -5,9 +5,9 @@
  */
 import { guardedVectorFetch } from './e02-vector-request-gateway.js';
 export const S11_EXPECTED_PLUGIN = Object.freeze({
-    pluginVersion: '3.2.10-s10.9-f05',
+    pluginVersion: '3.2.10-s10.10-f06',
     contractVersion: 2,
-    sourceFingerprint: 'a268af5ec5318c3309f1deaab623977c118a3b1e10f1cbd453e19fa4638d5b23',
+    sourceFingerprint: 'f4c57d07c136f114cd8f52085c43acae425afc09aab1e178f53bd8a041d6be9c',
 });
 export const S11_BACKENDS = Object.freeze(['standard','lancedb','qdrant','milvus']);
 const ROOT = '/api/plugins/similharity';
@@ -35,7 +35,11 @@ export function validateS11Discovery(build,caps,contracts,expected=S11_EXPECTED_
         contracts.routes['POST /v2/records/pilot-mutate']!=='F04_DISPOSABLE_QDRANT_CONSENTED_V2_RECORDS_UNCERTIFIED' ||
         caps.experimentalQdrantPilotMutationsAvailable!==true ||
         caps.extendedQdrantDisposableAcceptanceAvailable!==true ||
-        contracts.routes['POST /v2/diagnostics/qdrant-f05']!=='F05_EXTENDED_LOCAL_QDRANT_DISPOSABLE_ACCEPTANCE_NOT_PRODUCTION')
+        contracts.routes['POST /v2/diagnostics/qdrant-f05']!=='F05_EXTENDED_LOCAL_QDRANT_DISPOSABLE_ACCEPTANCE_NOT_PRODUCTION' ||
+        contracts.routes['POST /v2/diagnostics/lancedb-f06']!=='F06_LOCAL_LANCEDB_DISPOSABLE_ACCEPTANCE_NOT_PRODUCTION' ||
+        caps.disposableLanceDBAcceptanceAvailable!==true || caps.sourceBoundLanceDBProvisioningAvailable!==true ||
+        caps.experimentalLanceDBPilotMutationsAvailable!==true ||
+        contracts.routes['POST /v2/records/lancedb-pilot-mutate']!=='F06_SOURCE_BOUND_LANCEDB_LOCAL_PILOT_NOT_PRODUCTION')
         return refused('unexpected-execution-contract');
     if(S11_BACKENDS.some(b=>['insert','delete','updateText','updateMetadata','operationSubmit'].some(op=>
         caps.backends[b].operations[op]!=='DENIED_NOT_LIVE_CERTIFIED')))return refused('unaccepted-mutation-claim');
@@ -79,7 +83,7 @@ export function renderS11CompatibilityStatus(root,status,doc=globalThis.document
         node.setAttribute('role','status');node.style.padding='0.5em';
         node.style.marginBottom='0.5em';root.prepend(node);}
     node.textContent=status?.compatible
-        ? 'Similharity F05 detected. Source-bound v2 reads, F03 collection provisioning, an F04 disposable pilot, and extended F05 local-Qdrant host acceptance are available for testing. Automatic memory writes, legacy retrieval and exports remain blocked.'
+        ? 'Similharity F06 detected. Source-bound v2 reads, F03 collection provisioning, an F04 disposable pilot, extended F05 Qdrant and F06 LanceDB disposable host acceptance are available for testing. Automatic memory writes, legacy retrieval and exports remain blocked.'
         : 'Similharity S10 compatibility not verified. Unsafe operations remain disabled.';
     return true;
 }

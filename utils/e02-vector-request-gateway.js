@@ -132,7 +132,7 @@ export function inspectVectorRequest(url, options={}) {
             kind==='lorebook'?['kind','name']:[];
         const provision=req.suffix.endsWith('/provision');
         const keys=['backend','source','embedding','configId',...(provision?['confirmProvision','expectedCollectionName']:[])];
-        if(req.method!=='POST'||!body||!['qdrant','milvus'].includes(body.backend)||
+        if(req.method!=='POST'||!body||!['qdrant','milvus','lancedb'].includes(body.backend)||
            !sourceKeys.length||!source||Object.keys(source).some(k=>!sourceKeys.includes(k))||
            sourceKeys.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220)||
            !embedding||typeof embedding!=='object'||Array.isArray(embedding)||
@@ -179,6 +179,32 @@ export function inspectVectorRequest(url, options={}) {
            (b.action==='delete'&&b.metadata!==undefined))fail(req,'f04-disposable-source-bound-pilot-required');
         return {intercepted:true,allowed:true,transport:'plugin',operation:'f04PilotMutation',backend:'qdrant',method:'POST'};
     }
+    // F06: manual, explicitly consented source-bound pilot for a NEW F03 LanceDB
+    // collection. This is NEVER an E02 matrix unlock or ordinary memory route.
+    if(req.transport==='plugin'&&req.suffix==='/v2/records/lancedb-pilot-mutate'){
+        const b=req.body,source=b?.source,embedding=b?.embedding;
+        const kind=source?.kind;
+        const sourceKeys=kind==='chat'?['kind','avatar','chatFile']:
+            kind==='group-chat'?['kind','groupId','chatFile']:
+            kind==='lorebook'?['kind','name']:[];
+        const allowed=['backend','source','embedding','configId','action','recordId','expectedRevision',
+            'operationId','experimentalConsent','text','vector','metadata'];
+        const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+        if(req.method!=='POST'||!b||b.backend!=='lancedb'||b.configId!=='default'||
+           b.experimentalConsent!=='I ACCEPT F06 LOCAL LANCEDB PILOT'||
+           !['insert','update','metadata','delete'].includes(b.action)||
+           !uuid.test(b.recordId||'')||!uuid.test(b.operationId||'')||
+           !sourceKeys.length||!source||Object.keys(source).some(k=>!sourceKeys.includes(k))||
+           sourceKeys.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220)||
+           !embedding||typeof embedding!=='object'||Array.isArray(embedding)||
+           Object.keys(embedding).some(k=>!['source','model','dimension','metric'].includes(k))||
+           Object.keys(b).some(k=>!allowed.includes(k))||
+           (b.action==='insert'&&b.expectedRevision!==0)||
+           (b.action!=='insert'&&(!Number.isSafeInteger(b.expectedRevision)||b.expectedRevision<1))||
+           (['delete','metadata'].includes(b.action)&&(b.text!==undefined||b.vector!==undefined))||
+           (b.action==='delete'&&b.metadata!==undefined))fail(req,'f06-disposable-source-bound-pilot-required');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:'f06PilotMutation',backend:'lancedb',method:'POST'};
+    }
     // F05: fixed-parameter, explicit-consent local Qdrant acceptance suite.
     // Server selects a new random namespace and synthetic record IDs. No user
     // chat, backend collection, physical IDs, or credentials are transported.
@@ -190,6 +216,15 @@ export function inspectVectorRequest(url, options={}) {
             fail(req,'f05-disposable-consent-required');
         return {intercepted:true,allowed:true,transport:'plugin',backend:'qdrant',
             operation:'f05DisposableAcceptance',method:'POST'};
+    }
+    // F06: one explicitly confirmed isolated LanceDB diagnostic. A browser
+    // cannot select paths, physical tables, owners, record IDs or credentials.
+    if(req.transport==='plugin'&&req.suffix==='/v2/diagnostics/lancedb-f06'){
+        const b=req.body;
+        if(req.method!=='POST'||!b||b.consent!=='I ACCEPT F06 DISPOSABLE LANCEDB TEST'||
+           Object.keys(b).some(k=>k!=='consent'))fail(req,'f06-disposable-consent-required');
+        return {intercepted:true,allowed:true,transport:'plugin',backend:'lancedb',
+            operation:'f06DisposableAcceptance',method:'POST'};
     }
     // H01 is a narrowly bounded, explicitly confirmed disposable acceptance
     // diagnostic. It cannot select a collection, write real memories, or lift

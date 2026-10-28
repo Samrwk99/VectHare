@@ -22,9 +22,9 @@ export async function f03CollectionRequest(operation,body,headers={},fetchImpl=g
 export function renderF03ProvisionPanel(root,getSettings,doc=globalThis.document){
  if(!root||!doc?.createElement||root.querySelector?.('#vecthare_f03_provision'))return false;
  const panel=doc.createElement('div');panel.id='vecthare_f03_provision';
- const title=doc.createElement('div');title.textContent='F03 — new v2 collection setup (Qdrant/Milvus only)';
+ const title=doc.createElement('div');title.textContent='F03 — new v2 collection setup (Qdrant/Milvus/LanceDB)';
  const desc=doc.createElement('div');desc.textContent='Preview, then explicitly confirm creation of a NEW empty source-bound collection. No existing collections are cleared or overwritten. Memory writes remain disabled.';
- const backend=doc.createElement('select');for(const b of ['qdrant','milvus']){const op=doc.createElement('option');op.value=b;op.textContent=b;backend.append(op);}
+ const backend=doc.createElement('select');for(const b of ['qdrant','milvus','lancedb']){const op=doc.createElement('option');op.value=b;op.textContent=b;backend.append(op);}
  const model=doc.createElement('input');model.type='text';model.placeholder='Exact embedding model identifier';
  const dimension=doc.createElement('input');dimension.type='number';dimension.min='1';dimension.max='65536';dimension.placeholder='Embedding dimension';
  const metric=doc.createElement('select');for(const m of ['cosine','dot','euclid']){const op=doc.createElement('option');op.value=m;op.textContent=m;metric.append(op);}
