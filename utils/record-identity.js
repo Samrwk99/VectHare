@@ -166,5 +166,25 @@ export function remapReferences(metadata, mapping, {requireMapped = false} = {})
     for (const field of ARRAY_REFS) if (Array.isArray(next[field])) next[field] = next[field].map(resolve);
     return {status:blocked.length ? 'blocked':'ready',metadata:blocked.length ? metadata : next,unresolved:[...new Set(blocked)]};
 }
+/** Fingerprint the embedding-affecting configuration without persisting secret
+ * provider credentials or untrusted API endpoints in collection metadata.
+ * Legacy records without this version are UNKNOWN, never auto-certified.
+ */
+export const EMBEDDING_PROFILE_VERSION = 'vh-embed-profile-v1';
+export function embeddingProfileFingerprint(settings = {}) {
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) throw new Error('Invalid embedding settings');
+    const source=settings.source || 'transformers';
+    // No fall back to a generic model if a provider-specific model is chosen.
+    const modelName=({openai:'openai_model',cohere:'cohere_model',ollama:'ollama_model',
+        llamacpp:'llamacpp_model',vllm:'vllm_model',openrouter:'openrouter_model',
+        nomicai:'nomicai_model',mistral:'mistral_model'})[source] || 'model';
+    const policy={version:EMBEDDING_PROFILE_VERSION,source,model:settings[modelName] ?? null,
+        dimensions:settings.embedding_dimensions ?? settings.milvus_dimensions ?? null,
+        chunking:settings.chunking_strategy ?? 'per_message',batchSize:settings.batch_size ?? 4,
+        conversationTurnOrder:settings.conversation_turn_order ?? 'user_character',
+        cleaning:settings.text_cleaning_mode ?? null,includeAttachments:settings.include_attachments ?? null,
+        speakerFormat:settings.speaker_format ?? null,embeddingTemplate:settings.embedding_template ?? null};
+    return fingerprint(policy);
+}
 export const MESSAGE_UID_FIELD = UID_FIELD;
 export const RECORD_FINGERPRINT_VERSION = FINGERPRINT_VERSION;

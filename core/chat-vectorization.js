@@ -1,4 +1,4 @@
-import {recordId, fingerprint, stampMessageUids, messageReference, groupRecordLocalId, checkCollision, MESSAGE_UID_FIELD} from '../utils/record-identity.js';
+import {recordId, fingerprint, stampMessageUids, messageReference, groupRecordLocalId, checkCollision, embeddingProfileFingerprint, MESSAGE_UID_FIELD} from '../utils/record-identity.js';
 import {hasVerifiedCapability} from '../utils/backend-contracts.js';
 import {chatJobs, anyJobSignal,currentChatIdentity} from './chat-job-runtime.js';
 import {scopedActivationHistory} from '../utils/activation-history.js';
@@ -478,6 +478,7 @@ function collectGroupedItems(chat, settings, collectionId = null, durableUids = 
                 ...(qualifiedKey ? {recordId: recordId(qualifiedKey, `hash:${key}`)} : {}),
                 ...(refs.length ? {logicalGroupIds: [groupRecordLocalId(refs, strategy)]} : {}),
                 contentFingerprint: fingerprint(item.raw),
+                embeddingProfileFingerprint: embeddingProfileFingerprint(settings),
             };
             merged.set(key, item);
             continue;

@@ -33,7 +33,8 @@
     "test:dependency-b": "node --experimental-vm-modules --test tests/c04b-c06b-c11b.node.test.mjs",
     "test:c03": "node --experimental-vm-modules --test tests/c03-*.node.test.mjs",
     "test:c07": "node --test tests/c07-*.node.test.mjs",
-    "test:c02": "node --test tests/c02-operations.node.test.mjs && node --experimental-vm-modules --test tests/c02-integration.node.test.mjs"
+    "test:c02": "node --test tests/c02-operations.node.test.mjs && node --experimental-vm-modules --test tests/c02-integration.node.test.mjs",
+    "test:step6": "node --test tests/c04-c06-c07-completion.node.test.mjs && node --experimental-vm-modules --test tests/c06-backend-cache.node.test.mjs"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^2.1.0",

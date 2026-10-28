@@ -6,7 +6,7 @@ import {dirname,resolve} from 'node:path';
 import {
  fingerprint, recordId, diagnosticRecordKey, stampMessageUids, messageReference,
  groupRecordLocalId, checkCollision, reconcilePositions, reconcileSceneBoundaries, remapReferences,
- MESSAGE_UID_FIELD
+ MESSAGE_UID_FIELD, embeddingProfileFingerprint
 } from '../utils/record-identity.js';
 import {createDebugData,recordChunkFate} from '../ui/search-debug.js';
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
@@ -156,7 +156,7 @@ function actualChatGrouping({hash=(text)=> [...text].reduce((v,c)=> v*31+c.codeP
   substituteParams:x=>x,cleanText:x=>x,
   extractBM25Keywords:()=>[],groupConversationTurns:messages=>messages.map(m=>[m]),
   getVerifiedChatOriginId:()=> 'verified-chat', messageReference, recordId, fingerprint,
-  groupRecordLocalId, checkCollision,
+  groupRecordLocalId, checkCollision, embeddingProfileFingerprint,
  });
  const code=[
   functionSource('core/chat-vectorization.js','function groupMessagesByStrategy('),

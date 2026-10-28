@@ -6,6 +6,9 @@ const norm = id => typeof id==='string' && id.trim() ? id : null;
 export function verifyCollectionOwner({collectionKey,metadata,chatId,characterId}={}) {
     if (!parseCollectionKey(collectionKey)) return {allowed:false,reason:'unqualified-collection'};
     if (!metadata || typeof metadata!=='object') return {allowed:false,reason:'ownership-metadata-unavailable'};
+    // Metadata from a different qualified collection is not transferable ownership proof.
+    if (metadata.collectionKey && metadata.collectionKey !== collectionKey)
+        return {allowed:false,reason:'metadata-collection-mismatch'};
     if (metadata.enabled===false || metadata.ownershipReviewRequired===true || metadata.ownerStatus==='unverified')
         return {allowed:false,reason:'disabled-or-owner-unverified'};
     const originChat=norm(metadata.originChatId),originCharacter=norm(metadata.originCharacterId);
@@ -16,7 +19,10 @@ export function verifyCollectionOwner({collectionKey,metadata,chatId,characterId
     if(metadata.lockMode==='exclusive') {
         const chats=[...(Array.isArray(metadata.lockedToChatIds)?metadata.lockedToChatIds:[]),...(metadata.lockedToChatId?[metadata.lockedToChatId]:[])].map(String);
         const chars=(Array.isArray(metadata.lockedToCharacterIds)?metadata.lockedToCharacterIds:[]).map(String);
-        if ((chats.length || chars.length) && !chats.includes(String(chatId)) && !chars.includes(String(characterId)))
+        // When both lock dimensions are present BOTH must match. The former OR
+        // check allowed a correct character to bypass a foreign chat lock.
+        if ((chats.length && !chats.includes(String(chatId))) ||
+            (chars.length && !chars.includes(String(characterId))))
             return {allowed:false,reason:'exclusive-owner-mismatch'};
     }
     return {allowed:true,reason:'verified-owner-policy'};

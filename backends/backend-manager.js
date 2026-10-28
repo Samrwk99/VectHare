@@ -11,6 +11,7 @@
  */
 
 import { extension_settings } from '../../../../extensions.js';
+import { backendConfigurationFingerprint } from '../utils/backend-configuration.js';
 import { StandardBackend } from './standard.js';
 import { LanceDBBackend } from './lancedb.js';
 import { QdrantBackend } from './qdrant.js';
@@ -45,6 +46,8 @@ const backendInstances = {};
 const backendHealthStatus = {};
 const backendAccessTimestamps = {}; // Track last access time for LRU eviction
 const backendHealthTimestamps = {}; // VEC-33: Track when health was last verified
+const backendConfigurationFingerprints = {};
+const backendInitializationGenerations = {};
 const MAX_CACHED_BACKENDS = 5; // Limit cache size to prevent unbounded growth
 const HEALTH_CACHE_TTL_MS = 60000; // VEC-33: Health cache TTL (60 seconds)
 
@@ -256,6 +259,7 @@ function evictLRUBackendIfNeeded() {
             delete backendHealthStatus[oldestBackend];
             delete backendAccessTimestamps[oldestBackend];
             delete backendHealthTimestamps[oldestBackend]; // VEC-33
+            delete backendConfigurationFingerprints[oldestBackend];
         }
     }
 }
@@ -270,6 +274,19 @@ function evictLRUBackendIfNeeded() {
 export async function initializeBackend(backendName, settings, throwOnFail = true) {
     // Normalize backend name (vectra -> standard, etc.)
     const normalizedName = normalizeBackendName(backendName);
+    const configuration = backendConfigurationFingerprint(normalizedName, settings || {});
+    // A health-checked instance is NOT reusable for a different source,
+    // model, tenant mode, endpoint or credential. Nor is an old health failure
+    // authoritative after configuration changes.
+    if (backendConfigurationFingerprints[normalizedName] !== configuration) {
+        delete backendInstances[normalizedName];
+        delete backendHealthStatus[normalizedName];
+        delete backendAccessTimestamps[normalizedName];
+        delete backendHealthTimestamps[normalizedName];
+    }
+    backendConfigurationFingerprints[normalizedName] = configuration;
+    const initializationGeneration = (backendInitializationGenerations[normalizedName] || 0) + 1;
+    backendInitializationGenerations[normalizedName] = initializationGeneration;
 
     // VEC-33: If already have a healthy instance, check if health cache is stale
     if (backendInstances[normalizedName] && backendHealthStatus[normalizedName]) {
@@ -326,6 +343,10 @@ export async function initializeBackend(backendName, settings, throwOnFail = tru
 
         // Health check
         const healthy = await backend.healthCheck();
+        // Do not let a stale, concurrently superseded initialization write
+        // health state or evict the newer backend's cached instance.
+        if (backendConfigurationFingerprints[normalizedName] !== configuration ||
+            backendInitializationGenerations[normalizedName] !== initializationGeneration) return healthy ? backend : null;
         recordHealthCheck(normalizedName, healthy); // VEC-18: Record health check result
         if (!healthy) {
             backendHealthStatus[normalizedName] = false;
@@ -345,6 +366,11 @@ export async function initializeBackend(backendName, settings, throwOnFail = tru
         console.log(`VectHare: Successfully initialized ${normalizedName} backend`);
         return backend;
     } catch (error) {
+        if (backendConfigurationFingerprints[normalizedName] !== configuration ||
+            backendInitializationGenerations[normalizedName] !== initializationGeneration) {
+            if (throwOnFail) throw error;
+            return null;
+        }
         backendHealthStatus[normalizedName] = false;
         recordHealthCheck(normalizedName, false); // VEC-18: Record failed health check
         recordError(normalizedName, error); // VEC-18: Record error
@@ -398,6 +424,12 @@ export async function getBackendForCollection(collectionBackend, settings) {
 export async function isBackendAvailable(backendName, settings) {
     const normalizedName = normalizeBackendName(backendName);
 
+    // A previous failed health check applies only to the same configuration.
+    if (backendConfigurationFingerprints[normalizedName] !== backendConfigurationFingerprint(normalizedName,settings || {})) {
+        delete backendHealthStatus[normalizedName];
+        delete backendInstances[normalizedName];
+        delete backendHealthTimestamps[normalizedName];
+    }
     // If we already know it's unhealthy, return false without retrying
     if (backendHealthStatus[normalizedName] === false) {
         return false;
@@ -423,6 +455,7 @@ export function resetBackendHealth(backendName = null) {
         delete backendHealthStatus[normalizedName];
         delete backendInstances[normalizedName];
         delete backendHealthTimestamps[normalizedName]; // VEC-33
+        delete backendConfigurationFingerprints[normalizedName];
         console.log(`VectHare: Reset backend health status for ${normalizedName}${backendName !== normalizedName ? ` (alias: ${backendName})` : ''}`);
     } else {
         // Reset all
