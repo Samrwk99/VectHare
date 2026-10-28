@@ -122,6 +122,29 @@ export function inspectVectorRequest(url, options={}) {
             fail(req,'f02-host-scoped-read-shape-required');
         return {intercepted:true,allowed:true,transport:'plugin',operation:`f02-${operation}`,backend:b.backend,method:'POST'};
     }
+    // F03: opt-in schema provisioning only (NO record writes, overwrite or purge).
+    // Requires F01 source selector, derived physical name, and exact confirmation.
+    if(req.transport==='plugin' && /^\/v2\/collections\/(?:preview|provision|status)$/.test(req.suffix)){
+        const body=req.body, source=body?.source, embedding=body?.embedding;
+        const kind=source?.kind;
+        const sourceKeys=kind==='chat'?['kind','avatar','chatFile']:
+            kind==='group-chat'?['kind','groupId','chatFile']:
+            kind==='lorebook'?['kind','name']:[];
+        const provision=req.suffix.endsWith('/provision');
+        const keys=['backend','source','embedding','configId',...(provision?['confirmProvision','expectedCollectionName']:[])];
+        if(req.method!=='POST'||!body||!['qdrant','milvus'].includes(body.backend)||
+           !sourceKeys.length||!source||Object.keys(source).some(k=>!sourceKeys.includes(k))||
+           sourceKeys.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220)||
+           !embedding||typeof embedding!=='object'||Array.isArray(embedding)||
+           Object.keys(embedding).some(k=>!['source','model','dimension','metric'].includes(k))||
+           Object.keys(body).some(k=>!keys.includes(k))||
+           (body.configId!==undefined&&!['local','default'].includes(body.configId))||
+           (body.backend==='milvus'&&body.configId==='local')||
+           (provision&&(body.confirmProvision!==true||!/^vh2_[a-f0-9]{48}$/.test(body.expectedCollectionName))))
+            fail(req,'f03-explicit-source-provision-contract-required');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:provision?'f03SchemaProvision':'f03SchemaPreview',
+            backend:body.backend,method:'POST'};
+    }
     // H01 is a narrowly bounded, explicitly confirmed disposable acceptance
     // diagnostic. It cannot select a collection, write real memories, or lift
     // any production capability matrix cell.

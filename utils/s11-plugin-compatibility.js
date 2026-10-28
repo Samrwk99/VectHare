@@ -5,9 +5,9 @@
  */
 import { guardedVectorFetch } from './e02-vector-request-gateway.js';
 export const S11_EXPECTED_PLUGIN = Object.freeze({
-    pluginVersion: '3.2.10-s10.6-f02',
+    pluginVersion: '3.2.10-s10.7-f03',
     contractVersion: 2,
-    sourceFingerprint: '90d097876ce2cc562b6d8609db6e5c746c6b088b24add9c0c92d8a9ea1554c1d',
+    sourceFingerprint: '6db71540d66f656eee6b6e6d44d8197af51f2a76b7c13f045f682656ae110e95',
 });
 export const S11_BACKENDS = Object.freeze(['standard','lancedb','qdrant','milvus']);
 const ROOT = '/api/plugins/similharity';
@@ -28,11 +28,14 @@ export function validateS11Discovery(build,caps,contracts,expected=S11_EXPECTED_
     if(!isObj(caps.backends) || S11_BACKENDS.some(b=>!isObj(caps.backends[b]?.operations)))return refused('backend-contract-missing');
     if(caps.capabilityClaimsArePermissions!==false || caps.productionCertified!==false || caps.publicV2MutationsEnabled!==false || caps.publicV2ReadsEnabled!==false)
         return refused('unsupported-capability-claims');
-    if(contracts.executionCertified!==false || !isObj(contracts.routes) || contracts.routes['POST /v2/operations/submit']!=='DENIED' || contracts.routes['POST /v2/reads/get']!=='GUARDED_F02_HOST_SOURCE_V2_SCHEMA_ONLY' || caps.publicV2ReadRoutesAvailable!==true)
+    if(contracts.executionCertified!==false || !isObj(contracts.routes) || contracts.routes['POST /v2/operations/submit']!=='DENIED' || contracts.routes['POST /v2/reads/get']!=='GUARDED_F02_HOST_SOURCE_V2_SCHEMA_ONLY' || caps.publicV2ReadRoutesAvailable!==true || caps.guardedNewCollectionProvisioningAvailable!==true ||
+        contracts.routes['POST /v2/collections/preview']!=='F03_SOURCE_BOUND_NEW_COLLECTION_PREVIEW_ONLY' ||
+        contracts.routes['POST /v2/collections/provision']!=='F03_EXPLICIT_SOURCE_BOUND_EMPTY_SCHEMA_CREATION_UNCERTIFIED' ||
+        contracts.routes['POST /v2/collections/status']!=='F03_SOURCE_BOUND_PROVISION_RECEIPT_ONLY')
         return refused('unexpected-execution-contract');
     if(S11_BACKENDS.some(b=>['insert','delete','updateText','updateMetadata','operationSubmit'].some(op=>
         caps.backends[b].operations[op]!=='DENIED_NOT_LIVE_CERTIFIED')))return refused('unaccepted-mutation-claim');
-    return Object.freeze({compatible:true,readiness:'GUARDED_F02_READ_ONLY',reason:'f02-v2-read-routes-source-bound-not-live-certified',
+    return Object.freeze({compatible:true,readiness:'GUARDED_F02_READ_ONLY',reason:'f03-v2-source-bound-read-and-schema-setup-not-live-certified',
         pluginVersion:safeString(build.pluginVersion),sourceFingerprint:safeString(build.sourceFingerprint),
         writeEnabled:false,publicV2ReadsEnabled:false,
         hostAttested:false,sourceOwnershipAttested:false,backendsCertified:false});
@@ -72,7 +75,7 @@ export function renderS11CompatibilityStatus(root,status,doc=globalThis.document
         node.setAttribute('role','status');node.style.padding='0.5em';
         node.style.marginBottom='0.5em';root.prepend(node);}
     node.textContent=status?.compatible
-        ? 'Similharity F02 detected. Saved-source v2 reads are guarded; legacy reads, all vector writes and verified exports remain blocked until acceptance.'
+        ? 'Similharity F03 detected. Source-bound v2 reads and explicit empty collection setup are available for testing; ordinary memory writes, legacy retrieval and verified exports remain blocked.'
         : 'Similharity S10 compatibility not verified. Unsafe operations remain disabled.';
     return true;
 }
