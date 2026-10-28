@@ -3,6 +3,7 @@ import { guardedVectorFetch as fetch } from './utils/e02-vector-request-gateway.
 import {renderF02ReadPanel} from './utils/f02-public-read-client.js';
 import {renderF09MemoryPreview} from './utils/f09-memory-workflow.js';
 import {renderF10RecoveryPanel} from './utils/f10-recovery-client.js';
+import {renderF11SetupCenter,groupF11DeveloperPanels} from './utils/f11-setup-center.js';
 import {renderF03ProvisionPanel} from './utils/f03-provision-client.js';
 import {renderF04PilotPanel} from './utils/f04-pilot-client.js';
 import {renderF05QdrantAcceptance} from './utils/f05-acceptance-client.js';
@@ -29,6 +30,7 @@ import {recoverPendingC02Operations} from './core/core-vector-api.js';
 import {
     eventSource,
     event_types,
+    getRequestHeaders,
     extension_prompt_types,
 } from '../../../../script.js';
 import {
@@ -596,6 +598,8 @@ jQuery(async () => {
         renderF07PilotPanel(document.querySelector('.vecthare_settings'),()=>settings);
         renderF08MilvusAcceptance(document.querySelector('.vecthare_settings'));
         renderF08PilotPanel(document.querySelector('.vecthare_settings'),()=>settings);
+        renderF11SetupCenter(document.querySelector('.vecthare_settings'),{getHeaders:getRequestHeaders});
+        groupF11DeveloperPanels(document.querySelector('.vecthare_settings'));
         if (!status.compatible) console.warn('VectHare: Similharity S10 compatibility unavailable:',status.reason);
     });
 

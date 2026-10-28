@@ -5,9 +5,9 @@
  */
 import { guardedVectorFetch } from './e02-vector-request-gateway.js';
 export const S11_EXPECTED_PLUGIN = Object.freeze({
-    pluginVersion: '3.2.10-s10.14-f10',
+    pluginVersion: '3.2.10-s10.15-f11',
     contractVersion: 2,
-    sourceFingerprint: '016d9b892b6a78ee2b751a1a6b815b73ffdaeb7218c1225282b384f17b76d6e4',
+    sourceFingerprint: '0e2d5a6fd60b4b6eb8083d80edcf944fb3a4e3a456c0e689eee731a24cba9a6a',
 });
 export const S11_BACKENDS = Object.freeze(['standard','lancedb','qdrant','milvus']);
 const ROOT = '/api/plugins/similharity';
@@ -51,6 +51,8 @@ export function validateS11Discovery(build,caps,contracts,expected=S11_EXPECTED_
         contracts.routes['POST /v2/recovery/status']!=='F10_CHECKSUM_AND_SOURCE_BOUND_RECEIPT_ONLY' ||
         contracts.routes['POST /v2/recovery/download']!=='F10_NONAUTHORITATIVE_EVIDENCE_DOWNLOAD_ONLY' ||
         caps.f10NonAuthoritativeEvidenceCaptureAvailable!==true ||
+        caps.f11GuiReadinessAvailable!==true ||
+        contracts.routes['GET /v2/setup/readiness']!=='F11_REDACTED_GUI_DEVELOPMENT_READINESS_NO_HEALTH_OR_WRITE_GRANT' ||
         caps.sourceBoundMilvusProvisioningAvailable!==true || caps.experimentalMilvusPilotMutationsAvailable!==true ||
         caps.disposableMilvusAcceptanceAvailable!==true)
         return refused('unexpected-execution-contract');
@@ -96,7 +98,7 @@ export function renderS11CompatibilityStatus(root,status,doc=globalThis.document
         node.setAttribute('role','status');node.style.padding='0.5em';
         node.style.marginBottom='0.5em';root.prepend(node);}
     node.textContent=status?.compatible
-        ? 'Similharity F10 detected. F01–F09 guarded development capabilities and F10 source-bound record evidence capture are available. F10 is NOT a verified full backup, atomic inventory, migration, or restore. Automatic memory writes, legacy retrieval, and production exports remain blocked.'
+        ? 'Similharity F11 detected. GUI readiness reporting, guarded F01–F09 development tools and F10 non-authoritative record evidence are available. Automatic writes, native Standard mutations, legacy migration, complete backup and restore remain blocked.'
         : 'Similharity S10 compatibility not verified. Unsafe operations remain disabled.';
     return true;
 }

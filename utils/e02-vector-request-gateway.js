@@ -77,6 +77,13 @@ export function inspectVectorRequest(url, options={}) {
         if (req.body != null) fail(req,'inspection-rejects-body');
         return {intercepted:true,allowed:true,transport:'plugin',operation:'s11Discovery',backend:'none',method:'GET'};
     }
+    // F11: server-authenticated, redacted readiness snapshot. GET only;
+    // no backend health probe or ability to enable memory operations.
+    if (req.transport === 'plugin' && req.suffix === '/v2/setup/readiness') {
+        if (req.method !== 'GET' || req.body != null || req.parsed.search)
+            fail(req,'f11-readiness-inspection-only');
+        return {intercepted:true,allowed:true,operation:'f11Readiness',backend:'none',transport:'plugin',method:'GET'};
+    }
     // S11.4: specifically reviewed authenticated database CONFIGURATION routes.
     // These never insert or delete vector records; server validates CSRF,
     // trusted user scope, endpoint restrictions and private file storage.
