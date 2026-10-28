@@ -29,6 +29,158 @@
 import { DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP } from './constants.js';
 
 /**
+ * C13 versioned strategy definitions. A change to a chunk boundary changes its
+ * physical hash. Existing collections must never be silently re-chunked.
+ */
+export const CHUNKER_VERSION = 2;
+export const SIZE_BASED_STRATEGIES = new Set(['adaptive', 'sentence', 'dialogue']);
+
+/** Validate overlap before work begins; overlapping chunks must advance. */
+export function validateOverlap(chunkSize, chunkOverlap) {
+    if (!Number.isSafeInteger(chunkSize) || chunkSize < 2 || chunkSize > 1000000)
+        throw new Error('C13: chunkSize must be an integer from 2 to 1000000');
+    if (!Number.isSafeInteger(chunkOverlap) || chunkOverlap < 0 || chunkOverlap >= chunkSize)
+        throw new Error('C13: chunkOverlap must be an integer >= 0 and smaller than chunkSize');
+}
+
+/**
+ * Overlap on the original input text, not on the already-overlapped output.
+ * Never synthesizes repeated identical chunks, empty chunks, or non-progress.
+ * Text strategies preserve the order and natural boundaries of base chunks;
+ * exceptionally long base chunks are split into bounded windows.
+ */
+export function applyTextOverlap(baseChunks, chunkSize, overlap) {
+    validateOverlap(chunkSize, overlap);
+    const blocks = baseChunks.filter(c => (typeof c === 'string' ? c : c?.text || '').trim());
+    if (!overlap) return blocks;
+    const output = [];
+    for (let blockIndex=0; blockIndex<blocks.length;blockIndex++) {
+        const base=blocks[blockIndex];
+        const source=typeof base === 'string' ? base : base.text;
+        const baseMetadata=typeof base === 'string' ? {} : base.metadata || {};
+        let offset=0;
+        while (offset<source.length) {
+            const prefix=output.length ? output[output.length-1].text.slice(-overlap) : '';
+            // Separate consecutive semantic blocks rather than gluing the
+            // final word of one paragraph to the first word of the next.
+            const separator=offset===0 && output.length && !/\s$/.test(prefix) && !/^\s/.test(source)
+                && chunkSize-prefix.length>1 ? ' ' : '';
+            const capacity=chunkSize-prefix.length-separator.length;
+            if (capacity<1) throw new Error('C13: chunk overlap leaves no room for content');
+            let end=Math.min(source.length,offset+capacity);
+            if (end<source.length && /[\uD800-\uDBFF]/.test(source[end-1])) end--;
+            if (end===offset) throw new Error('C13: chunkSize too small for Unicode text');
+            const part=source.slice(offset,end);
+            const text=prefix+separator+part;
+            if (text.trim() && text!==output[output.length-1]?.text)
+                output.push({text,metadata:{...baseMetadata,overlapPrefixLength:prefix.length+separator.length,
+                    sourceBlock:blockIndex,sourceOffset:offset,sourceEnd:end}});
+            offset=end;
+        }
+    }
+    return output;
+}
+
+/**
+ * Adaptive chat grouping retains exact member references and never coalesces
+ * incompatible physical records. Each group is bounded by chunkSize and is
+ * deterministic for unchanged message content/order/options.
+ */
+export function adaptiveChatGroups(messages, {chunkSize = 500} = {}) {
+    validateOverlap(chunkSize, 0);
+    if (!Array.isArray(messages)) throw new Error('C13: adaptive chat requires message array');
+    const output = [];
+    let current = [];
+    let size = 0;
+    const flush = () => {
+        if (!current.length) return;
+        const text = current.map(x => x.text).join('\n\n');
+        const raw = current.map(x => x.raw).join('\n\n');
+        const membership = [...new Set(current.map(x => x.id).filter(x => x !== undefined && x !== null))];
+        output.push({text, raw, metadata: {
+            strategy: 'adaptive', chunkerVersion: CHUNKER_VERSION,
+            messageIds: membership, startIndex: membership[0], endIndex: membership[membership.length - 1],
+            messageRefs: [...new Set(current.map(x => x.ref).filter(Boolean))],
+            messageHashes: [...new Set(current.map(x => x.hash).filter(x => x !== undefined))],
+            segmentOffsets: current.map(x => ({id:x.id, from:x.from, to:x.to})),
+        }});
+        current = []; size = 0;
+    };
+    for (const msg of messages) {
+        const displayed = String(msg?.text ?? msg?.mes ?? '');
+        const original = String(msg?.raw ?? msg?.text ?? msg?.mes ?? '');
+        const id = msg?.index ?? msg?.id;
+        const role = msg?.is_user ? 'User' : String(msg?.speaker || msg?.name || 'Character');
+        const prefix = `[${role}]: `;
+        // Keep membership when a single message exceeds the limit.
+        // Preserve the corresponding source substring for stable hashing.
+        const maxPart = Math.max(1, chunkSize - prefix.length);
+        if (prefix.length >= chunkSize) throw new Error('C13: chunkSize too small for chat role label');
+        let from = 0;
+        while (from < displayed.length || (from === 0 && !displayed.length)) {
+            let to = Math.min(displayed.length, from + maxPart);
+            if (to < displayed.length && /[\uD800-\uDBFF]/.test(displayed[to - 1])) to--;
+            if (to === from && displayed.length) throw new Error('C13: chunkSize too small for Unicode chat text');
+            const visiblePart = displayed.slice(from, to);
+            const originalPart = original.slice(from, to);
+            const unit = {text: prefix + visiblePart, raw: prefix + originalPart + `\u0000segment:${from}:${to}:${original.length}`,
+                id, ref:msg?.messageRef, hash:msg?.hash, from, to};
+            const needed = unit.text.length + (current.length ? 2 : 0);
+            if (current.length && size + needed > chunkSize) flush();
+            current.push(unit); size += unit.text.length + (current.length > 1 ? 2 : 0);
+            from = to || displayed.length;
+        }
+    }
+    flush();
+    return output;
+}
+
+/** Parse explicit upload scene boundaries; never infer scene ownership from text alone. */
+export function parseUploadedScenes(messages, metadata={}) {
+    if (!Array.isArray(messages)) throw new Error('C13: uploaded scenes require message array');
+    const normalized = messages.map((msg, index) => ({...msg, __index:index}));
+    const declared = Array.isArray(metadata?.scenes) ? metadata.scenes : null;
+    const ranges = [];
+    if (declared?.length) {
+        for (const item of declared) {
+            const start = item.start ?? item.sceneStart;
+            const end = item.end ?? item.sceneEnd;
+            if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end >= messages.length || end < start)
+                throw new Error('C13: invalid imported scene range');
+            ranges.push({start,end,title:item.title ?? null});
+        }
+    } else {
+        let pending = null;
+        for (let i=0; i<normalized.length; i++) {
+            const msg = normalized[i];
+            const start = msg.sceneStart === true || msg.extra?.vecthare?.sceneStart === true || /^\s*\[SCENE START\]/i.test(msg.mes || msg.text || '');
+            const end = msg.sceneEnd === true || msg.extra?.vecthare?.sceneEnd === true || /^\s*\[SCENE END\]/i.test(msg.mes || msg.text || '');
+            if (start) {
+                if (pending !== null) throw new Error('C13: nested imported scene start');
+                pending = i;
+            }
+            if (end) {
+                if (pending === null) throw new Error('C13: scene end without start');
+                ranges.push({start:pending,end:i,title:msg.sceneTitle || null});
+                pending = null;
+            }
+        }
+        if (pending !== null) throw new Error('C13: unclosed imported scene');
+    }
+    ranges.sort((a,b)=>a.start-b.start);
+    for (let i=1; i<ranges.length; i++)
+        if (ranges[i].start <= ranges[i-1].end) throw new Error('C13: overlapping imported scenes');
+    if (!ranges.length) throw new Error('C13: no complete scene markers found in upload');
+    return ranges.map((scene,sceneIndex)=>{
+        const members = normalized.slice(scene.start,scene.end+1);
+        return {text:members.map(m=>`[${m.is_user?'User':(m.name || 'Character')}]: ${m.mes ?? m.text ?? ''}`).join('\n\n'),
+            metadata:{strategy:'per_scene',chunkerVersion:CHUNKER_VERSION,isScene:true,sceneIndex,
+                sceneStart:scene.start,sceneEnd:scene.end,sceneTitle:scene.title,
+                messageIds:members.map(m=>m.__index)}};
+    });
+}
+
+/**
  * Main entry point - chunks text using specified strategy
  * @param {string|Array|object} text - Text to chunk (format depends on strategy)
  * @param {object} options - Chunking options
@@ -44,6 +196,7 @@ export async function chunkText(text, options = {}) {
         chunkOverlap = DEFAULT_CHUNK_OVERLAP,
         batchSize = 4,
         conversationTurnOrder = 'user_character',
+        sourceMetadata = {},
     } = options;
 
     if (!text) {
@@ -59,7 +212,10 @@ export async function chunkText(text, options = {}) {
     // Select strategy
     const strategyFn = STRATEGIES[strategy];
     if (!strategyFn) throw new Error(`Unsupported chunking strategy: ${strategy}`);
-    const chunks = strategyFn(text, { chunkSize, chunkOverlap, batchSize, conversationTurnOrder });
+    if (SIZE_BASED_STRATEGIES.has(strategy) && !Array.isArray(text)) validateOverlap(chunkSize, chunkOverlap);
+    const sourceChunks = strategyFn(text, { chunkSize, chunkOverlap, batchSize, conversationTurnOrder, sourceMetadata });
+    const chunks = SIZE_BASED_STRATEGIES.has(strategy) && !Array.isArray(text)
+        ? applyTextOverlap(sourceChunks, chunkSize, chunkOverlap) : sourceChunks;
 
     // Add metadata to each chunk
     return chunks.map((chunk, index) => ({
@@ -68,6 +224,7 @@ export async function chunkText(text, options = {}) {
             chunkIndex: index,
             totalChunks: chunks.length,
             strategy: strategy,
+            ...(SIZE_BASED_STRATEGIES.has(strategy) || (strategy === 'per_scene' && Array.isArray(text)) ? {chunkerVersion:CHUNKER_VERSION} : {}),
             ...(typeof chunk === 'object' ? chunk.metadata : {}),
         },
     }));
@@ -219,11 +376,9 @@ const STRATEGIES = {
      * This strategy returns empty because scenes are created by createSceneChunk()
      * when the user marks a scene end. Auto-sync skips processing for this strategy.
      */
-    per_scene: (_messages, _options) => {
-        // Scenes are created via scene-markers.js when user marks scene boundaries
-        // This strategy intentionally returns empty - auto-sync is bypassed for per_scene
-        // See chat-vectorization.js which checks for this strategy and skips processing
-        return [];
+    per_scene: (messages, options) => {
+        if (!Array.isArray(messages)) throw new Error('C13: per_scene upload requires parsed messages');
+        return parseUploadedScenes(messages, options.sourceMetadata || {});
     },
 
     /**
@@ -231,10 +386,7 @@ const STRATEGIES = {
      * Tries paragraphs first, then sentences, then words
      */
     adaptive: (text, options) => {
-        if (Array.isArray(text)) {
-            // If given array, treat as per_message
-            return STRATEGIES.per_message(text, options);
-        }
+        if (Array.isArray(text)) return adaptiveChatGroups(text, options);
         return adaptiveChunk(text, options);
     },
 
@@ -484,36 +636,34 @@ function adaptiveChunk(text, options) {
  * Splits a large paragraph at sentence boundaries, then words if needed
  */
 function splitLargeParagraph(text, maxSize) {
-    const sentences = text.split(/(?<=[.!?])\s+/);
-    const chunks = [];
-    let currentChunk = '';
-
+    validateOverlap(maxSize,0);
+    // Prefer sentence boundaries, then words. Long unbroken words still need
+    // bounded output; use code-point-safe cuts to avoid partial surrogate pairs.
+    const sentences = text.match(/[^.!?]+[.!?]*\s*/g) || [text];
+    const parts=[];
     for (const sentence of sentences) {
-        if (currentChunk.length + sentence.length + 1 <= maxSize) {
-            currentChunk += (currentChunk ? ' ' : '') + sentence;
-        } else {
-            if (currentChunk) chunks.push(currentChunk);
-
-            if (sentence.length > maxSize) {
-                // Split by words
-                const words = sentence.split(/\s+/);
-                let wordChunk = '';
-                for (const word of words) {
-                    if (wordChunk.length + word.length + 1 <= maxSize) {
-                        wordChunk += (wordChunk ? ' ' : '') + word;
-                    } else {
-                        if (wordChunk) chunks.push(wordChunk);
-                        wordChunk = word;
-                    }
-                }
-                if (wordChunk) currentChunk = wordChunk;
-            } else {
-                currentChunk = sentence;
+        if (!sentence.trim()) continue;
+        if (sentence.length<=maxSize) {parts.push(sentence.trim());continue;}
+        const words=sentence.trim().split(/\s+/);
+        for (const word of words) {
+            if (word.length<=maxSize) {parts.push(word);continue;}
+            let rest=word;
+            while (rest.length) {
+                let cut=Math.min(maxSize,rest.length);
+                if (cut<rest.length && /[\uD800-\uDBFF]/.test(rest[cut-1])) cut--;
+                if (cut<=0) throw new Error('C13: chunkSize too small for a Unicode character');
+                parts.push(rest.slice(0,cut));rest=rest.slice(cut);
             }
         }
     }
-
-    if (currentChunk) chunks.push(currentChunk);
+    const chunks=[];let current='';
+    for (const part of parts) {
+        if (!part) continue;
+        if (current && current.length+1+part.length>maxSize) {chunks.push(current);current='';}
+        if (part.length>maxSize) throw new Error('C13: failed to bound oversized text');
+        current += (current?' ':'')+part;
+    }
+    if (current) chunks.push(current);
     return chunks;
 }
 
@@ -535,5 +685,28 @@ export function isUnitStrategy(strategyId) {
  * Get chat-specific strategies
  */
 export function getChatStrategies() {
-    return ['per_message', 'conversation_turns', 'message_batch', 'adaptive'];
+    // Live chat does not expose adaptive until C02/C07 migration can commit.
+    return ['per_message', 'conversation_turns', 'message_batch', 'per_scene'];
+}
+
+/**
+ * C13 dry-run plan for non-destructive chunk-strategy rebuilds. A new physical
+ * collection ID is mandatory; these plans are not authorization to delete or
+ * mutate the old collection. Activation remains behind C02/C06 proof gates.
+ */
+export function planChunkStrategyRebuild({oldCollectionKey, newCollectionKey, strategy, oldChunkerVersion = 1, newChunkerVersion = CHUNKER_VERSION, sourceRecordCount} = {}) {
+    if (!oldCollectionKey || !newCollectionKey || oldCollectionKey === newCollectionKey)
+        throw new Error('C13: rebuild requires a distinct, qualified destination collection');
+    const valid = key => /^((standard|qdrant|milvus|lancedb):[^:]+:[^:]+)$/.test(key);
+    if (!valid(oldCollectionKey) || !valid(newCollectionKey)) throw new Error('C13: invalid qualified collection key');
+    if (!['adaptive','per_scene','sentence','dialogue'].includes(strategy))
+        throw new Error('C13: unsupported versioned rebuild strategy');
+    if (!Number.isSafeInteger(sourceRecordCount) || sourceRecordCount < 0)
+        throw new Error('C13: rebuild requires an independently verified record count');
+    if (!Number.isSafeInteger(oldChunkerVersion) || !Number.isSafeInteger(newChunkerVersion) || newChunkerVersion <= oldChunkerVersion)
+        throw new Error('C13: new chunker version must advance');
+    return Object.freeze({kind:'c13-chunker-rebuild',status:'dry-run',
+        oldCollectionKey,newCollectionKey,strategy,oldChunkerVersion,newChunkerVersion,
+        sourceRecordCount,preservesOriginal:true,requiresVerifiedC02Commit:true,
+        requiresCompleteReferenceMigration:true,automaticActivation:false});
 }

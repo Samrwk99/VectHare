@@ -1,4 +1,5 @@
 import {requireSupportedChunkStrategy} from '../utils/feature-support.js';
+import {parseUploadedScenes, CHUNKER_VERSION} from './chunking.js';
 /**
  * ============================================================================
  * VECTHARE CONTENT VECTORIZATION
@@ -11,7 +12,7 @@ import {requireSupportedChunkStrategy} from '../utils/feature-support.js';
  * ============================================================================
  */
 
-import { getContentType, getContentTypeDefaults, hasFeature } from './content-types.js';
+import { getContentType, getContentTypeDefaults, getChunkingStrategy, hasFeature } from './content-types.js';
 import { chunkText } from './chunking.js';
 import { insertVectorItems, purgeVectorIndex } from './core-vector-api.js';
 import { setCollectionMeta, getDefaultDecayForType } from './collection-metadata.js';
@@ -47,7 +48,6 @@ export async function vectorizeContent({ contentType, source, settings }) {
         throw new Error(`Unknown content type: ${contentType}`);
     }
 
-    requireSupportedChunkStrategy(settings.strategy || type.defaultStrategy, contentType, {uploaded:true});
     const sourceName = source.name || source.filename || source.id || contentType;
     progressTracker.show(`Vectorizing ${type.label || contentType}`, 4, 'Steps');
     progressTracker.updateCurrentItem(sourceName);
@@ -60,12 +60,22 @@ export async function vectorizeContent({ contentType, source, settings }) {
         // Step 2: Prepare and chunk
         progressTracker.updateProgress(2, 'Chunking content...');
         const preparedContent = await prepareContent(contentType, rawContent, settings);
+        const chosenStrategy = settings.strategy || type.defaultStrategy;
+        const parsedScenes = chosenStrategy === 'per_scene' && contentType === 'chat'
+            ? parseUploadedScenes(preparedContent.text, preparedContent.sourceMetadata) : null;
+        requireSupportedChunkStrategy(chosenStrategy, contentType, {
+            kind:'upload', uploaded:true, sceneMarkersPresent: Boolean(parsedScenes?.length),
+        });
+        const effectiveChunkSize = settings.chunkSize ?? type.defaults.chunkSize ?? 500;
+        const effectiveOverlap = ['adaptive','sentence','dialogue'].includes(chosenStrategy) && contentType !== 'chat'
+            ? (settings.chunkOverlap ?? getChunkingStrategy(chosenStrategy)?.defaultOverlap ?? 0) : 0;
         const chunks = await chunkText(preparedContent.text || preparedContent, {
-            strategy: settings.strategy || type.defaultStrategy,
-            chunkSize: settings.chunkSize || type.defaults.chunkSize,
-            chunkOverlap: settings.chunkOverlap ?? type.defaults.chunkOverlap,
+            strategy: chosenStrategy,
+            chunkSize: effectiveChunkSize,
+            chunkOverlap: effectiveOverlap,
             batchSize: settings.batchSize ?? type.defaults.batchSize ?? 4,
             conversationTurnOrder: settings.conversation_turn_order || 'user_character',
+            sourceMetadata: preparedContent.sourceMetadata,
         });
 
         if (chunks.length === 0) {
@@ -138,7 +148,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
 
         // Save collection metadata
         const trustedChatId = contentType === 'chat' ? getVerifiedChatOriginId() : null;
-        const ownerNeedsReview = (contentType === 'chat' && !trustedChatId) || contentType === 'character';
+        const ownerNeedsReview = (contentType === 'chat' && (!trustedChatId || source.type === 'file')) || contentType === 'character';
         setCollectionMeta(collectionKey, {
             contentType,
             sourceName,
@@ -147,12 +157,15 @@ export async function vectorizeContent({ contentType, source, settings }) {
             enabled: !ownerNeedsReview,
             ...(ownerNeedsReview ? {ownerStatus:'unverified',ownershipReviewRequired:true} : {}),
             chunkCount: hashedChunks.length,
+            chunkerVersion: CHUNKER_VERSION,
             createdAt: new Date().toISOString(),
             settings: {
                 strategy: settings.strategy,
                 conversation_turn_order: settings.conversation_turn_order,
-                chunkSize: settings.chunkSize,
+                chunkSize: effectiveChunkSize,
                 batchSize: settings.batchSize,
+                chunkOverlap: effectiveOverlap,
+                chunkerVersion: CHUNKER_VERSION,
             },
             temporalDecay: hasFeature(contentType, 'temporalDecay')
                 ? (settings.temporalDecay || getDefaultDecayForType(contentType))
@@ -472,7 +485,11 @@ function prepareChatContent(rawContent, settings) {
     }
 
     // Filter out system messages and empty messages
-    const validMessages = messages.filter(m => m.mes && !m.is_system);
+    const validMessages = messages.filter(m => (m.mes || m.text) && !m.is_system);
+    if (settings.strategy === 'per_scene' && Array.isArray(rawContent.metadata?.scenes)
+        && validMessages.length !== messages.length) {
+        throw new Error('C13: imported scene indices are ambiguous after filtering system/empty messages');
+    }
 
     // Apply text cleaning to messages
     const cleanedMessages = cleanMessages(validMessages, settings.cleaningPreset ?? 'none');
@@ -485,6 +502,10 @@ function prepareChatContent(rawContent, settings) {
         name: m.name,
         index: idx,
         id: m.send_date || m.id || idx,
+        sceneStart: m.sceneStart === true,
+        sceneEnd: m.sceneEnd === true,
+        sceneTitle: m.sceneTitle,
+        extra: m.extra,
     }));
 
     // For per_message strategy - return array of messages for chunking.js
@@ -506,11 +527,12 @@ function prepareChatContent(rawContent, settings) {
     }
 
     // For message_batch strategy - return array for chunking.js to batch
-    if (settings.strategy === 'message_batch') {
+    if (settings.strategy === 'message_batch' || settings.strategy === 'adaptive' || settings.strategy === 'per_scene') {
         return {
             text: normalizedMessages,
             type: 'messages',
             messages: validMessages,
+            sourceMetadata: rawContent.metadata || {},
         };
     }
 
@@ -639,6 +661,9 @@ function generateCollectionId(contentType, source, settings) {
 
     switch (contentType) {
         case 'chat':
+            // C13: uploaded adaptive chat MUST NOT reuse the active chat's physical ID.
+            if (settings.strategy === 'adaptive' || settings.strategy === 'per_scene')
+                return buildChatCollectionId(`import-${settings.strategy}-v${CHUNKER_VERSION}-${timestamp}-${Math.floor(Math.random()*1000000).toString().padStart(6,'0')}`);
             // Use UUID-based ID (single source of truth)
             const chatCollectionId = buildChatCollectionId();
             if (chatCollectionId) {

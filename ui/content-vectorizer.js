@@ -1,4 +1,6 @@
 import {parseSafePng, MAX_PNG_TEXT_BYTES} from '../utils/safe-png.js';
+import {parseUploadedScenes} from '../core/chunking.js';
+import {validateChunkStrategy} from '../utils/feature-support.js';
 /**
  * ============================================================================
  * VECTHARE CONTENT VECTORIZER UI
@@ -706,9 +708,14 @@ function renderYouTubeSource(type) {
  * Updates chunking strategy section
  */
 function updateChunkingSection(type) {
-    const strategies = getChunkingStrategies(type.id);
+    let markers = false;
+    if (type.id === 'chat' && sourceData?.messages) {
+        try { markers = parseUploadedScenes(sourceData.messages, sourceData.metadata).length > 0; } catch { /* invalid boundaries are not selectable */ }
+    }
+    const strategies = getChunkingStrategies(type.id, {kind:'upload',uploaded:true,sceneMarkersPresent:markers});
     const defaults = getContentTypeDefaults(type.id);
     const selectedStrategyId = currentSettings.strategy || type.defaultStrategy;
+    if (!strategies.some(s => s.id === selectedStrategyId)) currentSettings.strategy = type.defaultStrategy;
 
     const strategySelect = $('#vecthare_cv_strategy');
     strategySelect.empty();
@@ -1165,8 +1172,14 @@ function bindEvents() {
     $('#vecthare_cv_strategy').on('change', function() {
         const strategy = $(this).val();
         const type = getContentType(currentContentType);
-        const strategies = getChunkingStrategies(currentContentType);
+        const strategies = getChunkingStrategies(currentContentType, {
+            kind:'upload',uploaded:true,
+            sceneMarkersPresent: currentContentType === 'chat' && sourceData?.messages
+                ? (()=>{try {return parseUploadedScenes(sourceData.messages, sourceData.metadata).length>0;}catch{return false;}})()
+                : false,
+        });
         const selected = strategies.find(s => s.id === strategy);
+        if (!selected) { toastr.error('C13: select an uploaded chat with complete scene markers first'); updateChunkingSection(getContentType(currentContentType)); return; }
 
         $('#vecthare_cv_strategy_desc').text(selected?.description || '');
         currentSettings.strategy = strategy;
@@ -2118,6 +2131,7 @@ function handleChatFileUpload(e) {
         let messages = [];
         let metadata = null;
         let parseError = null;
+        let excludedOriginalMessages = false;
 
         try {
             if (ext === 'jsonl') {
@@ -2131,13 +2145,15 @@ function handleChatFileUpload(e) {
 
                     // First line is usually metadata (has chat_metadata or user_name fields)
                     if (i === 0 && (parsed.chat_metadata || parsed.user_name || parsed.character_name)) {
-                        metadata = parsed;
+                        metadata = {...parsed, scenes:parsed.scenes ?? parsed.chat_metadata?.scenes};
                         continue;
                     }
 
                     // Skip system messages and lines without content
-                    if (parsed.is_system) continue;
-                    if (!parsed.mes && !parsed.text && !parsed.content) continue;
+                    if (parsed.is_system || (!parsed.mes && !parsed.text && !parsed.content)) {
+                        excludedOriginalMessages = true;
+                        continue;
+                    }
 
                     // Normalize message format
                     messages.push({
@@ -2145,6 +2161,8 @@ function handleChatFileUpload(e) {
                         mes: parsed.mes || parsed.text || parsed.content || '',
                         is_user: parsed.is_user || false,
                         send_date: parsed.send_date,
+                        sceneStart: parsed.sceneStart === true, sceneEnd: parsed.sceneEnd === true,
+                        sceneTitle: parsed.sceneTitle, extra: parsed.extra,
                     });
                 }
 
@@ -2159,16 +2177,23 @@ function handleChatFileUpload(e) {
                         mes: m.mes || m.text || m.content || '',
                         is_user: m.is_user || false,
                         send_date: m.send_date,
+                        sceneStart: m.sceneStart === true, sceneEnd:m.sceneEnd === true,
+                        sceneTitle:m.sceneTitle, extra:m.extra,
                     }));
                 } else if (data.chat || data.messages) {
                     // Object with chat/messages array
                     const arr = data.chat || data.messages;
-                    metadata = { user_name: data.user_name, character_name: data.character_name };
+                    metadata = { user_name: data.user_name, character_name: data.character_name,
+                        scenes:data.scenes ?? data.chat_metadata?.scenes };
+                    if (Array.isArray(metadata.scenes) && arr.some(m=>!(m.mes || m.text || m.content)))
+                        throw new Error('Scene ranges cannot be reconciled after removing empty messages');
                     messages = arr.filter(m => m.mes || m.text || m.content).map(m => ({
                         name: m.name || (m.is_user ? 'User' : 'Assistant'),
                         mes: m.mes || m.text || m.content || '',
                         is_user: m.is_user || false,
                         send_date: m.send_date,
+                        sceneStart: m.sceneStart === true, sceneEnd:m.sceneEnd === true,
+                        sceneTitle:m.sceneTitle, extra:m.extra,
                     }));
                 } else if (data.mes || data.text || data.content) {
                     // Single message object
@@ -2202,6 +2227,8 @@ function handleChatFileUpload(e) {
             console.error('VectHare: Chat file parse error:', err);
         }
 
+        if (excludedOriginalMessages && Array.isArray(metadata?.scenes) && metadata.scenes.length)
+            parseError = new Error('C13: scene ranges cannot be trusted after filtering original messages');
         if (parseError || messages.length === 0) {
             toastr.error(`Failed to parse chat file: ${parseError?.message || 'No messages found'}`);
             return;
@@ -2225,6 +2252,8 @@ function handleChatFileUpload(e) {
             characterName: characterName,
         };
 
+        // Re-evaluate per_scene availability only after parsing this source.
+        updateChunkingSection(getContentType('chat'));
         // Show upload info
         $('#vecthare_cv_chat_upload_zone').hide();
         $('#vecthare_cv_chat_upload_info').show();
@@ -2267,6 +2296,7 @@ function clearChatUpload() {
     $('#vecthare_cv_chat_upload_info').hide();
     $('#vecthare_cv_chat_upload_stats').hide();
     $('#vecthare_cv_chat_file_input').val('');
+    if (currentContentType === 'chat') updateChunkingSection(getContentType('chat'));
 }
 
 // ============================================================================
@@ -2298,6 +2328,11 @@ async function previewChunks() {
         // Resolve and prepare content (handles 'select' type sources like lorebooks)
         const prepared = await resolveAndPrepareContent(currentContentType, source, currentSettings);
         const contentText = prepared.text;
+        const mode = currentSettings.strategy || type.defaultStrategy;
+        const markers = mode === 'per_scene' && currentContentType === 'chat'
+            ? parseUploadedScenes(contentText, prepared.sourceMetadata).length > 0 : false;
+        const selectedSupport = validateChunkStrategy(mode,currentContentType,{kind:'upload',uploaded:true,sceneMarkersPresent:markers});
+        if (!selectedSupport.supported) throw new Error(selectedSupport.reason);
 
         if (!contentText || (Array.isArray(contentText) && contentText.length === 0)) {
             container.html('<div class="vecthare-cv-error">Could not load content. Please check your selection.</div>');
@@ -2310,6 +2345,7 @@ async function previewChunks() {
             chunkOverlap: currentSettings.chunkOverlap ?? type.defaults.chunkOverlap,
             batchSize: currentSettings.batchSize ?? type.defaults.batchSize ?? 4,
             conversationTurnOrder: currentSettings.conversation_turn_order || 'user_character',
+            sourceMetadata: prepared.sourceMetadata,
         });
 
         // Handle empty or undefined chunks

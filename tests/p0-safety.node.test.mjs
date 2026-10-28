@@ -128,9 +128,10 @@ test('P0-6 recursive report/export secrets and auth headers scrubbed',()=>{
   assert.ok(output.includes('[REDACTED]'));
 });
 test('P0-7 unsupported runtime modes are rejected rather than silently downgraded',()=>{
-  assert.equal(validateChunkStrategy('adaptive','chat').supported,false);
+  assert.equal(validateChunkStrategy('adaptive','chat',{kind:'live_chat'}).supported,false);
+  assert.equal(validateChunkStrategy('adaptive','chat',{kind:'upload',uploaded:true}).supported,true);
   assert.equal(validateChunkStrategy('per_scene','chat',{uploaded:true}).supported,false);
-  assert.throws(()=>requireSupportedChunkStrategy('adaptive','chat'),/Unsupported/);
+  assert.throws(()=>requireSupportedChunkStrategy('adaptive','chat',{kind:'live_chat'}),/Unsupported/);
   assert.throws(()=>requireSupportedClassifierMode({useEmbeddingSimilarity:true}),/not implemented/);
   assert.equal(classifierCapabilities().similaritySupported,false);
 });

@@ -145,6 +145,7 @@ test('C07 physical backend hash remains unchanged pending C02 migration',()=>{
 
 // Run the real, extracted chat grouping functions with a host-free environment.
 import vm from 'node:vm';
+import { requireSupportedChunkStrategy } from '../utils/feature-support.js';
 function functionSource(file, prefix) {
  const s=source(file),start=s.indexOf(prefix),end=s.indexOf('\n}\n',start);
  assert.ok(start>=0 && end>start,`Cannot extract ${prefix}`);
@@ -157,6 +158,7 @@ function actualChatGrouping({hash=(text)=> [...text].reduce((v,c)=> v*31+c.codeP
   extractBM25Keywords:()=>[],groupConversationTurns:messages=>messages.map(m=>[m]),
   getVerifiedChatOriginId:()=> 'verified-chat', messageReference, recordId, fingerprint,
   groupRecordLocalId, checkCollision, embeddingProfileFingerprint,
+  requireSupportedChunkStrategy,
  });
  const code=[
   functionSource('core/chat-vectorization.js','function groupMessagesByStrategy('),

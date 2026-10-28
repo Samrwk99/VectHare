@@ -39,7 +39,8 @@
     "test:c08": "node --test tests/c08-activation.node.test.mjs",
     "test:c09": "node --experimental-vm-modules --test --test-concurrency=1 tests/c09-*.node.test.mjs",
     "test:c10": "node --test tests/c10-*.node.test.mjs",
-    "test:c11": "node --test tests/c11-complete.node.test.mjs"
+    "test:c11": "node --test tests/c11-complete.node.test.mjs",
+    "test:c13": "node --test tests/c13-chunking.node.test.mjs"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^2.1.0",

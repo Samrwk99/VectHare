@@ -1,0 +1,36 @@
+{
+  "stage": "Step 13 C13",
+  "date": "2026-10-28",
+  "baseline": "VectHare-Step12-C12-Cumulative-Scenes-Temporal-Checkpoint.zip",
+  "issues": [
+    "#57",
+    "#107",
+    "#148"
+  ],
+  "modified": [
+    "core/chat-vectorization.js",
+    "core/chunking.js",
+    "core/content-types.js",
+    "core/content-vectorization.js",
+    "package.json",
+    "tests/c07-record-identity.node.test.mjs",
+    "tests/i13-numeric-zero.node.test.mjs",
+    "tests/p0-safety.node.test.mjs",
+    "ui/content-vectorizer.js",
+    "ui/ui-manager.js",
+    "utils/feature-support.js"
+  ],
+  "added": [
+    "C13-CHANGELOG.md",
+    "C13-CHECKLIST.md",
+    "C13-VERIFICATION.md",
+    "tests/c13-chunking.node.test.mjs",
+    "C13-RELEASE-MANIFEST.json"
+  ],
+  "removed": [],
+  "prior_tests_passed": 779,
+  "new_tests_passed": 44,
+  "total_tests_passed": 823,
+  "live_acceptance": "blocked_pending_C02_C06_and_SillyTavern_backend_contract_evidence",
+  "plugin_modified": false
+}

@@ -23,7 +23,8 @@ import {planReplacement} from '../utils/replacement-safety.js';
 import { getCurrentChatId, is_send_press, setExtensionPrompt, substituteParams, chat_metadata, extension_prompts } from '../../../../../script.js';
 import { getContext } from '../../../../extensions.js';
 import { getStringHash as calculateHash, waitUntilCondition, onlyUnique } from '../../../../utils.js';
-import { isUnitStrategy, groupConversationTurns } from './chunking.js';
+import { isUnitStrategy, groupConversationTurns, adaptiveChatGroups } from './chunking.js';
+import {requireSupportedChunkStrategy} from '../utils/feature-support.js';
 import { extractChatKeywords, extractBM25Keywords, applyKeywordBoost } from './keyword-boost.js';
 import { containsLexicalPhrase } from '../utils/lexical-tokenization.js';
 import { mergeSemanticWorldInfoChunks } from '../utils/world-info-dedup.js';
@@ -334,7 +335,7 @@ function prepareItemsForInsertion(items) {
  * @param {string} keywordLevel Keyword extraction level: 'off', 'minimal', 'balanced', 'aggressive'
  * @returns {object[]} Grouped message items ready for chunking
  */
-function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel = 'balanced', conversationTurnOrder = 'user_character') {
+function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel = 'balanced', conversationTurnOrder = 'user_character', chunkSize = 500) {
     if (!messages.length) return [];
 
     // R22: grouped strategies hash the combined RAW text (m.raw), not the
@@ -349,6 +350,15 @@ function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel
     };
 
     switch (strategy) {
+        case 'adaptive': {
+            // Used only for a *new*, versioned collection rebuild; never switch
+            // the live existing collection's hash grouping in place.
+            return adaptiveChatGroups(messages, {chunkSize}).map(group => ({
+                text:group.text, raw:group.raw, hash:getStringHash(group.raw),
+                index:group.metadata.startIndex, keywords:getKeywords(group.text),
+                metadata:group.metadata,
+            }));
+        }
         case 'conversation_turns': {
             // Pair logical speaker turns, including consecutive messages.
             const grouped = [];
@@ -454,6 +464,7 @@ function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel
  */
 function collectGroupedItems(chat, settings, collectionId = null, durableUids = false) {
     const strategy = settings.chunking_strategy || 'per_message';
+    requireSupportedChunkStrategy(strategy, 'chat', {kind:'live_chat',existingCollection:true});
     const strategyBatchSize = settings.batch_size || 4;
     const keywordLevel = settings.keyword_extraction_level || 'balanced';
 
@@ -474,7 +485,7 @@ function collectGroupedItems(chat, settings, collectionId = null, durableUids = 
         });
     }
 
-    const items = groupMessagesByStrategy(allMessages, strategy, strategyBatchSize, keywordLevel, settings.conversation_turn_order);
+    const items = groupMessagesByStrategy(allMessages, strategy, strategyBatchSize, keywordLevel, settings.conversation_turn_order, settings.chunk_size || 500);
     const collision = checkCollision(items);
     if (!collision.safe) throw new Error('C07: distinct chat content shares a backend hash; write blocked pending safe migration');
     // Standard's physical key is a text hash. Merge same-text records while
@@ -3705,7 +3716,7 @@ export async function checkUnfinishedVectorization(settings, collectionIdOverrid
             });
         }
 
-        const groupedItems = groupMessagesByStrategy(allMessages, strategy, strategyBatchSize, keywordLevel, settings.conversation_turn_order);
+        const groupedItems = groupMessagesByStrategy(allMessages, strategy, strategyBatchSize, keywordLevel, settings.conversation_turn_order, settings.chunk_size || 500);
         const pending = groupedItems.filter(item => !existingHashes.has(item.hash)).length;
 
         return {

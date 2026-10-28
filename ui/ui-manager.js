@@ -1856,9 +1856,13 @@ function bindSettingsEvents(settings, callbacks) {
         // Collection lock handled inside Database Browser per-collection settings
 
     // Chunking strategy - populate from content-types.js (single source of truth)
-    const chatStrategies = getChunkingStrategies('chat');
+    const chatStrategies = getChunkingStrategies('chat', {kind:'live_chat'});
     const strategySelect = $('#vecthare_chunking_strategy');
     strategySelect.empty();
+    // Do not disguise a saved, now unsupported strategy as per_message.
+    // Preserve legacy settings for review until the user explicitly selects a mode.
+    if (!chatStrategies.some(s => s.id === (settings.chunking_strategy || 'per_message')))
+        strategySelect.append($('<option>').val('__unavailable__').text('Unavailable saved strategy — choose a supported mode').prop('selected',true).prop('disabled',true));
     for (const strategy of chatStrategies) {
         const selected = strategy.id === (settings.chunking_strategy || 'per_message');
         strategySelect.append(`<option value="${strategy.id}" ${selected ? 'selected' : ''}>${strategy.name}</option>`);

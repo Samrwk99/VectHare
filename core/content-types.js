@@ -55,7 +55,7 @@ export const CHUNKING_STRATEGIES = {
     per_scene: {
         id: 'per_scene',
         name: 'Per Scene',
-        description: 'Only vectorizes marked scenes. Mark scene boundaries in chat to create chunks.',
+        description: 'Live: marked chat scenes. Uploads: requires complete explicit scene markers or indexed scene ranges.',
         needsSize: false,
         needsOverlap: false,
         needsBatchSize: false,
@@ -101,7 +101,8 @@ export const CHUNKING_STRATEGIES = {
         name: 'Adaptive',
         description: 'Intelligently splits at natural boundaries (paragraphs → sentences → words).',
         needsSize: true,
-        needsOverlap: false,
+        needsOverlap: true,
+        defaultOverlap: 50,
         needsBatchSize: false,
         bestFor: ['chat', 'document', 'url', 'wiki', 'youtube'],
         defaultSize: 500,
@@ -129,7 +130,8 @@ export const CHUNKING_STRATEGIES = {
         name: 'By Sentence',
         description: 'Groups sentences up to target size. Most granular text splitting.',
         needsSize: true,
-        needsOverlap: false,
+        needsOverlap: true,
+        defaultOverlap: 50,
         needsBatchSize: false,
         bestFor: ['document'],
         defaultSize: 300,
@@ -139,7 +141,8 @@ export const CHUNKING_STRATEGIES = {
         name: 'Dialogue-Aware',
         description: 'Keeps quoted speech intact. Best for transcripts and scripts.',
         needsSize: true,
-        needsOverlap: false,
+        needsOverlap: true,
+        defaultOverlap: 50,
         needsBatchSize: false,
         bestFor: ['document', 'youtube'],
         defaultSize: 400,
@@ -421,14 +424,17 @@ export function getAllContentTypes() {
 /**
  * Get chunking strategies for a content type (with full metadata)
  */
-export function getChunkingStrategies(typeId) {
+export function getChunkingStrategies(typeId, source = {kind:'upload'}) {
     const type = CONTENT_TYPES[typeId];
     if (!type?.chunkingStrategies) return [];
 
     return type.chunkingStrategies
         .map(id => CHUNKING_STRATEGIES[id])
         .filter(Boolean)
-        .filter(strategy => validateChunkStrategy(strategy.id, typeId, {kind:'upload'}).supported);
+        .filter(strategy => validateChunkStrategy(strategy.id, typeId, source).supported)
+        .map(strategy => typeId === 'chat' && strategy.id === 'adaptive'
+            ? {...strategy,needsOverlap:false,description:strategy.description + ' New uploaded collection only; live chat requires a reviewed rebuild.'}
+            : strategy);
 }
 
 /**

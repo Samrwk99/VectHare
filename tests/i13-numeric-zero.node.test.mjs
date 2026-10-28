@@ -117,7 +117,14 @@ test('#58: zero Content Vectorizer overlap survives UI, preview, and execution',
     const vars={currentSettings:{chunkOverlap:0},strategyDefaults:{defaultOverlap:100},defaults:{chunkOverlap:200}};
     assert.equal(vm.runInNewContext(`${line}\nchunkOverlap`,vars),0);
     assert.match(ui,/chunkOverlap: currentSettings\.chunkOverlap \?\? type\.defaults\.chunkOverlap/);
-    assert.match(source('core/content-vectorization.js'),/chunkOverlap: settings\.chunkOverlap \?\? type\.defaults\.chunkOverlap/);
+    const execution=source('core/content-vectorization.js');
+    const match=execution.match(/const effectiveOverlap = [\s\S]*? : 0;/)?.[0];
+    assert.ok(match, 'execution must resolve overlap before chunking');
+    assert.equal(vm.runInNewContext(`${match}\neffectiveOverlap`,{
+        chosenStrategy:'adaptive',contentType:'document',settings:{chunkOverlap:0},
+        getChunkingStrategy:()=>({defaultOverlap:100}),
+    }),0);
+    assert.match(execution,/chunkOverlap: effectiveOverlap/);
 });
 
 test('#193: chunk injection-depth input preserves 0 and defaults invalid input',()=>{
