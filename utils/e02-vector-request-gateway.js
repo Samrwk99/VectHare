@@ -123,6 +123,25 @@ export function inspectVectorRequest(url, options={}) {
             fail(req,'f02-host-scoped-read-shape-required');
         return {intercepted:true,allowed:true,transport:'plugin',operation:`f02-${operation}`,backend:b.backend,method:'POST'};
     }
+    // F09: ordinary v2 candidate retrieval PREVIEW. Uses the same F01/F02
+    // server-owned scope and physical schema checks; never a legacy hash route.
+    if(req.transport==='plugin'&&req.suffix==='/v2/workflows/preview'){
+        const b=req.body,source=b?.source,embedding=b?.embedding;
+        const sourceKeys=source?.kind==='chat'?['kind','avatar','chatFile']:
+            source?.kind==='group-chat'?['kind','groupId','chatFile']:
+            source?.kind==='lorebook'?['kind','name']:[];
+        if(req.method!=='POST'||!b||!sourceKeys.length||!source||
+           Object.keys(source).some(k=>!sourceKeys.includes(k))||
+           sourceKeys.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220)||
+           !embedding||typeof embedding!=='object'||Array.isArray(embedding)||
+           Object.keys(embedding).some(k=>!['source','model','dimension','metric'].includes(k))||
+           !['qdrant','milvus','lancedb','vectra'].includes(b.backend)||
+           (b.configId!==undefined&&!['local','default'].includes(b.configId))||
+           !Array.isArray(b.vector)||!Number.isInteger(b.topK)||b.topK<1||b.topK>30||
+           Object.keys(b).some(k=>!['backend','source','embedding','configId','vector','topK'].includes(k)))
+            fail(req,'f09-source-bound-preview-required');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:'f09CandidatePreview',backend:b.backend,method:'POST'};
+    }
     // F03: opt-in schema provisioning only (NO record writes, overwrite or purge).
     // Requires F01 source selector, derived physical name, and exact confirmation.
     if(req.transport==='plugin' && /^\/v2\/collections\/(?:preview|provision|status)$/.test(req.suffix)){

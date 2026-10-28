@@ -18,6 +18,7 @@ function reports(){
  'POST /v2/records/lancedb-pilot-mutate':'F06_SOURCE_BOUND_LANCEDB_LOCAL_PILOT_NOT_PRODUCTION',
  'POST /v2/diagnostics/vectra-f07':'F07_LOCAL_VECTRA_DISPOSABLE_ACCEPTANCE_NOT_PRODUCTION',
  'POST /v2/records/vectra-pilot-mutate':'F07_SOURCE_BOUND_LOCAL_PLUGIN_VECTRA_PILOT_NOT_NATIVE_STANDARD',
+ 'POST /v2/workflows/preview':'F09_SOURCE_BOUND_V2_CANDIDATE_PREVIEW_ONLY',
  'POST /v2/diagnostics/milvus-f08':'F08_DISPOSABLE_MILVUS_ACCEPTANCE_NOT_PRODUCTION',
  'POST /v2/records/milvus-pilot-mutate':'F08_SOURCE_BOUND_LOCAL_MILVUS_PILOT_NOT_PRODUCTION'}};
  return {build,caps,contracts};
