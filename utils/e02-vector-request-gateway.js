@@ -84,6 +84,13 @@ export function inspectVectorRequest(url, options={}) {
             fail(req,'f11-readiness-inspection-only');
         return {intercepted:true,allowed:true,operation:'f11Readiness',backend:'none',transport:'plugin',method:'GET'};
     }
+    // F12: release-gate inspection only; never accepts claimed host evidence,
+    // mutations, query overrides, or a certification switch.
+    if (req.transport === 'plugin' && req.suffix === '/v2/release/assessment') {
+        if (req.method !== 'GET' || req.body != null || req.parsed.search)
+            fail(req,'f12-release-inspection-only');
+        return {intercepted:true,allowed:true,operation:'f12Assessment',backend:'none',transport:'plugin',method:'GET'};
+    }
     // S11.4: specifically reviewed authenticated database CONFIGURATION routes.
     // These never insert or delete vector records; server validates CSRF,
     // trusted user scope, endpoint restrictions and private file storage.
