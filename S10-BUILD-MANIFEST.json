@@ -1,17 +1,17 @@
 {
   "formatVersion": 1,
   "contractVersion": 2,
-  "pluginVersion": "3.2.10-s10.1",
+  "pluginVersion": "3.2.10-s10.3",
   "algorithm": "sha256",
   "files": {
-    "index.js": "0c115a82b75af9bf1d1e179066d107b3d53793f6f8d12a52e1fddf627b9ee5b5",
+    "index.js": "bce496078b696daa26d68d3cc9c6cce324a712ff1a96117c6c10fcd2cf8150fa",
     "lancedb-backend.js": "a3cd5b9cafd1686a6775b24345a48611b396e5cd2672a028b57b154335d499de",
     "lib/s01-safety.js": "559917c958cdc7f6573e0d38bbe04d22199da726224aa38b1e0d74fe3d086310",
     "lib/s02-identity.js": "fd525737359313609b40dc9493a9195f143d4da14396226aa4f6a6048ac582b0",
     "lib/s02-migration.js": "731c7df4d638f5147e47c24c5b6b49379bd9ffcf0676b94d8f2c1b4bde5f1e34",
     "lib/s02-registry.js": "809301de55a7fa7c15d4e783b2599e33a12db5b9612d442aaa82bfda168015c0",
-    "lib/s03-backends.js": "e78f6cd3001b4acc42456a9d3b83a4fd2fd532c752573bdaa9a8cb7fc7bcbd62",
-    "lib/s03-security.js": "cf697fecbfd1a62717946309b0582cb251274d929cc7859d4cb8887c01cc6a83",
+    "lib/s03-backends.js": "05de0c8946b4b27f4d78716569fb89b1316d5e0a32ce9ac07d68770a1f019048",
+    "lib/s03-security.js": "f72a44cc2d8927d72d0b746257dd0423f03f58e2fb1a796e010949e151be8d4b",
     "lib/s04-contract.js": "bc63fd34f5f63eb54c024f7ae90e353101443abf7c6585f899a243e5b6ef01b1",
     "lib/s04-engine.js": "2c9c7fe5cc19b5e4256f501b0d619c2da7b50af5cfef5a9bf825f70bee43a905",
     "lib/s04-ledger.js": "d51e3e11d8aeffadf165d40252d138f71917ef3f1988a92d4fc3696a5032a736",
@@ -27,10 +27,11 @@
     "lib/s09-fixture.js": "be09261e7dc79edf854232b59360d0c3e277f99f21d61a232509d6cfb0455848",
     "lib/s09-manifest.js": "9e27d35b82a8775e6a001fc8b001782a773fff7c7dcb909ff78712ddb1e86269",
     "lib/s10-build.js": "f724d07f0acdf40bc47715fdc4ce4c367ccd07a4bb211511ce87c979e2209eef",
-    "lib/s10-contracts.js": "e5a587b9df3233c01420d76444dcf3eb4805de07f86b9d5c065ae1107ab9a9f4",
+    "lib/s10-contracts.js": "ac55553ca02b4dbbfa9c0443234380043dfa51f4084fa3810ae788399ddeeace",
+    "lib/s10-gui-connections.js": "e5a041abda59cdefd4f3556e58e9bfd8debbcba7309a2bac504b0c68d887ff58",
     "milvus-backend.js": "6cfee983eb34ab39a0f59f6ce2590a6c75d24a961f5a19ee4ae59d440427394e",
-    "package.json": "e889ac62e281d487a476ff4e0b7d1a883b721e69583b6f26489323182580e579",
-    "qdrant-backend.js": "dea5fdb49c3e34d06456b4760fdb0bfcee8fc087780c4d78debb7b294c239087"
+    "package.json": "f5ef447bc1c497111a61ba3e753bb59a8a33c4e8f0e09a238143f732a4267732",
+    "qdrant-backend.js": "f6a71992d55288345f041ed5d30e38524fc8f58201150b0b92cab18cf3e3d72b"
   },
-  "sourceFingerprint": "12a04b322c1a6eccd9a083c8791bfd6a27603723b876ba6eb604f27cba2e537c"
+  "sourceFingerprint": "18c2b0b5f78ac3a430aa6acb66315dad814d23b030bc62298c0d197f52110acd"
 }
