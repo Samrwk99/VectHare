@@ -1,6 +1,6 @@
 {
   "name": "similharity",
-  "version": "3.2.5-s05.0",
+  "version": "3.2.6-s06.0",
   "description": "Vector database backend extensions for Similharity - LanceDB, Qdrant, and enhanced Vectra with full metadata storage",
   "main": "index.js",
   "type": "module",
@@ -36,6 +36,8 @@
     "test:s04": "node --experimental-vm-modules --test tests/s01-safety.test.mjs tests/s02-identity.test.mjs tests/s03-isolation.test.mjs tests/s03-route.test.mjs tests/s04-contract.test.mjs tests/s04-ledger.test.mjs tests/s04-engine.test.mjs tests/s04-route.test.mjs",
     "check:s04": "find . -type f \\( -name \"*.js\" -o -name \"*.mjs\" \\) -not -path \"./node_modules/*\" -print0 | xargs -0 -n1 node --check",
     "test:s05": "node --experimental-vm-modules --test tests/*.test.mjs",
-    "check:s05": "find . -type f \\( -name \"*.js\" -o -name \"*.mjs\" \\) -not -path \"./node_modules/*\" -print0 | xargs -0 -n1 node --check"
+    "check:s05": "find . -type f \\( -name \"*.js\" -o -name \"*.mjs\" \\) -not -path \"./node_modules/*\" -print0 | xargs -0 -n1 node --check",
+    "test:s06": "node --experimental-vm-modules --test tests/*.test.mjs",
+    "check:s06": "find . -type f \\( -name \"*.js\" -o -name \"*.mjs\" \\) -not -path \"./node_modules/*\" -print0 | xargs -0 -n1 node --check"
   }
 }

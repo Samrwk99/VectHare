@@ -14,7 +14,7 @@ test('S05 Qdrant query always sends full owner filter incl branch; verifies retu
  assert.equal(request.body.filter.must.length,5);
  assert.equal(request.body.filter.must.find(x=>x.key==='branchId').match.value,'branch-1');
  assert.ok(request.path.includes(mBinding.collection.physicalName)===false);
- await assert.rejects(()=>qdrantV2Reads({_request:async()=>({result:[{id:p.physicalId,payload:wrongOwner,score:0.9}]})},binding).query({vector:[1,2,3]}),{code:'S05_OWNER_MISMATCH'});
+ await assert.rejects(()=>qdrantV2Reads({_request:async()=>({result:[{id:p.physicalId,payload:wrongOwner,score:0.9}]})},binding).query({vector:[1,2,3]}),{code:'S05_PHYSICAL_ID_MISMATCH'});
 });
 test('S05 Qdrant get returns null only for real empty response and refuses backend malformed',async()=>{
  const r=recordFor(),reader=qdrantV2Reads({_request:async()=>({result:{points:[{id:r.physicalId,payload:r,vector:r.vector}]}})},binding);

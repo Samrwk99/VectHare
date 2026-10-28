@@ -1011,3 +1011,7 @@ proposed operation; it does **not** grant permission or store vector data.
 ## S05 checkpoint notice (3.2.5-s05.0)
 
 S05 adds offline-tested **internal v2 scoped read adapters** for Qdrant/Milvus, strict record/embedding/inventory validation, and **preflight-only** HTTP read routes. They are not public active read routes. All S01 mutation blocks and S03 legacy shared-read restrictions remain in place. New schema/migration and source-ownership attestation are not completed. See `S05-CHANGELOG.md`, `S05-VERIFICATION.md` and `S05-NEXT-STEPS.md` before deploying this checkpoint.
+
+## S06 cumulative checkpoint (developer test build)
+
+S06 adds `lib/s06-qdrant.js`, a Qdrant v2 **internal disposable-test** adapter with schema inspection, full scope filters, controlled fixture writes and independent readback. **It does not reactivate public reads or writes.** The new API retains S01–S05 legacy route blocks; do not deploy over valuable data. See `S06-CHANGELOG.md`, `S06-VERIFICATION.md`, `S06-CAPABILITY-MATRIX.json`, and `S06-NEXT-STEPS.md`.
