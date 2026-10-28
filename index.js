@@ -7,7 +7,7 @@
  * All chunk operations go through unified /chunks/* endpoints.
  * Backend is specified via `backend` parameter in request body.
  *
- * @version 3.2.10-s10.11-f07
+ * @version 3.2.10-s10.12-f08
  */
 
 import path from 'node:path';
@@ -33,6 +33,8 @@ import {registerF06PilotRoutes} from './lib/f06-lancedb-pilot.js';
 import {f07SealedVectra,f07VectraLocation} from './lib/f07-vectra.js';
 import {registerF07PilotRoutes} from './lib/f07-vectra-pilot.js';
 import {registerF07AcceptanceRoutes} from './lib/f07-vectra-acceptance.js';
+import {registerF08MilvusPilotRoutes} from './lib/f08-milvus.js';
+import {registerF08AcceptanceRoutes} from './lib/f08-milvus-acceptance.js';
 import { loadS10Build } from './lib/s10-build.js';
 import { registerS10Routes } from './lib/s10-contracts.js';
 import {registerH01AcceptanceRoutes} from './lib/h01-qdrant-acceptance.js';
@@ -40,7 +42,7 @@ import {registerF01HostRoutes} from './lib/f01-host-sources.js';
 import { validateVector as validateS05Vector } from './lib/s05-contract.js';
 
 const pluginName = 'similharity';
-const pluginVersion = '3.2.10-s10.11-f07';
+const pluginVersion = '3.2.10-s10.12-f08';
 
 /**
  * Initialize the plugin
@@ -96,6 +98,8 @@ export async function init(router) {
     registerF06PilotRoutes(router,{backendPool});
     registerF07PilotRoutes(router,{createVectra:(req,binding)=>f07SealedVectra(req,binding,{createIndex:folder=>new vectra.LocalIndex(folder)})});
     registerF07AcceptanceRoutes(router,{makeIndex:folder=>new vectra.LocalIndex(folder)});
+    registerF08MilvusPilotRoutes(router,{backendPool});
+    registerF08AcceptanceRoutes(router,{backendPool});
     registerS10Routes(router, s10Build);
     registerH01AcceptanceRoutes(router,{backendPool});
     registerF01HostRoutes(router);

@@ -1,10 +1,10 @@
 {
   "formatVersion": 1,
   "contractVersion": 2,
-  "pluginVersion": "3.2.10-s10.11-f07",
+  "pluginVersion": "3.2.10-s10.12-f08",
   "algorithm": "sha256",
   "files": {
-    "index.js": "8e8b527e49c7130741dd285de9dba0f35b1913355c114876083ada518fcbbc90",
+    "index.js": "db03a2d296a1eaaa71ee740ba9bbfddd56d8cd666f793c146cecc81668171265",
     "lancedb-backend.js": "a3cd5b9cafd1686a6775b24345a48611b396e5cd2672a028b57b154335d499de",
     "lib/f01-host-sources.js": "af4c52a3d961a3befb7d2f7a42b08c5b9429ddfd8bb07022f067dd8820878c57",
     "lib/f02-public-reads.js": "983305e0a7a1bf183494b5b8876c829eccfec7238403d20493525824cefc4ba0",
@@ -17,6 +17,8 @@
     "lib/f07-vectra-acceptance.js": "4ca1cc435e3aab9f30a8a56b20d447f236e613c024786aabfff8456ee568fa50",
     "lib/f07-vectra-pilot.js": "4f97921bd6b8c9590178b984e4bd820581f9e2431b1dcf89dfd85c1e4a5e3c51",
     "lib/f07-vectra.js": "afe8d01788010158d4ceecd8b37c8c975daec9d8701e8c3d6737983de64ae3db",
+    "lib/f08-milvus-acceptance.js": "939adc6c8f0ee221ea68ef56c78ce2c101c9a75ff13cd4c1ed71b65647fedd79",
+    "lib/f08-milvus.js": "bff90ded4de23c4955586e08c4fdf339306a40f1cc14dba11b333ecbb91e48dd",
     "lib/h01-qdrant-acceptance.js": "b6420fdf0e6524d7d4344ae2eff12b5ccbcfc484a35c6744920e5df4cb37d915",
     "lib/s01-safety.js": "559917c958cdc7f6573e0d38bbe04d22199da726224aa38b1e0d74fe3d086310",
     "lib/s02-identity.js": "fd525737359313609b40dc9493a9195f143d4da14396226aa4f6a6048ac582b0",
@@ -32,18 +34,18 @@
     "lib/s05-contract.js": "edd5e9e199316c93b6e874509f119ddd835edbde14c7560bef79c76bd01e3157",
     "lib/s05-routes.js": "f3f0eda963c8394713fe8bd8e7ea9dbdd9faf57bca62a41fc68a8e7c42881b8f",
     "lib/s06-qdrant.js": "a54b831f764e1ea7ea3f14c8fe26a1b0cc166ebd0bf794c5ee85a17623f721b1",
-    "lib/s07-milvus.js": "383ea1bdf5d7ba655476381e6d244d6c9d390d4921f86c6df3b33aa28e976420",
+    "lib/s07-milvus.js": "aa3cf165c51df8890b260b332443f29c0d495d96683ca81e6ce945af8df965e7",
     "lib/s08-lancedb.js": "ff995add6f3b9a909ec11d5df01462d101f9c05ba52bdeb29a520d3a390b3f30",
     "lib/s08-local-contract.js": "ca8b4b7cde249c03a8dbd9fe62a4702ec14b105202be9d35720a786c9e56a15b",
     "lib/s08-vectra.js": "4aea858488ace31fa07371fe28401d936ad6b9cd702c48863e75eed3e1d0ed7b",
     "lib/s09-fixture.js": "be09261e7dc79edf854232b59360d0c3e277f99f21d61a232509d6cfb0455848",
     "lib/s09-manifest.js": "9e27d35b82a8775e6a001fc8b001782a773fff7c7dcb909ff78712ddb1e86269",
     "lib/s10-build.js": "f724d07f0acdf40bc47715fdc4ce4c367ccd07a4bb211511ce87c979e2209eef",
-    "lib/s10-contracts.js": "386772a1868e87ae8621ff48a005c844e11d812b0fe501284f4f09f648dea605",
+    "lib/s10-contracts.js": "92d12c60d223855c2f6f443922f7dd40b0612f4d2bbcc506f77e6499e2c176e2",
     "lib/s10-gui-connections.js": "e5a041abda59cdefd4f3556e58e9bfd8debbcba7309a2bac504b0c68d887ff58",
     "milvus-backend.js": "6cfee983eb34ab39a0f59f6ce2590a6c75d24a961f5a19ee4ae59d440427394e",
-    "package.json": "07b29c25c605af92f8fd4281e79bf2e05bb61734b9b527ec8439372a63414425",
+    "package.json": "f07c19efdd8a95ee6322d9553a491dacc1390828c2863c2e25c48c1ed9989fbd",
     "qdrant-backend.js": "f6a71992d55288345f041ed5d30e38524fc8f58201150b0b92cab18cf3e3d72b"
   },
-  "sourceFingerprint": "d5cfbb4cb1f96cc43067b180a9de8ce812da2c589d28be5abec7c6a28e7de42c"
+  "sourceFingerprint": "7cfc5cee05b331b7a41651e6f9aea1d2b3ff783b2e72848bda19b2ddcae1a1c6"
 }

@@ -19,6 +19,8 @@ import {registerF06PilotRoutes} from '../lib/f06-lancedb-pilot.js';
 import {registerF07PilotRoutes} from '../lib/f07-vectra-pilot.js';
 import {registerF07AcceptanceRoutes} from '../lib/f07-vectra-acceptance.js';
 import {f07SealedVectra,f07VectraLocation} from '../lib/f07-vectra.js';
+import {registerF08MilvusPilotRoutes} from '../lib/f08-milvus.js';
+import {registerF08AcceptanceRoutes} from '../lib/f08-milvus-acceptance.js';
 import { registerS04Routes } from '../lib/s04-routes.js';
 import {registerS05Routes} from '../lib/s05-routes.js';
 import {registerS10Routes} from '../lib/s10-contracts.js';
@@ -56,6 +58,8 @@ async function registered(pool) {
             './lib/f07-vectra-pilot.js':{registerF07PilotRoutes},
             './lib/f07-vectra-acceptance.js':{registerF07AcceptanceRoutes},
             './lib/f07-vectra.js':{f07SealedVectra,f07VectraLocation},
+            './lib/f08-milvus.js':{registerF08MilvusPilotRoutes},
+            './lib/f08-milvus-acceptance.js':{registerF08AcceptanceRoutes},
             './lib/s10-gui-connections.js':{registerGuiConnectionRoutes:()=>{}}
         };
         assert.ok(objects[specifier],`unexpected import: ${specifier}`);

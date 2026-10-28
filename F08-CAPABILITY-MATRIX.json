@@ -1,0 +1,58 @@
+{
+  "checkpoint": "F08",
+  "baseline": "F07",
+  "versions": {
+    "extension": "2.2.0-alpha.s11.13-f08",
+    "plugin": "3.2.10-s10.12-f08"
+  },
+  "evidence": {
+    "plugin": {
+      "passed": 312,
+      "failed": 0,
+      "type": "offline/simulated SDK"
+    },
+    "extension": {
+      "passed": 1130,
+      "failed": 0,
+      "files": 66,
+      "type": "offline isolated node VM"
+    },
+    "focusAfterFingerprint": 28,
+    "syntax": "passed",
+    "liveMilvus": false
+  },
+  "capabilities": {
+    "milvus": {
+      "guiConnection": "AVAILABLE",
+      "sourceAttestation": "F01_VERIFIED_SAVED_FILES",
+      "v2ScopedReads": "F02_GUARDED_REQUIRES_PROVISION",
+      "newCollectionProvision": "F03_SERVER_OWNED_UNCERTIFIED",
+      "disposableLifecycle": "F08_AVAILABLE_REQUIRES_EXPLICIT_CONSENT",
+      "manualCRUD": "F08_LOCAL_LOOPBACK_ONLY_EXPLICIT_CONSENT",
+      "normalMemoryCRUD": "DENIED",
+      "verifiedFullInventory": "DENIED",
+      "legacyCollections": "QUARANTINED",
+      "hostCertified": false,
+      "externalCAS": "UNPROVEN"
+    },
+    "qdrant": {
+      "status": "F05_DEVELOPMENT_ACCEPTANCE_NOT_LIVE_CERTIFIED",
+      "normalMemoryCRUD": "DENIED"
+    },
+    "lancedb": {
+      "status": "F06_GUARDED_PILOT_NOT_LIVE_CERTIFIED",
+      "normalMemoryCRUD": "DENIED"
+    },
+    "pluginVectra": {
+      "status": "F07_GUARDED_PILOT_NOT_LIVE_CERTIFIED",
+      "normalMemoryCRUD": "DENIED"
+    },
+    "nativeStandard": {
+      "listQuery": "GUARDED_READ_PROBE",
+      "insertDeletePurge": "UNPROBED_DENIED"
+    }
+  },
+  "normalWorkflowsAvailable": false,
+  "productionReady": false,
+  "next": "F09_NORMAL_MEMORY_WORKFLOW_INTEGRATION"
+}
