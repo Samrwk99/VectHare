@@ -21,6 +21,7 @@ export class VectorOperationDenied extends Error {
         this.code = 'VECTHARE_E02_OPERATION_DENIED';
     }
 }
+const UUID_RE=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const backendAliases = Object.freeze({ vectra:'standard', standard:'standard', qdrant:'qdrant', milvus:'milvus', lancedb:'lancedb' });
 const nativeOperation = Object.freeze({list:'list',query:'query','query-multi':'query',insert:'insert',delete:'delete',purge:'purge'});
 const pluginOperations = Object.freeze({
@@ -132,7 +133,7 @@ export function inspectVectorRequest(url, options={}) {
             kind==='lorebook'?['kind','name']:[];
         const provision=req.suffix.endsWith('/provision');
         const keys=['backend','source','embedding','configId',...(provision?['confirmProvision','expectedCollectionName']:[])];
-        if(req.method!=='POST'||!body||!['qdrant','milvus','lancedb'].includes(body.backend)||
+        if(req.method!=='POST'||!body||!['qdrant','milvus','lancedb','vectra'].includes(body.backend)||
            !sourceKeys.length||!source||Object.keys(source).some(k=>!sourceKeys.includes(k))||
            sourceKeys.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220)||
            !embedding||typeof embedding!=='object'||Array.isArray(embedding)||
@@ -204,6 +205,37 @@ export function inspectVectorRequest(url, options={}) {
            (['delete','metadata'].includes(b.action)&&(b.text!==undefined||b.vector!==undefined))||
            (b.action==='delete'&&b.metadata!==undefined))fail(req,'f06-disposable-source-bound-pilot-required');
         return {intercepted:true,allowed:true,transport:'plugin',operation:'f06PilotMutation',backend:'lancedb',method:'POST'};
+    }
+    // F07: source-bound Vectra LOCAL PILOT; NEVER native SillyTavern Standard.
+    if(req.transport==='plugin'&&req.suffix==='/v2/records/vectra-pilot-mutate'){
+        const b=req.body, src=b?.source, emb=b?.embedding;
+        const k=src?.kind, sourceKeys=k==='chat'?['kind','avatar','chatFile']:
+            k==='group-chat'?['kind','groupId','chatFile']:
+            k==='lorebook'?['kind','name']:[];
+        const accepted=['backend','source','embedding','configId','action','recordId','expectedRevision','operationId',
+            'experimentalConsent','text','vector','metadata'];
+        if(req.method!=='POST'||!b||b.backend!=='vectra'||b.configId!=='default'||
+           b.experimentalConsent!=='I ACCEPT F07 LOCAL VECTRA PILOT'||
+           !['insert','update','metadata','delete'].includes(b.action)||
+           !UUID_RE.test(b.recordId||'')||!UUID_RE.test(b.operationId||'')||
+           !sourceKeys.length||!src||Object.keys(src).some(key=>!sourceKeys.includes(key))||
+           sourceKeys.some(key=>typeof src[key]!=='string'||!src[key]||src[key].length>220)||
+           !emb||typeof emb!=='object'||Array.isArray(emb)||
+           Object.keys(emb).some(key=>!['source','model','dimension','metric'].includes(key))||
+           Object.keys(b).some(key=>!accepted.includes(key))||
+           (b.action==='insert'&&b.expectedRevision!==0)||
+           (b.action!=='insert'&&(!Number.isSafeInteger(b.expectedRevision)||b.expectedRevision<1))||
+           (['delete','metadata'].includes(b.action)&&(b.text!==undefined||b.vector!==undefined))||
+           (b.action==='delete'&&b.metadata!==undefined))fail(req,'f07-disposable-source-bound-pilot-required');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:'f07PilotMutation',backend:'vectra',method:'POST'};
+    }
+    // F07 diagnostic is a server-generated new index with synthetic data only.
+    if(req.transport==='plugin'&&req.suffix==='/v2/diagnostics/vectra-f07'){
+        const b=req.body;
+        if(req.method!=='POST'||!b||b.consent!=='I ACCEPT F07 DISPOSABLE VECTRA TEST'||
+           Object.keys(b).some(k=>k!=='consent'))fail(req,'f07-disposable-consent-required');
+        return {intercepted:true,allowed:true,transport:'plugin',backend:'vectra',
+            operation:'f07DisposableAcceptance',method:'POST'};
     }
     // F05: fixed-parameter, explicit-consent local Qdrant acceptance suite.
     // Server selects a new random namespace and synthetic record IDs. No user

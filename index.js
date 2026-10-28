@@ -6,6 +6,8 @@ import {renderF04PilotPanel} from './utils/f04-pilot-client.js';
 import {renderF05QdrantAcceptance} from './utils/f05-acceptance-client.js';
 import {renderF06LanceAcceptance} from './utils/f06-lancedb-acceptance.js';
 import {renderF06PilotPanel} from './utils/f06-lancedb-pilot-client.js';
+import {renderF07VectraAcceptance} from './utils/f07-vectra-acceptance.js';
+import {renderF07PilotPanel} from './utils/f07-vectra-pilot-client.js';
 import {discoverS11Plugin, renderS11CompatibilityStatus, renderH01QdrantButton, renderF01SourceAttestation} from './utils/s11-plugin-compatibility.js';
 import {recoverPendingC02Operations} from './core/core-vector-api.js';
 /**
@@ -584,6 +586,8 @@ jQuery(async () => {
         renderF05QdrantAcceptance(document.querySelector('.vecthare_settings'));
         renderF06LanceAcceptance(document.querySelector('.vecthare_settings'));
         renderF06PilotPanel(document.querySelector('.vecthare_settings'),()=>settings);
+        renderF07VectraAcceptance(document.querySelector('.vecthare_settings'));
+        renderF07PilotPanel(document.querySelector('.vecthare_settings'),()=>settings);
         if (!status.compatible) console.warn('VectHare: Similharity S10 compatibility unavailable:',status.reason);
     });
 

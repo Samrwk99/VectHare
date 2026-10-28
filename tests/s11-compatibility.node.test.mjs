@@ -7,7 +7,7 @@ const root='/api/plugins/similharity';
 function reports(){
  const build={pluginVersion:S11_EXPECTED_PLUGIN.pluginVersion, contractVersion:2,sourceFingerprint:S11_EXPECTED_PLUGIN.sourceFingerprint,verification:'MATCHED_LOCAL_SOURCE_MANIFEST'};
  const operations=Object.fromEntries(['insert','delete','updateText','updateMetadata','operationSubmit'].map(v=>[v,'DENIED_NOT_LIVE_CERTIFIED']));
- const caps={...build,buildVerification:build.verification,capabilityClaimsArePermissions:false,productionCertified:false,publicV2MutationsEnabled:false,publicV2ReadsEnabled:false,publicV2ReadRoutesAvailable:true,guardedNewCollectionProvisioningAvailable:true,experimentalQdrantPilotMutationsAvailable:true,extendedQdrantDisposableAcceptanceAvailable:true,disposableLanceDBAcceptanceAvailable:true,sourceBoundLanceDBProvisioningAvailable:true,experimentalLanceDBPilotMutationsAvailable:true,backends:Object.fromEntries(['standard','lancedb','qdrant','milvus'].map(b=>[b,{operations}]))};
+ const caps={...build,buildVerification:build.verification,capabilityClaimsArePermissions:false,productionCertified:false,publicV2MutationsEnabled:false,publicV2ReadsEnabled:false,publicV2ReadRoutesAvailable:true,guardedNewCollectionProvisioningAvailable:true,experimentalQdrantPilotMutationsAvailable:true,extendedQdrantDisposableAcceptanceAvailable:true,disposableLanceDBAcceptanceAvailable:true,sourceBoundLanceDBProvisioningAvailable:true,experimentalLanceDBPilotMutationsAvailable:true,sourceBoundVectraProvisioningAvailable:true,experimentalVectraPilotMutationsAvailable:true,disposableVectraAcceptanceAvailable:true,backends:Object.fromEntries(['standard','lancedb','qdrant','milvus'].map(b=>[b,{operations}]))};
  const contracts={contractVersion:2,executionCertified:false,routes:{'POST /v2/operations/submit':'DENIED','POST /v2/reads/get':'GUARDED_F02_HOST_SOURCE_V2_SCHEMA_ONLY',
  'POST /v2/collections/preview':'F03_SOURCE_BOUND_NEW_COLLECTION_PREVIEW_ONLY',
  'POST /v2/collections/provision':'F03_EXPLICIT_SOURCE_BOUND_EMPTY_SCHEMA_CREATION_UNCERTIFIED',
@@ -15,7 +15,9 @@ function reports(){
  'POST /v2/records/pilot-mutate':'F04_DISPOSABLE_QDRANT_CONSENTED_V2_RECORDS_UNCERTIFIED',
  'POST /v2/diagnostics/qdrant-f05':'F05_EXTENDED_LOCAL_QDRANT_DISPOSABLE_ACCEPTANCE_NOT_PRODUCTION',
  'POST /v2/diagnostics/lancedb-f06':'F06_LOCAL_LANCEDB_DISPOSABLE_ACCEPTANCE_NOT_PRODUCTION',
- 'POST /v2/records/lancedb-pilot-mutate':'F06_SOURCE_BOUND_LANCEDB_LOCAL_PILOT_NOT_PRODUCTION'}};
+ 'POST /v2/records/lancedb-pilot-mutate':'F06_SOURCE_BOUND_LANCEDB_LOCAL_PILOT_NOT_PRODUCTION',
+ 'POST /v2/diagnostics/vectra-f07':'F07_LOCAL_VECTRA_DISPOSABLE_ACCEPTANCE_NOT_PRODUCTION',
+ 'POST /v2/records/vectra-pilot-mutate':'F07_SOURCE_BOUND_LOCAL_PLUGIN_VECTRA_PILOT_NOT_NATIVE_STANDARD'}};
  return {build,caps,contracts};
 }
 const stub=reports();

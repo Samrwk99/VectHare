@@ -5,9 +5,9 @@
  */
 import { guardedVectorFetch } from './e02-vector-request-gateway.js';
 export const S11_EXPECTED_PLUGIN = Object.freeze({
-    pluginVersion: '3.2.10-s10.10-f06',
+    pluginVersion: '3.2.10-s10.11-f07',
     contractVersion: 2,
-    sourceFingerprint: 'f4c57d07c136f114cd8f52085c43acae425afc09aab1e178f53bd8a041d6be9c',
+    sourceFingerprint: 'd5cfbb4cb1f96cc43067b180a9de8ce812da2c589d28be5abec7c6a28e7de42c',
 });
 export const S11_BACKENDS = Object.freeze(['standard','lancedb','qdrant','milvus']);
 const ROOT = '/api/plugins/similharity';
@@ -39,7 +39,11 @@ export function validateS11Discovery(build,caps,contracts,expected=S11_EXPECTED_
         contracts.routes['POST /v2/diagnostics/lancedb-f06']!=='F06_LOCAL_LANCEDB_DISPOSABLE_ACCEPTANCE_NOT_PRODUCTION' ||
         caps.disposableLanceDBAcceptanceAvailable!==true || caps.sourceBoundLanceDBProvisioningAvailable!==true ||
         caps.experimentalLanceDBPilotMutationsAvailable!==true ||
-        contracts.routes['POST /v2/records/lancedb-pilot-mutate']!=='F06_SOURCE_BOUND_LANCEDB_LOCAL_PILOT_NOT_PRODUCTION')
+        contracts.routes['POST /v2/records/lancedb-pilot-mutate']!=='F06_SOURCE_BOUND_LANCEDB_LOCAL_PILOT_NOT_PRODUCTION' ||
+        contracts.routes['POST /v2/diagnostics/vectra-f07']!=='F07_LOCAL_VECTRA_DISPOSABLE_ACCEPTANCE_NOT_PRODUCTION' ||
+        contracts.routes['POST /v2/records/vectra-pilot-mutate']!=='F07_SOURCE_BOUND_LOCAL_PLUGIN_VECTRA_PILOT_NOT_NATIVE_STANDARD' ||
+        caps.sourceBoundVectraProvisioningAvailable!==true ||
+        caps.experimentalVectraPilotMutationsAvailable!==true || caps.disposableVectraAcceptanceAvailable!==true)
         return refused('unexpected-execution-contract');
     if(S11_BACKENDS.some(b=>['insert','delete','updateText','updateMetadata','operationSubmit'].some(op=>
         caps.backends[b].operations[op]!=='DENIED_NOT_LIVE_CERTIFIED')))return refused('unaccepted-mutation-claim');

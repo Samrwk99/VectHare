@@ -78,11 +78,11 @@ export async function checkVectorsExtension() {
             })
         });
 
-        if (response.status === 404) {
+        if (!response.ok) {
             return {
                 name: 'ST Vectra (Standard)',
                 status: 'fail',
-                message: 'ST vector API not available - check SillyTavern installation',
+                message: `ST native vector list probe was not successful (HTTP ${response.status}); not proof the endpoint is absent`,
                 fixable: false,
                 category: 'infrastructure'
             };
@@ -113,66 +113,29 @@ export async function checkVectorsExtension() {
  * the Similharity plugin endpoints for actual operations, not these.
  */
 export async function checkBackendEndpoints(settings) {
-    const results = [];
-    // Always use 'transformers' - native ST endpoints don't know custom sources
-    // This check tests "do endpoints respond?" not "does my provider work?"
-    const source = 'transformers';
-
-    const endpoints = [
-        { name: 'list', method: 'POST', url: '/api/vector/list', body: { collectionId: 'vecthare_diag', source } },
-        { name: 'query', method: 'POST', url: '/api/vector/query', body: { collectionId: 'vecthare_diag', searchText: 'test', topK: 1, source } },
-        { name: 'insert', method: 'POST', url: '/api/vector/insert', body: { collectionId: 'vecthare_diag', items: [], source } },
-        { name: 'delete', method: 'POST', url: '/api/vector/delete', body: { collectionId: 'vecthare_diag', hashes: [], source } },
-        { name: 'purge', method: 'POST', url: '/api/vector/purge', body: { collectionId: 'vecthare_diag_nonexistent' } },
+    // Native Standard is NOT Similharity Vectra. Never probe mutation routes
+    // with empty payloads: even malformed requests are not guaranteed harmless.
+    // A non-404 error is NOT evidence that an endpoint works.
+    const source='transformers';
+    const endpoints=[
+        {name:'list',url:'/api/vector/list',body:{collectionId:'vecthare_f07_nonexistent',source}},
+        {name:'query',url:'/api/vector/query',body:{collectionId:'vecthare_f07_nonexistent',searchText:'test',topK:1,source}},
     ];
-
-    for (const endpoint of endpoints) {
-        try {
-            const response = await fetch(endpoint.url, {
-                method: endpoint.method,
-                headers: getRequestHeaders(),
-                body: JSON.stringify(endpoint.body),
-            });
-
-            if (response.status === 404) {
-                results.push({ name: endpoint.name, ok: false, status: 404 });
-            } else {
-                results.push({ name: endpoint.name, ok: true, status: response.status });
-            }
-        } catch (error) {
-            results.push({ name: endpoint.name, ok: false, error: error.message });
-        }
+    const results=[];
+    for(const endpoint of endpoints){
+        try{
+            const response=await fetch(endpoint.url,{method:'POST',headers:getRequestHeaders(),
+                body:JSON.stringify(endpoint.body)});
+            results.push({name:endpoint.name,ok:response.ok,status:response.status});
+        }catch(error){results.push({name:endpoint.name,ok:false,error:error?.message||'network error'});}
     }
-
-    const passed = results.filter(r => r.ok);
-    const failed = results.filter(r => !r.ok);
-
-    const formatResults = results.map(r =>
-        `${r.name} ${r.ok ? '✓' : `✗(${r.status || r.error})`}`
-    ).join(', ');
-
-    if (failed.length === 0) {
-        return {
-            name: 'ST Vector Endpoints',
-            status: 'pass',
-            message: `All ${passed.length} endpoints: ${formatResults}`,
-            category: 'infrastructure',
-        };
-    } else if (passed.length > 0) {
-        return {
-            name: 'ST Vector Endpoints',
-            status: 'warning',
-            message: `${passed.length}/${results.length} working: ${formatResults}`,
-            category: 'infrastructure',
-        };
-    } else {
-        return {
-            name: 'ST Vector Endpoints',
-            status: 'fail',
-            message: 'No ST vector endpoints available',
-            category: 'infrastructure',
-        };
-    }
+    for(const name of ['insert','delete','purge'])results.push({name,ok:false,skipped:true});
+    const working=results.filter(r=>r.ok).length;
+    const display=results.map(r=>r.skipped?`${r.name} SKIPPED (unverified native mutation)`:
+        `${r.name} ${r.ok?'✓':`✗(${r.status||r.error})`}`).join(', ');
+    return {name:'ST Vector Endpoints',status:working===2?'warning':working===0?'fail':'warning',
+        message:`${working}/2 read probes successful; native mutations NOT TESTED: ${display}. This is separate from Similharity Vectra.`,
+        category:'infrastructure'};
 }
 
 /**
