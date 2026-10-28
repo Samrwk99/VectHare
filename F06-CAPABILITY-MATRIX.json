@@ -1,0 +1,80 @@
+{
+  "checkpoint": "F06",
+  "status": "LANCEDB_GUARDED_DEV_PILOT_NOT_PRODUCTION",
+  "extensionVersion": "2.2.0-alpha.s11.11-f06",
+  "pluginVersion": "3.2.10-s10.10-f06",
+  "pluginSourceFingerprint": "f4c57d07c136f114cd8f52085c43acae425afc09aab1e178f53bd8a041d6be9c",
+  "backends": {
+    "qdrant": {
+      "ordinaryInsert": "DENIED",
+      "ordinaryEdit": "DENIED",
+      "ordinaryDelete": "DENIED",
+      "ordinaryReindex": "DENIED",
+      "verifiedInventory": "DENIED",
+      "fullExport": "DENIED",
+      "guardedV2Reads": "GUARDED_ALREADY_PROVISIONED_V2_ONLY",
+      "extendedDisposableAcceptance": "AVAILABLE_UNCERTIFIED"
+    },
+    "lancedb": {
+      "ordinaryInsert": "DENIED",
+      "ordinaryEdit": "DENIED",
+      "ordinaryDelete": "DENIED",
+      "ordinaryReindex": "DENIED",
+      "verifiedInventory": "DENIED",
+      "fullExport": "DENIED",
+      "guardedV2Reads": "GUARDED_ALREADY_PROVISIONED_V2_ONLY",
+      "extendedDisposableAcceptance": "AVAILABLE_UNCERTIFIED",
+      "sourceBoundV2Provisioning": "AVAILABLE_UNCERTIFIED_LIVE",
+      "manualSourceBoundCRUDPilot": "AVAILABLE_UNCERTIFIED_LIVE"
+    },
+    "vectra": {
+      "ordinaryInsert": "DENIED",
+      "ordinaryEdit": "DENIED",
+      "ordinaryDelete": "DENIED",
+      "ordinaryReindex": "DENIED",
+      "verifiedInventory": "DENIED",
+      "fullExport": "DENIED",
+      "guardedV2Reads": "GUARDED_ALREADY_PROVISIONED_V2_ONLY",
+      "extendedDisposableAcceptance": "NOT_AVAILABLE"
+    },
+    "milvus": {
+      "ordinaryInsert": "DENIED",
+      "ordinaryEdit": "DENIED",
+      "ordinaryDelete": "DENIED",
+      "ordinaryReindex": "DENIED",
+      "verifiedInventory": "DENIED",
+      "fullExport": "DENIED",
+      "guardedV2Reads": "GUARDED_ALREADY_PROVISIONED_V2_ONLY",
+      "extendedDisposableAcceptance": "NOT_AVAILABLE"
+    }
+  },
+  "nativeStandard": {
+    "insert": "DENIED_NATIVE_UNPROBED",
+    "delete": "DENIED_NATIVE_UNPROBED",
+    "purge": "DENIED_NATIVE_UNPROBED"
+  },
+  "f05ExtendedAcceptance": {
+    "backend": "qdrant",
+    "connection": "local-only",
+    "serverGeneratedCollection": true,
+    "syntheticMutations": true,
+    "realHostAcceptance": "NOT_RUN",
+    "externalWriterCAS": "UNPROVEN",
+    "restartDurability": "UNPROVEN",
+    "productionWritePromotion": false,
+    "autoPurge": false
+  },
+  "next": "F07_STANDARD_VECTRA_PLUS_REAL_LANCE_HOST_ACCEPTANCE",
+  "f06LanceDB": {
+    "sourceSpecificBackendSelection": true,
+    "schemaCreateMode": "create",
+    "createExistOk": false,
+    "manualV2Pilot": "OPT_IN_ONLY",
+    "syntheticLifecycleAcceptance": "OFFLINE_TESTED_ONLY",
+    "hostNativeSDK": "NOT_TESTED",
+    "trueRestartDurability": "UNPROVEN",
+    "externalWriterCAS": "UNPROVEN",
+    "productionEnabled": false,
+    "platformsCertified": []
+  }
+}

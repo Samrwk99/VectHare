@@ -7,7 +7,7 @@
  * All chunk operations go through unified /chunks/* endpoints.
  * Backend is specified via `backend` parameter in request body.
  *
- * @version 3.2.10-s10.9-f05
+ * @version 3.2.10-s10.10-f06
  */
 
 import path from 'node:path';
@@ -28,6 +28,8 @@ import {registerF02Routes} from './lib/f02-public-reads.js';
 import {registerF03ProvisionRoutes} from './lib/f03-provision.js';
 import {registerF04PilotRoutes} from './lib/f04-pilot-mutations.js';
 import {registerF05AcceptanceRoutes} from './lib/f05-qdrant-acceptance.js';
+import {registerF06AcceptanceRoutes} from './lib/f06-lancedb.js';
+import {registerF06PilotRoutes} from './lib/f06-lancedb-pilot.js';
 import { loadS10Build } from './lib/s10-build.js';
 import { registerS10Routes } from './lib/s10-contracts.js';
 import {registerH01AcceptanceRoutes} from './lib/h01-qdrant-acceptance.js';
@@ -35,7 +37,7 @@ import {registerF01HostRoutes} from './lib/f01-host-sources.js';
 import { validateVector as validateS05Vector } from './lib/s05-contract.js';
 
 const pluginName = 'similharity';
-const pluginVersion = '3.2.10-s10.9-f05';
+const pluginVersion = '3.2.10-s10.10-f06';
 
 /**
  * Initialize the plugin
@@ -85,6 +87,8 @@ export async function init(router) {
     registerF03ProvisionRoutes(router,{backendPool});
     registerF04PilotRoutes(router,{backendPool});
     registerF05AcceptanceRoutes(router,{backendPool});
+    registerF06AcceptanceRoutes(router,{backendPool});
+    registerF06PilotRoutes(router,{backendPool});
     registerS10Routes(router, s10Build);
     registerH01AcceptanceRoutes(router,{backendPool});
     registerF01HostRoutes(router);

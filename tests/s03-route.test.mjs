@@ -14,6 +14,8 @@ import {registerF02Routes} from '../lib/f02-public-reads.js';
 import {registerF03ProvisionRoutes} from '../lib/f03-provision.js';
 import {registerF04PilotRoutes} from '../lib/f04-pilot-mutations.js';
 import {registerF05AcceptanceRoutes} from '../lib/f05-qdrant-acceptance.js';
+import {registerF06AcceptanceRoutes} from '../lib/f06-lancedb.js';
+import {registerF06PilotRoutes} from '../lib/f06-lancedb-pilot.js';
 import { registerS04Routes } from '../lib/s04-routes.js';
 import {registerS05Routes} from '../lib/s05-routes.js';
 import {registerS10Routes} from '../lib/s10-contracts.js';
@@ -46,6 +48,8 @@ async function registered(pool) {
             './lib/f03-provision.js':{registerF03ProvisionRoutes},
             './lib/f04-pilot-mutations.js':{registerF04PilotRoutes},
             './lib/f05-qdrant-acceptance.js':{registerF05AcceptanceRoutes},
+            './lib/f06-lancedb.js':{registerF06AcceptanceRoutes},
+            './lib/f06-lancedb-pilot.js':{registerF06PilotRoutes},
             './lib/s10-gui-connections.js':{registerGuiConnectionRoutes:()=>{}}
         };
         assert.ok(objects[specifier],`unexpected import: ${specifier}`);

@@ -1,6 +1,6 @@
 {
   "name": "similharity",
-  "version": "3.2.10-s10.9-f05",
+  "version": "3.2.10-s10.10-f06",
   "description": "Vector database backend extensions for Similharity - LanceDB, Qdrant, and enhanced Vectra with full metadata storage",
   "main": "index.js",
   "type": "module",
@@ -21,7 +21,8 @@
   ],
   "dependencies": {
     "@lancedb/lancedb": "^0.5.0",
-    "@zilliz/milvus2-sdk-node": "^2.6.5"
+    "@zilliz/milvus2-sdk-node": "^2.6.5",
+    "apache-arrow": "^17.0.0"
   },
   "optionalDependencies": {
     "@lancedb/lancedb-linux-x64-musl": "^0.23.0"
@@ -51,6 +52,7 @@
     "test:f01": "node --experimental-vm-modules --test tests/*.test.mjs",
     "test:f02": "node --experimental-vm-modules --test tests/*.test.mjs",
     "test:f03": "node --experimental-vm-modules --test tests/*.test.mjs",
-    "test:f04": "node --experimental-vm-modules --test tests/*.test.mjs"
+    "test:f04": "node --experimental-vm-modules --test tests/*.test.mjs",
+    "test:f06": "node --experimental-vm-modules --test tests/*.test.mjs"
   }
 }
