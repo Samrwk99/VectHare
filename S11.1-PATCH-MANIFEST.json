@@ -1,0 +1,16 @@
+{
+  "checkpoint": "S11.1",
+  "base": "S11",
+  "plugin": "S10 unchanged",
+  "publicMutationsEnabled": false,
+  "liveVerified": false,
+  "changes": {
+    "backends/qdrant.js": "96b4d0a1f20efda5acc44667f4ace995677e465f35bbcfef21c66a260c9a5c82",
+    "diagnostics/infrastructure.js": "8aedb4b2296cf1e69a668d0cab98b380a0fe6c9715a61d6ecc15827f963ac268",
+    "ui/ui-manager.js": "b304000c601b3a0a5cc1a8c2909177ab87e05e5765ff88395a6d72b41c878ecc",
+    "manifest.json": "8e8ebb7c160d6bac89f3d218dd59f76ad59b30e2e178cb1f19f40b101644aa13",
+    "tests/c05-credentials.node.test.mjs": "c699e5e77bb13c31b124449fb433ed64ebc74dd4b727bb445fc048cc5e44afa3",
+    "tests/s11-qdrant-server-config.node.test.mjs": "9689f348e06e86195eb0101e21227e0e6d0601178b5a81022580738f387970ee",
+    "S11.1-QDRANT-COMPATIBILITY-FIX.md": "b1b144be18b2796920b3fb8235a90bec5772bb078d875e5f448b7421e88909db"
+  }
+}

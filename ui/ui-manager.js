@@ -90,6 +90,11 @@ export function renderSettings(containerId, settings, callbacks) {
 
                             <!-- Qdrant Settings (shown only when Qdrant backend is selected) -->
                             <div id="vecthare_qdrant_settings" style="display: none;">
+                                <small class="vecthare-help-text" style="display:block; margin:5px 0 12px;">
+                                    Similharity S10 uses administrator-provisioned Qdrant connection settings.
+                                    The local host, cloud URL and API-key fields below are legacy settings
+                                    and do not configure this plugin. Do not enter credentials here.
+                                </small>
                                 <label class="checkbox_label">
                                     <input type="checkbox" id="vecthare_qdrant_use_cloud" />
                                     <span>Use Qdrant Cloud</span>
@@ -1967,7 +1972,7 @@ function bindSettingsEvents(settings, callbacks) {
                     const { initializeBackend } = await import('../backends/backend-manager.js');
                     await initializeBackend('qdrant', settings, false);
                     toastr.success(
-                        `Qdrant re-initialized in ${settings.qdrant_use_cloud ? 'cloud' : 'local'} mode`,
+                        'Qdrant server-managed connection re-initialized',
                         'VectHare'
                     );
                 } catch (e) {
