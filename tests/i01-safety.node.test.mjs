@@ -85,6 +85,7 @@ async function loadCollectionLoader({ registry = [], purge = async () => true } 
     const stubs = {
         '../utils/e02-vector-request-gateway.js':{guardedVectorFetch:(...args)=>context.fetch(...args)},
         '../utils/keyed-mutex.js': {withCollectionLock: async (_key,fn)=>fn(),writeBarrier:{closeAndDrain:async()=>({verified:true}),reopen:()=>{}}},
+        '../utils/e03-mutation-lock.js': {withCrossTabMutationLock: async (_key,fn)=>fn()},
         '../utils/c01-deletion.js': {deleteCollectionSafely:async()=>({success:false,status:'blocked',reason:'destructive-server-contract-unverified'}),recoverTombstones:()=>[]},
         '../utils/c01-inventory.js': {collectScopedInventory:async()=>({complete:false,status:'unavailable'})},
         '../utils/backend-contracts.js': {hasVerifiedCapability:()=>false},

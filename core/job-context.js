@@ -51,7 +51,10 @@ export function createJobCoordinator({ getIdentity, storage = null, markerKey = 
     const store = storage;
     const persist = () => {
         if (!store) return false;
-        try { store.setItem(markerKey, JSON.stringify({version:MARKER_VERSION, operations:pending})); return true; }
+        try { const snapshot=JSON.stringify({version:MARKER_VERSION, operations:pending});
+            store.setItem(markerKey,snapshot);
+            // This is a browser-local marker check, NOT host settings durability.
+            return store.getItem(markerKey)===snapshot; }
         catch { return false; }
     };
     try {
@@ -100,7 +103,14 @@ export function createJobCoordinator({ getIdentity, storage = null, markerKey = 
         ctx?.assertCurrent();
         const marker = {id:`c03-write-${instanceId}-${++nextId}`,collectionKey:String(collectionKey||''),kind:String(kind),status:'in-flight'};
         pending.push(marker);
-        if (!persist()) writeBarrier.markUncertain(); // storage unavailable: no crash-proof receipt
+        if (!persist()) {
+            writeBarrier.markUncertain();
+            marker.status='uncertain';
+            // Never start a deferred network write without even a browser-local
+            // journal marker. Existing already-started Promise inputs cannot be
+            // cancelled here, so keep the uncertain marker in memory.
+            if(typeof operationPromise==='function')throw new Error('C03 write blocked: pending marker persistence failed');
+        }
 
         const promise = (async () => {
             try {

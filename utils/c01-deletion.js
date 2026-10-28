@@ -18,9 +18,9 @@ const trustedInventory = (list,key) => list?.status==='complete' && list?.comple
  * persist(snapshot) MUST confirm durable storage (return true). A debounced save
  * without a durable acknowledgement must return false: no purge may follow it.
  */
-export async function deleteCollectionSafely({key,store,persist,inventory,purge,verifyEmpty,contractVerified=false,backup,protectedCollection=false,resume=false}={}) {
+export async function deleteCollectionSafely({key,store,persist,inventory,purge,verifyEmpty,contractVerified=false,backup,protectedCollection=false,resume=false,mutationLock=withCollectionLock}={}) {
     if (!parseCollectionKey(key)) return fail('blocked','invalid-or-unqualified-key');
-    return withCollectionLock(key, async()=> {
+    return mutationLock(key, async()=> {
         if (contractVerified !== true) return fail('blocked','destructive-server-contract-unverified');
         if (!store || !Array.isArray(store.registry) || !store.collections || typeof store.collections!=='object' || !store.tombstones || typeof store.tombstones!=='object')
             return fail('blocked','registry-or-metadata-unavailable');

@@ -257,7 +257,7 @@ test('C03 #92: cancelled queued insert is rejected before backend work can start
     queued.cancel('stop');await assert.rejects(b,StaleJobError);
     hold.resolve();await a;assert.deepEqual(calls,['owner']);
     const api=fs.readFileSync(new URL('../core/core-vector-api.js',import.meta.url),'utf8');
-    assert.match(api,/withCollectionLock\(key,async\(\)=>\{/);
+    assert.match(api,/withCrossTabMutationLock\(key,async\(\)=>\{/);
     assert.equal((api.match(/\}, \{signal:abortSignal\}\);/g)||[]).length,2,'both insert and delete locks receive the signal');
 });
 

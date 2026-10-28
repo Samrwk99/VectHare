@@ -1,3 +1,4 @@
+import {withCrossTabMutationLock} from '../utils/e03-mutation-lock.js';
 import { guardedVectorFetch as fetch } from '../utils/e02-vector-request-gateway.js';
 import {getBackendForCollection} from '../backends/backend-manager.js';
 import {inspectAdapterInventory} from '../utils/c11-adapter-inventory.js';
@@ -126,6 +127,7 @@ export async function deleteCollection(collectionId, settings, registryKey = nul
         tombstones:(ext.vecthare_delete_tombstones ||= {}),
         recordMetadata:ext.vecthare_chunk_meta_by_collection,chatCollectionPolicies:ext.chatCollectionPolicies};
     const result=await deleteCollectionSafely({
+        mutationLock:withCrossTabMutationLock,
         key:resolved.key,store,contractVerified:capabilityVerified,
         inventory:async key=>{
             // Only reached if independently verified capabilities are enabled.

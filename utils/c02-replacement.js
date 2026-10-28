@@ -18,7 +18,7 @@ function asEvidence(data, key, requested) {
 }
 function errorReason(e) {return e?.name==='AbortError'?'aborted-after-dispatch':'write-or-transport-uncertain';}
 export function createC02Coordinator({journal=createIndexedDBOperationJournal(),list,upsert,remove,
-        canUpsertIdempotently=()=>false,canDelete=()=>false,allowUnverifiedFirstWrite=false, signal}={}) {
+        canUpsertIdempotently=()=>false,canDelete=()=>false,allowUnverifiedFirstWrite=false, signal, mutationLock=withCollectionLock}={}) {
     if(typeof journal?.create!=='function'||typeof journal?.put!=='function'||typeof journal?.list!=='function'||typeof journal?.get!=='function')throw new Error('Journal required');
     async function checkpoint(header,phase,reason='none',confirmedIds=header.confirmedIds){
         const updated={...header,phase,reason,confirmedIds,updatedAt:Math.max(Date.now(),header.updatedAt)};
@@ -51,7 +51,7 @@ export function createC02Coordinator({journal=createIndexedDBOperationJournal(),
     }
     async function replaceRecords({collectionKey,kind='replace',oldIds=[],newItems=[],signal:localSignal=signal}={}){
         // Do not acquire the same lock again in callbacks: adapter caller handles its transport.
-        return withCollectionLock(collectionKey,async()=>{
+        return mutationLock(collectionKey,async()=>{
             if(localSignal?.aborted) return {status:'cancelled',reason:'not-sent'};
             const ids=contentIds(newItems),previous=verifiedIds(oldIds);
             if(previous.length && !ids.length)throw new Error('Destructive empty replacement is forbidden');
@@ -87,7 +87,7 @@ export function createC02Coordinator({journal=createIndexedDBOperationJournal(),
         },{signal:localSignal});
     }
     async function reconcileBatch(id){const header=await journal.get(id);if(!header)throw new Error('C02 operation not found');
-        return withCollectionLock(header.collectionKey,async()=>{
+        return mutationLock(header.collectionKey,async()=>{
             if(header.phase==='committed')return {status:'committed',operationId:id};
             const result=await reconcileInternal(header);
             if(result.status!=='verified')return result;
@@ -104,7 +104,7 @@ export function createC02Coordinator({journal=createIndexedDBOperationJournal(),
     async function resumeMissingRecords(id, newItems, {signal:resumeSignal=signal}={}) {
         const original=await journal.get(id);
         if(!original)throw new Error('C02 operation not found');
-        return withCollectionLock(original.collectionKey,async()=>{
+        return mutationLock(original.collectionKey,async()=>{
             let header=await journal.get(id);
             if(header.phase==='committed')return {status:'committed',operationId:id};
             if(canUpsertIdempotently(header.collectionKey)!==true)return uncertain(header,'idempotency-contract-unverified');

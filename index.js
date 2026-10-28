@@ -1,3 +1,4 @@
+import {buildRecoveryReport} from './utils/e03-recovery.js';
 import { guardedVectorFetch as fetch } from './utils/e02-vector-request-gateway.js';
 import {recoverPendingC02Operations} from './core/core-vector-api.js';
 /**
@@ -516,15 +517,19 @@ jQuery(async () => {
         toastr.warning(`${pendingDeletions.length} collection deletion(s) require reconciliation; no automatic purge was attempted`, 'VectHare', {timeOut:12000});
     }
 
+    let e03JournalEntries=[];
+    let e03JournalError=false;
     // C02: durable write journal is inspected after settings load. No
     // pending replacement is retried or cleaned up automatically.
     try {
         const pendingC02=await recoverPendingC02Operations();
+        e03JournalEntries=pendingC02;
         if(pendingC02.length){
             console.warn('VectHare: Journalled operations require reconciliation',pendingC02.map(op=>({operationId:op.operationId,kind:op.kind,phase:op.phase})));
             toastr.warning(`${pendingC02.length} import/replacement operation(s) require reconciliation; existing vectors were not automatically deleted`, 'VectHare', {timeOut:15000});
         }
     } catch (_) {
+        e03JournalError=true;
         console.warn('VectHare: C02 durable journal unavailable; imports and replacements must remain blocked');
         toastr.warning('Durable vector-operation journal unavailable; unsafe replacements remain blocked', 'VectHare', {timeOut:15000});
     }
@@ -537,6 +542,12 @@ jQuery(async () => {
         console.warn('VectHare: Pending write operations require reconciliation', pendingWrites.map(({id,status})=>({id,status})));
         toastr.warning(`${pendingWriteCount} interrupted or uncertain write(s) require reconciliation; destructive operations remain blocked`, 'VectHare', {timeOut:12000});
     }
+
+    // E03: a consolidated, strictly read-only startup incident report. This
+    // object can be inspected in diagnostics; it never auto-replays mutations.
+    const recoveryReport=buildRecoveryReport({journal:e03JournalEntries,
+        journalError:e03JournalError,writeMarkers:pendingWrites,deletionMarkers:pendingDeletions});
+    globalThis.__vecthareRecoveryReport=recoveryReport;
 
     // Render UI
     renderSettings('extensions_settings2', settings, {

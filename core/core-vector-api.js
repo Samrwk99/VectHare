@@ -1,3 +1,4 @@
+import {withCrossTabMutationLock} from '../utils/e03-mutation-lock.js';
 import { requireServerCredentialResolution } from '../utils/c05-protected-credentials.js';
 import {inspectAdapterInventory} from '../utils/c11-adapter-inventory.js';
 import {createC02Coordinator} from '../utils/c02-replacement.js';
@@ -767,7 +768,7 @@ export async function insertVectorItems(collectionId, items, settings, onProgres
     const ticket=writeBarrier.enter();
     let uncertain=false;
     const operation=beginOperation('insert',key);
-    try {return await withCollectionLock(key,async()=>{
+    try {return await withCrossTabMutationLock(key,async()=>{
     // R17: getBackend was previously an UNABORTABLE, UNTIMED await executed
     // once per item - the exact place a run could hang forever with Stop
     // unable to free it (user symptom: "stopping hangs on embedding" while
@@ -965,7 +966,7 @@ export async function deleteVectorItems(collectionId, hashes, settings, abortSig
     }
     const ticket=writeBarrier.enter();
     let uncertain=false;
-    try { return await withCollectionLock(key,async()=>{
+    try { return await withCrossTabMutationLock(key,async()=>{
     if(resolveCollectionKey(collectionId,{registry:extension_settings.vecthare?.vecthare_collection_registry || []}).key!==key) throw new Error('Registry changed during deletion');
     // R17: guarded - deletes during a run were unabortable+untimed awaits
     const backend = await withOpGuard(() => getBackend(settings), abortSignal, 'Backend initialization (delete)');
@@ -1395,7 +1396,7 @@ export async function replaceVectorRecords(collectionId,oldIds,newItems,settings
     // The C11 bridge requires authoritative page, count and tenant evidence.
     // These are currently UNKNOWN for the supplied plugin; no network writes
     // are admitted until a pinned server implementation proves otherwise.
-    const coordinator=createC02Coordinator({journal:c02Journal,
+    const coordinator=createC02Coordinator({journal:c02Journal,mutationLock:withCrossTabMutationLock,
         allowUnverifiedFirstWrite:false,
         list:async scope=>{
             const backend=await withOpGuard(()=>getBackend(settings),signal,'C02 inventory initialization');

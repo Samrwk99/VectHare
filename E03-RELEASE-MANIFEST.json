@@ -1,0 +1,75 @@
+{
+  "checkpoint": "E03",
+  "date": "2026-10-28",
+  "baselineZip": "VectHare-E02-Cumulative-Safety-Enforcement-Checkpoint.zip",
+  "baselineFiles": 330,
+  "existingFilesModified": [
+    "core/collection-loader.js",
+    "core/core-vector-api.js",
+    "core/job-context.js",
+    "index.js",
+    "tests/c03-jobs.node.test.mjs",
+    "tests/i01-safety.node.test.mjs",
+    "utils/c01-deletion.js",
+    "utils/c02-operation-journal.js",
+    "utils/c02-replacement.js"
+  ],
+  "filesAddedBeforeManifest": [
+    "E03-CHANGELOG.md",
+    "E03-CHECKLIST.md",
+    "E03-VERIFICATION.md",
+    "tests/e03-persistence-recovery.node.test.mjs",
+    "tools/e03-verify.mjs",
+    "utils/e03-mutation-lock.js",
+    "utils/e03-persistence.js",
+    "utils/e03-recovery.js"
+  ],
+  "filesDeleted": [],
+  "unchangedBaselineFiles": 321,
+  "pluginModified": false,
+  "pluginBuildIncluded": false,
+  "runtimeMutationCapabilitiesUnlocked": 0,
+  "tests": {
+    "casesTotal": 937,
+    "casesPassedAcrossPartitionedRuns": 937,
+    "files": 49,
+    "newE03Cases": 27,
+    "partitionedRuns": {
+      "stable47Files": {
+        "passed": 926,
+        "failed": 0
+      },
+      "c09Hybrid": {
+        "passed": 4,
+        "failed": 0
+      },
+      "c12Integration": {
+        "passed": 7,
+        "failed": 0
+      }
+    },
+    "singleCombinedRun": "UNSTABLE: intermittent Node SIGSEGV; see E03-VERIFICATION.md"
+  },
+  "syntax": {
+    "productionJavaScriptFilesChecked": 128,
+    "failed": 0
+  },
+  "audits": {
+    "E01": "PASS",
+    "E02": "PASS",
+    "E03": "PASS"
+  },
+  "realHostVerified": false,
+  "hostDurableSaveContractVerified": false,
+  "crossTabBrowserVerified": false,
+  "security": {
+    "noBrowserCredentialForwarding": true,
+    "pluginServerHazardsUnchanged": true
+  },
+  "limits": [
+    "Web Locks cooperate per browser origin only",
+    "Browser IndexedDB readback is not SillyTavern server-save proof",
+    "Host readback adapter is fail-closed and not yet connected",
+    "Default-deny mutation policy unchanged"
+  ]
+}

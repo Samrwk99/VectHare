@@ -79,7 +79,16 @@ export function createIndexedDBOperationJournal({indexedDB=globalThis.indexedDB,
         });
     }
     return {
-        async create(header){const value=publicHeader(header); if(await this.get(value.operationId))throw new Error('Operation already exists');await transaction('readwrite',store=>store.add(value));return value;},
+        async create(header){
+            const value=publicHeader(header);
+            // Early duplicate detection provides a specific message; add() is
+            // still the atomic cross-tab uniqueness guard if another tab races.
+            if(await this.get(value.operationId))throw new Error('Operation already exists');
+            await transaction('readwrite',store=>store.add(value));
+            const saved=await this.get(value.operationId);
+            if(!saved || JSON.stringify(saved)!==JSON.stringify(value))throw new Error('C02 journal create readback failed');
+            return saved;
+        },
         async put(header){
             const value=publicHeader(header),db=await database();
             return new Promise((resolve,reject)=>{
@@ -97,13 +106,34 @@ export function createIndexedDBOperationJournal({indexedDB=globalThis.indexedDB,
                     store.put(value);
                 };
                 request.onerror=()=>{reason='C02 journal read failed';tx.abort();};
-                tx.oncomplete=()=>resolve(value);
+                tx.oncomplete=()=>{
+                    // Confirm in a *separate* read transaction, not the in-memory
+                    // object sent to IDB. A lost or altered write cannot pass.
+                    this.get(value.operationId).then(saved=>{
+                        if(!saved || JSON.stringify(saved)!==JSON.stringify(value))reject(new Error('C02 journal update readback failed'));
+                        else resolve(saved);
+                    },reject);
+                };
                 tx.onerror=()=>reject(new Error(reason||'C02 journal write failed'));
                 tx.onabort=()=>reject(new Error(reason||'C02 journal write aborted'));
             });
         },
-        async get(id){const db=await database();return new Promise((resolve,reject)=>{const tx=db.transaction(STORE,'readonly');const r=tx.objectStore(STORE).get(id);r.onsuccess=()=>{try{resolve(r.result?publicHeader(r.result):null);}catch(_){reject(new Error('Invalid persisted C02 journal'));}};r.onerror=()=>reject(new Error('C02 journal read failed'));});},
-        async list(){const db=await database();return new Promise((resolve,reject)=>{const tx=db.transaction(STORE,'readonly');const r=tx.objectStore(STORE).getAll();r.onsuccess=()=>{try{if(r.result.length>MAX_RECORDS)throw new Error('C02 journal limit exceeded');resolve(r.result.map(publicHeader));}catch(error){reject(error);}};r.onerror=()=>reject(new Error('C02 journal list failed'));});},
+        async get(id){const db=await database();return new Promise((resolve,reject)=>{
+            const tx=db.transaction(STORE,'readonly'),r=tx.objectStore(STORE).get(id);let value,invalid=false;
+            r.onsuccess=()=>{try{value=r.result?publicHeader(r.result):null;}catch{invalid=true;}};
+            r.onerror=()=>{invalid=true;};
+            tx.oncomplete=()=>invalid?reject(new Error('Invalid persisted C02 journal')):resolve(value);
+            tx.onerror=()=>reject(new Error('C02 journal read failed'));
+            tx.onabort=()=>reject(new Error('C02 journal read aborted'));
+        });},
+        async list(){const db=await database();return new Promise((resolve,reject)=>{
+            const tx=db.transaction(STORE,'readonly'),r=tx.objectStore(STORE).getAll();let values,invalid=false;
+            r.onsuccess=()=>{try{if(r.result.length>MAX_RECORDS)throw Error('limit');values=r.result.map(publicHeader);}catch{invalid=true;}};
+            r.onerror=()=>{invalid=true;};
+            tx.oncomplete=()=>invalid?reject(new Error('Invalid persisted C02 journal list')):resolve(values);
+            tx.onerror=()=>reject(new Error('C02 journal list failed'));
+            tx.onabort=()=>reject(new Error('C02 journal list aborted'));
+        });},
     };
 }
 /** An explicit test-only store. It is NEVER used for browser writes. */
