@@ -14,6 +14,7 @@
 
 import { getBackend } from '../backends/backend-manager.js';
 import { createBM25Scorer, tokenize } from './bm25-scorer.js';
+import { lexicalCandidates } from './lexical-provider.js';
 
 /** Default RRF constant (prevents division by zero, balances contribution) */
 export const DEFAULT_RRF_K = 60;
@@ -36,12 +37,17 @@ export async function hybridSearch(collectionId, searchText, topK, settings, opt
         vectorWeight = settings.hybrid_vector_weight ?? 0.5,
         textWeight = settings.hybrid_text_weight ?? 0.5,
         rrfK = settings.hybrid_rrf_k || DEFAULT_RRF_K,
-        queryVector = null
+        queryVector = null,
+        lexicalProvider = 'none',
+        clientSnapshot = null,
+        bm25Options = { k1: settings.bm25_k1 ?? 1.5, b: settings.bm25_b ?? 0.75 },
+        nativeLexicalSearch = null,
+        nativeContractVerified = false
     } = options;
 
     // Check if backend supports native hybrid search and user prefers it
     const preferNative = settings.hybrid_native_prefer !== false;
-    if (preferNative && backend.supportsHybridSearch && backend.supportsHybridSearch()) {
+    if (preferNative && nativeContractVerified === true && backend.supportsHybridSearch && backend.supportsHybridSearch()) {
         console.log(`[HybridSearch] Using native hybrid search (${backend.constructor.name})`);
         try {
             return await backend.hybridQuery(collectionId, searchText, topK, settings, {
@@ -64,7 +70,7 @@ export async function hybridSearch(collectionId, searchText, topK, settings, opt
         searchText,
         topK,
         settings,
-        { fusionMethod, vectorWeight, textWeight, rrfK, queryVector }
+        { fusionMethod, vectorWeight, textWeight, rrfK, queryVector, lexicalProvider, clientSnapshot, bm25Options, nativeLexicalSearch }
     );
 }
 
@@ -85,7 +91,11 @@ async function clientSideHybridSearch(backend, collectionId, searchText, topK, s
         vectorWeight,
         textWeight,
         rrfK,
-        queryVector
+        queryVector,
+        lexicalProvider,
+        clientSnapshot,
+        bm25Options,
+        nativeLexicalSearch
     } = options;
 
     // Fetch more results for fusion (need candidates from both methods)
@@ -95,44 +105,37 @@ async function clientSideHybridSearch(backend, collectionId, searchText, topK, s
     console.log(`[HybridSearch] Fetching ${expandedTopK} vector results from collection: ${collectionId}`);
     console.log(`[HybridSearch] Backend: ${backend.constructor.name}, Source: ${settings.source}`);
 
-    let vectorResults;
+    let vectorResults = {hashes:[],metadata:[]};
+    let vectorFailed = false;
     try {
-        vectorResults = await backend.queryCollection(
-            collectionId,
-            searchText,
-            expandedTopK,
-            settings,
-            queryVector
-        );
-        console.log(`[HybridSearch] Raw vector results:`, vectorResults ? `hashes=${vectorResults.hashes?.length}, metadata=${vectorResults.metadata?.length}` : 'null');
+        vectorResults = await backend.queryCollection(collectionId,searchText,expandedTopK,settings,queryVector);
+        if (!vectorResults || !Array.isArray(vectorResults.hashes) || !Array.isArray(vectorResults.metadata) ||
+            vectorResults.hashes.length !== vectorResults.metadata.length) {
+            vectorFailed=true;
+            vectorResults={hashes:[],metadata:[]};
+        }
     } catch (error) {
-        console.error(`[HybridSearch] Vector query failed:`, error);
-        return { hashes: [], metadata: [] };
+        vectorFailed=true;
+        console.warn('[HybridSearch] Vector query unavailable:',error.message);
     }
 
-    if (!vectorResults || !vectorResults.metadata || vectorResults.metadata.length === 0) {
-        console.log('[HybridSearch] No vector results found');
-        console.log(`[HybridSearch] Debug - vectorResults:`, JSON.stringify(vectorResults));
-        return { hashes: [], metadata: [] };
-    }
-
-    // 2. Convert to format for BM25 scoring (include title and tags for field boosting)
-    const resultsWithText = vectorResults.metadata.map((meta, idx) => ({
-        hash: vectorResults.hashes[idx],
-        text: meta.text || '',
-        title: meta.entryName || meta.title || '',
-        tags: meta.keywords || [],
-        score: meta.score || 0,
-        metadata: meta
-    }));
-
-    // 3. Perform BM25 full-text search over the result set with field boosting
-    console.log(`[HybridSearch] Computing BM25 scores for ${resultsWithText.length} results...`);
-    const bm25Results = performBM25Search(resultsWithText, searchText, {
-        k1: settings.bm25_k1 ?? 1.5,
-        b: settings.bm25_b ?? 0.75,
-        fieldBoosting: true  // Enable title (3x) and tags (2x) boosting
+    // 2. Lexical results MUST be independent of the vector hits. Never call a
+    // BM25 pass over the vector top-K "hybrid". Unknown capability => vector-only.
+    const independent = await lexicalCandidates({
+        collectionKey: collectionId,query:searchText,limit:expandedTopK,
+        provider:lexicalProvider,nativeSearch:nativeLexicalSearch,clientSnapshot,bm25Options
     });
+    const bm25Results = independent.items;
+    if (independent.mode === 'none') {
+        return {
+            hashes:vectorResults.hashes.slice(0,topK),
+            metadata:vectorResults.metadata.slice(0,topK).map(meta=>({
+                ...meta,hybridSearch:false,lexicalMode:'none',
+                explain:{...(meta.explain||{}),retrieval:'vector-only',reason:independent.reason}
+            })),
+            lexicalMode:'none',reason:vectorFailed?'vector-query-unavailable':independent.reason
+        };
+    }
 
     // 4. Fuse results
     let fusedResults;
@@ -172,6 +175,8 @@ async function clientSideHybridSearch(backend, collectionId, searchText, topK, s
     }
 
     return {
+        lexicalMode: independent.mode,
+        vectorFailed,
         hashes: topResults.map(r => r.result?.hash ?? r.hash),
         metadata: topResults.map(r => ({
             ...(r.result?.metadata || r.metadata || {}),
@@ -184,6 +189,7 @@ async function clientSideHybridSearch(backend, collectionId, searchText, topK, s
             textRank: r.ranks?.text,
             fusionMethod: fusionMethod,
             hybridSearch: true,
+            lexicalMode: independent.mode,
             explain: {
                 retrieval: 'hybrid',
                 fusionMethod,

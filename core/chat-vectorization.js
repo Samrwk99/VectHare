@@ -33,7 +33,9 @@ import {
     deleteVectorItems,
     purgeVectorIndex,
 } from './core-vector-api.js';
-import { isBackendAvailable } from '../backends/backend-manager.js';
+import { isBackendAvailable, getBackend } from '../backends/backend-manager.js';
+import { createScopedFacade } from '../utils/c06-scoped-facade.js';
+import { formatCollectionKey, parseCollectionKey } from '../utils/collection-keys.js';
 import { applyDecayToResults, applyNostalgiaToResults, applySceneAwareDecay } from './temporal-decay.js';
 import { isChunkDisabledByScene } from './scenes.js';
 import { registerCollection, getCollectionRegistry } from './collection-loader.js';
@@ -58,6 +60,7 @@ import { buildSearchContext, filterChunksByConditions, processChunkLinks } from 
 import { getRequiredConditionDepth } from './condition-rule-compat.js';
 import { getChunkMetadata, getCollectionMeta } from './collection-metadata.js';
 import { processChunkGroups, mergeVirtualLinks } from './chunk-groups.js';
+import { overfetchSize, selectFinal, removeOverlappingGroups, expandRequiredLinks, resolveGroupConstraints, candidateId } from './retrieval-planner.js';
 import { createDebugData, setLastSearchDebug, addTrace, recordChunkFate } from '../ui/search-debug.js';
 import { getSemanticWorldInfoEntries } from './world-info-integration.js';
 import { Queue, LRUCache } from '../utils/data-structures.js';
@@ -1117,9 +1120,10 @@ function buildSearchQuery(chat, settings) {
  * @param {object} debugData Debug tracking object
  * @returns {Promise<object[]>} Array of chunk objects with scores
  */
-async function queryAndMergeCollections(activeCollections, queryText, settings, chat, debugData) {
+async function queryAndMergeCollections(activeCollections, queryText, settings, chat, debugData, overfetchFactor=3) {
     let chunksForVisualizer = [];
     const effectiveTopK = settings.top_k ?? settings.insert;
+    const candidateLimit = overfetchSize(Number(effectiveTopK ?? 10), {factor:overfetchFactor});
 
     // PERF: Build hash-to-message Map once for O(1) lookups instead of O(n) find() per chunk
     const chatHashMap = new Map();
@@ -1138,7 +1142,7 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
     let successfulQueries = 0;
     for (const collectionId of activeCollections) {
         try {
-            const queryResults = await queryCollection(collectionId, queryText, effectiveTopK, settings);
+            const queryResults = await queryCollection(collectionId, queryText, candidateLimit, settings);
 
             if (queryResults?.error) throw new Error(queryResults.error);
             successfulQueries++;
@@ -1236,8 +1240,10 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
     }
 
     // Sort merged results by score (descending) and limit to topK
-    chunksForVisualizer.sort((a, b) => b.score - a.score);
-    chunksForVisualizer = chunksForVisualizer.slice(0, effectiveTopK);
+    chunksForVisualizer.sort((a, b) => b.score - a.score || String(a.recordId).localeCompare(String(b.recordId)));
+    // C09: do not discard over-fetched candidates before late condition/group filters.
+    chunksForVisualizer = chunksForVisualizer.slice(0, candidateLimit);
+    debugData.retrievalCandidateLimit = candidateLimit;
 
     return chunksForVisualizer;
 }
@@ -1255,7 +1261,7 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
  */
 async function expandSummaryChunks(chunks, activeCollections, settings, debugData) {
     const expandedChunks = [];
-    const parentHashesNeeded = new Map(); // parentHash -> { summaryChunk, collectionId }
+    const parentHashesNeeded = new Map(); // scoped parent -> Array of summaries
 
     // First pass: identify which chunks are summaries and need parent expansion
     for (const chunk of chunks) {
@@ -1265,10 +1271,9 @@ async function expandSummaryChunks(chunks, activeCollections, settings, debugDat
 
         if (isSummary && parentHash) {
             // Track this summary for parent lookup
-            parentHashesNeeded.set(String(parentHash), {
-                summaryChunk: chunk,
-                collectionId: chunk.collectionId
-            });
+            const parentKey = `${chunk.collectionId}\u0000${String(parentHash)}`;
+            if (!parentHashesNeeded.has(parentKey)) parentHashesNeeded.set(parentKey, []);
+            parentHashesNeeded.get(parentKey).push({ parentHash, summaryChunk: chunk, collectionId: chunk.collectionId });
 
             addTrace(debugData, 'summary_expansion', `Summary chunk found, will expand to parent`, {
                 summaryHash: chunk.hash,
@@ -1290,12 +1295,9 @@ async function expandSummaryChunks(chunks, activeCollections, settings, debugDat
     // Second pass: fetch parent chunks from the vector DB
     // Group by collection for efficiency
     const parentsByCollection = new Map();
-    for (const [parentHash, info] of parentHashesNeeded) {
-        const collectionId = info.collectionId;
-        if (!parentsByCollection.has(collectionId)) {
-            parentsByCollection.set(collectionId, []);
-        }
-        parentsByCollection.get(collectionId).push({ parentHash, summaryChunk: info.summaryChunk });
+    for (const infos of parentHashesNeeded.values()) for (const info of infos) {
+        if (!parentsByCollection.has(info.collectionId)) parentsByCollection.set(info.collectionId, []);
+        parentsByCollection.get(info.collectionId).push(info);
     }
 
     // Fetch parents from each collection
@@ -1629,10 +1631,30 @@ async function applyGroupsAndLinksStage(chunks, activeCollections, settings, deb
         const meta = getCollectionMeta(collectionId);
         if (meta.groups && meta.groups.length > 0) {
             for (const group of meta.groups) {
-                allGroups.push(group);
+                allGroups.push({...group, collectionId});
                 if (group.mode === 'inclusive') inclusiveCount++;
                 else if (group.mode === 'exclusive') exclusiveCount++;
             }
+        }
+    }
+
+    // Legacy link resolution indexes physical hashes globally. If the same
+    // hash appears in two collections, suppress those legacy links rather than
+    // linking one tenant's record to another. Verified C07 record IDs remain
+    // independent and are not modified here.
+    const hashOwners = new Map();
+    const ambiguousLinkHashes = new Set();
+    for (const c of chunks) {
+        const hash=String(c.hash), owner=String(c.collectionId);
+        if (hashOwners.has(hash) && hashOwners.get(hash)!==owner) ambiguousLinkHashes.add(hash);
+        else hashOwners.set(hash,owner);
+    }
+    if (ambiguousLinkHashes.size) {
+        addTrace(debugData,'groups','Ambiguous legacy hashes; cross-collection links suppressed',{
+            count:ambiguousLinkHashes.size
+        });
+        for (let i=0;i<allGroups.length;i++) {
+            allGroups[i]={...allGroups[i],members:allGroups[i].members?.filter(h=>!ambiguousLinkHashes.has(String(h)))||[]};
         }
     }
 
@@ -1646,7 +1668,7 @@ async function applyGroupsAndLinksStage(chunks, activeCollections, settings, deb
         });
 
         // Build a map of all chunks for mandatory group lookup
-        const allChunksMap = new Map(chunks.map(c => [String(c.hash), c]));
+        const allChunksMap = new Map(chunks.map(c => [`${c.collectionId}\u0000${String(c.hash)}`, c]));
 
         // Process groups
         const groupResult = processChunkGroups(chunks, allGroups, allChunksMap, {
@@ -1694,7 +1716,7 @@ async function applyGroupsAndLinksStage(chunks, activeCollections, settings, deb
         // PERF: Build chunk metadata map ONCE and reuse for both virtual and explicit links
         const chunkMetadataMap = new Map();
         for (const chunk of processedChunks) {
-            const meta = getChunkMetadata(chunk.hash) || {};
+            const meta = ambiguousLinkHashes.has(String(chunk.hash)) ? {} : (getChunkMetadata(chunk.hash) || {});
             chunkMetadataMap.set(String(chunk.hash), meta);
         }
 
@@ -1756,7 +1778,7 @@ async function applyGroupsAndLinksStage(chunks, activeCollections, settings, deb
         // PERF: Build metadata map once for chunks with links only
         const chunkMetadataMap = new Map();
         for (const chunk of processedChunks) {
-            const meta = getChunkMetadata(chunk.hash) || {};
+            const meta = ambiguousLinkHashes.has(String(chunk.hash)) ? {} : (getChunkMetadata(chunk.hash) || {});
             if ((meta.links && meta.links.length > 0) || (meta.chunkLinks && meta.chunkLinks.length > 0)) {
                 chunkMetadataMap.set(String(chunk.hash), meta);
             }
@@ -1771,6 +1793,21 @@ async function applyGroupsAndLinksStage(chunks, activeCollections, settings, deb
                 addTrace(debugData, 'links', `Explicit links boosted ${boostedByExplicitLinks.length} chunks`, {});
             }
         }
+    }
+
+    // C09 #139: resolve overlap against the ORIGINAL eligible pool. A
+    // mandatory-group post-processing pass must not reintroduce a candidate
+    // eliminated by another active exclusive group.
+    if (allGroups.some(group => group.mode === 'exclusive')) {
+        const valid = resolveGroupConstraints(chunks, allGroups, {
+            priorities: settings.collection_retrieval_priorities || {}
+        });
+        const allowed = new Set(valid.items.map(candidateId));
+        processedChunks = processedChunks.filter(c => allowed.has(candidateId(c)));
+        for (const excluded of valid.reasons) {
+            addTrace(debugData, 'groups', excluded.code, excluded);
+        }
+        debugData.c09GroupConflicts = valid.reasons;
     }
 
     addTrace(debugData, 'groups', 'Groups and links processing complete', {
@@ -2359,6 +2396,41 @@ export async function rearrangeChat(chat, settings, type) {
         debugData.stages.initial = chunks.map(chunk => ({ ...chunk }));
         debugData.stats.retrievedFromVector = chunks.length;
 
+        // C09: expand required linked/group records ONLY through the verified
+        // tenant-scoped C06 read facade. The supplied plugin has not established
+        // these capabilities, so the ordinary deployment logs missing evidence
+        // and never substitutes an unscoped list scan.
+        const linkedGroups = activeCollections.flatMap(collectionId =>
+            (getCollectionMeta(collectionId)?.groups || []).map(group => ({...group, collectionId})));
+        const backendName = settings.vector_backend || 'standard';
+        const hasScopedRead = ['tenantFilter', 'pointTenantFilter', 'getByIds']
+            .every(cap => hasVerifiedCapability(backendName,cap));
+        const readByIds = hasScopedRead ? async ({collectionId, recordIds}) => {
+            const key = parseCollectionKey(collectionId) ? collectionId : formatCollectionKey({
+                backend:backendName, source:settings.source || 'transformers', collectionId
+            });
+            const facade = createScopedFacade({resolveAdapter:async()=>getBackend(settings),settings});
+            const result = await facade.getByIds({key,recordIds});
+            if (result.status !== 'confirmed') return {status:'unavailable'};
+            const items=(result.items||[]).map(item => ({
+                ...item, collectionId, hash:item.hash ?? item.recordId,
+                text:item.text ?? item.metadata?.text ?? '',
+                metadata:item.metadata || {},score:item.score ?? 0.5
+            }));
+            return {status:'confirmed',complete:true,items};
+        } : undefined;
+        const expandedLinks = await expandRequiredLinks(chunks, linkedGroups, {getByIds:readByIds});
+        job.assertCurrent();
+        chunks = expandedLinks.items;
+        if (expandedLinks.reasons.length) {
+            debugData.retrievalExpansion = expandedLinks.reasons;
+            addTrace(debugData,'retrieval_planner','Required-link expansion limited',{
+                reasons:expandedLinks.reasons
+            });
+        }
+
+
+
         // === STAGE 4.1: Filter disabled chunks ===
         const beforeDisabledFilter = chunks.length;
         chunks = chunks.filter(chunk => {
@@ -2533,6 +2605,9 @@ export async function rearrangeChat(chat, settings, type) {
         debugData.stats.afterConditions = chunks.length;
 
         // === STAGE 8.5: Chunk Groups and Links ===
+        // Hold the pre-group eligible pool for bounded C09 refill; reprocess
+        // groups against the whole pool so exclusive winners remain consistent.
+        let eligiblePreGroups = [...chunks];
         chunks = await applyGroupsAndLinksStage(chunks, activeCollections, settings, debugData);
         job.assertCurrent();
         debugData.stages.afterGroups = [...chunks];
@@ -2562,7 +2637,35 @@ export async function rearrangeChat(chat, settings, type) {
         console.log(`[VectHare Deduplication] Starting with ${chunks.length} chunks before deduplication`);
         console.log(`[VectHare Deduplication] Current chat has ${chat.length} messages`);
 
-        const { toInject: chunksToInject, skipped: skippedDuplicates } = deduplicateChunks(chunks, chat, settings, debugData);
+        let { toInject: chunksToInject, skipped: skippedDuplicates } = deduplicateChunks(chunks, chat, settings, debugData);
+
+        // C09 final retrieval selection is after activation, threshold and grouping.
+        // C10's prompt-token budget remains a separate, later contract.
+        const selectedForChat = new Set(getChatCollectionPolicy(getCurrentChatId())?.selectedCollections || []);
+        const collectionPriorities = Object.fromEntries(activeCollections.map(collectionId => [
+            collectionId,
+            (Number(getCollectionMeta(collectionId)?.retrievalPriority) || 0) + (selectedForChat.has(collectionId) ? 100 : 0)
+        ]));
+        Object.assign(collectionPriorities, settings.collection_retrieval_priorities || {});
+        const collectionQuotas = Object.fromEntries(activeCollections.map(collectionId => [
+            collectionId, getCollectionMeta(collectionId)?.retrievalQuota
+        ]).filter(([,quota]) => Number.isSafeInteger(quota) && quota >= 0));
+        Object.assign(collectionQuotas, settings.collection_retrieval_quotas || {});
+        const overlaps = removeOverlappingGroups(chunksToInject, {priorities: collectionPriorities});
+        const finalPlan = selectFinal(overlaps.items, {
+            limit: Math.max(0, Math.floor(Number(settings.top_k ?? settings.insert ?? 10))),
+            priorities: collectionPriorities,
+            quotas: collectionQuotas
+        });
+        finalPlan.reasons.unshift(...overlaps.reasons);
+        for (const exclusion of finalPlan.reasons) {
+            if (exclusion.recordId != null) recordChunkFate(debugData, exclusion.recordId, 'retrieval_planner', 'dropped', exclusion.code, exclusion);
+        }
+        debugData.retrievalPlanner = {reasons: finalPlan.reasons, remainingSlots: finalPlan.remainingSlots,
+            candidateLimit: debugData.retrievalCandidateLimit};
+        chunksToInject = finalPlan.items;
+
+
 
         console.log(`[VectHare Deduplication] After deduplication: ${chunksToInject.length} to inject, ${skippedDuplicates.length} skipped`);
         if (skippedDuplicates.length > 0) {
@@ -2571,6 +2674,86 @@ export async function rearrangeChat(chat, settings, type) {
                 console.log(`  [${idx + 1}] Hash: ${chunk.hash}, Score: ${chunk.score?.toFixed(4)}, Text: "${chunk.text?.substring(0, 80)}..."`);
             });
         }
+
+        // C09 #108: bounded additional rounds AFTER conditions and in-chat
+        // deduplication. A wider vector query is not allowed to bypass any
+        // disabled/threshold/temporal/condition/group guard. Recompute groups
+        // from the pre-group pool to avoid accumulating soft-link boosts.
+        const seenCandidates = new Set((debugData.stages.initial || []).map(candidateId));
+        let refillReason = null;
+        let refillRounds = 0;
+        const requestedSlots = Math.max(0, Math.floor(Number(settings.top_k ?? settings.insert ?? 10)));
+        while (chunksToInject.length < requestedSlots && refillRounds < 2 && activeCollections.length) {
+            refillRounds++;
+            job.assertCurrent();
+            let extraRaw;
+            try {
+                extraRaw = await queryAndMergeCollections(activeCollections,queryText,settings,chat,debugData,3+refillRounds);
+            } catch (error) {
+                if (error instanceof StaleJobError) throw error;
+                refillReason = 'refill-backend-failed';
+                addTrace(debugData,'retrieval_planner','Refill backend unavailable',{error:error.message,round:refillRounds});
+                break;
+            }
+            job.assertCurrent();
+            let extras = extraRaw.filter(item => !seenCandidates.has(candidateId(item)));
+            for (const item of extraRaw) seenCandidates.add(candidateId(item));
+            if (!extras.length) { refillReason='refill-no-progress'; break; }
+            extras = extras.filter(item => {
+                const meta=getChunkMetadata(item.hash);
+                return meta?.disabled!==true && meta?.enabled!==false;
+            });
+            if (extras.length) {
+                const lower=queryText.toLowerCase();
+                for (const item of extras) {
+                    const keywords=(item.metadata?.keywords||[]).filter(keyword=>{
+                        const phrase=String(typeof keyword==='object'?keyword.text:keyword).toLowerCase();
+                        return phrase && (queryKeywordTexts.includes(phrase)||containsLexicalPhrase(lower,phrase));
+                    });
+                    if (keywords.length) {
+                        const boosted=applyKeywordBoost([{...item,keywords}],queryText)[0];
+                        item.originalScore=item.score;
+                        item.score=boosted?.score??item.score;
+                    }
+                }
+                extras = await expandSummaryChunks(extras,activeCollections,settings,debugData);
+                job.assertCurrent();
+                if (settings.source==='bananabread' && settings.bananabread_rerank)
+                    extras=await rerankWithBananaBread(queryText,extras,settings);
+                job.assertCurrent();
+                extras=applyThresholdFilter(extras,settings.score_threshold||0,debugData);
+                extras=applyTemporalDecayStage(extras,chat,settings,settings.score_threshold||0,debugData);
+                extras=await applyConditionsStage(extras,chat,{
+                    ...settings,generationType:type||'normal',
+                    isGroupChat:getContext().groupId!=null,
+                    currentCharacter:getContext().name2||null
+                },debugData);
+                job.assertCurrent();
+                eligiblePreGroups.push(...extras);
+            }
+            chunks=await applyGroupsAndLinksStage(eligiblePreGroups,activeCollections,settings,debugData);
+            job.assertCurrent();
+            chunks=chunks.filter(hasInjectableText);
+            const deduped=deduplicateChunks(chunks,chat,settings,debugData);
+            skippedDuplicates=deduped.skipped;
+            const overlap=removeOverlappingGroups(deduped.toInject,{priorities:collectionPriorities});
+            const selected=selectFinal(overlap.items,{
+                limit:requestedSlots,priorities:collectionPriorities,quotas:collectionQuotas
+            });
+            chunksToInject=selected.items;
+            debugData.retrievalPlanner.reasons.push(...overlap.reasons,...selected.reasons);
+            debugData.retrievalPlanner.remainingSlots=selected.remainingSlots;
+            if (chunksToInject.length>=requestedSlots)break;
+        }
+        if (chunksToInject.length < requestedSlots && !refillReason)
+            refillReason=activeCollections.length?'refill-bound-reached':'refill-no-active-collections';
+        debugData.retrievalPlanner.refillRounds=refillRounds;
+        debugData.retrievalPlanner.refillReason=refillReason;
+        if (refillReason) addTrace(debugData,'retrieval_planner','Not all requested slots filled',{
+            reason:refillReason,requested:requestedSlots,selected:chunksToInject.length,rounds:refillRounds
+        });
+        debugData.stages.afterGroups=[...chunks];
+        window.VectHare_LastSearch={...window.VectHare_LastSearch,chunks:[...chunks]};
 
         if (chunksToInject.length === 0) {
             console.log('ℹ️ VectHare: All retrieved chunks already in context, nothing to inject');

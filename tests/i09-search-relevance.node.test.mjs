@@ -40,7 +40,7 @@ async function hybridApi() {
             ? { getBackend: () => null }
             : spec === './bm25-scorer.js'
                 ? { createBM25Scorer: bm25.createBM25Scorer, tokenize: bm25.tokenize }
-                : null;
+                : spec === './lexical-provider.js' ? {lexicalCandidates: async()=>({mode:'none',items:[]})} : null;
         assert.ok(values, `Unexpected hybrid import ${spec}`);
         return new vm.SyntheticModule(Object.keys(values), function () {
             for (const [key, value] of Object.entries(values)) this.setExport(key, value);

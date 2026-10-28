@@ -1,0 +1,91 @@
+{
+  "suites": {
+    "I01-I18": {
+      "passed": 199,
+      "total": 199,
+      "exit": 0,
+      "attempts": 1
+    },
+    "Phase 0": {
+      "passed": 33,
+      "total": 33,
+      "exit": 0,
+      "attempts": 1
+    },
+    "C01": {
+      "passed": 50,
+      "total": 50,
+      "exit": 0,
+      "attempts": 1
+    },
+    "C04/C06/C11-A": {
+      "passed": 24,
+      "total": 24,
+      "exit": 0,
+      "attempts": 1
+    },
+    "C04/C06/C11-B": {
+      "passed": 31,
+      "total": 31,
+      "exit": 0,
+      "attempts": 1
+    },
+    "C03": {
+      "passed": 38,
+      "total": 38,
+      "exit": 0,
+      "attempts": 1
+    },
+    "C07": {
+      "passed": 40,
+      "total": 40,
+      "exit": 0,
+      "attempts": 1
+    },
+    "C02 operations": {
+      "passed": 50,
+      "total": 50,
+      "exit": 0,
+      "attempts": 1
+    },
+    "C02 integration": {
+      "passed": 11,
+      "total": 11,
+      "exit": 0,
+      "attempts": 1
+    },
+    "Step 6 foundation": {
+      "passed": 35,
+      "total": 35,
+      "exit": 0,
+      "attempts": 1
+    },
+    "Step 6 cache": {
+      "passed": 2,
+      "total": 2,
+      "exit": 0,
+      "attempts": 1
+    },
+    "C05": {
+      "passed": 47,
+      "total": 47,
+      "exit": 0,
+      "attempts": 1
+    },
+    "C08": {
+      "passed": 44,
+      "total": 44,
+      "exit": 0,
+      "attempts": 1
+    },
+    "C09": {
+      "passed": 47,
+      "total": 47,
+      "exit": 0,
+      "attempts": 2
+    }
+  },
+  "totalPassed": 651,
+  "totalTests": 651,
+  "allPass": true
+}

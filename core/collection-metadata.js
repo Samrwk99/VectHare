@@ -52,6 +52,8 @@ const defaultCollectionMeta = {
     forceMode: 'normal',           // 'normal' or 'forced' for explicitly pinned collections
     exclusiveWhenActive: false,    // If true, this collection can suppress peers in the same exclusive scope
     exclusiveScope: 'lorebook',    // 'lorebook' or 'all'
+    retrievalPriority: 0,         // C09: stable tie-break after score
+    retrievalQuota: null,         // C09: optional maximum from this collection
     triggers: [],                  // Array of trigger keywords (case-insensitive)
     triggerMatchMode: 'any',       // 'any' = OR logic, 'all' = AND logic
     triggerCaseSensitive: false,   // Case sensitivity for trigger matching
@@ -1244,19 +1246,24 @@ export async function filterActiveCollections(collectionIds, context) {
     );
 
     const activeIds = results.filter(r => r.active).map(r => r.id);
-    const exclusiveActiveIds = activeIds.filter(id => getCollectionMeta(id).exclusiveWhenActive === true);
+    const exclusiveActiveIds = activeIds.filter(id => getCollectionMeta(id).exclusiveWhenActive === true)
+        .sort((a,b) => {
+            const pa=Number(getCollectionMeta(a).retrievalPriority) || 0;
+            const pb=Number(getCollectionMeta(b).retrievalPriority) || 0;
+            return pb-pa || String(a).localeCompare(String(b));
+        });
     let finalActiveIds = activeIds;
-
     if (exclusiveActiveIds.length > 0) {
-        const suppressAll = exclusiveActiveIds.some(id => (getCollectionMeta(id).exclusiveScope || 'lorebook') === 'all');
+        const winner=exclusiveActiveIds[0];
+        const suppressAll=(getCollectionMeta(winner).exclusiveScope || 'lorebook') === 'all';
         finalActiveIds = activeIds.filter(id => {
-            if (exclusiveActiveIds.includes(id)) return true;
+            if (id===winner) return true;
+            if (exclusiveActiveIds.includes(id)) return false;
             if (suppressAll) return false;
             const normalized = normalizeCollectionKey(id);
             return !String(id).includes('lorebook') && !normalized.includes('lorebook');
         });
-
-        console.log(`[VectHare Activation Filter] Exclusive collection(s) active, suppressed ${activeIds.length - finalActiveIds.length} peer collection(s)`);
+        console.log(`[VectHare Activation Filter] Exclusive winner ${winner}, suppressed ${activeIds.length-finalActiveIds.length} collection(s)`);
     }
 
     console.log(`[VectHare Activation Filter] Summary: ${collectionIds.length} collections → ${finalActiveIds.length} active`);

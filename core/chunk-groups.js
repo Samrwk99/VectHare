@@ -47,7 +47,7 @@ export function expandInclusiveGroups(groups, matchedHashes, defaultBoost = 0.15
         if (!group.members || group.members.length < 2) continue;
 
         // Check if any member matched
-        const matchedMembers = group.members.filter(hash => matchedHashes.has(String(hash)));
+        const matchedMembers = group.members.filter(hash => (matchedHashes.has(`${group.collectionId ?? ''}\u0000${String(hash)}`) || (!group.collectionId && matchedHashes.has(String(hash)))));
         if (matchedMembers.length === 0) continue;
 
         const linkType = group.linkType || 'soft';
@@ -93,7 +93,8 @@ export function applyExclusiveGroups(chunks, groups) {
         return { chunks, excluded: [] };
     }
 
-    const chunkMap = new Map(chunks.map(c => [String(c.hash), c]));
+    const key = (c) => `${c.collectionId ?? ''}\u0000${String(c.hash)}`;
+    const chunkMap = new Map(chunks.map(c => [key(c), c]));
     const excluded = [];
     const excludedHashes = new Set();
 
@@ -102,18 +103,18 @@ export function applyExclusiveGroups(chunks, groups) {
 
         // Find all members that are in the current results
         const presentMembers = group.members
-            .map(hash => chunkMap.get(String(hash)))
+            .map(hash => chunkMap.get(`${group.collectionId ?? ''}\u0000${String(hash)}`))
             .filter(Boolean);
 
         if (presentMembers.length <= 1) continue;
 
         // Sort by score descending, keep only the best
-        presentMembers.sort((a, b) => (b.score || 0) - (a.score || 0));
+        presentMembers.sort((a, b) => (b.score || 0) - (a.score || 0) || String(a.recordId ?? a.hash).localeCompare(String(b.recordId ?? b.hash)));
         const winner = presentMembers[0];
         const losers = presentMembers.slice(1);
 
         for (const loser of losers) {
-            excludedHashes.add(String(loser.hash));
+            excludedHashes.add(key(loser));
             excluded.push({
                 hash: loser.hash,
                 score: loser.score,
@@ -127,7 +128,7 @@ export function applyExclusiveGroups(chunks, groups) {
         console.log(`VectHare Groups: Exclusive group "${group.name}" - kept chunk ${String(winner.hash).substring(0, 8)}... (score: ${winner.score?.toFixed(3)}), excluded ${losers.length} lower-scoring member(s)`);
     }
 
-    const filteredChunks = chunks.filter(c => !excludedHashes.has(String(c.hash)));
+    const filteredChunks = chunks.filter(c => !excludedHashes.has(key(c)));
 
     return {
         chunks: filteredChunks,
@@ -150,7 +151,8 @@ export function enforceMandatoryGroups(chunks, groups, allChunksMap) {
         return { chunks, forced: [] };
     }
 
-    const resultHashes = new Set(chunks.map(c => String(c.hash)));
+    const scoped = (collectionId, hash) => `${collectionId ?? ''}\u0000${String(hash)}`;
+    const resultHashes = new Set(chunks.map(c => scoped(c.collectionId,c.hash)));
     const forced = [];
     const toAdd = [];
 
@@ -158,12 +160,12 @@ export function enforceMandatoryGroups(chunks, groups, allChunksMap) {
         if (!group.members || group.members.length === 0) continue;
 
         // Check if any member is already in results
-        const hasRepresentative = group.members.some(hash => resultHashes.has(String(hash)));
+        const hasRepresentative = group.members.some(hash => resultHashes.has(scoped(group.collectionId,hash)));
         if (hasRepresentative) continue;
 
         // No member present - find the best available one
         const availableMembers = group.members
-            .map(hash => allChunksMap.get(String(hash)))
+            .map(hash => allChunksMap.get(scoped(group.collectionId,hash)))
             .filter(Boolean)
             .filter(c => !c.disabled);
 
@@ -173,7 +175,7 @@ export function enforceMandatoryGroups(chunks, groups, allChunksMap) {
         }
 
         // If we have scores, pick highest; otherwise pick first
-        availableMembers.sort((a, b) => (b.score || 0) - (a.score || 0));
+        availableMembers.sort((a, b) => (b.score || 0) - (a.score || 0) || String(a.recordId ?? a.hash).localeCompare(String(b.recordId ?? b.hash)));
         const chosen = availableMembers[0];
 
         toAdd.push({
@@ -189,7 +191,7 @@ export function enforceMandatoryGroups(chunks, groups, allChunksMap) {
             reason: 'mandatory_exclusive'
         });
 
-        resultHashes.add(String(chosen.hash));
+        resultHashes.add(scoped(chosen.collectionId,chosen.hash));
 
         console.log(`VectHare Groups: Mandatory group "${group.name}" - force-included chunk ${String(chosen.hash).substring(0, 8)}...`);
     }
@@ -219,7 +221,7 @@ export function processChunkGroups(chunks, groups, allChunksMap, options = {}) {
     }
 
     const softBoost = options.softBoost ?? 0.15;
-    const matchedHashes = new Set(chunks.map(c => String(c.hash)));
+    const matchedHashes = new Set(chunks.map(c => `${c.collectionId ?? ''}\u0000${String(c.hash)}`));
 
     // Step 1: Expand inclusive groups into virtual links
     const virtualLinks = expandInclusiveGroups(groups, matchedHashes, softBoost);

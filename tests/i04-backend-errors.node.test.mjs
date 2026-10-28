@@ -131,6 +131,7 @@ test('I04 #109: all failed searches surface an error instead of empty success', 
         console: silent,
         getStringHash: () => 1,
         getTextWithoutAttachments: m => m.mes,
+        overfetchSize: k => Math.min(k*3,200),
         queryCollection: async () => { throw new Error('backend offline'); },
         toastr: { warning() {} },
         addTrace() {},
@@ -147,6 +148,7 @@ test('I04 #109: partial search failure retains healthy results and warns', async
         console: silent,
         getStringHash: () => 1,
         getTextWithoutAttachments: m => m.mes,
+        overfetchSize: k => Math.min(k*3,200),
         queryCollection: async id => {
             if (id === 'B') throw new Error('backend offline');
             return { hashes: [1], metadata: [{ text: 'hello', score: 0.8 }] };
