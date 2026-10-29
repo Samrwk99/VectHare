@@ -217,7 +217,7 @@ test('S07 internal adapter works with S04 ledger and remains disabled on public 
  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'s07-milvus-engine-'));
  try{
   const context={userScopeId:scope.userScopeId,vectorsPath:dir},bk=mock();
-  const engine=new MutationEngine({ledger:new OperationLedger(context),adapter:milvusV2Adapter(bk,binding),
+  const engine=new MutationEngine({atomicOnly:false,ledger:new OperationLedger(context),adapter:milvusV2Adapter(bk,binding),
    authorize:async p=>({authorized:true,ownerVerified:true,mutationContractVerified:true,collectionKey:p.collectionKey,backend:p.backend})});
   const p=plan({action:'insert',...payload});
   const response=await engine.execute(p,payload);
@@ -286,7 +286,7 @@ test('S07 operation ledger survives a simulated process restart after verified i
  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'s07-milvus-restart-'));
  try{
   const ctx={userScopeId:scope.userScopeId,vectorsPath:dir},bk=mock();
-  const ledger=new OperationLedger(ctx),a=milvusV2Adapter(bk,binding),engine=new MutationEngine({ledger,adapter:a,
+  const ledger=new OperationLedger(ctx),a=milvusV2Adapter(bk,binding),engine=new MutationEngine({atomicOnly:false,ledger,adapter:a,
    authorize:async p=>({authorized:true,ownerVerified:true,mutationContractVerified:true,collectionKey:p.collectionKey,backend:p.backend})});
   const p=insert();await engine.execute(p,payload);
   const fresh=new OperationLedger(ctx),receipt=await fresh.read(p.operationId);

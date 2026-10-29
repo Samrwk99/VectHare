@@ -203,7 +203,7 @@ test('S08 new adapters can use S04 ledger engine for disposable insert',async()=
   const dir=await fs.mkdtemp(path.join(os.tmpdir(),`s08-${backend}-`));
   try{
    const tr=factory(),p=plan(backend),context={userScopeId:scope.userScopeId,vectorsPath:dir};
-   const engine=new MutationEngine({ledger:new OperationLedger(context),adapter:ctor(tr,bind(backend)),
+   const engine=new MutationEngine({atomicOnly:false,ledger:new OperationLedger(context),adapter:ctor(tr,bind(backend)),
     authorize:async intent=>({authorized:true,ownerVerified:true,mutationContractVerified:true,collectionKey:intent.collectionKey,backend:intent.backend})});
    const result=await engine.execute(p,payload);
    assert.equal(result.state,'VERIFIED');

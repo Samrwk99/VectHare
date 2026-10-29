@@ -7,7 +7,7 @@
  * All chunk operations go through unified /chunks/* endpoints.
  * Backend is specified via `backend` parameter in request body.
  *
- * @version 3.2.10-s10.21-f09b4c
+ * @version 3.2.10-s10.45-f10b10
  */
 
 import path from 'node:path';
@@ -29,6 +29,9 @@ import {registerF09WorkflowRoutes} from './lib/f09-workflows.js';
 import {registerF09bSyncRoutes} from './lib/f09b-chat-sync.js';
 import {registerF09b3SyncRoutes} from './lib/f09b3-chat-sync-execute.js';
 import {registerF09b4LifecycleRoutes} from './lib/f09b4-chat-lifecycle.js';
+import {registerF09b5EmbeddingRoutes,generateManagedEmbedding} from './lib/f09b5-embedding-profiles.js';
+import {registerF09b6Routes} from './lib/f09b6-content-workflows.js';
+import {registerF09b7Routes} from './lib/f09b7-link-conditions.js';
 import {registerF10Routes} from './lib/f10-recovery-capture.js';
 import {registerF11ReadinessRoutes} from './lib/f11-readiness.js';
 import {registerF12ReleaseRoutes} from './lib/f12-release-assessment.js';
@@ -49,7 +52,7 @@ import {registerF01HostRoutes} from './lib/f01-host-sources.js';
 import { validateVector as validateS05Vector } from './lib/s05-contract.js';
 
 const pluginName = 'similharity';
-const pluginVersion = '3.2.10-s10.21-f09b4c';
+const pluginVersion = '3.2.10-s10.45-f10b10';
 
 /**
  * Initialize the plugin
@@ -99,9 +102,16 @@ export async function init(router) {
       f07SealedVectra(req,binding,{createIndex:folder=>new vectra.LocalIndex(folder)})});
     registerF09bSyncRoutes(router,{backendPool,createVectra:async(req,binding)=>
       f07SealedVectra(req,binding,{createIndex:folder=>new vectra.LocalIndex(folder)})});
-    registerF09b3SyncRoutes(router,{backendPool,embed:getEmbeddingForSource,
+    const managedEmbed=(source,text,model,directories,req)=>generateManagedEmbedding(req.s03,
+      {...req.body.embedding},text,{hostEmbed:(s,t,m)=>getEmbeddingForSource(s,t,m,directories,req)});
+    registerF09b5EmbeddingRoutes(router,{hostEmbed:(req,s,t,m)=>getEmbeddingForSource(s,t,m,req.user.directories,req)});
+    registerF09b3SyncRoutes(router,{backendPool,embed:managedEmbed,
       createVectra:async(req,binding)=>f07SealedVectra(req,binding,{createIndex:folder=>new vectra.LocalIndex(folder)})});
-    registerF09b4LifecycleRoutes(router,{backendPool,embed:getEmbeddingForSource,
+    registerF09b7Routes(router,{backendPool,createVectra:async(req,binding)=>
+      f07SealedVectra(req,binding,{createIndex:folder=>new vectra.LocalIndex(folder)})});
+    registerF09b6Routes(router,{backendPool,embed:managedEmbed,
+      createVectra:async(req,binding)=>f07SealedVectra(req,binding,{createIndex:folder=>new vectra.LocalIndex(folder)})});
+    registerF09b4LifecycleRoutes(router,{backendPool,embed:managedEmbed,
       createVectra:async(req,binding)=>f07SealedVectra(req,binding,{createIndex:folder=>new vectra.LocalIndex(folder)})});
     registerF10Routes(router,{backendPool,createVectra:async(req,binding)=>
       f07SealedVectra(req,binding,{createIndex:folder=>new vectra.LocalIndex(folder)})});

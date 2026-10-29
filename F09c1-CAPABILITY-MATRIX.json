@@ -1,0 +1,88 @@
+{
+  "checkpoint": "F09c.1 strict atomic-only safety gate; real-backend acceptance OPEN",
+  "baseline": {
+    "extensionVersion": "2.2.0-alpha.s11.27-f09c1",
+    "pluginVersion": "3.2.10-s10.26-f09c1",
+    "pluginSourceFingerprint": "c976f48a5861e0de89c1a01db61a8d887fc14b7cca20c659fe51902ee52a8c4c"
+  },
+  "stageStatus": "PARTIAL_ATOMIC_GATE_IMPLEMENTED_REAL_BACKEND_ACCEPTANCE_BLOCKED",
+  "runtimeCodeChanges": true,
+  "backends": {
+    "qdrant": {
+      "liveHostAcceptance": "NOT_RUN",
+      "liveBackendCRUD": "NOT_RUN",
+      "externalWriterAtomicCAS": "BLOCKED_UNPROVEN",
+      "restartCrashAcceptance": "NOT_RUN",
+      "productionWritesEnabled": false
+    },
+    "lancedb": {
+      "liveHostAcceptance": "NOT_RUN",
+      "liveBackendCRUD": "NOT_RUN",
+      "externalWriterAtomicCAS": "BLOCKED_UNPROVEN",
+      "restartCrashAcceptance": "NOT_RUN",
+      "productionWritesEnabled": false
+    },
+    "pluginVectra": {
+      "liveHostAcceptance": "NOT_RUN",
+      "liveBackendCRUD": "NOT_RUN",
+      "externalWriterAtomicCAS": "BLOCKED_UNPROVEN",
+      "restartCrashAcceptance": "NOT_RUN",
+      "productionWritesEnabled": false
+    },
+    "milvus": {
+      "liveHostAcceptance": "NOT_RUN",
+      "liveBackendCRUD": "NOT_RUN",
+      "externalWriterAtomicCAS": "BLOCKED_UNPROVEN",
+      "restartCrashAcceptance": "NOT_RUN",
+      "productionWritesEnabled": false
+    }
+  },
+  "localEvidence": {
+    "pluginSourceManifest": "MATCHED_LOCAL_ONLY",
+    "qdrantLoopbackPort6333": "CLOSED_OR_UNREACHABLE",
+    "milvusLoopbackPort19530": "CLOSED_OR_UNREACHABLE",
+    "embeddedLanceDB": "NOT_PROBED",
+    "embeddedVectra": "NOT_PROBED",
+    "pluginTestCombined": "400_PASS_CLEAN",
+    "pluginReRunAffectedWorker": "9_PASS",
+    "f09cRaceNegativeControl": "1_PASS",
+    "f09cEvidenceAssessorTests": "3_PASS",
+    "extensionTests": "1154_PASS_IN_COMBINED_PLUS_15_PASS_RETEST_i05_SIGSEGV",
+    "f09cAtomicGateTests": "7_PASS"
+  },
+  "safety": {
+    "atomicExternalWriterGuarantee": "NOT_PROVEN",
+    "productionMutations": "DENIED",
+    "nativeStandard": "DENIED",
+    "legacyVectors": "DENIED",
+    "collectionPurge": "PROHIBITED",
+    "automaticMutations": "NOT_ACTIVATED",
+    "uncertainReceiptAutomaticReconciliation": "DENIED",
+    "realHost": "NOT_CONNECTED",
+    "productionWritesEnabled": false
+  },
+  "releaseDecision": "NO_GO_F09C_PARTIAL_GUARD_COMPLETE_REAL_HOST_ACCEPTANCE_OPEN",
+  "nextRequired": [
+    "backend_specific_ATOMIC_COMPARE_AND_MUTATE_IMPLEMENTATION_OR_PROVEN_EXTERNAL_SINGLE_WRITER_CONTRACT",
+    "real_disposable_backend_host_testing",
+    "independent_cas_and_crash_evidence_review",
+    "production_permission_review_only_for_certified_backend"
+  ],
+  "runtimeAtomicGate": {
+    "defaultEngineMode": "ATOMIC_ONLY_FAIL_CLOSED",
+    "legacyPilots": "EXPLICIT_ATOMIC_ONLY_FALSE_RESTRICTED_DEVELOPMENT_ONLY",
+    "atomicAdapterInterface": "atomicCompareAndMutate_PILOT_CONTRACT_ONLY",
+    "atomicOperationsRequired": [
+      "insert",
+      "update",
+      "metadata",
+      "delete"
+    ],
+    "missingAtomicMethod": "REFUSED_BEFORE_LEDGER_OR_MUTATION",
+    "missingHostIndependentAttestation": "REFUSED_BEFORE_LEDGER_OR_MUTATION",
+    "ambiguousAtomicResponse": "UNCERTAIN_NO_LEGACY_FALLBACK_NO_RETRY",
+    "uncertainReceiptReconciliation": "NO_AUTOMATIC_PROMOTION",
+    "realBackendAtomicCASImplemented": false,
+    "anyProductionPathCertified": false
+  }
+}

@@ -124,7 +124,7 @@ test('F04 Qdrant acknowledged-only response stays UNCERTAIN and operation UUID c
  assert.equal(outcome.code,202);assert.equal(outcome.body.success,false);assert.equal(outcome.body.state,'UNCERTAIN');
  assert.equal((await new OperationLedger(ctx).read(body.operationId)).state,'UNCERTAIN');
  assert.equal(backend.mutationCount,1);
- assert.equal((await call(r,ctx,body)).body.code,'S04_OPERATION_EXISTS');
+ assert.equal((await call(r,ctx,body)).body.code,'F09C5_WRITER_BUSY'); // retained after uncertain dispatch
  assert.equal(backend.mutationCount,1);
 }));
 test('F04 refuses missing Qdrant owner index before any record mutation',async()=>freshDir(async ctx=>{

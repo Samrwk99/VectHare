@@ -267,6 +267,9 @@ test('plugin registration keeps legacy mutation endpoints blocked even without m
             './lib/f09b-chat-sync.js':{registerF09bSyncRoutes:()=>{}},
             './lib/f09b3-chat-sync-execute.js':{registerF09b3SyncRoutes:()=>{}},
             './lib/f09b4-chat-lifecycle.js':{registerF09b4LifecycleRoutes:()=>{}},
+            './lib/f09b5-embedding-profiles.js':{registerF09b5EmbeddingRoutes:()=>{},generateManagedEmbedding:()=>{}},
+            './lib/f09b6-content-workflows.js':{registerF09b6Routes:()=>{}},
+            './lib/f09b7-link-conditions.js':{registerF09b7Routes:()=>{}},
             './lib/f10-recovery-capture.js':{registerF10Routes:()=>{}},
             './lib/f11-readiness.js':{registerF11ReadinessRoutes:()=>{}},
             './lib/f12-release-assessment.js':{registerF12ReleaseRoutes:()=>{}},
@@ -278,6 +281,8 @@ test('plugin registration keeps legacy mutation endpoints blocked even without m
         get:(route,fn)=>routes.set(`GET ${route}`,fn),
         post:(route,fn)=>routes.set(`POST ${route}`,fn),
         patch:(route,fn)=>routes.set(`PATCH ${route}`,fn),
+        put:(route,fn)=>routes.set(`PUT ${route}`,fn),
+        delete:(route,fn)=>routes.set(`DELETE ${route}`,fn),
     };
     await namespace.init(router);
     assert.ok(middleware.length>=2);

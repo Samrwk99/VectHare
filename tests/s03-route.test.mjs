@@ -67,6 +67,9 @@ async function registered(pool) {
             './lib/f09b-chat-sync.js':{registerF09bSyncRoutes},
             './lib/f09b3-chat-sync-execute.js':{registerF09b3SyncRoutes:()=>{}},
             './lib/f09b4-chat-lifecycle.js':{registerF09b4LifecycleRoutes:()=>{}},
+            './lib/f09b5-embedding-profiles.js':{registerF09b5EmbeddingRoutes:()=>{},generateManagedEmbedding:()=>{}},
+            './lib/f09b6-content-workflows.js':{registerF09b6Routes:()=>{}},
+            './lib/f09b7-link-conditions.js':{registerF09b7Routes:()=>{}},
             './lib/f10-recovery-capture.js':{registerF10Routes},
             './lib/f11-readiness.js':{registerF11ReadinessRoutes:()=>{}},
             './lib/f12-release-assessment.js':{registerF12ReleaseRoutes:()=>{}},
@@ -81,7 +84,8 @@ async function registered(pool) {
     await module.evaluate();
     const routes=new Map(),middleware=[];
     const router={use:f=>middleware.push(f),get:(p,f)=>routes.set(`GET ${p}`,f),
-        post:(p,f)=>routes.set(`POST ${p}`,f),patch:(p,f)=>routes.set(`PATCH ${p}`,f)};
+        post:(p,f)=>routes.set(`POST ${p}`,f),patch:(p,f)=>routes.set(`PATCH ${p}`,f),
+        put:(p,f)=>routes.set(`PUT ${p}`,f),delete:(p,f)=>routes.set(`DELETE ${p}`,f)};
     await module.namespace.init(router);
     return async(method,endpoint,request={})=>{
         const req={method,path:endpoint,url:endpoint,body:{},query:{},params:{backend:'qdrant'},...request};

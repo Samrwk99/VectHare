@@ -164,7 +164,7 @@ test('S06 S04 engine integrates with disposable Qdrant adapter and private opera
   const ledger=new OperationLedger(context);
   const authorize=async(plan)=>({authorized:true,ownerVerified:true,mutationContractVerified:true,collectionKey:plan.collectionKey,backend:plan.backend});
   // This simulated authorization callback is deliberately NOT registered in index.js.
-  const engine=new MutationEngine({ledger,adapter,authorize});
+  const engine=new MutationEngine({atomicOnly:false,ledger,adapter,authorize});
   const plan=planMutation(context,{backend:'qdrant',scope,embedding,action:'insert',operationId:randomUUID(),...payload});
   const done=await engine.execute(plan,payload);
   assert.equal(done.state,'VERIFIED');

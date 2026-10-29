@@ -9,7 +9,7 @@ async function fixture(fn){const dir=await fs.mkdtemp(path.join(os.tmpdir(),'s04
   async updateRecord(p,payload){writes++;const old=records.get(p.physicalId);records.set(p.physicalId,{...item(p,payload),...(p.action==='metadata'?{textHash:old?.textHash,vectorHash:old?.vectorHash}:{}),vector:payload.vector??old?.vector});if(failWrite)throw Error('lost response');},
   async deleteRecord(p){writes++;records.delete(p.physicalId);if(failWrite)throw Error('lost response');}};
  const authorize=async p=>({authorized:true,ownerVerified:true,mutationContractVerified:true,collectionKey:p.collectionKey,backend:p.backend});
- const ledger=new OperationLedger(ctx),engine=new MutationEngine({ledger,adapter:backend,authorize});
+ const ledger=new OperationLedger(ctx),engine=new MutationEngine({atomicOnly:false,ledger,adapter:backend,authorize});
  await fn({ctx,ledger,engine,backend,records,authorize,getWrites:()=>writes,setFailWrite:v=>failWrite=v,setFailRead:v=>failRead=v});
  }finally{await fs.rm(dir,{recursive:true,force:true});}}
 function item(p,payload){return {recordId:p.recordId,physicalId:p.physicalId,scope:p.scope,revision:p.targetRevision,textHash:p.textHash,vectorHash:p.vectorHash,metadataHash:p.metadataHash,vector:payload?.vector??[.1,.2,.3]};}
@@ -24,7 +24,7 @@ test('S04 engine inserts, updates and deletes using independent mock-backend rea
 test('S04 rejects authorization or altered payload before persisting/dispatching',async()=>fixture(async f=>{
  const p=plan(f.ctx,'insert');
  await assert.rejects(()=>f.engine.execute(p,{text:'wrong',vector:[.1,.2,.3]}),e=>e.code==='S04_PLAN_INVALID');
- const denied=new MutationEngine({ledger:f.ledger,adapter:f.backend,authorize:async()=>({authorized:false})});
+ const denied=new MutationEngine({atomicOnly:false,ledger:f.ledger,adapter:f.backend,authorize:async()=>({authorized:false})});
  await assert.rejects(()=>denied.execute(p,{text:'hello',vector:[.1,.2,.3],metadata:{tag:'safe'}}),e=>e.code==='S04_AUTHORIZATION_NOT_ATTESTED');
  assert.equal(f.getWrites(),0);
 }));

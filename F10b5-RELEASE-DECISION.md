@@ -1,0 +1,7 @@
+# F10b.5 — Release decision
+
+**F10b.5 evidence assessor and host runbook: COMPLETE as an offline review implementation.** A new private plugin CLI checks that per-backend host evidence matches this build, artifact hashes are intact, source/restore semantic inventory manifests agree, the accepted cooperating-writer contract is declared, and all required acceptance categories are present. Tests cover tampered evidence, missing categories, stale versions, wrong inventory, symlinks, hardlinks, attempted replay and fabricated approval labels.
+
+**F10b.5 actual host acceptance: NOT EXECUTED / NOT CERTIFIED.** No connection to the intended SillyTavern host or native Qdrant, LanceDB, Vectra and Milvus services is available in the build environment. No native Qdrant restore, LanceDB/Vectra SDK reopen, Milvus Backup, complete source/restore record inventory, safe administrative lock release or backend-authoritative uncertain-operation reconciliation was implemented here. The assessor's `READY_FOR_INDEPENDENT_MANUAL_REVIEW` status is never an unlock or permission grant.
+
+**Overall F10b: OPEN; production NO GO.** All backup/restore and legacy/native mutation permissions remain disabled. The F09c real-host gate also remains open. The next substantive work is native disposable restores with verified full inventory, Milvus official backup integration, and safe authoritative crash/lock resolution, followed by independent real-host acceptance and a truthful per-backend matrix update.

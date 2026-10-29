@@ -78,7 +78,7 @@ test('F03 backend errors leave UNCERTAIN receipt and refuse all automatic retrie
  const receipt=JSON.parse(await fs.readFile(path.join(ctx.vectorsPath,'.similharity','f03-provisions',c.key+'.json'),'utf8'));
  assert.equal(receipt.state,'UNCERTAIN');
  const retry=await call(r,'/v2/collections/provision',ctx,input);
- assert.equal(retry.body.code,'F03_RECEIPT_EXISTS');assert.equal(writes,1);
+ assert.equal(retry.body.code,'F09C5_WRITER_BUSY');assert.equal(writes,1); // F09c.10 retained gate after uncertain provisioning
 }));
 test('F03 collection lock serializes separate ledger instances and refuses stale lock rather than stealing',async()=>temp(async ctx=>{
  const a=new OperationLedger(ctx),b=new OperationLedger(ctx),plan={collectionKey:c.key};
