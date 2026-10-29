@@ -132,7 +132,7 @@ export function renderF09bChatSyncPreview(root,getSettings,doc=globalThis.docume
    if(!optIn.checked)throw Error('Check the explicit local pilot consent first');
    const {getRequestHeaders,getCurrentChatId}=await import('../../../../../script.js');
    const source=await f02CurrentChatSelector({getChatId:getCurrentChatId,getContext:()=>globalThis.SillyTavern?.getContext?.()});
-   const settings=getSettings?.()||{};const embedding={source:settings.source||'webllm',
+   const settings=getSettings?.()||{};const embedding={source:settings.f09b_embedding_source||settings.source||'webllm',
     model:settings.f09b_embedding_model,dimension:Number(settings.f09b_embedding_dimension),
     metric:settings.f09b_embedding_metric};
    if(embedding.source==='webllm')throw Error('Pilot requires a host/server embedding provider, not WebLLM. Create the v2 collection using the exact same provider/model.');
@@ -174,7 +174,7 @@ export function renderF09bChatSyncPreview(root,getSettings,doc=globalThis.docume
    const model=settings.f09b_embedding_model,dimension=Number(settings.f09b_embedding_dimension),metric=settings.f09b_embedding_metric;
    const backend=settings.f09b_backend||'qdrant';
    if(!model||!Number.isSafeInteger(dimension)||dimension<1)throw Error('Configure F09b embedding model and dimension first');
-   const result=await f09bPreviewChatSync({backend,source,embedding:{source:settings.source||'webllm',model,dimension,metric},
+   const result=await f09bPreviewChatSync({backend,source,embedding:{source:settings.f09b_embedding_source||settings.source||'webllm',model,dimension,metric},
     configId:backend==='qdrant'&&settings.qdrant_use_cloud!==true?'local':'default'},getRequestHeaders());
    status.textContent=`Saved chat verified: ${result.counts.create} missing, ${result.counts.update} changed, ${result.counts.inSync} matched. Read-only: no insert/delete, no complete inventory or production write permission.`;
   }catch(e){status.textContent=`Sync preview unavailable: ${e?.message||'unknown'}`;}
@@ -204,7 +204,7 @@ export function renderF09bChatSyncPreview(root,getSettings,doc=globalThis.docume
    const backend=settings.f09b_backend||'qdrant';
    if(backend==='qdrant'&&settings.qdrant_use_cloud===true)throw Error('Local pilot only');
    const base={backend,source,configId:backend==='qdrant'?'local':'default',embedding:{
-    source:settings.source||'webllm',model:settings.f09b_embedding_model,
+    source:settings.f09b_embedding_source||settings.source||'webllm',model:settings.f09b_embedding_model,
     dimension:Number(settings.f09b_embedding_dimension),metric:settings.f09b_embedding_metric}};
    if(base.embedding.source==='webllm')throw Error('Server embedding provider required for this pilot');
    const idx=Number(messageIndex.value);
@@ -247,7 +247,7 @@ export function renderF09bChatSyncPreview(root,getSettings,doc=globalThis.docume
   const source=await f02CurrentChatSelector({getChatId:getCurrentChatId,getContext:()=>globalThis.SillyTavern?.getContext?.()});
   const settings=getSettings?.()||{},backend=settings.f09b_backend||'qdrant';
   if(backend==='qdrant'&&settings.qdrant_use_cloud===true)throw Error('Local pilot only');
-  const embedding={source:settings.source||'webllm',model:settings.f09b_embedding_model,
+  const embedding={source:settings.f09b_embedding_source||settings.source||'webllm',model:settings.f09b_embedding_model,
    dimension:Number(settings.f09b_embedding_dimension),metric:settings.f09b_embedding_metric};
   if(embedding.source==='webllm')throw Error('Server embedding profile required');
   return {base:{backend,source,embedding,configId:backend==='qdrant'?'local':'default'},

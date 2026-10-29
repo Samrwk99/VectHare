@@ -102,6 +102,21 @@ export function inspectVectorRequest(url, options={}) {
         }
         return {intercepted:true,allowed:true,operation:'guiConnectionConfiguration',backend:'none',transport:'plugin',method:req.method};
     }
+    // F09b.5: server-owned embedding configuration, write-only credential and
+    // bounded test. No embedding vectors or arbitrary URLs are sent to browser.
+    if(req.transport==='plugin'&&['/v2/embeddings/profile','/v2/embeddings/test'].includes(req.suffix)){
+        const isProfile=req.suffix.endsWith('/profile');
+        if((isProfile&&!['GET','PUT','DELETE'].includes(req.method))||(!isProfile&&req.method!=='POST'))
+            fail(req,'f09b5-method-forbidden');
+        if((req.method==='GET'||req.method==='DELETE')&&req.body!=null)fail(req,'f09b5-body-forbidden');
+        if(req.method==='PUT'&&(!req.body||typeof req.body!=='object'||Array.isArray(req.body)||
+            Object.keys(req.body).some(k=>!['source','model','dimension','metric','credential','clearCredential'].includes(k))))
+            fail(req,'f09b5-profile-shape-forbidden');
+        if(req.method==='POST'&&(!req.body||typeof req.body!=='object'||Array.isArray(req.body)||Object.keys(req.body).length))
+            fail(req,'f09b5-test-body-forbidden');
+        if(req.parsed.search)fail(req,'f09b5-query-forbidden');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:'f09b5EmbeddingConfiguration',backend:'none',method:req.method};
+    }
     // F01: read/verify only a host-owned chat/group/lorebook file; route may
     // reserve a private source identity but can NEVER read/write vector records.
     if (req.transport === 'plugin' && req.suffix === '/v2/sources/attest') {
@@ -172,6 +187,50 @@ export function inspectVectorRequest(url, options={}) {
            Object.keys(b).some(k=>!['backend','source','embedding','configId'].includes(k)))
             fail(req,'f09b-host-chat-sync-plan-shape-required');
         return {intercepted:true,allowed:true,transport:'plugin',operation:'f09bChatSyncPlan',backend:b.backend,method:'POST'};
+    }
+    // F09b.7: source-owned read-only lorebook link/condition/lifecycle inspection.
+    // No record IDs, vectors, link rules, conditions or text are accepted from browser.
+    if(req.transport==='plugin'&&req.suffix==='/v2/workflows/link-condition-preview'){
+        const b=req.body,source=b?.source,embedding=b?.embedding;
+        if(req.method!=='POST'||!b||Object.keys(b).some(k=>!['backend','configId','source','embedding'].includes(k))||
+           !['qdrant','lancedb','vectra','milvus'].includes(b.backend)||b.configId!==(b.backend==='qdrant'?'local':'default')||
+           !source||source.kind!=='lorebook'||Object.keys(source).sort().join(',')!=='kind,name'||
+           typeof source.name!=='string'||!source.name||source.name.length>220||
+           /[\\/\x00-\x1f]/.test(source.name)||source.name==='.'||source.name==='..'||
+           !embedding||typeof embedding!=='object'||Array.isArray(embedding)||
+           Object.keys(embedding).some(k=>!['source','model','dimension','metric'].includes(k))||
+           !['transformers','openai','togetherai','mistral','openrouter'].includes(embedding.source)||
+           typeof embedding.model!=='string'||!embedding.model||!Number.isSafeInteger(embedding.dimension)||
+           embedding.dimension<1||embedding.dimension>65536||!['cosine','dot','euclid'].includes(embedding.metric))
+            fail(req,'f09b7-lorebook-preview-only');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:'f09b7LinkConditionPreview',backend:b.backend,method:'POST'};
+    }
+    // F09b.6: exact saved-source summary/lorebook preview and one-record
+    // consented pilot. Browser cannot submit text, record IDs or vectors.
+    if(req.transport==='plugin'&&req.suffix==='/v2/workflows/saved-content-pilot'){
+        const b=req.body,source=b?.source,embedding=b?.embedding;
+        const keys=source?.kind==='chat'?['kind','avatar','chatFile']:
+            source?.kind==='group-chat'?['kind','groupId','chatFile']:
+            source?.kind==='lorebook'?['kind','name']:[];
+        if(req.method!=='POST'||!b||!['preview','apply'].includes(b.mode)||!keys.length||
+            Object.keys(source).some(k=>!keys.includes(k))||
+            keys.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220||
+              /[\\/\x00-\x1f]/.test(source[k])||source[k]==='.'||source[k]==='..')||
+            !['qdrant','milvus','lancedb','vectra'].includes(b.backend)||
+            b.configId!==(b.backend==='qdrant'?'local':'default')||
+            !embedding||typeof embedding!=='object'||Array.isArray(embedding)||
+            Object.keys(embedding).some(k=>!['source','model','dimension','metric'].includes(k))||
+            !['transformers','openai','togetherai','mistral','openrouter'].includes(embedding.source)||
+            !Number.isSafeInteger(embedding.dimension)||embedding.dimension<1||embedding.dimension>65536||
+            typeof embedding.model!=='string'||!embedding.model||
+            !['cosine','dot','euclid'].includes(embedding.metric)||
+            Object.keys(b).some(k=>!['mode','backend','configId','source','embedding','sourceRevisionFingerprint','itemIndex','experimentalConsent'].includes(k))||
+            (b.mode==='preview'&&(b.sourceRevisionFingerprint!==undefined||b.itemIndex!==undefined||b.experimentalConsent!==undefined))||
+            (b.mode==='apply'&&(!Number.isSafeInteger(b.itemIndex)||b.itemIndex<0||b.itemIndex>=80||
+              !/^[a-f0-9]{64}$/.test(b.sourceRevisionFingerprint||'')||
+              b.experimentalConsent!=='I ACCEPT SAVED CONTENT VECTOR PILOT')))
+            fail(req,'f09b6-saved-content-source-pilot-required');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:'f09b6SavedContentPilot',backend:b.backend,method:'POST'};
     }
     // F09b.3: explicitly confirmed, one-record saved-chat sync PILOT.
     // Server owns text, vector, record and operation IDs. This is not normal

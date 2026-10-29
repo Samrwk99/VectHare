@@ -1,0 +1,110 @@
+{
+  "checkpoint": "F09c.4 Qdrant conditional acknowledgement evidence; F09c real-backend acceptance OPEN",
+  "baseline": {
+    "extensionVersion": "2.2.0-alpha.s11.30-f09c4",
+    "pluginVersion": "3.2.10-s10.29-f09c4",
+    "pluginSourceFingerprint": "aefba1939f78dabbd0bcc198f0eecb8b3dedf5626e2e6f5910c9f0fe7230caf6"
+  },
+  "stageStatus": "QDRANT_ACK_EVIDENCE_CLASSIFIED_OFFLINE_SINGLE_WRITER_ATTESTATION_REQUIRED",
+  "runtimeCodeChanges": true,
+  "backends": {
+    "qdrant": {
+      "liveHostAcceptance": "NOT_RUN",
+      "liveBackendCRUD": "NOT_RUN",
+      "externalWriterAtomicCAS": "BLOCKED_UNPROVEN",
+      "restartCrashAcceptance": "NOT_RUN",
+      "productionWritesEnabled": false,
+      "conditionalProbe": "DISPOSABLE_FIXTURE_ONLY_OFFLINE_VERIFIED",
+      "conditionalModes": "INSERT_ONLY_UPDATE_ONLY_REVISION_FILTER_AND_SCOPED_DELETE_FILTER",
+      "appliedReceiptProven": "NO_COMPLETED_STATUS_IS_NOT_MATCH_EVIDENCE",
+      "minimumCandidateVersion": "1.17.0",
+      "conditionalAcknowledgement": "COMPLETED_IS_NOT_PER_POINT_MATCH_PROOF",
+      "readbackAttribution": "UNPROVEN_EXTERNAL_WRITER_CAN_MIMIC_POSTSTATE",
+      "exclusiveWriterAlternative": "DESIGN_ONLY_NOT_HOST_ENFORCED",
+      "evidenceClassification": "F09C4_NONAUTHORIZING_OFFLINE_TESTED"
+    },
+    "lancedb": {
+      "liveHostAcceptance": "NOT_RUN",
+      "liveBackendCRUD": "NOT_RUN",
+      "externalWriterAtomicCAS": "BLOCKED_UNPROVEN",
+      "restartCrashAcceptance": "NOT_RUN",
+      "productionWritesEnabled": false
+    },
+    "pluginVectra": {
+      "liveHostAcceptance": "NOT_RUN",
+      "liveBackendCRUD": "NOT_RUN",
+      "externalWriterAtomicCAS": "BLOCKED_UNPROVEN",
+      "restartCrashAcceptance": "NOT_RUN",
+      "productionWritesEnabled": false
+    },
+    "milvus": {
+      "liveHostAcceptance": "NOT_RUN",
+      "liveBackendCRUD": "NOT_RUN",
+      "externalWriterAtomicCAS": "BLOCKED_UNPROVEN",
+      "restartCrashAcceptance": "NOT_RUN",
+      "productionWritesEnabled": false
+    }
+  },
+  "localEvidence": {
+    "pluginSourceManifest": "MATCHED_LOCAL_ONLY",
+    "qdrantLoopbackPort6333": "UNREACHABLE",
+    "milvusLoopbackPort19530": "UNREACHABLE",
+    "embeddedLanceDB": "NOT_PROBED",
+    "embeddedVectra": "NOT_PROBED",
+    "pluginTestCombined": "400_PASS_CLEAN",
+    "pluginReRunAffectedWorker": "9_PASS",
+    "f09cRaceNegativeControl": "1_PASS",
+    "f09cEvidenceAssessorTests": "3_PASS",
+    "extensionTests": "1169_PASS_CONTROLLED_PARTITIONS_WITH_INTERMITTENT_NODE_WORKER_CRASH",
+    "f09cAtomicGateTests": "7_PASS",
+    "pluginFullRegression": "429_PASS_CLEAN",
+    "f09c2CrashGapTests": "5_PASS",
+    "f09c3ConditionalCandidateTests": "13_PASS",
+    "matchedPair": "PASS_LOCAL_MANIFEST_AND_PIN_ONLY",
+    "f09c4EvidenceNegativeControls": "11_PASS",
+    "javascriptSyntax": "363_PASS"
+  },
+  "safety": {
+    "atomicExternalWriterGuarantee": "NOT_PROVEN",
+    "productionMutations": "DENIED",
+    "nativeStandard": "DENIED",
+    "legacyVectors": "DENIED",
+    "collectionPurge": "PROHIBITED",
+    "automaticMutations": "NOT_ACTIVATED",
+    "uncertainReceiptAutomaticReconciliation": "DENIED",
+    "realHost": "NOT_CONNECTED",
+    "productionWritesEnabled": false
+  },
+  "releaseDecision": "NO_GO_F09C4_REAL_BACKEND_CAS_OR_ENFORCED_EXCLUSIVE_WRITER_STILL_UNCERTIFIED",
+  "nextRequired": [
+    "AUTHORITATIVE_PER_OPERATION_APPLIED_VS_NOOP_EVIDENCE_OR_ENFORCED_EXCLUSIVE_WRITER",
+    "QDRANT_DISPOSABLE_LIVE_SEMANTICS_AND_EXTERNAL_RACE_TESTS",
+    "LANCEDB_VECTRA_MILVUS_PER_BACKEND_ATOMIC_OR_EXCLUSIVE_WRITER_TESTS",
+    "CRASH_RECOVERY_AND_HOST_INDEPENDENT_ATTESTATION",
+    "FINAL_CAPABILITY_MATRIX_DENIAL_UNTIL_EVIDENCE_REVIEWED"
+  ],
+  "runtimeAtomicGate": {
+    "defaultEngineMode": "ATOMIC_ONLY_FAIL_CLOSED",
+    "legacyPilots": "EXPLICIT_ATOMIC_ONLY_FALSE_RESTRICTED_DEVELOPMENT_ONLY",
+    "atomicAdapterInterface": "atomicCompareAndMutate_PILOT_CONTRACT_ONLY",
+    "atomicOperationsRequired": [
+      "insert",
+      "update",
+      "metadata",
+      "delete"
+    ],
+    "missingAtomicMethod": "REFUSED_BEFORE_LEDGER_OR_MUTATION",
+    "missingHostIndependentAttestation": "REFUSED_BEFORE_LEDGER_OR_MUTATION",
+    "ambiguousAtomicResponse": "UNCERTAIN_NO_LEGACY_FALLBACK_NO_RETRY",
+    "uncertainReceiptReconciliation": "NO_AUTOMATIC_PROMOTION",
+    "realBackendAtomicCASImplemented": false,
+    "anyProductionPathCertified": false,
+    "persistedSubmittedAutoReconciliation": "DENIED_WITHOUT_NONEXPORTED_IN_PROCESS_ACK_TOKEN",
+    "persistedUncertainAutoReconciliation": "DENIED",
+    "qdrantCandidateImplemented": true,
+    "qdrantCandidateReturnsApplied": false,
+    "qdrantCandidatePublicRoute": false,
+    "qdrantCandidateEvidenceClassifier": "DIAGNOSTIC_ONLY_NO_WRITE_GRANT",
+    "qdrantExclusiveWriterChecklist": "NONAUTHORITATIVE_DENIES_PRODUCTION_EVEN_ALL_FLAGS_TRUE"
+  }
+}

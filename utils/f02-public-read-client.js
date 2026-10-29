@@ -37,6 +37,7 @@ export function renderF02ReadPanel(root,getSettings,doc=globalThis.document){
  const model=doc.createElement('input');model.type='text';model.placeholder='Exact embedding model identifier';
  const dimension=doc.createElement('input');dimension.type='number';dimension.min='1';dimension.max='65536';dimension.placeholder='Embedding dimensions';
  const metric=doc.createElement('select');for(const name of ['cosine','dot','euclid']){const o=doc.createElement('option');o.value=name;o.textContent=name;metric.append(o);}
+ const current=getSettings?.()||{};model.value=current.f09b_embedding_model||'';dimension.value=current.f09b_embedding_dimension||'';metric.value=current.f09b_embedding_metric||'cosine';
  const selection=doc.createElement('select');for(const backend of ['qdrant','lancedb','vectra','milvus']){const o=doc.createElement('option');o.value=backend;o.textContent=backend;selection.append(o);}
  const bind=doc.createElement('button');bind.type='button';bind.textContent='Bind saved chat (no vectors written)';
  const list=doc.createElement('button');list.type='button';list.textContent='List v2 records (read-only)';
@@ -53,7 +54,7 @@ export function renderF02ReadPanel(root,getSettings,doc=globalThis.document){
    const {getCurrentChatId}=await import('../../../../../script.js');
    source=await f02CurrentChatSelector({getChatId:getCurrentChatId,getContext:()=>globalThis.SillyTavern?.getContext?.()});
    const settings=typeof getSettings==='function'?getSettings():{};
-   const embedding={source:settings?.source||'transformers',model:model.value.trim(),dimension:Number(dimension.value),metric:metric.value};
+   const embedding={source:settings?.f09b_embedding_source||settings?.source||'transformers',model:model.value.trim(),dimension:Number(dimension.value),metric:metric.value};
    const result=await f02Read(operation,{backend:selection.value,source,embedding,
      configId:selection.value==='qdrant'&&(settings?.qdrant_use_cloud!==true)?'local':'default',
      ...(operation==='list'?{page:{limit:20}}:operation==='get'?{recordId:recordId.value.trim()}:

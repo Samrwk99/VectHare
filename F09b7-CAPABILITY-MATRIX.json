@@ -1,0 +1,68 @@
+{
+  "checkpoint": "F09b.7 restricted links, conditions and lifecycle inspection pilot",
+  "extensionVersion": "2.2.0-alpha.s11.25-f09b7",
+  "pluginVersion": "3.2.10-s10.24-f09b7",
+  "pluginSourceFingerprint": "9efa9f0e96d87538138038aabb5352efa7f29f79259b17bacc28705555c5df11",
+  "f09b6": {
+    "savedChatHeaderSummaryPreview": "IMPLEMENTED_OFFLINE_SUPPORTED_STRING_ONLY",
+    "savedChatHeaderSummaryOneRecordApply": "CONSENTED_PILOT_OFFLINE",
+    "lorebookStableUidPreview": "IMPLEMENTED_OFFLINE",
+    "lorebookOneRecordApply": "CONSENTED_PILOT_OFFLINE",
+    "stableScopedRecordIds": "IMPLEMENTED_OFFLINE",
+    "browserTextVectorExposure": "NONE_IN_F09B6_WORKFLOW",
+    "managedRegistryAndS04Receipts": "REUSED_TESTED_OFFLINE",
+    "untrackedHistoricalRecordUpdates": "DENIED",
+    "automaticSummaryGeneration": "NOT_IMPLEMENTED",
+    "dualVectorSummaryParentLifecycle": "NOT_IMPLEMENTED_AS_CERTIFIED_V2_WORKFLOW",
+    "automaticWorldInfoSync": "NOT_ACTIVATED",
+    "worldInfoPromptActivation": "NOT_CERTIFIED_IN_V2_WORKFLOW",
+    "automaticOrphanDeletion": "DENIED",
+    "completeInventory": "NOT_CLAIMED",
+    "otherHostSummarySchemas": "UNVERIFIED_UNSUPPORTED"
+  },
+  "pluginBackends": {
+    "qdrant": "OFFLINE_PILOT_INTEGRATION_PRODUCTION_DENIED",
+    "lancedb": "OFFLINE_PILOT_INTEGRATION_PRODUCTION_DENIED",
+    "pluginVectra": "OFFLINE_PILOT_INTEGRATION_PRODUCTION_DENIED",
+    "milvus": "OFFLINE_PILOT_INTEGRATION_PRODUCTION_DENIED"
+  },
+  "production": {
+    "nativeStandard": "UNPROBED_DENIED",
+    "legacyVectors": "DENIED",
+    "purge": "PROHIBITED",
+    "automaticMutations": "NOT_ACTIVATED",
+    "externalWriterCAS": "UNPROVEN",
+    "crashReconciliation": "NOT_CERTIFIED",
+    "fullBackupRestore": "NOT_READY",
+    "realHost": "NOT_TESTED",
+    "productionWritesEnabled": false
+  },
+  "verification": {
+    "pluginTests": 390,
+    "extensionAssertions": 1166,
+    "extensionTestFiles": 76,
+    "extensionMethod": "TEN_CONTROLLED_PARTITIONS_ALL_GREEN",
+    "pluginSourceManifest": "MATCHED",
+    "realBackendAcceptance": "NOT_TESTED",
+    "combinedExtensionRun": "TWO_INTERMITTENT_SIGSEGV_WORKERS_RETESTED_GREEN"
+  },
+  "releaseDecision": "DEVELOPMENT_ONLY_NO_GO",
+  "nextStage": "F09b.8",
+  "f09b7": {
+    "savedLorebookSourceAttestation": "IMPLEMENTED_OFFLINE",
+    "scopedReadbackAndSnapshotRaceRefusal": "IMPLEMENTED_OFFLINE",
+    "stableUidReferenceTopology": "IMPLEMENTED_READ_ONLY_EXPERIMENTAL_SOURCE_ANNOTATION",
+    "explicitUidLinks": "READ_ONLY_EXPERIMENTAL_VECTHARE_LINKS_FIELD_NOT_NATIVE_CERTIFIED",
+    "disabledAndEmptyLifecyclePreview": "IMPLEMENTED_NO_DELETION_AUTHORITY",
+    "vectorPresentAndStaleStates": "IMPLEMENTED_OFFLINE",
+    "keywordConditionDescriptors": "COUNTS_AND_FLAGS_ONLY_NOT_EVALUATED",
+    "normalPromptConditionActivation": "UNVERIFIED_NOT_ACTIVATED",
+    "hardLinkGraphTraversal": "NOT_IMPLEMENTED",
+    "automaticVectorMetadataLinkWrites": "DENIED",
+    "automaticDeleteOrSync": "DENIED",
+    "fullLinkConditionLifecycleParity": "NOT_COMPLETE",
+    "sourceTextOrVectorReturnedToBrowser": "NONE_IN_F09B7_RESPONSE",
+    "guiInspection": "IMPLEMENTED_OFFLINE",
+    "productionWritesEnabled": false
+  }
+}

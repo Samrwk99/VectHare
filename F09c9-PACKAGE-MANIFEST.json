@@ -1,0 +1,23 @@
+{
+  "checkpoint": "F09c.9",
+  "releaseDecision": "DEVELOPMENT_COMPLETE_PRODUCTION_NO_GO",
+  "matchedPluginFingerprint": "71a1673baf3e82c769bb3449785a7ab8c46fbff96ea3dc38b063a31989e3cc9c",
+  "extensionVersion": "2.2.0-alpha.s11.35-f09c9",
+  "pluginVersion": "3.2.10-s10.34-f09c9",
+  "pluginTestsPassed": 484,
+  "extensionAssertionsPassed": 1169,
+  "newProbeTestsPassed": 10,
+  "nativeMilvusSdkAvailable": false,
+  "liveMilvusAccepted": false,
+  "productionMutationsEnabled": false,
+  "files": {
+    "VectHare-Similharity-F09c9-Milvus-Host-Probe-Plugin.zip": {
+      "sha256": "d2545ec366a192cb77308e03f83d7ddea9ae1286eb6848e8926014841b8c1246",
+      "bytes": 742573
+    },
+    "VectHare-F09c9-Milvus-Host-Probe-Extension.zip": {
+      "sha256": "1301bfb33aa48814c3c63d3efa96ddad3ad5edc0ee8702c1c57153136048dbaa",
+      "bytes": 1870717
+    }
+  }
+}

@@ -5,9 +5,9 @@
  */
 import { guardedVectorFetch } from './e02-vector-request-gateway.js';
 export const S11_EXPECTED_PLUGIN = Object.freeze({
-    pluginVersion: '3.2.10-s10.21-f09b4c',
+    pluginVersion: '3.2.10-s10.45-f10b10',
     contractVersion: 2,
-    sourceFingerprint: 'b773c4cbc1c4799b76635f6e09054da419601dd85f174ea7f90ffcd3e4c33090',
+    sourceFingerprint: '8741eced82177c9d6ec8985603bcffaf444c8b20eb84a5d0f2781fa3e18f58c8',
 });
 export const S11_BACKENDS = Object.freeze(['standard','lancedb','qdrant','milvus']);
 const ROOT = '/api/plugins/similharity';
@@ -50,6 +50,10 @@ export function validateS11Discovery(build,caps,contracts,expected=S11_EXPECTED_
         contracts.routes['POST /v2/workflows/retrieve']!=='F09B_VERIFIED_SOURCE_BOUND_READ_ONLY_PROMPT_CANDIDATES' ||
         contracts.routes['POST /v2/workflows/chat-sync-plan']!=='F09B_SAVED_HOST_CHAT_READ_ONLY_STABLE_ID_SYNC_PLAN' ||
         caps.f09bReadOnlyChatSyncPlannerAvailable!==true ||
+        caps.f09b6SavedContentPilotAvailable!==true ||
+        caps.f09b7ReadOnlyLinksConditionsLifecyclePreviewAvailable!==true ||
+        contracts.routes['POST /v2/workflows/link-condition-preview']!=='F09B7_READ_ONLY_SOURCE_BACKED_LOREBOOK_LINK_CONDITION_LIFECYCLE_DIAGNOSTICS' ||
+        contracts.routes['POST /v2/workflows/saved-content-pilot']!=='F09B6_SERVER_SAVED_SUMMARY_LOREBOOK_ONE_RECORD_CONSENTED_PILOT' ||
         caps.f09b3ExplicitLocalChatSyncPilotAvailable!==true ||
         caps.f09b4ExactMessageLifecyclePilotAvailable!==true || caps.f09b4ManagedOrphanPilotAvailable!==true ||
         contracts.routes['POST /v2/workflows/chat-lifecycle-pilot']!=='F09B4_EXACT_SAVED_MESSAGE_DELETE_REVECTOR_AND_RECEIPT_INSPECTION_PILOT' ||
@@ -108,7 +112,7 @@ export function renderS11CompatibilityStatus(root,status,doc=globalThis.document
         node.setAttribute('role','status');node.style.padding='0.5em';
         node.style.marginBottom='0.5em';root.prepend(node);}
     node.textContent=status?.compatible
-        ? 'Similharity F09b.4 completion detected. Verified v2 read-only prompt integration and release gate and GUI readiness reporting, guarded F01–F09 development tools and F10 non-authoritative record evidence are available. Automatic writes, native Standard mutations, legacy migration, complete backup and restore remain blocked.'
+        ? 'Similharity F09b.5 server-managed embedding pilot detected. Verified v2 read-only prompt integration and release gate and GUI readiness reporting, guarded F01–F09 development tools and F10 non-authoritative record evidence are available. Automatic writes, native Standard mutations, legacy migration, complete backup and restore remain blocked.'
         : 'Similharity S10 compatibility not verified. Unsafe operations remain disabled.';
     return true;
 }

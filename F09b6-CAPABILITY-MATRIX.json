@@ -1,0 +1,45 @@
+{
+  "checkpoint": "F09b.6 restricted saved summaries and World Info pilot",
+  "extensionVersion": "2.2.0-alpha.s11.24-f09b6",
+  "pluginVersion": "3.2.10-s10.23-f09b6",
+  "pluginSourceFingerprint": "9908dffe698993291b1d62f4b9f05a6445c129ebbda2d33aa792f1fc298938c7",
+  "f09b6": {
+    "savedChatHeaderSummaryPreview": "IMPLEMENTED_OFFLINE_SUPPORTED_STRING_ONLY",
+    "savedChatHeaderSummaryOneRecordApply": "CONSENTED_PILOT_OFFLINE",
+    "lorebookStableUidPreview": "IMPLEMENTED_OFFLINE",
+    "lorebookOneRecordApply": "CONSENTED_PILOT_OFFLINE",
+    "stableScopedRecordIds": "IMPLEMENTED_OFFLINE",
+    "browserTextVectorExposure": "NONE_IN_F09B6_WORKFLOW",
+    "managedRegistryAndS04Receipts": "REUSED_TESTED_OFFLINE",
+    "untrackedHistoricalRecordUpdates": "DENIED",
+    "automaticSummaryGeneration": "NOT_IMPLEMENTED",
+    "dualVectorSummaryParentLifecycle": "NOT_IMPLEMENTED_AS_CERTIFIED_V2_WORKFLOW",
+    "automaticWorldInfoSync": "NOT_ACTIVATED",
+    "worldInfoPromptActivation": "NOT_CERTIFIED_IN_V2_WORKFLOW",
+    "automaticOrphanDeletion": "DENIED",
+    "completeInventory": "NOT_CLAIMED",
+    "otherHostSummarySchemas": "UNVERIFIED_UNSUPPORTED"
+  },
+  "pluginBackends": {
+    "qdrant": "OFFLINE_PILOT_INTEGRATION_PRODUCTION_DENIED",
+    "lancedb": "OFFLINE_PILOT_INTEGRATION_PRODUCTION_DENIED",
+    "pluginVectra": "OFFLINE_PILOT_INTEGRATION_PRODUCTION_DENIED",
+    "milvus": "OFFLINE_PILOT_INTEGRATION_PRODUCTION_DENIED"
+  },
+  "production": {
+    "nativeStandard": "UNPROBED_DENIED",
+    "legacyVectors": "DENIED",
+    "purge": "PROHIBITED",
+    "automaticMutations": "NOT_ACTIVATED",
+    "externalWriterCAS": "UNPROVEN",
+    "crashReconciliation": "NOT_CERTIFIED",
+    "fullBackupRestore": "NOT_READY",
+    "realHost": "NOT_TESTED",
+    "productionWritesEnabled": false
+  },
+  "verification": {"pluginTests": 379, "extensionAssertions": 1164, "extensionTestFiles": 75,
+    "extensionMethod": "TEN_CONTROLLED_PARTITIONS_ALL_GREEN", "pluginSourceManifest": "MATCHED",
+    "syntaxChecks": "PASSED", "realBackendAcceptance": "NOT_TESTED"},
+  "releaseDecision": "DEVELOPMENT_ONLY_NO_GO",
+  "nextStage": "F09b.7"
+}

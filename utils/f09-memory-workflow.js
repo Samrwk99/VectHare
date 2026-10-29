@@ -85,7 +85,7 @@ export function renderF09MemoryPreview(root,getSettings,doc=globalThis.document)
    const settings=typeof getSettings==='function'?getSettings():{};
    const source=kind.value==='lorebook'?{kind:'lorebook',name:lorebook.value.trim()}:
      await f02CurrentChatSelector({getChatId:getCurrentChatId,getContext:()=>globalThis.SillyTavern?.getContext?.()});
-   const embedding={source:settings.source||'transformers',model:model.value.trim(),dimension:Number(dim.value),metric:metric.value};
+   const embedding={source:settings.f09b_embedding_source||settings.source||'transformers',model:model.value.trim(),dimension:Number(dim.value),metric:metric.value};
    let numericVector;
    if(vector.value.trim())numericVector=JSON.parse(vector.value);
    else if(embedding.source==='webllm'&&searchText.value.trim()){

@@ -28,6 +28,7 @@ export function renderF03ProvisionPanel(root,getSettings,doc=globalThis.document
  const model=doc.createElement('input');model.type='text';model.placeholder='Exact embedding model identifier';
  const dimension=doc.createElement('input');dimension.type='number';dimension.min='1';dimension.max='65536';dimension.placeholder='Embedding dimension';
  const metric=doc.createElement('select');for(const m of ['cosine','dot','euclid']){const op=doc.createElement('option');op.value=m;op.textContent=m;metric.append(op);}
+ const current=getSettings?.()||{};model.value=current.f09b_embedding_model||'';dimension.value=current.f09b_embedding_dimension||'';metric.value=current.f09b_embedding_metric||'cosine';
  const preview=doc.createElement('button');preview.type='button';preview.textContent='Preview v2 collection (no backend writes)';
  const confirm=doc.createElement('button');confirm.type='button';confirm.textContent='Confirm creation of NEW empty collection';confirm.disabled=true;
  const status=doc.createElement('button');status.type='button';status.textContent='Check previous provisioning receipt';status.disabled=true;
@@ -42,7 +43,7 @@ export function renderF03ProvisionPanel(root,getSettings,doc=globalThis.document
    const {getCurrentChatId}=await import('../../../../../script.js');
    const source=await f02CurrentChatSelector({getChatId:getCurrentChatId,getContext:()=>globalThis.SillyTavern?.getContext?.()});
    const settings=typeof getSettings==='function'?getSettings():{};
-   const body={backend:backend.value,source,embedding:{source:settings?.source||'transformers',
+   const body={backend:backend.value,source,embedding:{source:settings?.f09b_embedding_source||settings?.source||'transformers',
     model:model.value.trim(),dimension:Number(dimension.value),metric:metric.value},
     configId:backend.value==='qdrant'&&settings?.qdrant_use_cloud!==true?'local':'default'};
    const result=await f03CollectionRequest('preview',body,getRequestHeaders());

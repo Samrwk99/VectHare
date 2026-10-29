@@ -1,0 +1,157 @@
+{
+  "checkpoint": "F09c.6 Qdrant disposable host acceptance probe; cooperating-writer deployment model accepted; F09c remains OPEN",
+  "baseline": {
+    "extensionVersion": "2.2.0-alpha.s11.32-f09c6",
+    "pluginVersion": "3.2.10-s10.31-f09c6",
+    "pluginSourceFingerprint": "ae8105e3223a61f4fd93c8fff6a62a5d9e231052f21c4e82d399700766ea1e54"
+  },
+  "stageStatus": "F09C6_DISPOSABLE_QDRANT_HOST_PROBE_IMPLEMENTED_TESTED_NO_REAL_SERVICE",
+  "runtimeCodeChanges": true,
+  "backends": {
+    "qdrant": {
+      "liveHostAcceptance": "PENDING_REAL_HOST_NOT_AVAILABLE_HERE",
+      "liveBackendCRUD": "NOT_RUN",
+      "externalWriterAtomicCAS": "BLOCKED_UNPROVEN",
+      "restartCrashAcceptance": "NOT_RUN",
+      "productionWritesEnabled": false,
+      "conditionalProbe": "HOST_ONLY_DISPOSABLE_DIAGNOSTIC_IMPLEMENTED_OFFLINE_TESTED",
+      "conditionalModes": "INSERT_ONLY_UPDATE_ONLY_REVISION_FILTER_AND_SCOPED_DELETE_FILTER",
+      "appliedReceiptProven": "NO_COMPLETED_STATUS_IS_NOT_MATCH_EVIDENCE",
+      "minimumCandidateVersion": "1.17.0",
+      "conditionalAcknowledgement": "COMPLETED_IS_NOT_PER_POINT_MATCH_PROOF",
+      "readbackAttribution": "UNPROVEN_EXTERNAL_WRITER_CAN_MIMIC_POSTSTATE",
+      "exclusiveWriterAlternative": "COOPERATING_WRITER_MODEL_ACCEPTED_BY_USER_NOT_YET_INTEGRATED_CERTIFIED",
+      "evidenceClassification": "F09C4_NONAUTHORIZING_OFFLINE_TESTED",
+      "realHostProbe": "ADMIN_CLI_ONLY_LOOPBACK_127_0_0_1_EXPLICIT_NEW_COLLECTION_CONSENT_NO_AUTOMATIC_RETRY"
+    },
+    "lancedb": {
+      "liveHostAcceptance": "NOT_RUN",
+      "liveBackendCRUD": "NOT_RUN",
+      "externalWriterAtomicCAS": "BLOCKED_UNPROVEN",
+      "restartCrashAcceptance": "NOT_RUN",
+      "productionWritesEnabled": false,
+      "exclusiveWriterAlternative": "LOCAL_COOPERATING_PROCESS_CANDIDATE_NOT_HOST_ENFORCED"
+    },
+    "pluginVectra": {
+      "liveHostAcceptance": "NOT_RUN",
+      "liveBackendCRUD": "NOT_RUN",
+      "externalWriterAtomicCAS": "BLOCKED_UNPROVEN",
+      "restartCrashAcceptance": "NOT_RUN",
+      "productionWritesEnabled": false,
+      "exclusiveWriterAlternative": "LOCAL_COOPERATING_PROCESS_CANDIDATE_NOT_HOST_ENFORCED"
+    },
+    "milvus": {
+      "liveHostAcceptance": "NOT_RUN",
+      "liveBackendCRUD": "NOT_RUN",
+      "externalWriterAtomicCAS": "BLOCKED_UNPROVEN",
+      "restartCrashAcceptance": "NOT_RUN",
+      "productionWritesEnabled": false,
+      "exclusiveWriterAlternative": "LOCAL_COOPERATING_PROCESS_CANDIDATE_NOT_HOST_ENFORCED"
+    }
+  },
+  "localEvidence": {
+    "pluginSourceManifest": "MATCHED_LOCAL_ONLY",
+    "qdrantLoopbackPort6333": "UNREACHABLE_NO_LIVE_ACCEPTANCE",
+    "milvusLoopbackPort19530": "UNREACHABLE",
+    "embeddedLanceDB": "NOT_PROBED",
+    "embeddedVectra": "NOT_PROBED",
+    "pluginTestCombined": "400_PASS_CLEAN",
+    "pluginReRunAffectedWorker": "9_PASS",
+    "f09cRaceNegativeControl": "1_PASS",
+    "f09cEvidenceAssessorTests": "3_PASS",
+    "extensionTests": "1169_PASS_CLEAN_CONCURRENCY_2",
+    "f09cAtomicGateTests": "7_PASS",
+    "pluginFullRegression": "452_PASS_CLEAN",
+    "f09c2CrashGapTests": "5_PASS",
+    "f09c3ConditionalCandidateTests": "13_PASS",
+    "matchedPair": "PASS_LOCAL_MANIFEST_AND_PIN_ONLY",
+    "f09c4EvidenceNegativeControls": "11_PASS",
+    "javascriptSyntax": "365_PASS",
+    "f09c5WriterBoundaryTests": "10_PASS_NEW_PLUS_4_IMPORTED_S04_FIXTURES",
+    "f09c5IndependentProcessLock": "PASS_LOCAL_TEST",
+    "f09c5OSProcessTermination": "PASS_LOCAL_TEST",
+    "f09c6ProbeTests": "9_PASS_MOCK_TRANSPORT"
+  },
+  "safety": {
+    "atomicExternalWriterGuarantee": "NOT_PROVEN",
+    "productionMutations": "DENIED",
+    "nativeStandard": "DENIED",
+    "legacyVectors": "DENIED",
+    "collectionPurge": "PROHIBITED",
+    "automaticMutations": "NOT_ACTIVATED",
+    "uncertainReceiptAutomaticReconciliation": "DENIED",
+    "realHost": "NOT_CONNECTED",
+    "productionWritesEnabled": false
+  },
+  "releaseDecision": "NO_GO_F09C6_QDRANT_HOST_DIAGNOSTIC_OFFLINE_ONLY",
+  "nextRequired": [
+    "F09C6_REAL_QDRANT_DISPOSABLE_RUN_ON_USER_HOST_AND_REPORT",
+    "F09C7_LANCEDB_COOPERATING_WRITER_ACCEPTANCE",
+    "F09C8_VECTRA_COOPERATING_WRITER_ACCEPTANCE",
+    "F09C9_MILVUS_COOPERATING_WRITER_ACCEPTANCE",
+    "F09C10_REAL_HOST_CRASH_RESTART_SOURCE_ISOLATION_AND_LOCK_COVERAGE",
+    "F09C11_BACKEND_SCOPED_MATRIX_REVIEW"
+  ],
+  "runtimeAtomicGate": {
+    "defaultEngineMode": "ATOMIC_ONLY_FAIL_CLOSED",
+    "legacyPilots": "EXPLICIT_ATOMIC_ONLY_FALSE_RESTRICTED_DEVELOPMENT_ONLY",
+    "atomicAdapterInterface": "atomicCompareAndMutate_PILOT_CONTRACT_ONLY",
+    "atomicOperationsRequired": [
+      "insert",
+      "update",
+      "metadata",
+      "delete"
+    ],
+    "missingAtomicMethod": "REFUSED_BEFORE_LEDGER_OR_MUTATION",
+    "missingHostIndependentAttestation": "REFUSED_BEFORE_LEDGER_OR_MUTATION",
+    "ambiguousAtomicResponse": "UNCERTAIN_NO_LEGACY_FALLBACK_NO_RETRY",
+    "uncertainReceiptReconciliation": "NO_AUTOMATIC_PROMOTION",
+    "realBackendAtomicCASImplemented": false,
+    "anyProductionPathCertified": false,
+    "persistedSubmittedAutoReconciliation": "DENIED_WITHOUT_NONEXPORTED_IN_PROCESS_ACK_TOKEN",
+    "persistedUncertainAutoReconciliation": "DENIED",
+    "qdrantCandidateImplemented": true,
+    "qdrantCandidateReturnsApplied": false,
+    "qdrantCandidatePublicRoute": false,
+    "qdrantCandidateEvidenceClassifier": "DIAGNOSTIC_ONLY_NO_WRITE_GRANT",
+    "qdrantExclusiveWriterChecklist": "NONAUTHORITATIVE_DENIES_PRODUCTION_EVEN_ALL_FLAGS_TRUE"
+  },
+  "f09c5": {
+    "implementation": "OPT_IN_COOPERATIVE_WRITER_BOUNDARY_NOT_PUBLIC_ROUTED",
+    "module": "lib/f09c5-writer-boundary.js",
+    "mutationEngineHook": "OPTIONAL_writerBoundary_WITH_COLLECTION_WIDE_WRAPPING",
+    "locks": "EXCLUSIVE_CREATE_PER_BACKEND_AND_PHYSICAL_COLLECTION_ON_SHARED_PRIVATE_LOCAL_ROOT",
+    "cooperatingIndependentNodeProcesses": "OFFLINE_TEST_PASS",
+    "crashAndUncertain": "LOCK_REMAINS_FAIL_CLOSED_NO_TTL_NO_STEAL",
+    "lockRootDivergence": "NEGATIVE_CONTROL_CONFIRMED_BYPASS",
+    "nonCooperatingWriters": "NOT_BLOCKED",
+    "backendCredentialAndNetworkIsolation": "NOT_IMPLEMENTED_NOT_ATTESTED",
+    "hostIndependentCertification": "NOT_RUN",
+    "notProductionAuthorization": true,
+    "productionMutationGrant": false
+  },
+  "deploymentModel": {
+    "acceptedByUser": "COOPERATING_WRITERS_ONLY",
+    "scope": "All VectHare writes in one deployment use one shared, private filesystem lock root and same trusted collection identity; third-party direct DB writes are not prevented or conflict-safe.",
+    "externalWriterRestrictionRequiredForTarget": false,
+    "externalWritesUnsupportedDuringManagedMutation": true,
+    "cooperativeWriterIntegration": "OPTIONAL_ENGINE_HOOK_NOT_YET_ON_ALL_PILOT_ROUTES",
+    "hostCertification": "PENDING",
+    "productionMutationActivation": false
+  },
+  "f09c6": {
+    "hostProbe": "IMPLEMENTED",
+    "adminOnly": "YES_NOT_PUBLIC_ROUTE",
+    "endpoint": "HTTP_127.0.0.1_EXPLICIT_PORT_ONLY",
+    "probeTypes": [
+      "READ_ONLY_PREFLIGHT",
+      "EXPLICIT_DISPOSABLE_COLLECTION"
+    ],
+    "cleanup": "OPT_IN_ONLY_EXACT_CREATED_COLLECTION_AND_404_READBACK",
+    "uncertain": "NO_RETRY_NO_AUTO_CLEANUP",
+    "diagnosticNeverCertifiesApplied": "TRUE",
+    "offlineMockTests": 9,
+    "liveQdrantService": "ABSENT",
+    "complete": "OFFLINE_IMPLEMENTATION_ONLY"
+  }
+}

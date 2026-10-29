@@ -1,0 +1,131 @@
+{
+  "checkpoint": "F09c.5 cooperative writer boundary; overall F09c acceptance OPEN",
+  "baseline": {
+    "extensionVersion": "2.2.0-alpha.s11.31-f09c5",
+    "pluginVersion": "3.2.10-s10.30-f09c5",
+    "pluginSourceFingerprint": "93f1bab75f89450b60eee6f2496c8b97748b5d00d638ea2cfa9817c451f204c5"
+  },
+  "stageStatus": "COOPERATING_PROCESS_LOCK_IMPLEMENTED_OFFLINE_HOST_WRITE_ISOLATION_UNPROVEN",
+  "runtimeCodeChanges": true,
+  "backends": {
+    "qdrant": {
+      "liveHostAcceptance": "NOT_RUN",
+      "liveBackendCRUD": "NOT_RUN",
+      "externalWriterAtomicCAS": "BLOCKED_UNPROVEN",
+      "restartCrashAcceptance": "NOT_RUN",
+      "productionWritesEnabled": false,
+      "conditionalProbe": "DISPOSABLE_FIXTURE_ONLY_OFFLINE_VERIFIED",
+      "conditionalModes": "INSERT_ONLY_UPDATE_ONLY_REVISION_FILTER_AND_SCOPED_DELETE_FILTER",
+      "appliedReceiptProven": "NO_COMPLETED_STATUS_IS_NOT_MATCH_EVIDENCE",
+      "minimumCandidateVersion": "1.17.0",
+      "conditionalAcknowledgement": "COMPLETED_IS_NOT_PER_POINT_MATCH_PROOF",
+      "readbackAttribution": "UNPROVEN_EXTERNAL_WRITER_CAN_MIMIC_POSTSTATE",
+      "exclusiveWriterAlternative": "LOCAL_COOPERATING_PROCESS_CANDIDATE_NOT_HOST_ENFORCED",
+      "evidenceClassification": "F09C4_NONAUTHORIZING_OFFLINE_TESTED"
+    },
+    "lancedb": {
+      "liveHostAcceptance": "NOT_RUN",
+      "liveBackendCRUD": "NOT_RUN",
+      "externalWriterAtomicCAS": "BLOCKED_UNPROVEN",
+      "restartCrashAcceptance": "NOT_RUN",
+      "productionWritesEnabled": false,
+      "exclusiveWriterAlternative": "LOCAL_COOPERATING_PROCESS_CANDIDATE_NOT_HOST_ENFORCED"
+    },
+    "pluginVectra": {
+      "liveHostAcceptance": "NOT_RUN",
+      "liveBackendCRUD": "NOT_RUN",
+      "externalWriterAtomicCAS": "BLOCKED_UNPROVEN",
+      "restartCrashAcceptance": "NOT_RUN",
+      "productionWritesEnabled": false,
+      "exclusiveWriterAlternative": "LOCAL_COOPERATING_PROCESS_CANDIDATE_NOT_HOST_ENFORCED"
+    },
+    "milvus": {
+      "liveHostAcceptance": "NOT_RUN",
+      "liveBackendCRUD": "NOT_RUN",
+      "externalWriterAtomicCAS": "BLOCKED_UNPROVEN",
+      "restartCrashAcceptance": "NOT_RUN",
+      "productionWritesEnabled": false,
+      "exclusiveWriterAlternative": "LOCAL_COOPERATING_PROCESS_CANDIDATE_NOT_HOST_ENFORCED"
+    }
+  },
+  "localEvidence": {
+    "pluginSourceManifest": "MATCHED_LOCAL_ONLY",
+    "qdrantLoopbackPort6333": "UNREACHABLE",
+    "milvusLoopbackPort19530": "UNREACHABLE",
+    "embeddedLanceDB": "NOT_PROBED",
+    "embeddedVectra": "NOT_PROBED",
+    "pluginTestCombined": "400_PASS_CLEAN",
+    "pluginReRunAffectedWorker": "9_PASS",
+    "f09cRaceNegativeControl": "1_PASS",
+    "f09cEvidenceAssessorTests": "3_PASS",
+    "extensionTests": "1169_ASSERTIONS_PASS_ACROSS_PARTITIONS_AND_WORKER_RETESTS;COMBINED_RUN_SIGSEGV",
+    "f09cAtomicGateTests": "7_PASS",
+    "pluginFullRegression": "443_PASS_CLEAN",
+    "f09c2CrashGapTests": "5_PASS",
+    "f09c3ConditionalCandidateTests": "13_PASS",
+    "matchedPair": "PASS_LOCAL_MANIFEST_AND_PIN_ONLY",
+    "f09c4EvidenceNegativeControls": "11_PASS",
+    "javascriptSyntax": "365_PASS",
+    "f09c5WriterBoundaryTests": "10_PASS_NEW_PLUS_4_IMPORTED_S04_FIXTURES",
+    "f09c5IndependentProcessLock": "PASS_LOCAL_TEST",
+    "f09c5OSProcessTermination": "PASS_LOCAL_TEST"
+  },
+  "safety": {
+    "atomicExternalWriterGuarantee": "NOT_PROVEN",
+    "productionMutations": "DENIED",
+    "nativeStandard": "DENIED",
+    "legacyVectors": "DENIED",
+    "collectionPurge": "PROHIBITED",
+    "automaticMutations": "NOT_ACTIVATED",
+    "uncertainReceiptAutomaticReconciliation": "DENIED",
+    "realHost": "NOT_CONNECTED",
+    "productionWritesEnabled": false
+  },
+  "releaseDecision": "NO_GO_F09C5_LOCAL_WRITER_LOCK_IS_NOT_EXTERNAL_WRITE_ENFORCEMENT",
+  "nextRequired": [
+    "F09C6_QDRANT_BACKEND_NATIVE_APPLIED_EVIDENCE_OR_GENUINE_ENFORCED_GATEWAY_AND_LIVE_ACCEPTANCE",
+    "F09C7_LANCEDB_PHYSICAL_CONCURRENCY_AND_EXCLUSIVE_ACCESS",
+    "F09C8_VECTRA_LOCAL_PROCESS_AND_FILESTORE_EXCLUSIVE_ACCESS",
+    "F09C9_MILVUS_AUTHENTICATION_WRITE_ISOLATION_AND_CONCURRENCY",
+    "F09C10_REAL_HOST_CRASH_RESTART_DIRECT_WRITE_BYPASS_TESTS",
+    "F09C11_INDEPENDENT_EVIDENCE_AND_MATRIX_DECISION"
+  ],
+  "runtimeAtomicGate": {
+    "defaultEngineMode": "ATOMIC_ONLY_FAIL_CLOSED",
+    "legacyPilots": "EXPLICIT_ATOMIC_ONLY_FALSE_RESTRICTED_DEVELOPMENT_ONLY",
+    "atomicAdapterInterface": "atomicCompareAndMutate_PILOT_CONTRACT_ONLY",
+    "atomicOperationsRequired": [
+      "insert",
+      "update",
+      "metadata",
+      "delete"
+    ],
+    "missingAtomicMethod": "REFUSED_BEFORE_LEDGER_OR_MUTATION",
+    "missingHostIndependentAttestation": "REFUSED_BEFORE_LEDGER_OR_MUTATION",
+    "ambiguousAtomicResponse": "UNCERTAIN_NO_LEGACY_FALLBACK_NO_RETRY",
+    "uncertainReceiptReconciliation": "NO_AUTOMATIC_PROMOTION",
+    "realBackendAtomicCASImplemented": false,
+    "anyProductionPathCertified": false,
+    "persistedSubmittedAutoReconciliation": "DENIED_WITHOUT_NONEXPORTED_IN_PROCESS_ACK_TOKEN",
+    "persistedUncertainAutoReconciliation": "DENIED",
+    "qdrantCandidateImplemented": true,
+    "qdrantCandidateReturnsApplied": false,
+    "qdrantCandidatePublicRoute": false,
+    "qdrantCandidateEvidenceClassifier": "DIAGNOSTIC_ONLY_NO_WRITE_GRANT",
+    "qdrantExclusiveWriterChecklist": "NONAUTHORITATIVE_DENIES_PRODUCTION_EVEN_ALL_FLAGS_TRUE"
+  },
+  "f09c5": {
+    "implementation": "OPT_IN_COOPERATIVE_WRITER_BOUNDARY_NOT_PUBLIC_ROUTED",
+    "module": "lib/f09c5-writer-boundary.js",
+    "mutationEngineHook": "OPTIONAL_writerBoundary_WITH_COLLECTION_WIDE_WRAPPING",
+    "locks": "EXCLUSIVE_CREATE_PER_BACKEND_AND_PHYSICAL_COLLECTION_ON_SHARED_PRIVATE_LOCAL_ROOT",
+    "cooperatingIndependentNodeProcesses": "OFFLINE_TEST_PASS",
+    "crashAndUncertain": "LOCK_REMAINS_FAIL_CLOSED_NO_TTL_NO_STEAL",
+    "lockRootDivergence": "NEGATIVE_CONTROL_CONFIRMED_BYPASS",
+    "nonCooperatingWriters": "NOT_BLOCKED",
+    "backendCredentialAndNetworkIsolation": "NOT_IMPLEMENTED_NOT_ATTESTED",
+    "hostIndependentCertification": "NOT_RUN",
+    "notProductionAuthorization": true,
+    "productionMutationGrant": false
+  }
+}

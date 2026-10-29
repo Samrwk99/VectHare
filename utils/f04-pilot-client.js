@@ -70,7 +70,7 @@ export function renderF04PilotPanel(root,getSettings,doc=globalThis.document){
    operationId=uuid();lastOperationId=operationId;receiptId.value=operationId;
    const a=action.value;
    const payload={backend:'qdrant',source,configId:'local',
-    embedding:{source:settings?.source||'transformers',model:model.value.trim(),dimension:Number(dim.value),metric:metric.value},
+    embedding:{source:settings?.f09b_embedding_source||settings?.source||'transformers',model:model.value.trim(),dimension:Number(dim.value),metric:metric.value},
     action:a,recordId:record.value.trim(),expectedRevision:Number(revision.value),operationId,
     experimentalConsent:F04_PILOT_CONSENT,
     ...(['insert','update'].includes(a)?{text:text.value,vector:JSON.parse(vector.value)}:{}),
