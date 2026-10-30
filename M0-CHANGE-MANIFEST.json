@@ -1,0 +1,45 @@
+{
+  "extension": {
+    "added": [],
+    "modified": [
+      "manifest.json",
+      "tests/f03-provision.node.test.mjs",
+      "tests/f04-pilot.node.test.mjs",
+      "tests/f05-acceptance.node.test.mjs",
+      "tests/f06-lancedb.node.test.mjs",
+      "tests/f07-vectra.node.test.mjs",
+      "tests/f08-milvus.node.test.mjs",
+      "tests/f09b-sync-preview.node.test.mjs",
+      "tests/f09b5-embedding-gui.node.test.mjs",
+      "tests/f09b6-saved-content.node.test.mjs",
+      "tests/f09b8-integrated-gateway.node.test.mjs",
+      "tests/h01-acceptance.node.test.mjs",
+      "tests/s11-gui-connections.node.test.mjs",
+      "ui/ui-manager.js",
+      "utils/e02-vector-request-gateway.js",
+      "utils/f09b5-embedding-gui.js"
+    ],
+    "removed": []
+  },
+  "plugin": {
+    "added": [
+      "M0-SCHEMA-AND-CONTRACT.md",
+      "lib/m0-backend-contract.js",
+      "lib/m0-capabilities.js",
+      "lib/m0-gateway.js",
+      "lib/m0-record-schema.js",
+      "lib/m0-write-boundary.js",
+      "tests/m0-foundation.test.mjs",
+      "tests/m0-route-registry.test.mjs"
+    ],
+    "modified": [
+      "S10-BUILD-MANIFEST.json",
+      "index.js",
+      "package.json",
+      "tests/s01-safety.test.mjs",
+      "tests/s03-route.test.mjs",
+      "tests/s10-api.test.mjs"
+    ],
+    "removed": []
+  }
+}

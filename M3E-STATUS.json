@@ -1,0 +1,32 @@
+{
+  "milestone": "M3e",
+  "baseline": "M3d",
+  "pluginVersion": "3.2.10-m3.5",
+  "extensionVersion": "2.2.0-alpha.m3.3",
+  "completion": "PARTIAL",
+  "m3ExitGate": "OPEN",
+  "productionCapabilityPromotions": 0,
+  "realHostAcceptance": "NOT_EXECUTED",
+  "pluginTests": {
+    "partitionA": 700,
+    "partitionB": 12,
+    "passed": 712,
+    "failedAssertions": 0,
+    "runnerCaveat": "One isolated timing-sensitive runtime-lock run was cancelled; a subsequent isolated run passed; combined tests have also shown intermittent SIGSEGV"
+  },
+  "extensionTests": {
+    "m3FocusedPassed": 2,
+    "fullSuiteNotRerun": true
+  },
+  "implementation": [
+    "INTERNAL_SINGLE_LOCK_RESTORE_CUTOVER",
+    "ONE_WAY_RESTORE_CLAIM",
+    "QDRANT_RESTORE_INDEX_VECTOR_READBACK_AND_SMOKE",
+    "IMMUTABLE_TARGET_RECEIPT_AND_JOURNAL_PUBLICATION",
+    "M1_ROUTED_GENERATION_FENCED_S04_WRITES",
+    "MANAGED_EVOLUTION_PROVEN_BY_S04_LEDGER",
+    "FAIL_CLOSED_UNCERTAIN_RESTORE",
+    "NO_BROWSER_LIFECYCLE_EXECUTION"
+  ],
+  "next": "Finish one-shot production-facing restore certification plus full rollback, verified decommission/empty, new-model rebuild, live-host acceptance"
+}

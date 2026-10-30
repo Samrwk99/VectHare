@@ -1,0 +1,1128 @@
+{
+  "phase": "M0",
+  "baseline": "F10b.10",
+  "releaseCandidate": "m0.1",
+  "realHostAcceptance": "NOT_RUN",
+  "capabilities": [
+    {
+      "contractVersion": 2,
+      "backend": "qdrant",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "insert",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "qdrant",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "update",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "qdrant",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "revectorize",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "qdrant",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "delete",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "qdrant",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "collection-delete",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "qdrant",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "scoped-purge",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "qdrant",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "auto-chat-sync",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "qdrant",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "auto-lorebook-sync",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "qdrant",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "orphan-delete",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "qdrant",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "backup",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "qdrant",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "restore",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "qdrant",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "native-standard",
+      "mode": "UNSUPPORTED_BY_DESIGN",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_UNSUPPORTED_BY_DESIGN",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "qdrant",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "migration",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "qdrant",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "uncertain-recovery",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "milvus",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "insert",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "milvus",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "update",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "milvus",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "revectorize",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "milvus",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "delete",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "milvus",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "collection-delete",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "milvus",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "scoped-purge",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "milvus",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "auto-chat-sync",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "milvus",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "auto-lorebook-sync",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "milvus",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "orphan-delete",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "milvus",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "backup",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "milvus",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "restore",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "milvus",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "native-standard",
+      "mode": "UNSUPPORTED_BY_DESIGN",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_UNSUPPORTED_BY_DESIGN",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "milvus",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "migration",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "milvus",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "uncertain-recovery",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "lancedb",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "insert",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "lancedb",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "update",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "lancedb",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "revectorize",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "lancedb",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "delete",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "lancedb",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "collection-delete",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "lancedb",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "scoped-purge",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "lancedb",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "auto-chat-sync",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "lancedb",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "auto-lorebook-sync",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "lancedb",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "orphan-delete",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "lancedb",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "backup",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "lancedb",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "restore",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "lancedb",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "native-standard",
+      "mode": "UNSUPPORTED_BY_DESIGN",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_UNSUPPORTED_BY_DESIGN",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "lancedb",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "migration",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "lancedb",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "uncertain-recovery",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "vectra",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "insert",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "vectra",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "update",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "vectra",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "revectorize",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "vectra",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "delete",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "vectra",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "collection-delete",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "vectra",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "scoped-purge",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "vectra",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "auto-chat-sync",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "vectra",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "auto-lorebook-sync",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "vectra",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "orphan-delete",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "vectra",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "backup",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "vectra",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "restore",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "vectra",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "native-standard",
+      "mode": "UNSUPPORTED_BY_DESIGN",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_UNSUPPORTED_BY_DESIGN",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "vectra",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "migration",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "vectra",
+      "transport": "plugin",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "uncertain-recovery",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "standard",
+      "transport": "native",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "insert",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "standard",
+      "transport": "native",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "update",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "standard",
+      "transport": "native",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "revectorize",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "standard",
+      "transport": "native",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "delete",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "standard",
+      "transport": "native",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "collection-delete",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "standard",
+      "transport": "native",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "scoped-purge",
+      "mode": "UNSUPPORTED_BY_DESIGN",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_UNSUPPORTED_BY_DESIGN",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "standard",
+      "transport": "native",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "auto-chat-sync",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "standard",
+      "transport": "native",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "auto-lorebook-sync",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "standard",
+      "transport": "native",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "orphan-delete",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "standard",
+      "transport": "native",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "backup",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "standard",
+      "transport": "native",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "restore",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "standard",
+      "transport": "native",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "native-standard",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "standard",
+      "transport": "native",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "migration",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    },
+    {
+      "contractVersion": 2,
+      "backend": "standard",
+      "transport": "native",
+      "adapterVersion": "m0-contract-1",
+      "hostVersion": null,
+      "operation": "uncertain-recovery",
+      "mode": "BLOCKED",
+      "prerequisites": [
+        "M0_HOST_ACCEPTANCE",
+        "M1_MUTATION_IMPLEMENTATION"
+      ],
+      "enabled": false,
+      "reasonCode": "M0_PRODUCTION_GATE_NOT_CERTIFIED",
+      "evidenceFingerprint": null
+    }
+  ]
+}

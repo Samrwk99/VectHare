@@ -25,6 +25,8 @@ import {f07SealedVectra,f07VectraLocation} from '../lib/f07-vectra.js';
 import {registerF08MilvusPilotRoutes} from '../lib/f08-milvus.js';
 import {registerF08AcceptanceRoutes} from '../lib/f08-milvus-acceptance.js';
 import { registerS04Routes } from '../lib/s04-routes.js';
+import {registerM0GatewayRoutes} from '../lib/m0-gateway.js';
+import {m0WriteBoundary} from '../lib/m0-write-boundary.js';
 import {registerS05Routes} from '../lib/s05-routes.js';
 import {registerS10Routes} from '../lib/s10-contracts.js';
 import {loadS10Build} from '../lib/s10-build.js';
@@ -46,6 +48,14 @@ async function registered(pool) {
             './lib/s03-backends.js':{BackendPool:class {constructor(){return pool;}}},
             './lib/s02-identity.js':{safeLegacyPhysicalName},
             './lib/s04-routes.js':{registerS04Routes},
+            './lib/m0-gateway.js':{registerM0GatewayRoutes},
+            './lib/m1-saved-records.js':{registerM1Routes:()=>{},readM1HostEvidence:async()=>null},
+            './lib/m2-jobs.js':{registerM2Routes:()=>{}},
+            './lib/m3-collections.js':{registerM3Routes:()=>{}},
+            './lib/m4a-lancedb-lifecycle.js':{registerM4aLanceRoutes:()=>{}},
+            './lib/m4b-vectra-lifecycle.js':{registerM4bVectraRoutes:()=>{}},
+            './lib/m4c-milvus-lifecycle.js':{registerM4cMilvusRoutes:()=>{}},
+            './lib/m0-write-boundary.js':{m0WriteBoundary},
             './lib/s05-routes.js':{registerS05Routes},
             './lib/s05-contract.js':{validateVector:validateS05Vector},
             './lib/s10-build.js':{loadS10Build},

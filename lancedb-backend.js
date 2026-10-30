@@ -54,12 +54,25 @@ class LanceDBBackend {
      * @param {string} vectorsPath - Path to vectors directory
      */
     async initialize(vectorsPath) {
-        this.basePath = path.join(vectorsPath, 'lancedb');
-
-        // Ensure base directory exists
-        await fs.mkdir(this.basePath, { recursive: true });
-
-        console.log('[LanceDB] Initialized base path:', this.basePath);
+        if (typeof vectorsPath !== 'string' || !path.isAbsolute(vectorsPath)) {
+            throw new AccessError('M4A_STORAGE_ROOT_INVALID', 'Absolute server-owned vectors root required');
+        }
+        const root = await fs.realpath(vectorsPath);
+        const rootStat = await fs.lstat(vectorsPath);
+        if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+            throw new AccessError('M4A_STORAGE_ROOT_UNTRUSTED', 'Symlinked storage root refused');
+        }
+        const base = path.join(root, 'lancedb');
+        await fs.mkdir(base, {mode: 0o700});
+        const stat = await fs.lstat(base);
+        if (!stat.isDirectory() || stat.isSymbolicLink() ||
+            await fs.realpath(base) !== base) {
+            throw new AccessError('M4A_STORAGE_PATH_UNTRUSTED', 'Symlink/reparse-point storage path refused');
+        }
+        this.basePath = base;
+        this.databases.clear();
+        this.collections.clear();
+        console.log('[LanceDB] Initialized source-scoped storage');
     }
 
     /**
@@ -71,21 +84,23 @@ class LanceDBBackend {
     async getDatabase(source = 'transformers') {
         if (!this.basePath) throw new Error('LanceDB not initialized');
 
-        // Check cache
-        if (this.databases.has(source)) {
-            return this.databases.get(source);
-        }
-
-        // Create source-specific path
+        // Validate physical paths even on cached connections. A replaced
+        // source folder or junction must never silently redirect a write.
         exposedSafeSource(source);
-        const sourcePath = path.join(this.basePath, source);
-        await fs.mkdir(sourcePath, { recursive: true });
-        // No symlinked source directories may escape this user's data root.
         const physicalRoot = await fs.realpath(this.basePath);
+        const baseStat = await fs.lstat(this.basePath);
+        if (!baseStat.isDirectory() || baseStat.isSymbolicLink() || physicalRoot !== this.basePath) {
+            throw new AccessError('M4A_STORAGE_PATH_UNTRUSTED', 'LanceDB storage root changed');
+        }
+        const sourcePath = path.join(this.basePath, source);
+        await fs.mkdir(sourcePath, {mode: 0o700});
+        const sourceStat = await fs.lstat(sourcePath);
         const physicalSource = await fs.realpath(sourcePath);
-        if (path.dirname(physicalSource) !== physicalRoot) {
+        if (!sourceStat.isDirectory() || sourceStat.isSymbolicLink() ||
+            path.dirname(physicalSource) !== physicalRoot || physicalSource !== sourcePath) {
             throw new AccessError('S03_LANCE_PATH_ESCAPE', 'LanceDB source escapes user storage root');
         }
+        if (this.databases.has(source)) return this.databases.get(source);
 
         // Connect to source-specific database
         const db = await lancedb.connect(sourcePath);

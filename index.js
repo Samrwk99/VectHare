@@ -7,7 +7,7 @@
  * All chunk operations go through unified /chunks/* endpoints.
  * Backend is specified via `backend` parameter in request body.
  *
- * @version 3.2.10-s10.45-f10b10
+ * @version 3.2.11-m4d
  */
 
 import path from 'node:path';
@@ -23,6 +23,9 @@ import { BackendPool } from './lib/s03-backends.js';
 import { registerGuiConnectionRoutes } from './lib/s10-gui-connections.js';
 import { safeLegacyPhysicalName } from './lib/s02-identity.js';
 import { registerS04Routes } from './lib/s04-routes.js';
+import {registerM0GatewayRoutes} from './lib/m0-gateway.js';
+import {registerM1Routes,readM1HostEvidence} from './lib/m1-saved-records.js';
+import {m0WriteBoundary} from './lib/m0-write-boundary.js';
 import { registerS05Routes } from './lib/s05-routes.js';
 import {registerF02Routes} from './lib/f02-public-reads.js';
 import {registerF09WorkflowRoutes} from './lib/f09-workflows.js';
@@ -48,11 +51,16 @@ import {registerF08AcceptanceRoutes} from './lib/f08-milvus-acceptance.js';
 import { loadS10Build } from './lib/s10-build.js';
 import { registerS10Routes } from './lib/s10-contracts.js';
 import {registerH01AcceptanceRoutes} from './lib/h01-qdrant-acceptance.js';
+import {registerM2Routes} from './lib/m2-jobs.js';
+import {registerM3Routes} from './lib/m3-collections.js';
+import {registerM4aLanceRoutes} from './lib/m4a-lancedb-lifecycle.js';
+import {registerM4bVectraRoutes} from './lib/m4b-vectra-lifecycle.js';
+import {registerM4cMilvusRoutes} from './lib/m4c-milvus-lifecycle.js';
 import {registerF01HostRoutes} from './lib/f01-host-sources.js';
 import { validateVector as validateS05Vector } from './lib/s05-contract.js';
 
 const pluginName = 'similharity';
-const pluginVersion = '3.2.10-s10.45-f10b10';
+const pluginVersion = '3.2.11-m4d';
 
 /**
  * Initialize the plugin
@@ -65,6 +73,8 @@ export async function init(router) {
     console.log(`[${pluginName}] Initializing v${pluginVersion}...`);
     // S01: must run before ALL legacy routes, including /chunks/:hash/* and /purge-all.
     router.use(s01MutationGuard);
+    // M0 fail-closed boundary before ANY existing pilot, diagnostic or legacy writer.
+    router.use(m0WriteBoundary);
     const backendPool = new BackendPool();
     // Authentication is inherited from the SillyTavern host router. Do not
     // accept a user identity from request body, query or headers.
@@ -93,6 +103,30 @@ export async function init(router) {
     router.use(legacyReadBoundary);
     // S04 endpoints are preflight/status-only. No public mutation dispatch.
     registerS04Routes(router);
+    // M0: authenticated source-attested plan and read-only capabilities; execution blocked.
+    // M1 takes precedence for its narrow source-attested plan/execute routes.
+    // M0 generic denials, S01 and S04 legacy denials stay in force.
+    registerM1Routes(router,{backendPool,
+      createVectra:(req,binding)=>f07SealedVectra(req,binding,{createIndex:folder=>new vectra.LocalIndex(folder),
+        requireReceipt:!(binding.collection.generation>0)}),
+      makeVectraIndex:folder=>new vectra.LocalIndex(folder),
+      hostEmbed:(req,source,text,model)=>getEmbeddingForSource(source,text,model,req.user.directories,req)});
+    registerM2Routes(router,{backendPool});
+    registerM3Routes(router,{backendPool});
+    registerM4aLanceRoutes(router,{backendPool});
+    registerM4cMilvusRoutes(router,{backendPool});
+    registerM4bVectraRoutes(router,{
+      createVectra:(req,binding)=>f07SealedVectra(req,binding,{createIndex:folder=>new vectra.LocalIndex(folder),
+        requireReceipt:!(binding.collection.generation>0)}),
+      makeVectraIndex:folder=>new vectra.LocalIndex(folder)});
+    registerM0GatewayRoutes(router,{liveCapabilityEvidence:async()=>{
+      const evidenceByOperation={};
+      for(const operation of ['insert','update','revectorize','delete']){
+        const evidence=await readM1HostEvidence(operation);
+        if(evidence)evidenceByOperation[`qdrant:${operation}`]=evidence;
+      }
+      return {hostVersion:process.env.SIMILHARITY_STABLE_ST_VERSION??null,evidenceByOperation};
+    }});
     const f02ReadHandler=registerF02Routes(router,{backendPool,createVectra:async(req,binding)=>{
         // No fabricated index seal or auto-creation: S08 refuses unprovisioned Vectra.
         return f07SealedVectra(req,binding,{createIndex:folder=>new vectra.LocalIndex(folder)});

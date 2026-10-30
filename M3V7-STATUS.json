@@ -1,0 +1,23 @@
+{
+  "milestone": "M3v7",
+  "pluginVersion": "3.2.10-m3.11",
+  "extensionVersion": "2.2.0-alpha.m3.11",
+  "pluginTestsPassed": 739,
+  "extensionTestsPassed": 1182,
+  "matrix": {
+    "ENABLED_AWAITING_MANUAL_TEST": 8,
+    "BLOCKED": 57,
+    "UNSUPPORTED_BY_DESIGN": 5
+  },
+  "newFeatures": [
+    "verified generation-aware logical backups after cutover",
+    "read-only source-attested cross-model rebuild readiness"
+  ],
+  "manualAcceptance": "not run",
+  "m3Complete": false,
+  "remaining": [
+    "full new-model rebuild staging and atomic activation",
+    "repeated destructive lifecycle after cutover",
+    "general uncertain-operation adjudication"
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "milestone": "M3g",
+  "baseline": "M3f",
+  "pluginVersion": "3.2.10-m3.7",
+  "extensionVersion": "2.2.0-alpha.m3.7",
+  "completion": "PARTIAL",
+  "m3ExitGate": "OPEN",
+  "productionCapabilityPromotions": 0,
+  "realHostAcceptance": "NOT_EXECUTED",
+  "tests": {
+    "plugin": {
+      "passed": 725,
+      "failed": 0,
+      "command": "node --experimental-vm-modules --test --test-concurrency=1 tests/*.test.mjs"
+    },
+    "extension": {
+      "combinedPassed": 1171,
+      "combinedCrash": "SIGSEGV in unchanged C12 integration test",
+      "isolatedC12Passed": 7,
+      "isolatedC12Failed": 0
+    },
+    "m3FocusedPlugin": 21,
+    "m3FocusedExtension": 3
+  },
+  "implemented": [
+    "IMMUTABLE_M3_RESTORE_ROLLBACK_DELETION_STAGE_AUDIT",
+    "DURABLE_PRE_DISPATCH_PENDING_MARKER",
+    "OWNER_BOUND_AUTHENTICATED_READONLY_OPERATION_EVIDENCE",
+    "NO_AUTOMATIC_REPLAY_OR_LOCK_RELEASE",
+    "CLIENT_SIDE_EVIDENCE_REQUEST_GUARD"
+  ],
+  "outstanding": [
+    "PUBLIC_CERTIFIED_LIFECYCLE_GATEWAY_AND_CONSENT",
+    "M2_ADMINISTRATOR_PHYSICAL_LOCK_ADJUDICATION",
+    "SCOPED_EMPTY_AND_REPROVISION",
+    "NEW_MODEL_REBUILD",
+    "GENERAL_LOSSLESS_ROLLBACK",
+    "REAL_HOST_QDRANT_SILLYTAVERN_ACCEPTANCE"
+  ]
+}

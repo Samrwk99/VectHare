@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import qdrant from '../qdrant-backend.js';
 import { s01MutationGuard, SafetyError } from '../lib/s01-safety.js';
+import {m0WriteBoundary} from '../lib/m0-write-boundary.js';
 import { safeLegacyPhysicalName } from '../lib/s02-identity.js';
 import { exposedSafeSource, AccessError } from '../lib/s03-security.js';
 
@@ -246,9 +247,17 @@ test('plugin registration keeps legacy mutation endpoints blocked even without m
         './lib/s03-backends.js':{BackendPool:class {}},
         './lib/s02-identity.js':{safeLegacyPhysicalName},
         './lib/s04-routes.js':{registerS04Routes:()=>{}},
+        './lib/m0-gateway.js':{registerM0GatewayRoutes:()=>{}},
+        './lib/m1-saved-records.js':{registerM1Routes:()=>{},readM1HostEvidence:async()=>null},
+        './lib/m2-jobs.js':{registerM2Routes:()=>{}},
+            './lib/m3-collections.js':{registerM3Routes:()=>{}},
+            './lib/m4a-lancedb-lifecycle.js':{registerM4aLanceRoutes:()=>{}},
+            './lib/m4b-vectra-lifecycle.js':{registerM4bVectraRoutes:()=>{}},
+            './lib/m4c-milvus-lifecycle.js':{registerM4cMilvusRoutes:()=>{}},
+        './lib/m0-write-boundary.js':{m0WriteBoundary},
         './lib/s05-routes.js':{registerS05Routes:()=>{}},
         './lib/s05-contract.js':{validateVector:()=>{}},
-        './lib/s10-build.js':{loadS10Build:async()=>({pluginVersion:'3.2.10-s10.0',contractVersion:2,fingerprint:'test',verification:'MATCHED_LOCAL_SOURCE_MANIFEST'})},
+        './lib/s10-build.js':{loadS10Build:async()=>({pluginVersion:'3.2.10-m2.1',contractVersion:2,fingerprint:'test',verification:'MATCHED_LOCAL_SOURCE_MANIFEST'})},
         './lib/s10-contracts.js':{registerS10Routes:()=>{}},
         './lib/h01-qdrant-acceptance.js':{registerH01AcceptanceRoutes:()=>{}},
             './lib/f01-host-sources.js':{registerF01HostRoutes:()=>{}},
