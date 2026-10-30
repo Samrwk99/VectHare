@@ -1,10 +1,10 @@
 {
   "formatVersion": 1,
   "contractVersion": 2,
-  "pluginVersion": "3.2.11-m4d",
+  "pluginVersion": "3.2.11-m4d.2",
   "algorithm": "sha256",
   "files": {
-    "index.js": "21144b9fec45c42ea111469a0ad13473a0e5b81c62c08e1185b94b9a91deba00",
+    "index.js": "ed32b9f65a7ec89069ac7d450ab41f106d2986f79d7dde8c5e523cc36382262a",
     "lancedb-backend.js": "7862fb7cce79a011961e1156842d4d29fd0b6b45dac8233888f007a41589884a",
     "lib/f01-host-sources.js": "0e1de535de9381a109aadf6638d7f589933e92b1866a6f0d91e0137f58d8d474",
     "lib/f02-public-reads.js": "638797851d539ae9984fc4560b980ce01246368fdf485a877ff723782de87882",
@@ -117,8 +117,8 @@
     "lib/s10-contracts.js": "42c6054103c91873aa2ff1f49c4db61a45a08767ea22a6b6cff11698402c1b26",
     "lib/s10-gui-connections.js": "e5a041abda59cdefd4f3556e58e9bfd8debbcba7309a2bac504b0c68d887ff58",
     "milvus-backend.js": "6cfee983eb34ab39a0f59f6ce2590a6c75d24a961f5a19ee4ae59d440427394e",
-    "package.json": "d862a281d5780f69b20637589a0a937c2e37e6ec4ba59ead691d5e5d44605362",
+    "package.json": "03e1342f2a7737919ad0a237b6cec3beed36554d7b059295ff1c653455e74661",
     "qdrant-backend.js": "f6a71992d55288345f041ed5d30e38524fc8f58201150b0b92cab18cf3e3d72b"
   },
-  "sourceFingerprint": "063e174d304d94453d878f3609e41f4d023964eb2a7c63c06c2afd4d795fa371"
+  "sourceFingerprint": "3532044ef7450b57b31cd312c07b2f8b8fceb8d361e2d4679d58c93447443c6d"
 }

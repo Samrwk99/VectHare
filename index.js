@@ -7,7 +7,7 @@
  * All chunk operations go through unified /chunks/* endpoints.
  * Backend is specified via `backend` parameter in request body.
  *
- * @version 3.2.11-m4d
+ * @version 3.2.11-m4d.2
  */
 
 import path from 'node:path';
@@ -60,7 +60,7 @@ import {registerF01HostRoutes} from './lib/f01-host-sources.js';
 import { validateVector as validateS05Vector } from './lib/s05-contract.js';
 
 const pluginName = 'similharity';
-const pluginVersion = '3.2.11-m4d';
+const pluginVersion = '3.2.11-m4d.2';
 
 /**
  * Initialize the plugin
@@ -1328,8 +1328,11 @@ async function getEmbeddingForSource(source, text, model, directories, req) {
         }
         case 'llamacpp': {
             const { getLlamaCppVector } = await import('../../src/vectors/llamacpp-vectors.js');
-            const apiUrl = req.body?.apiUrl || 'http://localhost:8080';
-            return await getLlamaCppVector(text, apiUrl, directories);
+            const apiUrl = req.body?.apiUrl;
+            if (typeof apiUrl !== 'string' || !apiUrl.trim()) {
+                throw new Error('LLAMACPP_EMBEDDING_URL_REQUIRED: configure the llama.cpp URL in SillyTavern or VectHare');
+            }
+            return await getLlamaCppVector(text, apiUrl.trim(), directories);
         }
         case 'bananabread': {
             // BananaBread llama.cpp-compatible endpoint (no model param needed - uses server config)
