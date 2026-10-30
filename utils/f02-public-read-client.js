@@ -54,7 +54,12 @@ export function renderF02ReadPanel(root,getSettings,doc=globalThis.document){
    const {getCurrentChatId}=await import('../../../../../script.js');
    source=await f02CurrentChatSelector({getChatId:getCurrentChatId,getContext:()=>globalThis.SillyTavern?.getContext?.()});
    const settings=typeof getSettings==='function'?getSettings():{};
-   const embedding={source:settings?.f09b_embedding_source||settings?.source||'transformers',model:model.value.trim(),dimension:Number(dimension.value),metric:metric.value};
+   let embedding={source:settings?.f09b_embedding_source||settings?.source||'transformers',model:model.value.trim(),dimension:Number(dimension.value),metric:metric.value};
+   if(selection.value==='qdrant'&&operation!=='bind'){
+    const {m3SourceProfile}=await import('./m3-collections-gui.js');
+    const scoped=await m3SourceProfile(source,getRequestHeaders());
+    if(scoped.selected){embedding=scoped.profile;model.value=embedding.model;dimension.value=String(embedding.dimension);metric.value=embedding.metric;}
+   }
    const result=await f02Read(operation,{backend:selection.value,source,embedding,
      configId:selection.value==='qdrant'&&(settings?.qdrant_use_cloud!==true)?'local':'default',
      ...(operation==='list'?{page:{limit:20}}:operation==='get'?{recordId:recordId.value.trim()}:

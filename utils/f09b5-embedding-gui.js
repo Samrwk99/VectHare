@@ -31,7 +31,7 @@ export function renderF09b5EmbeddingGui(root,getSettings,persist,getHeaders,doc=
  if(!root||!doc?.createElement||root.querySelector?.('#vecthare_f09b5_embeddings'))return false;
  const panel=doc.createElement('section');panel.id='vecthare_f09b5_embeddings';
  const heading=doc.createElement('h4');heading.textContent='F09b.5 — server-managed embeddings';
- const note=doc.createElement('p');note.textContent='Configure a fixed-endpoint server embedding provider for Qdrant, LanceDB, Vectra and Milvus v2 pilots. Keys are write-only and stored in the authenticated user’s private server directory; never in extension settings. Profile model and dimension must match the exact F03 collection. This does not activate production writes or WebLLM prompt retrieval.';
+ const note=doc.createElement('p');note.textContent='M0: Embedding connection profiles and credentials are configured by the server administrator, not by this browser. Read or test the existing profile here. This does not enable production writes.';
  const settings=getSettings?.()||{};
  const source=doc.createElement('select');for(const name of SOURCES){const opt=doc.createElement('option');opt.value=name;opt.textContent=name;source.append(opt);}
  source.value=SOURCES.includes(settings.f09b_embedding_source)?settings.f09b_embedding_source:'transformers';
@@ -67,6 +67,10 @@ export function renderF09b5EmbeddingGui(root,getSettings,persist,getHeaders,doc=
  const remove=btn('Remove server embedding profile and key',async()=>{
   await deleteEmbeddingProfile(headers());status.textContent='Server embedding profile and credential removed. Existing collections were not touched.';
  });
+ // M0 D6: avoid presenting nonfunctional secret-edit controls.
+ for(const el of [source,model,dimension,metric,secret,clear,save,remove])el.disabled=true;
+ save.textContent='Admin-managed profile (read-only)';
+ remove.textContent='Admin-managed credentials (read-only)';
  panel.append(heading,note,source,model,dimension,metric,secret,clearLabel,load,save,test,remove,status);
  root.prepend(panel);void refresh().catch(()=>{status.textContent='Embedding profile unavailable; check plugin compatibility and server connection.';});return true;
 }

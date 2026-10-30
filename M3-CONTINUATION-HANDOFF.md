@@ -1,0 +1,12 @@
+# M3 continuation — remaining critical path
+
+Do **not** interpret the implemented cutover journal as a fully wired alias mechanism. The server only journals/validates transitions. Its published state fails closed at F02 and M3 context to prevent stale physical routing.
+
+1. **Finish trusted versioned binding across all consumers.** Introduce an authenticated, server-verifiable alias resolver that returns both logical key and current physical target/generation. `requireReadBinding`, `planMutation` + S04 re-derived plan, S04 ledger/engine, F02 public reads, M1 tickets/rechecks, F03 target-specific provision/schema receipts and M2 job lease exclusion must agree before `PUBLISHED` can be used. Reject stale generations and prevent writes during PREPARED.
+2. **Integrate fresh restore with the mutation gateway.** Tie the operation UUID to S04 receipt, backup digest and M3 journal, take both source/target cooperative physical locks in a deterministic order, create fresh target only, copy bounded exact rows once, verify indexes/inventory/metadata/revisions/vectors and versioned smoke-query set. A failure after dispatch retains the lock and goes to M2 assisted adjudication. No blind cleanup/replay.
+3. **Deletion:** only after active jobs stop, fresh verified backup, entire physical inventory/managed registry reconcile, source snapshot unchanged, S04 receipts terminal, typed approval and M3 operation claim. Dispatch once under F09c.10 physical lock, verify absence, commit S02 DELETED tombstone, then release. On ambiguity leave mapping and lock retained. Current `stageM3DisposableDecommission` tests only Qdrant physical semantics; it has no production registry tombstone.
+4. **Scoped empty:** reuse delete + exactly matched F03 re-provision, preserve audit/tombstone history and ensure crash recovery at every stage. Unrestricted purge stays prohibited.
+5. **Model rebuild:** use M2 source-attested re-embedding job into a different embedding profile and freshly provisioned target, validate complete inventory, cut over with explicit rollback retention; never silently update incompatible vectors in place.
+6. **Real-host acceptance:** in a disposable latest-stable SillyTavern + Qdrant environment, first close inherited M0/M1/M2 acceptance, then backup → restore → rollback, owned delete, empty, rebuild and injected failures. Only then promote per-Qdrant operation cells; other backends follow separately.
+
+M3 status: **NOT COMPLETE**. M4 should not be treated as the next completed-sequence milestone yet.

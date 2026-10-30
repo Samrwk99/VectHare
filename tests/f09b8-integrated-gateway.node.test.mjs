@@ -11,16 +11,14 @@ const lore={kind:'lorebook',name:'my_lore'};
 const base=source=>({backend:'qdrant',configId:'local',source,embedding});
 const fingerprint='a'.repeat(64);
 const request=(route,body,method='POST')=>inspectVectorRequest(`${path}${route}`,{method,body:JSON.stringify(body)});
-test('F09b.8 gateway permits only the explicit reviewed workflow selectors (not blanket writes)',()=>{
- assert.equal(request('/v2/workflows/chat-sync-pilot-apply',{
-  ...base(chat),sourceRevisionFingerprint:fingerprint,experimentalConsent:'I ACCEPT LOCAL CHAT SYNC PILOT'}).operation,'f09b3OneRecordSyncPilot');
- assert.equal(request('/v2/workflows/saved-content-pilot',{...base(lore),mode:'preview'}).operation,'f09b6SavedContentPilot');
- assert.equal(request('/v2/workflows/saved-content-pilot',{...base(lore),mode:'apply',itemIndex:0,
-  sourceRevisionFingerprint:fingerprint,experimentalConsent:'I ACCEPT SAVED CONTENT VECTOR PILOT'}).operation,'f09b6SavedContentPilot');
+test('M0 F09b.8 only read-only workflow selectors survive the gateway freeze',()=>{
+ for(const [endpoint,body] of [
+  ['/v2/workflows/chat-sync-pilot-apply',{...base(chat),sourceRevisionFingerprint:fingerprint,experimentalConsent:'I ACCEPT LOCAL CHAT SYNC PILOT'}],
+  ['/v2/workflows/saved-content-pilot',{...base(lore),mode:'preview'}],
+  ['/v2/workflows/saved-content-pilot',{...base(lore),mode:'apply',itemIndex:0,sourceRevisionFingerprint:fingerprint,experimentalConsent:'I ACCEPT SAVED CONTENT VECTOR PILOT'}],
+  ['/chunks/purge',{...base(chat),text:'unsafe'}]])
+  assert.throws(()=>request(endpoint,body),{code:'VECTHARE_E02_OPERATION_DENIED'});
  assert.equal(request('/v2/workflows/link-condition-preview',base(lore)).operation,'f09b7LinkConditionPreview');
- for(const endpoint of ['/chunks/purge','/purge-all','/v2/operations/submit','/v2/records/legacy-write'])
-  assert.throws(()=>request(endpoint,{...base(chat),text:'unsafe',vector:[1,2,3]}),{code:'VECTHARE_E02_OPERATION_DENIED'});
- assert.throws(()=>inspectVectorRequest('/api/vector/insert',{method:'POST',body:JSON.stringify({text:'unsafe'})}),{code:'VECTHARE_E02_OPERATION_DENIED'});
 });
 test('F09b.8 browser rejects cross-workflow attempts to nominate records, owners, text, or URLs',()=>{
  const requests=[

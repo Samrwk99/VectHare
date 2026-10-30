@@ -1,0 +1,34 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {randomUUID} from 'node:crypto';
+import {inspectVectorRequest,VectorOperationDenied} from '../utils/e02-vector-request-gateway.js';
+import {m2Preview,m2Create,m2Action,m2Status,m2Evidence} from '../utils/m2-jobs-gui.js';
+const root='/api/plugins/similharity/v2/m2/jobs';
+const id=randomUUID();
+const source={kind:'chat',avatar:'a.png',chatFile:'x'};
+const intent={backend:'qdrant',mode:'vectorize-current',source,maxItems:5,maxEmbeddings:5};
+const p=(suffix,method,body)=>inspectVectorRequest(root+suffix,{method,...(body===undefined?{}:{body:JSON.stringify(body)})});
+const denied=(suffix,method,body)=>assert.throws(()=>p(suffix,method,body),VectorOperationDenied);
+const response=(obj,status=200)=>({ok:status<400,status,async json(){return obj;}});
+test('M2 extension E02 only allows typed saved-source job operations',()=>{
+ assert.equal(p('/preview','POST',intent).allowed,true);
+ assert.equal(p('/create','POST',{intent,confirmation:'CREATE BOUNDED SAVED-SOURCE JOB'}).allowed,true);
+ assert.equal(p(`/${id}/step`,'POST',{}).allowed,true);
+ assert.equal(p(`/${id}/evidence`,'GET').allowed,true);
+ denied('/preview','POST',{...intent,ownerId:'bob'});
+ denied('/create','POST',{intent:{...intent,vector:[1]},confirmation:'CREATE BOUNDED SAVED-SOURCE JOB'});
+ denied('/create','POST',{intent,confirmation:'wrong'});
+ denied(`/${id}/step`,'POST',{recordId:id});
+ denied(`/${id}/review`,'POST',{decision:'APPLIED'});
+ denied(`/${id}/evidence`,'POST',{});
+ denied('/unknown','POST',{});
+});
+test('M2 GUI client requires valid preview/job/receipt responses',async()=>{
+ const dry=await m2Preview(intent,{},async()=>response({success:true,logicalKey:'a'.repeat(64),items:[],counts:{eligible:0,excluded:0}}));
+ assert.equal(dry.counts.eligible,0);
+ const created=await m2Create(intent,{},async()=>response({success:true,jobId:id,state:'PAUSED'}));assert.equal(created.jobId,id);
+ const step=await m2Action(id,'step',{},async()=>response({success:true,jobId:id,state:'READY'}));assert.equal(step.state,'READY');
+ const stat=await m2Status(id,{},async()=>response({success:true,jobId:id,state:'READY'}));assert.equal(stat.state,'READY');
+ const e=await m2Evidence(id,{},async()=>response({success:true,jobId:id,reviewState:'REVIEW_REQUIRED'}));assert.equal(e.reviewState,'REVIEW_REQUIRED');
+ await assert.rejects(()=>m2Action(id,'step',{},async()=>response({success:false,code:'M2_BLOCKED'},{status:409})),/M2_BLOCKED/);
+});

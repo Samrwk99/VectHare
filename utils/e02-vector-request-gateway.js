@@ -77,6 +77,494 @@ export function inspectVectorRequest(url, options={}) {
         if (req.body != null) fail(req,'inspection-rejects-body');
         return {intercepted:true,allowed:true,transport:'plugin',operation:'s11Discovery',backend:'none',method:'GET'};
     }
+    // M0 diagnostics with synthetic mutations are not production gateway writes.
+    if(req.transport==='plugin'&&/^\/v2\/diagnostics\/(?:qdrant-contract|qdrant-f05|lancedb-f06|vectra-f07|milvus-f08)$/.test(req.suffix)&&
+       req.method==='POST')fail(req,'m0-disposable-diagnostic-write-requires-gateway');
+    // M0: old pilot mutation endpoints are not the trusted new write gateway.
+    if(req.transport==='plugin'&&(
+       /^\/v2\/records\/(?:pilot-mutate|lancedb-pilot-mutate|vectra-pilot-mutate|milvus-pilot-mutate)$/.test(req.suffix)||
+       /^\/v2\/workflows\/(?:chat-sync-pilot-apply|chat-orphan-pilot|chat-lifecycle-pilot|saved-content-pilot)$/.test(req.suffix)||
+       req.suffix==='/v2/collections/provision'))fail(req,'m0-legacy-write-requires-gateway');
+    // M0/D6: remote endpoints and credentials are administrator configured.
+    if(req.transport==='plugin'&&/^\/v2\/connections\/(?:qdrant|milvus)$/.test(req.suffix)&&
+       ['PUT','DELETE'].includes(req.method))fail(req,'m0-admin-server-config-only');
+    // Active embedding credentials remain server-admin only. A staged local
+    // transformers identity (without secrets) may be configured by the user,
+    // but it never switches the active profile or enables a vector mutation.
+    if(req.transport==='plugin'&&req.suffix==='/v2/embeddings/profile'&&
+       ['PUT','DELETE'].includes(req.method))fail(req,'m0-admin-embedding-profile-only');
+    if(req.transport==='plugin'&&req.suffix==='/v2/embeddings/staged-profile'&&req.method==='PUT'){
+        const b=req.body;
+        if(!b||typeof b!=='object'||Array.isArray(b)||
+           Object.keys(b).some(k=>!['source','model','dimension','metric'].includes(k))||
+           b.source!=='transformers'||typeof b.model!=='string'||
+           !/^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,127}$/.test(b.model)||
+           !Number.isSafeInteger(b.dimension)||b.dimension<1||b.dimension>65536||
+           !['cosine','dot','euclid'].includes(b.metric)||req.parsed.search)
+            fail(req,'m3-staged-identity-only');
+        return {intercepted:true,allowed:true,transport:'plugin',backend:'none',
+            operation:'m3StagedLocalEmbeddingIdentity',method:'PUT'};
+    }
+    // M2: exact saved-source batch jobs, never client-supplied text/vectors,
+    // credential endpoints, owner IDs, physical names or generic mutations.
+    if(req.transport==='plugin'&&req.suffix.startsWith('/v2/m2/jobs')){
+        if(req.parsed.search)fail(req,'m2-query-forbidden');
+        const prefix='/v2/m2/jobs';
+        const item=req.suffix.slice(prefix.length);
+        const operation=item.match(/^\/([0-9a-f-]{36})(?:\/(resume|pause|cancel|step|evidence|review))?$/i);
+        if(operation){
+            if(!UUID_RE.test(operation[1]))fail(req,'m2-job-id-invalid');
+            const read=operation[2]===undefined||operation[2]==='evidence';
+            if(read?(req.method!=='GET'||req.body!=null):
+                (req.method!=='POST'||!req.body||typeof req.body!=='object'||Array.isArray(req.body)||Object.keys(req.body).length))
+                fail(req,'m2-job-method-or-body-forbidden');
+            return {intercepted:true,allowed:true,transport:'plugin',backend:'qdrant',
+                operation:read?'m2JobStatus':`m2${operation[2]}`,method:req.method};
+        }
+        if(!['/preview','/create'].includes(item)||req.method!=='POST'||!req.body||
+            typeof req.body!=='object'||Array.isArray(req.body))fail(req,'m2-job-shape-forbidden');
+        const body=item==='/create'?req.body.intent:req.body;
+        if(item==='/create'&&(Object.keys(req.body).some(k=>!['intent','confirmation'].includes(k))||
+           req.body.confirmation!=='CREATE BOUNDED SAVED-SOURCE JOB'))fail(req,'m2-job-confirmation-required');
+        const source=body?.source;
+        const fields=source?.kind==='chat'?['kind','avatar','chatFile']:
+            source?.kind==='group-chat'?['kind','groupId','chatFile']:
+            source?.kind==='lorebook'?['kind','name']:[];
+        if(!body||typeof body!=='object'||Array.isArray(body)||
+           Object.keys(body).some(k=>!['backend','source','configId','mode','selectedIds','maxItems','maxEmbeddings','ratePerMinute'].includes(k))||
+           body.backend!=='qdrant'||!fields.length||!source||Array.isArray(source)||
+           Object.keys(source).some(k=>!fields.includes(k))||
+           fields.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220)||
+           !['vectorize-current','vectorize-selected','vectorize-lorebook','revectorize-changed'].includes(body.mode)||
+           (body.configId!==undefined&&!['local','default'].includes(body.configId))||
+           (body.maxItems!==undefined&&(!Number.isInteger(body.maxItems)||body.maxItems<1||body.maxItems>80))||
+           (body.maxEmbeddings!==undefined&&(!Number.isInteger(body.maxEmbeddings)||body.maxEmbeddings<1||body.maxEmbeddings>80))||
+           (body.ratePerMinute!==undefined&&(!Number.isInteger(body.ratePerMinute)||body.ratePerMinute<1||body.ratePerMinute>120))||
+           (body.selectedIds!==undefined&&(!Array.isArray(body.selectedIds)||body.selectedIds.length>80||
+            body.selectedIds.some(id=>!UUID_RE.test(id)))))fail(req,'m2-job-intent-untrusted');
+        return {intercepted:true,allowed:true,transport:'plugin',backend:'qdrant',operation:'m2SavedJob'+item,method:'POST'};
+    }
+    // M4b: LanceDB source-bound preview and verified logical backup only.
+    // No client-specified physical names, vectors, paths, owners, or restore
+    // grants. Other LanceDB lifecycle routes remain denied by default.
+    // M4c Milvus: server-attested source selection, verified backup and one-use deletion only.
+    if(req.transport==='plugin'&&req.suffix.startsWith('/v2/m4c/milvus/')){
+        if(req.parsed.search)fail(req,'m4c-query-forbidden');
+        const verify=req.suffix.match(/^\/v2\/m4c\/milvus\/backups\/([a-f0-9-]{36})\/verify$/i);
+        if(verify){
+            if(!UUID_RE.test(verify[1])||req.method!=='GET'||req.body!==null)
+                fail(req,'m4c-verify-id-or-method-invalid');
+            return {intercepted:true,allowed:true,transport:'plugin',backend:'milvus',operation:'m4cVerifyBackup',method:'GET'};
+        }
+        if(req.suffix==='/v2/m4c/milvus/collections/transition/execute'){
+            const b=req.body;
+            if(req.method!=='POST'||!b||typeof b!=='object'||Array.isArray(b)||
+               Object.keys(b).sort().join(',')!=='confirmation,operationId'||
+               !UUID_RE.test(b.operationId)||
+               !['EMPTY OWNED MILVUS COLLECTION','RESTORE OWNED MILVUS COLLECTION'].includes(b.confirmation))
+                fail(req,'m4c-transition-execute-untrusted');
+            return {intercepted:true,allowed:true,transport:'plugin',backend:'milvus',operation:'m4cExecuteTransition',method:'POST'};
+        }
+        if(req.suffix==='/v2/m4c/milvus/collections/transition/plan'){
+            const b=req.body;
+            const fields=b?.source?.kind==='chat'?['kind','avatar','chatFile']:
+                b?.source?.kind==='group-chat'?['kind','groupId','chatFile']:
+                b?.source?.kind==='lorebook'?['kind','name']:[];
+            if(req.method!=='POST'||!b||typeof b!=='object'||Array.isArray(b)||
+               Object.keys(b).some(k=>!['backend','source','configId','backupId','action'].includes(k))||
+               b.backend!=='milvus'||(b.configId!==undefined&&b.configId!=='default')||
+               !['empty','restore'].includes(b.action)||!UUID_RE.test(b.backupId)||
+               !fields.length||!b.source||typeof b.source!=='object'||Array.isArray(b.source)||
+               Object.keys(b.source).some(k=>!fields.includes(k))||
+               fields.some(k=>typeof b.source[k]!=='string'||!b.source[k]||b.source[k].length>220))
+                fail(req,'m4c-transition-plan-untrusted');
+            return {intercepted:true,allowed:true,transport:'plugin',backend:'milvus',operation:'m4cPlanTransition',method:'POST'};
+        }
+        if(req.suffix==='/v2/m4c/milvus/collections/delete/execute'){
+            const b=req.body;
+            if(req.method!=='POST'||!b||typeof b!=='object'||Array.isArray(b)||
+               Object.keys(b).sort().join(',')!=='confirmation,operationId'||
+               !UUID_RE.test(b.operationId)||b.confirmation!=='DELETE OWNED MILVUS COLLECTION')
+                fail(req,'m4c-delete-execute-untrusted');
+            return {intercepted:true,allowed:true,transport:'plugin',backend:'milvus',operation:'m4cExecuteDelete',method:'POST'};
+        }
+        if(req.suffix==='/v2/m4c/milvus/collections/delete/plan'){
+            const b=req.body;
+            const fields=b?.source?.kind==='chat'?['kind','avatar','chatFile']:
+                b?.source?.kind==='group-chat'?['kind','groupId','chatFile']:
+                b?.source?.kind==='lorebook'?['kind','name']:[];
+            if(req.method!=='POST'||!b||typeof b!=='object'||Array.isArray(b)||
+                Object.keys(b).some(k=>!['backend','source','configId','backupId'].includes(k))||
+                b.backend!=='milvus'||(b.configId!==undefined&&b.configId!=='default')||
+                !UUID_RE.test(b.backupId)||!fields.length||!b.source||
+                typeof b.source!=='object'||Array.isArray(b.source)||
+                Object.keys(b.source).some(k=>!fields.includes(k))||
+                fields.some(k=>typeof b.source[k]!=='string'||!b.source[k]||b.source[k].length>220))
+                fail(req,'m4c-delete-plan-untrusted');
+            return {intercepted:true,allowed:true,transport:'plugin',backend:'milvus',operation:'m4cPlanDelete',method:'POST'};
+        }
+        if(!['/v2/m4c/milvus/collections/preview','/v2/m4c/milvus/backups/create'].includes(req.suffix)||
+            req.method!=='POST')fail(req,'m4c-route-forbidden');
+        const b=req.body;
+        const fields=b?.source?.kind==='chat'?['kind','avatar','chatFile']:
+            b?.source?.kind==='group-chat'?['kind','groupId','chatFile']:
+            b?.source?.kind==='lorebook'?['kind','name']:[];
+        const creating=req.suffix.endsWith('/create');
+        if(!b||typeof b!=='object'||Array.isArray(b)||
+            Object.keys(b).some(k=>!['backend','source','configId',...(creating?['confirmation']:[])].includes(k))||
+            b.backend!=='milvus'||(b.configId!==undefined&&b.configId!=='default')||
+            !fields.length||!b.source||typeof b.source!=='object'||Array.isArray(b.source)||
+            Object.keys(b.source).some(k=>!fields.includes(k))||
+            fields.some(k=>typeof b.source[k]!=='string'||!b.source[k]||b.source[k].length>220)||
+            (creating&&b.confirmation!=='CAPTURE OWNED LOGICAL BACKUP'))fail(req,'m4c-saved-selector-only');
+        return {intercepted:true,allowed:true,transport:'plugin',backend:'milvus',
+            operation:creating?'m4cCaptureBackup':'m4cPreview',method:'POST'};
+    }
+    if(req.transport==='plugin'&&req.suffix.startsWith('/v2/m4b/vectra/')){
+        if(req.parsed.search)fail(req,'m4b-query-forbidden');
+        const verify=req.suffix.match(/^\/v2\/m4b\/vectra\/backups\/([a-f0-9-]{36})\/verify$/i);
+        if(verify){
+            if(!UUID_RE.test(verify[1])||req.method!=='GET'||req.body!==null)
+                fail(req,'m4b-verify-id-or-method-invalid');
+            return {intercepted:true,allowed:true,transport:'plugin',backend:'vectra',operation:'m4bVerifyBackup',method:'GET'};
+        }
+        if(req.suffix==='/v2/m4b/vectra/collections/transition/execute'){
+            const b=req.body;
+            if(req.method!=='POST'||!b||typeof b!=='object'||Array.isArray(b)||
+               Object.keys(b).sort().join(',')!=='confirmation,operationId'||
+               !UUID_RE.test(b.operationId)||
+               !['EMPTY OWNED VECTRA COLLECTION','RESTORE OWNED VECTRA COLLECTION'].includes(b.confirmation))
+                fail(req,'m4b-transition-execute-untrusted');
+            return {intercepted:true,allowed:true,transport:'plugin',backend:'vectra',operation:'m4bExecuteTransition',method:'POST'};
+        }
+        if(req.suffix==='/v2/m4b/vectra/collections/transition/plan'){
+            const b=req.body;
+            const fields=b?.source?.kind==='chat'?['kind','avatar','chatFile']:
+                b?.source?.kind==='group-chat'?['kind','groupId','chatFile']:
+                b?.source?.kind==='lorebook'?['kind','name']:[];
+            if(req.method!=='POST'||!b||typeof b!=='object'||Array.isArray(b)||
+               Object.keys(b).some(k=>!['backend','source','configId','backupId','action'].includes(k))||
+               b.backend!=='vectra'||(b.configId!==undefined&&b.configId!=='default')||
+               !['empty','restore'].includes(b.action)||!UUID_RE.test(b.backupId)||
+               !fields.length||!b.source||typeof b.source!=='object'||Array.isArray(b.source)||
+               Object.keys(b.source).some(k=>!fields.includes(k))||
+               fields.some(k=>typeof b.source[k]!=='string'||!b.source[k]||b.source[k].length>220))
+                fail(req,'m4b-transition-plan-untrusted');
+            return {intercepted:true,allowed:true,transport:'plugin',backend:'vectra',operation:'m4bPlanTransition',method:'POST'};
+        }
+        if(req.suffix==='/v2/m4b/vectra/collections/delete/execute'){
+            const b=req.body;
+            if(req.method!=='POST'||!b||typeof b!=='object'||Array.isArray(b)||
+               Object.keys(b).sort().join(',')!=='confirmation,operationId'||
+               !UUID_RE.test(b.operationId)||b.confirmation!=='DELETE OWNED VECTRA COLLECTION')
+                fail(req,'m4b-delete-execute-untrusted');
+            return {intercepted:true,allowed:true,transport:'plugin',backend:'vectra',operation:'m4bExecuteDelete',method:'POST'};
+        }
+        if(req.suffix==='/v2/m4b/vectra/collections/delete/plan'){
+            const b=req.body;
+            const fields=b?.source?.kind==='chat'?['kind','avatar','chatFile']:
+                b?.source?.kind==='group-chat'?['kind','groupId','chatFile']:
+                b?.source?.kind==='lorebook'?['kind','name']:[];
+            if(req.method!=='POST'||!b||typeof b!=='object'||Array.isArray(b)||
+                Object.keys(b).some(k=>!['backend','source','configId','backupId'].includes(k))||
+                b.backend!=='vectra'||(b.configId!==undefined&&b.configId!=='default')||
+                !UUID_RE.test(b.backupId)||!fields.length||!b.source||
+                typeof b.source!=='object'||Array.isArray(b.source)||
+                Object.keys(b.source).some(k=>!fields.includes(k))||
+                fields.some(k=>typeof b.source[k]!=='string'||!b.source[k]||b.source[k].length>220))
+                fail(req,'m4b-delete-plan-untrusted');
+            return {intercepted:true,allowed:true,transport:'plugin',backend:'vectra',operation:'m4bPlanDelete',method:'POST'};
+        }
+        if(!['/v2/m4b/vectra/collections/preview','/v2/m4b/vectra/backups/create'].includes(req.suffix)||
+            req.method!=='POST')fail(req,'m4b-route-forbidden');
+        const b=req.body;
+        const fields=b?.source?.kind==='chat'?['kind','avatar','chatFile']:
+            b?.source?.kind==='group-chat'?['kind','groupId','chatFile']:
+            b?.source?.kind==='lorebook'?['kind','name']:[];
+        const creating=req.suffix.endsWith('/create');
+        if(!b||typeof b!=='object'||Array.isArray(b)||
+            Object.keys(b).some(k=>!['backend','source','configId',...(creating?['confirmation']:[])].includes(k))||
+            b.backend!=='vectra'||(b.configId!==undefined&&b.configId!=='default')||
+            !fields.length||!b.source||typeof b.source!=='object'||Array.isArray(b.source)||
+            Object.keys(b.source).some(k=>!fields.includes(k))||
+            fields.some(k=>typeof b.source[k]!=='string'||!b.source[k]||b.source[k].length>220)||
+            (creating&&b.confirmation!=='CAPTURE OWNED LOGICAL BACKUP'))fail(req,'m4b-saved-selector-only');
+        return {intercepted:true,allowed:true,transport:'plugin',backend:'vectra',
+            operation:creating?'m4bCaptureBackup':'m4bPreview',method:'POST'};
+    }
+    // M4a: LanceDB source-bound preview and verified logical backup only.
+    // No client-specified physical names, vectors, paths, owners, or restore
+    // grants. Other LanceDB lifecycle routes remain denied by default.
+    if(req.transport==='plugin'&&req.suffix.startsWith('/v2/m4a/lancedb/')){
+        if(req.parsed.search)fail(req,'m4a-query-forbidden');
+        const verify=req.suffix.match(/^\/v2\/m4a\/lancedb\/backups\/([a-f0-9-]{36})\/verify$/i);
+        if(verify){
+            if(!UUID_RE.test(verify[1])||req.method!=='GET'||req.body!==null)
+                fail(req,'m4a-verify-id-or-method-invalid');
+            return {intercepted:true,allowed:true,transport:'plugin',backend:'lancedb',operation:'m4aVerifyBackup',method:'GET'};
+        }
+        if(req.suffix==='/v2/m4a/lancedb/collections/transition/execute'){
+            const b=req.body;
+            if(req.method!=='POST'||!b||typeof b!=='object'||Array.isArray(b)||
+               Object.keys(b).sort().join(',')!=='confirmation,operationId'||
+               !UUID_RE.test(b.operationId)||
+               !['EMPTY OWNED LANCEDB COLLECTION','RESTORE OWNED LANCEDB COLLECTION'].includes(b.confirmation))
+                fail(req,'m4a-transition-execute-untrusted');
+            return {intercepted:true,allowed:true,transport:'plugin',backend:'lancedb',operation:'m4aExecuteTransition',method:'POST'};
+        }
+        if(req.suffix==='/v2/m4a/lancedb/collections/transition/plan'){
+            const b=req.body;
+            const fields=b?.source?.kind==='chat'?['kind','avatar','chatFile']:
+                b?.source?.kind==='group-chat'?['kind','groupId','chatFile']:
+                b?.source?.kind==='lorebook'?['kind','name']:[];
+            if(req.method!=='POST'||!b||typeof b!=='object'||Array.isArray(b)||
+               Object.keys(b).some(k=>!['backend','source','configId','backupId','action'].includes(k))||
+               b.backend!=='lancedb'||(b.configId!==undefined&&b.configId!=='default')||
+               !['empty','restore'].includes(b.action)||!UUID_RE.test(b.backupId)||
+               !fields.length||!b.source||typeof b.source!=='object'||Array.isArray(b.source)||
+               Object.keys(b.source).some(k=>!fields.includes(k))||
+               fields.some(k=>typeof b.source[k]!=='string'||!b.source[k]||b.source[k].length>220))
+                fail(req,'m4a-transition-plan-untrusted');
+            return {intercepted:true,allowed:true,transport:'plugin',backend:'lancedb',operation:'m4aPlanTransition',method:'POST'};
+        }
+        if(req.suffix==='/v2/m4a/lancedb/collections/delete/execute'){
+            const b=req.body;
+            if(req.method!=='POST'||!b||typeof b!=='object'||Array.isArray(b)||
+               Object.keys(b).sort().join(',')!=='confirmation,operationId'||
+               !UUID_RE.test(b.operationId)||b.confirmation!=='DELETE OWNED LANCEDB COLLECTION')
+                fail(req,'m4a-delete-execute-untrusted');
+            return {intercepted:true,allowed:true,transport:'plugin',backend:'lancedb',operation:'m4aExecuteDelete',method:'POST'};
+        }
+        if(req.suffix==='/v2/m4a/lancedb/collections/delete/plan'){
+            const b=req.body;
+            const fields=b?.source?.kind==='chat'?['kind','avatar','chatFile']:
+                b?.source?.kind==='group-chat'?['kind','groupId','chatFile']:
+                b?.source?.kind==='lorebook'?['kind','name']:[];
+            if(req.method!=='POST'||!b||typeof b!=='object'||Array.isArray(b)||
+                Object.keys(b).some(k=>!['backend','source','configId','backupId'].includes(k))||
+                b.backend!=='lancedb'||(b.configId!==undefined&&b.configId!=='default')||
+                !UUID_RE.test(b.backupId)||!fields.length||!b.source||
+                typeof b.source!=='object'||Array.isArray(b.source)||
+                Object.keys(b.source).some(k=>!fields.includes(k))||
+                fields.some(k=>typeof b.source[k]!=='string'||!b.source[k]||b.source[k].length>220))
+                fail(req,'m4a-delete-plan-untrusted');
+            return {intercepted:true,allowed:true,transport:'plugin',backend:'lancedb',operation:'m4aPlanDelete',method:'POST'};
+        }
+        if(!['/v2/m4a/lancedb/collections/preview','/v2/m4a/lancedb/backups/create'].includes(req.suffix)||
+            req.method!=='POST')fail(req,'m4a-route-forbidden');
+        const b=req.body;
+        const fields=b?.source?.kind==='chat'?['kind','avatar','chatFile']:
+            b?.source?.kind==='group-chat'?['kind','groupId','chatFile']:
+            b?.source?.kind==='lorebook'?['kind','name']:[];
+        const creating=req.suffix.endsWith('/create');
+        if(!b||typeof b!=='object'||Array.isArray(b)||
+            Object.keys(b).some(k=>!['backend','source','configId',...(creating?['confirmation']:[])].includes(k))||
+            b.backend!=='lancedb'||(b.configId!==undefined&&b.configId!=='default')||
+            !fields.length||!b.source||typeof b.source!=='object'||Array.isArray(b.source)||
+            Object.keys(b.source).some(k=>!fields.includes(k))||
+            fields.some(k=>typeof b.source[k]!=='string'||!b.source[k]||b.source[k].length>220)||
+            (creating&&b.confirmation!=='CAPTURE OWNED LOGICAL BACKUP'))fail(req,'m4a-saved-selector-only');
+        return {intercepted:true,allowed:true,transport:'plugin',backend:'lancedb',
+            operation:creating?'m4aCaptureBackup':'m4aPreview',method:'POST'};
+    }
+    // M3: immutable, source-attested collection lifecycle. Backups are scoped
+    // physical reads; destructive execution is intentionally server-blocked.
+    if(req.transport==='plugin'&&req.suffix.startsWith('/v2/m3/')){
+        if(req.parsed.search)fail(req,'m3-query-forbidden');
+        const b=req.body,backup=req.suffix.match(/^\/v2\/m3\/backups\/([a-f0-9-]{36})\/verify$/i);
+        const evidence=req.suffix.match(/^\/v2\/m3\/operations\/([a-f0-9-]{36})\/evidence$/i);
+        if(evidence){
+            if(!UUID_RE.test(evidence[1])||req.method!=='GET'||b!==null)fail(req,'m3-operation-evidence-readonly');
+            return {intercepted:true,allowed:true,transport:'plugin',operation:'m3OperationEvidence',backend:'qdrant',method:'GET'};
+        }
+        const generalReview=req.suffix.match(/^\/v2\/m3\/operations\/([a-f0-9-]{36})\/reconciliation$/i);
+        if(generalReview){
+            if(!UUID_RE.test(generalReview[1])||req.method!=='GET'||b!==null)
+                fail(req,'m3-general-reconciliation-readonly');
+            return {intercepted:true,allowed:true,transport:'plugin',operation:'m3GeneralReconciliation',backend:'qdrant',method:'GET'};
+        }
+        const stageResume=req.suffix.match(/^\/v2\/m3\/collections\/rebuild\/continue\/([a-f0-9-]{36})$/i);
+        if(stageResume){
+            if(!UUID_RE.test(stageResume[1])||req.method!=='POST'||!b||typeof b!=='object'||
+                Array.isArray(b)||Object.keys(b).length!==0)fail(req,'m3-stage-continuation-untrusted');
+            return {intercepted:true,allowed:true,transport:'plugin',backend:'qdrant',
+                operation:'m3StageContinuation',method:'POST'};
+        }
+        const stageContinuation=req.suffix.match(/^\/v2\/m3\/collections\/rebuild\/continuation-proof\/([a-f0-9-]{36})$/i);
+        if(stageContinuation){
+            if(!UUID_RE.test(stageContinuation[1])||req.method!=='GET'||b!==null)
+                fail(req,'m3-continuation-proof-readonly');
+            return {intercepted:true,allowed:true,transport:'plugin',backend:'qdrant',operation:'m3ContinuationProof',method:'GET'};
+        }
+        const abandonment=req.suffix.match(/^\/v2\/m3\/operations\/([a-f0-9-]{36})\/(abandon|abandonment)$/i);
+        if(abandonment){
+            if(!UUID_RE.test(abandonment[1])||
+             (abandonment[2]==='abandonment'?(req.method!=='GET'||b!==null):
+              (req.method!=='POST'||!b||typeof b!=='object'||Array.isArray(b)||Object.keys(b).length!==0)))
+                fail(req,'m3-abandonment-exact-id-only');
+            return {intercepted:true,allowed:true,transport:'plugin',backend:'qdrant',method:req.method,
+                operation:abandonment[2]==='abandonment'?'m3AbandonmentInspection':'m3AbandonUncertain'};
+        }
+        const proven=req.suffix.match(/^\/v2\/m3\/operations\/([a-f0-9-]{36})\/(adjudication-proof|quarantine-proven)$/i);
+        if(proven){
+            if(!UUID_RE.test(proven[1])||
+              (proven[2]==='adjudication-proof'?(req.method!=='GET'||b!==null):
+               (req.method!=='POST'||!b||typeof b!=='object'||Array.isArray(b)||Object.keys(b).length!==0)))
+                fail(req,'m3-proven-adjudication-untrusted');
+            return {intercepted:true,allowed:true,transport:'plugin',backend:'qdrant',method:req.method,
+                operation:proven[2]==='adjudication-proof'?'m3ProvenAdjudicationProof':'m3QuarantineProven'};
+        }
+        const terminal=req.suffix.match(/^\/v2\/m3\/operations\/([a-f0-9-]{36})\/(terminal-proof|quarantine-terminal)$/i);
+        if(terminal){
+            if(!UUID_RE.test(terminal[1])||
+                (terminal[2]==='terminal-proof'?(req.method!=='GET'||b!==null):
+                  (req.method!=='POST'||!b||typeof b!=='object'||Array.isArray(b)||Object.keys(b).length!==0)))
+                fail(req,'m3-admin-terminal-shape-forbidden');
+            return {intercepted:true,allowed:true,transport:'plugin',backend:'qdrant',
+                operation:terminal[2]==='terminal-proof'?'m3TerminalProof':'m3TerminalQuarantine',method:req.method};
+        }
+        if(backup){
+            if(!UUID_RE.test(backup[1])||req.method!=='GET'||b!==null)fail(req,'m3-backup-verify-readonly');
+            return {intercepted:true,allowed:true,transport:'plugin',operation:'m3BackupVerify',backend:'qdrant',method:'GET'};
+        }
+        const stageStatus=req.suffix.match(/^\/v2\/m3\/collections\/rebuild\/stages\/([a-f0-9-]{36})$/i);
+        if(stageStatus){
+            if(!UUID_RE.test(stageStatus[1])||req.method!=='GET'||b!==null)
+                fail(req,'m3-rebuild-stage-inspection-readonly');
+            return {intercepted:true,allowed:true,transport:'plugin',operation:'m3RebuildStageInspection',backend:'qdrant',method:'GET'};
+        }
+        const physicalProgress=req.suffix.match(/^\/v2\/m3\/collections\/rebuild\/physical-progress\/([a-f0-9-]{36})$/i);
+        if(physicalProgress){
+            if(!UUID_RE.test(physicalProgress[1])||req.method!=='GET'||b!==null)
+                fail(req,'m3-physical-progress-readonly');
+            return {intercepted:true,allowed:true,transport:'plugin',operation:'m3PhysicalProgress',backend:'qdrant',method:'GET'};
+        }
+        const preparation=req.suffix.match(/^\/v2\/m3\/collections\/rebuild\/preparation\/([a-f0-9-]{36})(?:\/(step))?$/i);
+        if(preparation){
+            if(!UUID_RE.test(preparation[1])||req.parsed.search||
+               (preparation[2]?(req.method!=='POST'||!b||typeof b!=='object'||Array.isArray(b)||Object.keys(b).length!==0):
+                (req.method!=='GET'||b!==null)))fail(req,'m3-preparation-exact-operation-only');
+            return {intercepted:true,allowed:true,transport:'plugin',operation:preparation[2]?'m3RebuildPreparationStep':'m3RebuildPreparationProgress',backend:'qdrant',method:req.method};
+        }
+        if(req.suffix==='/v2/m3/collections/readiness'){
+            if(req.method!=='GET'||b!==null)fail(req,'m3-readiness-readonly');
+            return {intercepted:true,allowed:true,transport:'plugin',operation:'m3Readiness',backend:'qdrant',method:'GET'};
+        }
+        if(req.method!=='POST'||!b||typeof b!=='object'||Array.isArray(b))fail(req,'m3-request-invalid');
+        if(req.suffix==='/v2/m3/collections/rollback/plan'){
+            if(Object.keys(b).length!==1||!UUID_RE.test(b.restoreOperationId||''))fail(req,'m3-rollback-untrusted');
+            return {intercepted:true,allowed:true,transport:'plugin',operation:'m3RollbackPlan',backend:'qdrant',method:'POST'};
+        }
+        if(req.suffix==='/v2/m3/collections/execute'){
+            if(Object.keys(b).some(k=>!['operationId','confirmation'].includes(k))||!UUID_RE.test(b.operationId||'')||
+                !['RESTORE TO FRESH COLLECTION','DELETE OWNED COLLECTION','ROLL BACK UNCHANGED COLLECTION','EMPTY OWNED COLLECTION'].includes(b.confirmation))
+                fail(req,'m3-exact-confirmation-required');
+            return {intercepted:true,allowed:true,transport:'plugin',operation:'m3LifecycleExecute',backend:'qdrant',method:'POST'};
+        }
+        if(req.suffix==='/v2/m3/collections/rebuild/activation-execute'){
+            if(Object.keys(b).some(k=>!['operationId','confirmation'].includes(k))||
+                !UUID_RE.test(b.operationId||'')||b.confirmation!=='ACTIVATE VERIFIED MODEL FOR THIS SOURCE')
+                fail(req,'m3-activation-confirmation-required');
+            return {intercepted:true,allowed:true,transport:'plugin',operation:'m3RebuildActivation',backend:'qdrant',method:'POST'};
+        }
+        if(req.suffix==='/v2/m3/collections/rebuild/activation-plan'){
+            if(Object.keys(b).length!==1||!UUID_RE.test(b.stageOperationId||''))
+                fail(req,'m3-activation-stage-id-required');
+            return {intercepted:true,allowed:true,transport:'plugin',operation:'m3RebuildActivationPlan',backend:'qdrant',method:'POST'};
+        }
+        if(req.suffix==='/v2/m3/collections/rebuild/source-profile'){
+            const source=b.source;
+            const fields=source?.kind==='chat'?['kind','avatar','chatFile']:
+                source?.kind==='group-chat'?['kind','groupId','chatFile']:
+                source?.kind==='lorebook'?['kind','name']:[];
+            if(Object.keys(b).length!==1||!fields.length||!source||typeof source!=='object'||Array.isArray(source)||
+                Object.keys(source).some(k=>!fields.includes(k))||
+                fields.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220))
+                fail(req,'m3-source-profile-selector-invalid');
+            return {intercepted:true,allowed:true,transport:'plugin',operation:'m3SelectedSourceProfile',backend:'qdrant',method:'POST'};
+        }
+        if(req.suffix==='/v2/m3/collections/rebuild/stage-execute'){
+            if(Object.keys(b).some(k=>!['operationId','confirmation'].includes(k))||
+                !UUID_RE.test(b.operationId||'')||b.confirmation!=='STAGE NEW MODEL WITHOUT ACTIVATION')
+                fail(req,'m3-rebuild-stage-confirmation-required');
+            return {intercepted:true,allowed:true,transport:'plugin',operation:'m3RebuildStage',backend:'qdrant',method:'POST'};
+        }
+        const commands={'/v2/m3/collections/preview':['backend','source','configId'],
+            '/v2/m3/backups/create':['backend','source','configId','confirmation'],
+            '/v2/m3/collections/plan':['backend','source','configId','action','backupId'],
+            '/v2/m3/collections/rebuild/preview':['backend','source','configId','backupId'],
+            '/v2/m3/collections/rebuild/stage-plan':['backend','source','configId','backupId']};
+        const allowed=commands[req.suffix],source=b.source;
+        const fields=source?.kind==='chat'?['kind','avatar','chatFile']:
+            source?.kind==='group-chat'?['kind','groupId','chatFile']:
+            source?.kind==='lorebook'?['kind','name']:[];
+        if(!allowed||Object.keys(b).some(k=>!allowed.includes(k))||b.backend!=='qdrant'||
+            (b.configId!==undefined&&!['default','local'].includes(b.configId))||
+            !fields.length||!source||typeof source!=='object'||Array.isArray(source)||
+            Object.keys(source).some(k=>!fields.includes(k))||
+            fields.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220))
+            fail(req,'m3-saved-source-only');
+        if(req.suffix.endsWith('/create')&&b.confirmation!=='CAPTURE OWNED LOGICAL BACKUP')fail(req,'m3-backup-confirmation-required');
+        if(req.suffix.endsWith('/plan')&&(!['restore','delete','empty','rebuild'].includes(b.action)||!UUID_RE.test(b.backupId||'')))fail(req,'m3-plan-invalid');
+        if((req.suffix.endsWith('/rebuild/preview')||req.suffix.endsWith('/rebuild/stage-plan'))&&!UUID_RE.test(b.backupId||''))fail(req,'m3-rebuild-preview-invalid');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:'m3'+req.suffix.split('/').slice(-2).join('-'),backend:'qdrant',method:'POST'};
+    }
+    // M0: read-only capability contract and source-attested plan (never execution).
+    if(req.transport==='plugin'&&req.suffix==='/v2/m0/capabilities'){
+        if(req.method!=='GET'||req.body!=null||req.parsed.search)fail(req,'m0-capability-inspection-only');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:'m0Capabilities',backend:'none',method:'GET'};
+    }
+    // M1: narrowly scoped saved-record operations, never generic or pilot writes.
+    if(req.transport==='plugin' && ['/v2/m1/capabilities','/v2/m1/records/preview','/v2/m1/collections/prepare','/v2/m1/collections/provision','/v2/mutations/execute'].includes(req.suffix)){
+        if(req.parsed.search)fail(req,'m1-no-query');
+        if(req.suffix==='/v2/m1/capabilities'){
+            if(req.method!=='GET'||req.body!=null)fail(req,'m1-capabilities-readonly');
+            return {intercepted:true,allowed:true,transport:'plugin',operation:'m1Capabilities',backend:'qdrant',method:'GET'};
+        }
+        if(req.method!=='POST'||!req.body||typeof req.body!=='object'||Array.isArray(req.body))
+            fail(req,'m1-method-and-body-required');
+        if(req.suffix==='/v2/m1/collections/provision'){
+            if(Object.keys(req.body).some(k=>!['operationId','confirmation'].includes(k))||
+               !UUID_RE.test(req.body.operationId||'')||req.body.confirmation!=='CREATE OWNED V2 COLLECTION')
+                fail(req,'m1-provision-confirmed-ticket-required');
+            return {intercepted:true,allowed:true,transport:'plugin',operation:'m1OwnedProvision',backend:'qdrant',method:'POST'};
+        }
+        if(req.suffix==='/v2/mutations/execute'){
+            if(Object.keys(req.body).some(k=>!['operationId','confirmation'].includes(k))||
+               !UUID_RE.test(req.body.operationId||'')||req.body.confirmation!=='APPLY SAVED RECORD MUTATION')
+                fail(req,'m1-confirmed-ticket-required');
+            return {intercepted:true,allowed:true,transport:'plugin',operation:'m1ExactApply',backend:'qdrant',method:'POST'};
+        }
+        const body=req.body,source=body.source;
+        const fields=source?.kind==='chat'?['kind','avatar','chatFile']:
+            source?.kind==='group-chat'?['kind','groupId','chatFile']:
+            source?.kind==='lorebook'?['kind','name']:[];
+        if(!['qdrant','lancedb','vectra','milvus'].includes(body.backend)||!fields.length||!source||typeof source!=='object'||Array.isArray(source)||
+           Object.keys(source).some(k=>!fields.includes(k))||
+           fields.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220)||
+           (body.configId!==undefined&&!['local','default'].includes(body.configId))||
+           (['lancedb','vectra','milvus'].includes(body.backend)&&body.configId==='local')||
+           Object.keys(body).some(k=>!['backend','source','configId'].includes(k)))
+            fail(req,'m1-saved-source-selector-required');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:req.suffix.endsWith('/prepare')?'m1ProvisionPlan':'m1SavedPreview',backend:body.backend,method:'POST'};
+    }
+    if(req.transport==='plugin'&&/^\/v2\/collections\/[a-f0-9]{64}\/records\/plan$/.test(req.suffix)){
+        const b=req.body,source=b?.source;
+        const fields=source?.kind==='chat'?['kind','avatar','chatFile']:
+            source?.kind==='group-chat'?['kind','groupId','chatFile']:
+            source?.kind==='lorebook'?['kind','name']:[];
+        if(req.method!=='POST'||req.parsed.search||!b||!['qdrant','milvus','lancedb','vectra'].includes(b.backend)||
+           !['insert','update','revectorize','delete','restore'].includes(b.action)||
+           !fields.length||!source||typeof source!=='object'||Array.isArray(source)||
+           Object.keys(source).some(k=>!fields.includes(k))||
+           fields.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220)||
+           (b.configId!==undefined&&!['default','local'].includes(b.configId))||
+           (['lancedb','vectra','milvus'].includes(b.backend)&&b.configId==='local')||
+           !UUID_RE.test(b.recordId||'')||
+           Object.keys(b).some(k=>!['backend','configId','source','action','recordId'].includes(k)))
+           fail(req,'m0-server-derived-plan-shape-required');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:'m0PlanOnly',backend:b.backend,method:'POST'};
+    }
     // F11: server-authenticated, redacted readiness snapshot. GET only;
     // no backend health probe or ability to enable memory operations.
     if (req.transport === 'plugin' && req.suffix === '/v2/setup/readiness') {

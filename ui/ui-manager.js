@@ -129,9 +129,9 @@ export function renderSettings(containerId, settings, callbacks) {
                                 </div>
 
                                 <div style="margin: 10px 0;">
-                                    <button type="button" class="vecthare-btn-sm" id="vecthare_qdrant_save_connection">Save connection &amp; test</button>
-                                    <button type="button" class="vecthare-btn-sm" id="vecthare_qdrant_remove_connection">Remove saved connection</button>
-                                    <small id="vecthare_qdrant_connection_status" role="status" class="vecthare-help-text" style="display:block;margin-top:6px;">Connection not checked yet</small>
+                                    <button type="button" class="vecthare-btn-sm" id="vecthare_qdrant_save_connection" disabled title="M0: server-side configuration only">Admin-managed (read-only)</button>
+                                    <button type="button" class="vecthare-btn-sm" id="vecthare_qdrant_remove_connection" disabled title="M0: server-side configuration only">Admin-managed (read-only)</button>
+                                    <small id="vecthare_qdrant_connection_status" role="status" class="vecthare-help-text" style="display:block;margin-top:6px;">M0: connection status is read-only; configure endpoints on server.</small>
                                 </div>
                                 <!-- Qdrant Multitenancy Setting -->
                                 <div style="margin-top: 10px; padding: 8px; background: rgba(0,0,0,0.1); border-radius: 4px;">
@@ -185,10 +185,10 @@ export function renderSettings(containerId, settings, callbacks) {
                                 <input type="number" id="vecthare_milvus_dimensions" class="vecthare-input" placeholder="Auto (768)" min="1" />
                                 <small class="vecthare_hint">Manually set dimension size if auto-detection fails (e.g. 1536, 4096). Required for some models on first run.</small>
                                 <div style="margin: 10px 0;">
-                                    <small class="vecthare_hint">Save Milvus connection settings to the server; the token is not stored in extension settings. Use token or username/password, not both.</small>
-                                    <button type="button" class="vecthare-btn-sm" id="vecthare_milvus_save_connection">Save connection &amp; test</button>
-                                    <button type="button" class="vecthare-btn-sm" id="vecthare_milvus_remove_connection">Remove saved connection</button>
-                                    <small id="vecthare_milvus_connection_status" role="status" class="vecthare-help-text" style="display:block;margin-top:6px;">Connection not checked yet</small>
+                                    <small class="vecthare_hint">M0: Milvus endpoints and credentials are administrator-configured on the server. Browser editing is disabled.</small>
+                                    <button type="button" class="vecthare-btn-sm" id="vecthare_milvus_save_connection" disabled title="M0: server-side configuration only">Admin-managed (read-only)</button>
+                                    <button type="button" class="vecthare-btn-sm" id="vecthare_milvus_remove_connection" disabled title="M0: server-side configuration only">Admin-managed (read-only)</button>
+                                    <small id="vecthare_milvus_connection_status" role="status" class="vecthare-help-text" style="display:block;margin-top:6px;">M0: connection status is read-only; configure endpoints on server.</small>
                                 </div>
                             </div>
 

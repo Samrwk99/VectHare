@@ -9,32 +9,14 @@ const base={backend:'qdrant',configId:'local',source:{kind:'chat',avatar:'test.p
  recordId:randomUUID(),operationId:randomUUID(),expectedRevision:0,
  experimentalConsent:F04_PILOT_CONSENT,text:'new',vector:[1,2,3]};
 const inspect=b=>inspectVectorRequest(ROOT,{method:'POST',body:JSON.stringify(b)});
-test('F04 gateway requires narrow disposable consent and refuses owner spoof and general routes',()=>{
- assert.equal(inspect(base).allowed,true);
- for(const bad of [{...base,experimentalConsent:false},{...base,configId:'default'},
-  {...base,collectionId:'legacy'},{...base,scope:{userScopeId:'wrong'}},
-  {...base,backend:'milvus'},{...base,recordId:'not-uuid'},
-  {...base,action:'delete',text:'unexpected'},
-  {...base,source:{...base.source,userScopeId:'other'}}]){
-  assert.throws(()=>inspect(bad),VectorOperationDenied);
- }
- assert.throws(()=>inspectVectorRequest('/api/plugins/similharity/v2/records/insert',{method:'POST',body:JSON.stringify(base)}),VectorOperationDenied);
+test('M0 supersedes F04 pilot: all legacy pilot requests are blocked at browser boundary',()=>{
+ for(const input of [base,{...base,experimentalConsent:false},{...base,ownerId:'other'}])
+  assert.throws(()=>inspect(input),VectorOperationDenied);
  assert.throws(()=>inspectVectorRequest('/api/plugins/similharity/chunks/insert',{method:'POST',body:JSON.stringify(base)}),VectorOperationDenied);
 });
-test('F04 response requires verified identity and explicitly nonproduction capability',async()=>{
- const calls=[];
- const fake=(value,status=200)=>async(u,o)=>{calls.push({u,o});return {status,ok:status<400,json:async()=>value};};
- const valid={success:true,state:'VERIFIED',recordId:base.recordId,operationId:base.operationId,
-  productionWritesEnabled:false,experimental:true,retryable:false,targetRevision:1};
- const result=await f04PilotMutation(base,{'X-CSRF-Token':'sample'},fake(valid));
- assert.equal(result.state,'VERIFIED');assert.equal(calls.length,1);
- assert.equal(calls[0].o.credentials,'same-origin');assert.equal(calls[0].o.method,'POST');
- assert.equal(calls[0].o.headers['x-vecthare-f04-pilot'],'1');
- await assert.rejects(()=>f04PilotMutation(base,{},fake({...valid,productionWritesEnabled:true})),/F04_RESPONSE_CONTRACT_INVALID/);
- await assert.rejects(()=>f04PilotMutation(base,{},fake({...valid,recordId:randomUUID()})),/F04_RESULT_ID_MISMATCH/);
- const uncertain=await f04PilotMutation(base,{},fake({...valid,success:false,state:'UNCERTAIN'},202));
- assert.equal(uncertain.state,'UNCERTAIN');
- await assert.rejects(()=>f04PilotMutation(base,{},fake({success:false,experimental:true,productionWritesEnabled:false,retryable:false,code:'S04_REVISION_OR_OWNER_MISMATCH'},409)),/S04_REVISION_OR_OWNER_MISMATCH/);
+test('M0 F04 client makes no network request, even with matching legacy consent',async()=>{
+ let sent=0;await assert.rejects(()=>f04PilotMutation(base,{},async()=>{sent++;return {ok:true};}),VectorOperationDenied);
+ assert.equal(sent,0);
 });
 test('F04 renders a clearly marked opt-in pilot control, not auto-dispatched operations',()=>{
  let count=0;const doc={createElement(tag){const el={tag,children:[],setAttribute(){},addEventListener(){},append(...x){this.children.push(...x);}};count++;return el;}};

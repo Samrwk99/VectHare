@@ -11,23 +11,15 @@ const fake={success:true,experimental:true,productionWritesEnabled:false,
  completeInventory:false,deletionsPlanned:false,automaticMutationsEnabled:false,sourceRevisionFingerprint:'a'.repeat(64),
  actions:[{recordId,action:'CREATE_PENDING_EMBEDDING',expectedRevision:0}],counts:{create:1,update:0,inSync:0},sourceItemsChecked:1};
 const inspect=body=>inspectVectorRequest(root,{method:'POST',body:JSON.stringify(body)});
-test('F09b.6 gateway permits only explicit server-source preview/one-item pilots',()=>{
- assert.equal(inspect({...base,mode:'preview'}).operation,'f09b6SavedContentPilot');
- assert.equal(inspect({...base,mode:'apply',itemIndex:0,sourceRevisionFingerprint:'a'.repeat(64),experimentalConsent:F09B6_CONSENT}).allowed,true);
- for(const bad of [{text:'forged'}, {vector:[1,2,3]},{recordId}, {ownerId:'fake'}, {physicalCollection:'private'},
-  {source:{kind:'lorebook',name:'../secret'}}, {source:{kind:'lorebook',name:'lore',filepath:'/tmp/x'}},
-  {mode:'apply',itemIndex:0,experimentalConsent:F09B6_CONSENT,sourceRevisionFingerprint:'bad'}]){
-   assert.throws(()=>inspect({...base,mode:'preview',...bad}));
-  }
+test('M0 F09b.6 saved-content pilot is blocked until its M1 gateway migration',()=>{
+ for(const input of [{...base,mode:'preview'},{...base,mode:'apply',itemIndex:0,
+  sourceRevisionFingerprint:'a'.repeat(64),experimentalConsent:F09B6_CONSENT}])
+  assert.throws(()=>inspect(input),{code:'VECTHARE_E02_OPERATION_DENIED'});
 });
-test('F09b.6 browser accepts only fully validated read-only previews',async()=>{
+test('M0 F09b.6 legacy API cannot dispatch even for a read-only workflow preview',async()=>{
  assert.equal(validateF09b6Response(fake,'preview').sourceKind,'lorebook-entry');
- await f09b6Request({...base,mode:'preview'},{},async(url,options)=>{
-  assert.equal(url,root);assert.equal(options.headers['X-VectHare-F09b6-Pilot'],'1');
-  return {ok:true,json:async()=>fake};
- });
- for(const changes of [{productionWritesEnabled:true},{completeInventory:true},{sourceVerified:false},
-  {actions:[{recordId,action:'DELETE',expectedRevision:1}]}, {sourceRevisionFingerprint:'bad'}])
-  assert.throws(()=>validateF09b6Response({...fake,...changes},'preview'));
- await assert.rejects(f09b6Request({...base,mode:'preview'},{},async()=>({ok:false,json:async()=>({code:'F09B6_REFUSED'})})),/F09B6_REFUSED/);
+ let calls=0;await assert.rejects(()=>f09b6Request({...base,mode:'preview'},{},async()=>{calls++;return {ok:true};}),
+  {code:'VECTHARE_E02_OPERATION_DENIED'});
+ assert.equal(calls,0);
+ assert.throws(()=>validateF09b6Response({...fake,productionWritesEnabled:true},'preview'));
 });

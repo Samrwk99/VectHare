@@ -1,0 +1,20 @@
+{
+  "milestone": "M3v6",
+  "pluginVersion": "3.2.10-m3.10",
+  "extensionVersion": "2.2.0-alpha.m3.10",
+  "pluginTestsPassed": 733,
+  "extensionTestsPassed": 1181,
+  "matrix": {
+    "ENABLED_AWAITING_MANUAL_TEST": 8,
+    "BLOCKED": 57,
+    "UNSUPPORTED_BY_DESIGN": 5
+  },
+  "newFeature": "Admin-only proof-bound terminal delete lock quarantine",
+  "manualAcceptance": "not run",
+  "m3Complete": false,
+  "remaining": [
+    "cross-embedding-model rebuild",
+    "post-cutover repeated lifecycle operations",
+    "general uncertain-operation adjudication"
+  ]
+}
