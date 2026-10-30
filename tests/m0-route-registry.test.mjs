@@ -15,7 +15,7 @@ const readonly=new Set([
  '/v2/m4b/vectra/collections/delete/plan','/v2/m4b/vectra/collections/transition/plan',
  '/v2/m4a/lancedb/collections/preview','/v2/m4a/lancedb/backups/create',
  '/v2/m4a/lancedb/collections/delete/plan', '/v2/m4a/lancedb/collections/transition/plan',
- '/v2/m2/jobs/preview','/v2/m3/collections/rebuild/source-profile','/v2/m3/collections/rebuild/activation-plan','/v2/m3/collections/rebuild/stage-plan','/v2/m3/collections/preview','/v2/m3/collections/rebuild/preview','/v2/m3/backups/create',
+ '/v2/m2/jobs/preview','/v2/m3/collections/rebuild/source-profile','/v2/m3/collections/rebuild/activation-plan','/v2/m3/collections/rebuild/stage-plan','/v2/m3/collections/preview','/v2/m3/collections/managed-inventory','/v2/m3/collections/rebuild/preview','/v2/m3/backups/create',
  '/v2/sources/attest','/v2/workflows/chat-sync-plan','/v2/workflows/preview',
  '/v2/workflows/retrieve','/v2/m1/records/preview','/v2/m1/collections/prepare','/v2/reads/preflight','/v2/operations/preflight',
  '/v2/recovery/capture','/v2/recovery/status','/v2/recovery/download',

@@ -1,10 +1,10 @@
 {
   "formatVersion": 1,
   "contractVersion": 2,
-  "pluginVersion": "3.2.11-m4d.2",
+  "pluginVersion": "3.2.11-m4d.3",
   "algorithm": "sha256",
   "files": {
-    "index.js": "ed32b9f65a7ec89069ac7d450ab41f106d2986f79d7dde8c5e523cc36382262a",
+    "index.js": "a522ef9dbf136e95bc374e9c6bb5decf0148f20945bae8baaf308577b347494c",
     "lancedb-backend.js": "7862fb7cce79a011961e1156842d4d29fd0b6b45dac8233888f007a41589884a",
     "lib/f01-host-sources.js": "0e1de535de9381a109aadf6638d7f589933e92b1866a6f0d91e0137f58d8d474",
     "lib/f02-public-reads.js": "638797851d539ae9984fc4560b980ce01246368fdf485a877ff723782de87882",
@@ -57,7 +57,7 @@
     "lib/m1-saved-records.js": "cba290d5da45de28aa05ccb222690f8b1eb75e8e57a2e010259c66b9ca7b1b88",
     "lib/m2-jobs.js": "c07eacd8410a313c9cb155561f0097b54e81372d44e2445290b9098b98e1e3c0",
     "lib/m3-abandonment.js": "9c3ec4f5dc355a021843d18fa94b2374110b271332dc143291b5d3b2d14a5843",
-    "lib/m3-collections.js": "e14e402be43ead8764112008985d2e16c559aeb31133d90534cf592edd31e98a",
+    "lib/m3-collections.js": "c2f122774240dada569498491d4627c19484fc7d4c0b71df96125419b921dc65",
     "lib/m3-cutover-journal.js": "1c2d3ee1512542ac263f1865f7ac1efe0867e7c82a69dcf4448516fbe4127ae8",
     "lib/m3-decommission-transaction.js": "8e5e35752b6ec47ce57bdae307c3b47456b05039fe8f46bc278178f31058c5fc",
     "lib/m3-empty-transaction.js": "acb7f13281e01a4c9cc6ba7bebe780e11053a5dcbe564533efe00488982a55c3",
@@ -117,8 +117,8 @@
     "lib/s10-contracts.js": "42c6054103c91873aa2ff1f49c4db61a45a08767ea22a6b6cff11698402c1b26",
     "lib/s10-gui-connections.js": "e5a041abda59cdefd4f3556e58e9bfd8debbcba7309a2bac504b0c68d887ff58",
     "milvus-backend.js": "6cfee983eb34ab39a0f59f6ce2590a6c75d24a961f5a19ee4ae59d440427394e",
-    "package.json": "03e1342f2a7737919ad0a237b6cec3beed36554d7b059295ff1c653455e74661",
+    "package.json": "6c9d7d0b8516b4dc58f2f9511a40ebfe5f327d9c1823076877f373ae40388444",
     "qdrant-backend.js": "f6a71992d55288345f041ed5d30e38524fc8f58201150b0b92cab18cf3e3d72b"
   },
-  "sourceFingerprint": "3532044ef7450b57b31cd312c07b2f8b8fceb8d361e2d4679d58c93447443c6d"
+  "sourceFingerprint": "be4408a0c06513322a7f0cfca2ca45b774d1485ca04d1546db2720c4d0b26b56"
 }
