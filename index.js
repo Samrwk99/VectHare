@@ -7,7 +7,7 @@
  * All chunk operations go through unified /chunks/* endpoints.
  * Backend is specified via `backend` parameter in request body.
  *
- * @version 3.2.11-m4d.3
+ * @version 3.2.11-m4e.1
  */
 
 import path from 'node:path';
@@ -60,7 +60,7 @@ import {registerF01HostRoutes} from './lib/f01-host-sources.js';
 import { validateVector as validateS05Vector } from './lib/s05-contract.js';
 
 const pluginName = 'similharity';
-const pluginVersion = '3.2.11-m4d.3';
+const pluginVersion = '3.2.11-m4e.1';
 
 /**
  * Initialize the plugin
