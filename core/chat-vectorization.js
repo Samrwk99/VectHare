@@ -725,6 +725,13 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
 
 async function synchronizeChatScoped(settings,batchSize,bypassAutoSync,job) {
     job.assertCurrent();
+    // M4d.3: legacy Qdrant auto-sync cannot establish authoritative shared
+    // inventory even when the physical database is new/empty. M5 owns the
+    // future saved-source diff engine; never attempt /chunks writes here.
+    if (settings?.vector_backend === 'qdrant') return {
+        remaining: -1, messagesProcessed: 0, chunksCreated: 0,
+        blocked: true, reason: 'QDRANT_LEGACY_SYNC_REQUIRES_M5_MANAGED_GATEWAY'
+    };
     // F09b uses source-attested UUID records; never feed those records into the
     // legacy numeric-hash chat synchronizer. F09c owns safe v2 auto-mutations.
     if(settings.f09b_v2_prompt_enabled===true)return {remaining:-1,messagesProcessed:0,chunksCreated:0,
@@ -3012,6 +3019,19 @@ export async function rearrangeChat(chat, settings, type) {
 export async function vectorizeAll(settings, batchSize) {
     let job = null;
     try {
+        // M4d.3: the legacy Sync Chat path starts with getSavedHashes(), which
+        // is deliberately denied for Qdrant shared/legacy collections.  An
+        // empty database does NOT make that inventory authoritative and must
+        // not be used to infer safe first-write permissions.  The authenticated
+        // M1 saved-record panel is the supported manual first-use path.
+        if (settings?.vector_backend === 'qdrant') {
+            toastr.warning(
+                'Qdrant Sync Chat is not yet supported by the guarded managed-v2 workflow. For an empty database, use the M1 / M4c saved-record panel: select Qdrant, preview your saved chat, set up an owned v2 collection, then plan and confirm saved-record inserts. Automatic Sync Chat awaits M5; no vectors were changed.',
+                'Qdrant: use managed-v2 vectorization',
+                { timeOut: 0, closeButton: true }
+            );
+            return false;
+        }
         // VectHare+: Manual Sync Chat / Continue always runs, regardless of the
         // per-collection auto-sync toggle - auto-sync gating applies ONLY to
         // event-driven background sync inside synchronizeChat (see the

@@ -1,3 +1,4 @@
+import {qdrantManagedInventory} from '../utils/qdrant-managed-inventory.js';
 import { isUnverifiedInventoryRead } from '../utils/diagnostic-inventory.js';
 import { diagnosticLlamaCppUrl } from '../utils/diagnostic-provider-url.js';
 import { textgen_types, textgenerationwebui_settings } from '../../../../textgen-settings.js';
@@ -606,6 +607,16 @@ export async function testDuplicateHashes(settings, collectionId) {
     }
 
     try {
+        if (settings?.vector_backend === 'qdrant') {
+            const proof = await qdrantManagedInventory(settings, {collectionId});
+            if (proof.repeatedContentHashGroups > 0) return {
+                name:'[PROD] Duplicate Hash Check',status:'warning',category:'production',
+                fixable:false,
+                message:`${proof.repeatedContentHashGroups} repeated content-hash groups (${proof.repeatedContentHashExtraRecords} extra managed-v2 records). Repeated text is not proof of duplicate record IDs. No automatic deletion authorised.`,
+            };
+            return {name:'[PROD] Duplicate Hash Check',status:'pass',category:'production',
+                message:`${proof.recordCount} verified managed-v2 records; no repeated content hashes. Legacy/shared vectors were not inspected.`};
+        }
         // Get all hashes from the server
         const serverHashes = await getSavedHashes(collectionId, settings);
 
@@ -651,6 +662,10 @@ export async function testDuplicateHashes(settings, collectionId) {
             data: { duplicates, collectionId, totalDuplicates: totalDupes }
         };
     } catch (error) {
+        if (settings?.vector_backend === 'qdrant') return {
+            name:'[PROD] Duplicate Hash Check',status:'warning',category:'production',
+            message:`Managed-v2 Qdrant duplicate check unverified (${error?.message||'unknown'}). Legacy/shared collection inventory remains unavailable; no deletion authorised.`,
+        };
         if (isUnverifiedInventoryRead(error)) return {
             name: '[PROD] Duplicate Hash Check', status: 'warning', category: 'production',
             message: 'Duplicate-check unverified: complete scoped Qdrant/Milvus inventory is unavailable through the legacy API. No duplicate-free claim or deletion is made.',

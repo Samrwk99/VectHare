@@ -1,3 +1,4 @@
+import {qdrantManagedInventory} from '../utils/qdrant-managed-inventory.js';
 import { isUnverifiedInventoryRead } from '../utils/diagnostic-inventory.js';
 /**
  * ============================================================================
@@ -211,6 +212,14 @@ export async function checkChatVectors(settings) {
                 message: 'Could not get collection ID'
             };
         }
+        // Qdrant managed-v2 inventory is server-attested; never infer absence
+        // from the intentionally blocked shared-collection legacy list.
+        if (settings?.vector_backend === 'qdrant') {
+            const proof = await qdrantManagedInventory(settings, {collectionId});
+            return proof.recordCount === 0
+                ? {name:'Chat Vectors',status:'warning',message:'Verified managed-v2 chat collection has no records. Legacy/shared vectors were not inspected.'}
+                : {name:'Chat Vectors',status:'pass',message:`${proof.recordCount} verified managed-v2 chat records (exclusive owned collection). Legacy/shared vectors not inspected.`};
+        }
         const hashes = await getSavedHashes(collectionId, settings);
         if (hashes.length === 0) {
             return {
@@ -227,6 +236,10 @@ export async function checkChatVectors(settings) {
             message: `${hashes.length} vectorized chunks`
         };
     } catch (error) {
+        if (settings?.vector_backend === 'qdrant') return {
+            name:'Chat Vectors',status:'warning',
+            message:`Managed-v2 Qdrant inventory unavailable (${error?.message||'unknown'}). For a fresh database, the owned v2 collection may not be provisioned yet: use the M1 / M4c saved-record panel to set it up before inserting. This does not imply missing vectors or prove the database is empty; legacy/shared collection inventory remains unverified.`,
+        };
         if (isUnverifiedInventoryRead(error)) return {
             name: 'Chat Vectors', status: 'warning',
             message: 'Vector count cannot be verified through the legacy shared-collection listing API. This does not imply vectors are missing. Use the managed collection inventory or a scoped retrieval test.',
@@ -488,6 +501,14 @@ export async function checkHashCollisionRate(settings) {
             };
         }
 
+        if (settings?.vector_backend === 'qdrant') {
+            const proof = await qdrantManagedInventory(settings, {collectionId});
+            const extras = proof.repeatedContentHashExtraRecords;
+            const rate = proof.recordCount > 0 ? extras / proof.recordCount : 0;
+            return {name:'Hash Collision Rate',category:'configuration',
+                status:rate>0.15?'warning':'pass',
+                message:`Managed-v2 Qdrant: ${proof.uniqueContentHashCount} distinct content hashes, ${extras} repeated-hash records among ${proof.recordCount} owned records (${(rate*100).toFixed(1)}%). Repetition may be intentional; legacy/shared vectors not inspected.`};
+        }
         const hashes = await getSavedHashes(collectionId, settings);
         if (hashes.length === 0) {
             return {
