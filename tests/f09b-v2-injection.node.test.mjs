@@ -72,3 +72,41 @@ test('F09b GUI does not enable on render',()=>{
  assert.equal(renderF09bV2Controls(root,()=>({}),()=>{},doc),true);
  assert.ok(events.includes('click'));
 });
+
+test('P-A.2 gateway allows only server-embedded managed text queries',()=>{
+ const url='/api/plugins/similharity/v2/workflows/retrieve-text';
+ const b={backend:'qdrant',source:body.source,queryText:'Nina',topK:3,configId:'local'};
+ assert.equal(inspectVectorRequest(url,{method:'POST',body:JSON.stringify(b)}).allowed,true);
+ for(const extra of [{vector:[1,0,0]},{embedding:body.embedding},{apiKey:'mine'},
+  {userScopeId:'foreign'},{physicalCollection:'shared'},{queryText:'x'.repeat(10001)},
+  {source:{...body.source,owner:'other'}}]){
+  assert.throws(()=>inspectVectorRequest(url,{method:'POST',body:JSON.stringify({...b,...extra})}),VectorOperationDenied);
+ }
+});
+test('P-A.2 generation uses server text route, not browser WebLLM embedding settings',async()=>{
+ const prompts={};const fetchBefore=globalThis.fetch;let captured;
+ globalThis.fetch=async(url,options)=>{captured={url,body:JSON.parse(options.body)};return {ok:true,json:async()=>response};};
+ try{
+  const result=await injectF09bV2({chat:[{mes:'Hello'}],settings:{...settings,source:'llamacpp',
+   f09b_embedding_model:'wrong-local-model'},queryText:'Nina',
+   getChatId:()=> 'chat',getContext:()=>({characterId:0,characters:[{avatar:'A.png'}]}),
+   getHeaders:()=>({}),embedText:async()=>{throw Error('browser embedding must not run');},
+   setPrompt:(tag,text)=>{prompts[tag]={value:text};},prompts,assertCurrent:()=>{},maxContext:8192});
+  assert.equal(result.status,'REGISTERED_UNWITNESSED');
+  assert.ok(captured.url.endsWith('/v2/workflows/retrieve-text'));
+  assert.equal(captured.body.queryText,'Nina');
+  assert.equal('vector' in captured.body,false);assert.equal('embedding' in captured.body,false);
+ }finally{globalThis.fetch=fetchBefore;}
+});
+
+test('P04 changes to selected chat during query cannot inject stale memory',async()=>{
+ const prompts={};let current='original';const previous=globalThis.fetch;
+ globalThis.fetch=async()=>{current='other';return {ok:true,json:async()=>response};};
+ try{
+  await assert.rejects(()=>injectF09bV2({chat:[{mes:'original'}],settings,queryText:'Nina',
+   getChatId:()=>current,getContext:()=>({characterId:0,characters:[{avatar:'A.png'}]}),
+   getHeaders:()=>({}),setPrompt:(tag,text)=>{prompts[tag]={value:text};},prompts,
+   assertCurrent:()=>{},maxContext:8192}),/F09B_SAVED_SOURCE_CHANGED_NO_INJECTION/);
+  assert.equal(prompts[F09B_PROMPT_TAG].value,'');
+ }finally{globalThis.fetch=previous;}
+});

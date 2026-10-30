@@ -878,6 +878,22 @@ export async function checkChunkGroupMemberIntegrity(settings) {
             };
         }
 
+        // P-B.8: getSavedHashes() is an unboundedness-unproven legacy
+        // hash read. On managed backends it cannot authorize membership
+        // correctness OR a repair, even when its returned array is small.
+        // Managed identities are UUIDs with source/generation provenance.
+        if (['qdrant', 'lancedb', 'vectra', 'milvus'].includes(settings?.vector_backend)) {
+            const grouped = registry.filter(key => {
+                const id = parseRegistryKey(key).collectionId;
+                return (getCollectionMeta(id)?.groups?.length ?? 0) > 0;
+            });
+            if (grouped.length) return {
+                name: 'Group Member Integrity', status: 'warning', category: 'configuration',
+                previewOnly: true, fixable: false,
+                message: `${grouped.length} managed collection(s) have local hash-based groups. Their membership is UNVERIFIED until a server-owned UUID membership mapping and durable update receipt are available. No changes attempted.`,
+                data: {unverifiedCollections: grouped.length, orphanedCount: 0}
+            };
+        }
         let totalMembers = 0;
         let orphanedMembers = 0;
         let unverifiedCollections = 0;
@@ -941,8 +957,9 @@ export async function checkChunkGroupMemberIntegrity(settings) {
                 status: 'warning',
                 message: `${orphanedMembers}/${totalMembers} group member(s) reference missing chunks`,
                 category: 'configuration',
-                fixable: true,
-                fixAction: 'cleanOrphanedGroupMembers',
+                // A shorter-than-limit legacy hash list still does not prove
+                // completeness/ownership or provide a durable metadata receipt.
+                fixable: false, previewOnly: true,
                 data: { orphanedDetails, orphanedCount: orphanedMembers }
             };
         }

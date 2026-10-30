@@ -327,7 +327,7 @@ export function getFixSuggestion(check) {
             return 'Some groups have invalid configuration. Open the Groups tab in the Chunk Visualizer and review the affected groups.';
 
         case 'Group Member Integrity':
-            return 'Click "Fix Now" to remove group members that reference deleted chunks. This can happen after purging or deleting vectors.';
+            return 'Review the reported group members. Automatic removal requires a complete server-verified owner inventory and a durable group-metadata receipt; legacy hashes cannot establish this.';
 
         case 'WebLLM Extension':
             return 'Install the WebLLM extension from Extensions > Download Extensions, then paste: https://github.com/SillyTavern/Extension-WebLLM. Requires Chrome 113+ or Edge 113+ for WebGPU support.';
@@ -382,66 +382,15 @@ export async function executeFixAction(check) {
  * Removes orphaned group members that reference non-existent chunks.
  * @returns {Promise<object>} Fix result
  */
+/** P29: a hash list is NOT a complete owned physical collection inventory.
+ * Until P14 introduces a revisioned, server-issued group metadata receipt,
+ * the Fix button must never mutate local group membership. */
 async function fixOrphanedGroupMembers() {
-    try {
-        const { getCollectionMeta, setCollectionMeta } = await import('../core/collection-metadata.js');
-        const { getCollectionRegistry } = await import('../core/collection-loader.js');
-        const { getSavedHashes } = await import('../core/core-vector-api.js');
-        const settings = extension_settings.vecthare;
-        const registry = getCollectionRegistry();
-        let totalCleaned = 0;
-        let collectionsFixed = 0;
-        let collectionsSkipped = 0;
-
-        for (const registryKey of registry) {
-            const {parseRegistryKey} = await import('../core/collection-ids.js');
-            const collectionId = parseRegistryKey(registryKey).collectionId;
-
-            const meta = getCollectionMeta(collectionId);
-            const groups = meta?.groups || [];
-
-            if (groups.length === 0) continue;
-
-            // Get actual chunk hashes
-            let existingHashes;
-            try {
-                const hashes = await getSavedHashes(collectionId, settings);
-                if (!Array.isArray(hashes) || hashes.length >= VECTOR_LIST_LIMIT) throw new Error('Incomplete or capped collection inventory');
-                existingHashes = new Set(hashes.map(h => String(h)));
-            } catch {
-                collectionsSkipped++;
-                continue;
-            }
-
-            let collectionModified = false;
-            for (const group of groups) {
-                const originalLength = group.members?.length || 0;
-                const retained = (group.members || []).filter(hash => existingHashes.has(String(hash)));
-                const removed = originalLength - retained.length;
-                if (removed > 0) group.members = retained;
-                if (removed > 0) {
-                    totalCleaned += removed;
-                    collectionModified = true;
-                }
-            }
-
-            if (collectionModified) {
-                setCollectionMeta(collectionId, { groups });
-                collectionsFixed++;
-            }
-        }
-
-        if (collectionsSkipped > 0) {
-            return {
-                success: false,
-                message: `Checked available collections; skipped ${collectionsSkipped} collection(s) with unavailable inventories. ${totalCleaned} member(s) cleaned from ${collectionsFixed} collection(s). Recheck before further cleanup.`
-            };
-        }
-        if (totalCleaned > 0) {
-            return { success: true, message: `Removed ${totalCleaned} orphaned member(s) from ${collectionsFixed} collection(s)` };
-        }
-        return { success: true, message: 'No orphaned members found to clean' };
-    } catch (error) {
-        return { success: false, message: `Fix failed: ${error.message}` };
-    }
+    return {
+        success: false,
+        status: 'UNVERIFIED',
+        previewOnly: true,
+        changesApplied: 0,
+        message: 'Group repair is preview-only: complete, owner-verified managed inventory and a durable server metadata-update receipt are required. No group membership was changed.'
+    };
 }

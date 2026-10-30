@@ -126,7 +126,8 @@ test('M3v8 staged local model config cannot send credentials or switch the activ
  assert.equal(profileCheck('PUT',b).allowed,true);
  for(const forbidden of [{credential:'secret'},{url:'http://evil'},{owner:'bob'}, {source:'openai'}])
   assert.throws(()=>profileCheck('PUT',{...b,...forbidden}),VectorOperationDenied);
- assert.throws(()=>inspectVectorRequest('/api/plugins/similharity/v2/embeddings/profile',{method:'PUT',body:JSON.stringify(b)}),VectorOperationDenied);
+ // P03 now permits a narrowly typed owner-scoped active profile setup, without M3 cutover rights.
+ assert.equal(inspectVectorRequest('/api/plugins/similharity/v2/embeddings/profile',{method:'PUT',body:JSON.stringify(b)}).allowed,true);
  const d=await m3SetLocalStagedProfile('local-embed',4,'cosine',{},async()=>response({success:true,configured:true,profile:b}));
  assert.equal(d.profile.model,'local-embed');
  await assert.rejects(()=>m3SetLocalStagedProfile('bad model',4,'cosine'),/M3_STAGED_PROFILE_INVALID/);

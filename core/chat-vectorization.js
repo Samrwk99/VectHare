@@ -250,6 +250,49 @@ function tryAcquireVectorizationRun() {
     return true;
 }
 
+/** P-A: managed manual runs share the real progress panel, serial-run guard,
+ * and Stop/Pause controls. Stop never aborts a submitted S04 operation: it
+ * waits for its definitive receipt, then prevents the next operation. */
+async function runManagedSavedChat(settings,mode='sync') {
+    if (!tryAcquireVectorizationRun()) return {status:'already-running'};
+    resetControlState();
+    const signal=getStopSignal();
+    let lastProcessed=0,verified=0;
+    progressTracker.show(mode==='repair'?'Repairing saved chat (managed)':'Vectorizing saved chat (managed)',0,'Saved records');
+    progressTracker.setControls({
+        onPause:()=>{pauseVectorization();progressTracker.markPaused('Managed run paused at next safe checkpoint');},
+        onResume:()=>{resumeVectorization();progressTracker.isPaused=false;progressTracker.updateDisplay('Managed run resumed');},
+        onStop:()=>{stopVectorization();progressTracker.isStopping=true;
+            progressTracker.updateDisplay('Stopping after in-flight M1 operation receipt; no blind retry');}
+    });
+    try {
+        const outcome=await m4eVectorizeCurrentChat(settings,{
+            getChatId:getCurrentChatId,getContext,getHeaders:getRequestHeaders,
+            confirm:globalThis.confirm,fetchImpl:globalThis.fetch,mode,signal,
+            pauseGate:async()=>{while(isVectorizationPaused()&&!signal.aborted)await new Promise(r=>setTimeout(r,100));},
+            progress:({inserted,processed,total})=>{
+                lastProcessed=processed;verified=inserted;
+                progressTracker.stats.totalItems=total;
+                progressTracker.updateProgress(processed,`Saved source: ${processed}/${total} records checked; ${inserted} verified changes`);
+            }
+        });
+        if(outcome.status==='cancelled'||outcome.status==='already-running'){
+            progressTracker.complete(false,'Managed operation cancelled before mutation');return outcome;
+        }
+        if(outcome.complete!==true)throw Error('M4E_SOURCE_INVENTORY_INCOMPLETE');
+        progressTracker.stats.totalItems=outcome.totalRecords;
+        progressTracker.updateProgress(outcome.processed);
+        progressTracker.complete(outcome.remainingReview===0,`${outcome.processed}/${outcome.totalRecords} source records checked, ${outcome.inserted} verified writes, ${outcome.remainingReview} requiring review`);
+        return outcome;
+    }catch(e){
+        if(signal.aborted)lastRunStoppedByUser=true;
+        progressTracker.complete(false,`${lastProcessed} records checked, ${verified} confirmed; ${e.message}. Check receipts before repeating uncertain writes`);
+        throw e;
+    }finally{
+        vectorizeRunActive=false;resetControlState();
+    }
+}
+
 // ============================================================================
 // RE-EXPORTS from collection-ids.js for backwards compatibility
 // Other files importing from chat-vectorization.js will still work.
@@ -2375,14 +2418,7 @@ export async function rearrangeChat(chat, settings, type) {
                 const queryText=buildSearchQuery(chat,settings);
                 const result=await injectF09bV2({chat,settings,queryText,
                     getChatId:getCurrentChatId,getContext,getHeaders:getRequestHeaders,
-                    embedText:async(text,profile)=>{
-                        // Only a locally configured provider with direct embeddings is
-                        // supported in F09b. The protected server credentials for other
-                        // providers belong to F11b, not browser-side workarounds.
-                        if(profile.source!=='webllm')throw Error('F09B_PROVIDER_NOT_YET_SERVER_MANAGED');
-                        const args=await getAdditionalArgs([text],profile);
-                        return args.embeddings?.[text];
-                    },setPrompt:setExtensionPrompt,prompts:extension_prompts,
+                    setPrompt:setExtensionPrompt,prompts:extension_prompts,
                     assertCurrent:()=>job.assertCurrent(),
                     tokenizer:typeof getContext()?.getTokenCountAsync==='function'?
                         text=>getContext().getTokenCountAsync(text):
@@ -3021,23 +3057,16 @@ export async function vectorizeAll(settings, batchSize) {
     let job = null;
     try {
         // M4e: all managed plugin backends now use the same saved-source
-        // M1/S04 path; never re-enter legacy getSavedHashes/chunks/insert.
+        // M1/S04 path via runManagedSavedChat → m4eVectorizeCurrentChat;
+        // never re-enter legacy hash writes.
         if (['qdrant','lancedb','vectra','milvus'].includes(settings?.vector_backend)) {
             try {
-                const outcome=await m4eVectorizeCurrentChat(settings,{
-                    getChatId:getCurrentChatId,getContext,
-                    getHeaders:getRequestHeaders,confirm:globalThis.confirm,
-                    fetchImpl:globalThis.fetch,
-                    progress:({inserted,total})=>console.info(`VectHare managed saved-record vectorization: ${inserted}/${total} verified`)
-                });
-                if(outcome.status==='cancelled')return false;
-                if(outcome.status==='review-required'||outcome.remainingReview||outcome.previewBounded) {
-                    toastr.warning(`Managed ${settings.vector_backend} vectorization verified ${outcome.inserted} inserts. Some changes or further saved records require explicit review; this is not automatic M5 synchronization.`, 'VectHare managed vectorization');
-                } else {
-                    toastr.success(`Verified ${outcome.inserted} saved-record inserts via ${settings.vector_backend}.`, 'VectHare managed vectorization');
-                }
-                return true;
-            } catch(e) {
+                const outcome=await runManagedSavedChat(settings,'sync');
+                if(outcome.status==='cancelled'||outcome.status==='already-running')return false;
+                if(outcome.remainingReview)toastr.warning(`Managed ${settings.vector_backend}: ${outcome.processed}/${outcome.totalRecords} saved records checked, ${outcome.inserted} verified writes and ${outcome.remainingReview} requiring review. No automatic deletion.`, 'VectHare managed vectorization');
+                else toastr.success(`Verified ${outcome.inserted} changes after checking all ${outcome.totalRecords} saved records via ${settings.vector_backend}.`, 'VectHare managed vectorization');
+                return outcome.complete===true;
+            }catch(e){
                 toastr.error(`Managed saved-chat vectorization stopped: ${e.message}. No unsafe legacy write was attempted.`, 'VectHare');
                 return false;
             }
@@ -3401,6 +3430,17 @@ export async function vectorizeAll(settings, batchSize) {
  * @param {number} batchSize Embed batch size (unused for deletes)
  */
 export async function repairChatVectors(settings, batchSize = 5) {
+    // P05: direct callers and the UI must use the source-attested M1 bridge before
+    // the old non-managed repair implementation.
+    if (M4E_BACKENDS.includes(settings?.vector_backend)) {
+        try {
+            const outcome=await runManagedSavedChat(settings,'repair');
+            if(outcome.status==='cancelled'||outcome.status==='already-running')return false;
+            if(outcome.remainingReview)toastr.warning(`Repair processed ${outcome.totalRecords} saved records, restored ${outcome.repaired?.missingRestored??0} missing vectors, updated ${outcome.repaired?.outdatedUpdated??0}, reconciled ${outcome.repaired?.registryReconciled??0} registry entries; ${outcome.remainingReview} items require review.`, 'VectHare Repair');
+            else toastr.success(`Repair checked ${outcome.totalRecords} saved records: ${outcome.repaired?.alreadyVerified??0} healthy, ${outcome.repaired?.missingRestored??0} missing vectors restored, ${outcome.repaired?.outdatedUpdated??0} updated, ${outcome.repaired?.registryReconciled??0} registry entries reconciled.`, 'VectHare Repair');
+            return outcome.complete===true;
+        }catch(e){toastr.error(`Managed repair stopped without legacy fallback: ${e.message}`, 'VectHare Repair');return false;}
+    }
     let job = null;
     try {
         if (!tryAcquireVectorizationRun()) return;

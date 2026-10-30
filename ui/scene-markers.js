@@ -21,12 +21,15 @@ import {
     filterSceneChunks,
 } from '../core/scenes.js';
 import { getSavedHashes } from '../core/core-vector-api.js';
-import { eventSource, event_types } from '../../../../../script.js';
+import { eventSource, event_types, chat_metadata, getRequestHeaders, getCurrentChatId } from '../../../../../script.js';
 import { getContext } from '../../../../extensions.js';
 import {currentChatIdentity} from '../core/chat-job-runtime.js';
 import {getVerifiedChatOriginId} from '../core/collection-ids.js';
 import {formatCollectionKey} from '../utils/collection-keys.js';
 import {acceptSceneTimelineSnapshot} from '../core/scene-timeline.js';
+import {requiresManagedSceneContract} from '../utils/pb3-managed-scene-guard.js';
+import {f02CurrentChatSelector} from '../utils/f02-public-read-client.js';
+import {readManagedScenes,sceneLocator,validateHostSceneDraft,commitManagedSceneEdit} from '../utils/pb6-managed-scenes.js';
 
 // ============================================================================
 // CONSTANTS
@@ -45,6 +48,40 @@ let cachedSceneChunks = [];
 let pendingSceneStart = null;
 let currentSettings = null;
 let sceneCacheRefreshVersion = 0;
+// P-B.2: legacy scene hash listings do not prove a managed-v2 record,
+// owned generation, revision, or physically complete inventory.
+let sceneCacheEvidence = 'UNVERIFIED';
+let managedSceneReadback = null;
+let managedSceneEditBusy = false;
+const selectedSavedSource = () => f02CurrentChatSelector({getChatId:getCurrentChatId,getContext});
+const managedLocatorKey = v => JSON.stringify([String(v.sendDate),v.name,v.isUser]);
+function resolveManagedSceneRows(scenes,chat) {
+    validateHostSceneDraft(scenes,chat);
+    const index=new Map(chat.map((m,i)=>{try{return [managedLocatorKey(sceneLocator(m)),i];}catch{return [String(i),i];}}));
+    return scenes.map(s=>({sceneId:s.id,sceneStart:index.get(managedLocatorKey(s.start)),
+        sceneEnd:index.get(managedLocatorKey(s.end)),title:s.title,source:'SAVED_CHAT_METADATA'}));
+}
+async function saveManagedSceneChanges(scenes,label) {
+    if(managedSceneEditBusy)throw Error('PB6_SCENE_EDIT_IN_PROGRESS');
+    if(sceneCacheEvidence!=='MANAGED_SAVED_SCENES_VERIFIED'||!managedSceneReadback)throw Error('PB6_SCENE_REFRESH_REQUIRED');
+    const ctx=getContext();
+    if(!ctx||!Array.isArray(ctx.chat))throw Error('PB6_CHAT_UNAVAILABLE');
+    validateHostSceneDraft(scenes,ctx.chat);
+    managedSceneEditBusy=true;
+    try {
+        const source=selectedSavedSource();
+        const read=async actual=>readManagedScenes({source:actual,headers:getRequestHeaders()});
+        const result=await commitManagedSceneEdit({context:ctx,chatMetadata:chat_metadata,source,
+            getCurrentSource:async()=>selectedSavedSource(),read,expected:managedSceneReadback,scenes,
+            confirm:async()=>globalThis.confirm?.(`${label}\n\nSave these scene annotations in the actual SillyTavern chat? These are saved-source markers, NOT newly vectorized scene chunks.`)===true});
+        if(result.status==='VERIFIED_SAVED_METADATA') {
+            await refreshSceneCache();updateAllMarkerStates();
+            eventSource.emit('vecthare_scenes_changed');
+        }
+        return result;
+    } finally { managedSceneEditBusy=false; }
+}
+
 
 // ============================================================================
 // CACHE MANAGEMENT
@@ -61,14 +98,40 @@ export async function refreshSceneCache(settings) {
     const isCurrent = () => version === sceneCacheRefreshVersion &&
         identity === JSON.stringify(currentChatIdentity()) &&
         collectionId === getCurrentCollectionId();
-    if (!collectionId || !currentSettings) {
-        cachedSceneChunks = [];
+    if (!currentSettings) {
+        sceneCacheEvidence = 'UNVERIFIED';cachedSceneChunks = [];managedSceneReadback=null;return;
+    }
+    if (requiresManagedSceneContract(currentSettings)) {
+        try {
+            const source=selectedSavedSource();
+            const read=await readManagedScenes({source,headers:getRequestHeaders()});
+            if(!isCurrent())return;
+            const chat=getContext()?.chat;
+            if(!Array.isArray(chat)||JSON.stringify(chat_metadata?.vecthareManagedScenes??[])!==JSON.stringify(read.scenes))
+                throw Error('PB6_HOST_SCENE_METADATA_STALE');
+            const rows=resolveManagedSceneRows(read.scenes,chat);
+            if(!isCurrent())return;
+            cachedSceneChunks=rows;managedSceneReadback=read;
+            sceneCacheEvidence='MANAGED_SAVED_SCENES_VERIFIED';
+        }catch(error){
+            if(!isCurrent())return;
+            cachedSceneChunks=[];managedSceneReadback=null;
+            sceneCacheEvidence='MANAGED_SCENE_UNVERIFIED';
+            console.warn('VectHare: managed scene readback is unverified',error);
+        }
         return;
+    }
+    if (!collectionId) {
+        sceneCacheEvidence='UNVERIFIED';cachedSceneChunks=[];managedSceneReadback=null;return;
     }
 
     try {
         const result = await getSavedHashes(collectionId, currentSettings, true);
         if (!isCurrent()) return; // never paint chat B with results from chat A
+        // The old getSavedHashes() response is advisory legacy metadata only.
+        // In particular an empty array must not be presented as proof that
+        // an owned managed-v2 collection contains no scenes.
+        sceneCacheEvidence = 'LEGACY_UNVERIFIED';
         if (result.metadata) {
             cachedSceneChunks = result.metadata
                 .filter(m => m.isScene === true)
@@ -98,6 +161,7 @@ export async function refreshSceneCache(settings) {
         if (!isCurrent()) return;
         console.error('VectHare Scenes: Failed to refresh cache', error);
         cachedSceneChunks = [];
+        sceneCacheEvidence = 'UNVERIFIED';
     }
 }
 
@@ -106,6 +170,14 @@ export async function refreshSceneCache(settings) {
  */
 export function getCachedScenes() {
     return cachedSceneChunks;
+}
+
+/** Read-only status for scene UI and diagnostics; never a mutation receipt. */
+export function getSceneCacheEvidence() {
+    return { status: sceneCacheEvidence,
+        source: sceneCacheEvidence==='MANAGED_SAVED_SCENES_VERIFIED'?'SAVED_CHAT_METADATA':'LEGACY_HASH_ADVISORY',
+        managedV2Verified: false, savedMetadataVerified: sceneCacheEvidence==='MANAGED_SAVED_SCENES_VERIFIED',
+        vectorSceneRecordsVerified: false, physicalInventoryComplete: false };
 }
 
 /**
@@ -258,7 +330,9 @@ function updateMessageMarkerState(messageElement, messageId) {
         startButton.classList.toggle('vecthare-pending', pendingSceneStart === messageId);
 
         if (isExistingStart) {
-            startButton.title = 'Delete this scene';
+            startButton.title = sceneCacheEvidence==='MANAGED_SAVED_SCENES_VERIFIED'
+                ? 'Saved scene annotation: click to rename or delete (not a vector chunk)'
+                : 'Legacy cached scene (UNVERIFIED managed-v2 provenance). Delete requires a separate authorized path.';
         } else if (pendingSceneStart === messageId) {
             startButton.title = 'Cancel pending scene';
         } else {
@@ -313,6 +387,36 @@ export function updateAllMarkerStates() {
  * Handles START button click
  */
 async function handleStartClick(messageId) {
+    if (requiresManagedSceneContract(currentSettings)) {
+        if(sceneCacheEvidence!=='MANAGED_SAVED_SCENES_VERIFIED') {
+            toastr.warning('Scene metadata unverified. Refresh scene markers before editing.');return;
+        }
+        const existing=getSceneStartingAt(messageId);
+        if(existing){
+            const rename=globalThis.confirm?.(`Rename scene "${existing.title}"?\nOK: rename; Cancel: offer deletion.`)===true;
+            let scenes,label;
+            if(rename){
+                const title=globalThis.prompt?.('New scene title',existing.title);
+                if(title===null||title===undefined)return;
+                scenes=managedSceneReadback.scenes.map(s=>s.id===existing.sceneId?{...s,title:title.trim()}:s);
+                label=`Rename scene "${existing.title}"?`;
+            }else{
+                if(globalThis.confirm?.(`Delete saved scene annotation "${existing.title}"?`)!==true)return;
+                scenes=managedSceneReadback.scenes.filter(s=>s.id!==existing.sceneId);
+                label=`Delete scene "${existing.title}"?`;
+            }
+            try{const result=await saveManagedSceneChanges(scenes,label);
+                if(result?.status==='VERIFIED_SAVED_METADATA')toastr.success('Saved scene metadata verified');
+            }catch(err){toastr.error(err.message);}return;
+        }
+        if(getSceneAtMessage(messageId)){
+            toastr.warning('Scene overlaps an existing range; edit the existing scene first.');return;
+        }
+        if(pendingSceneStart===messageId){pendingSceneStart=null;updateAllMarkerStates();return;}
+        pendingSceneStart=messageId;
+        toastr.info('Scene START selected. Click END to save a scene annotation.');
+        updateAllMarkerStates();return;
+    }
     if (!currentSettings) {
         toastr.error('VectHare settings not loaded');
         return;
@@ -405,6 +509,28 @@ async function handleStartClick(messageId) {
  * Handles END button click
  */
 async function handleEndClick(messageId) {
+    if (requiresManagedSceneContract(currentSettings)) {
+        if(sceneCacheEvidence!=='MANAGED_SAVED_SCENES_VERIFIED'||pendingSceneStart===null){
+            toastr.warning('Select a START marker after refreshing verified scene metadata.');return;
+        }
+        if(messageId<=pendingSceneStart||getSceneAtMessage(messageId)){
+            toastr.warning('Scene END must follow START and must not overlap another scene.');return;
+        }
+        const ctx=getContext(),start=ctx?.chat?.[pendingSceneStart],end=ctx?.chat?.[messageId];
+        if(!start||!end){toastr.error('Saved chat message boundaries unavailable');return;}
+        const title=globalThis.prompt?.(`Scene title (messages ${pendingSceneStart}–${messageId})`,
+            `Scene ${pendingSceneStart}–${messageId}`);
+        if(title===null||title===undefined)return;
+        try{
+            const newScene={id:globalThis.crypto.randomUUID(),start:sceneLocator(start),end:sceneLocator(end),title:title.trim()};
+            const result=await saveManagedSceneChanges([...managedSceneReadback.scenes,newScene],`Create scene "${newScene.title}"?`);
+            if(result?.status==='VERIFIED_SAVED_METADATA'){
+                pendingSceneStart=null;toastr.success('Scene annotation saved and verified in chat metadata');
+                updateAllMarkerStates();
+            }
+        }catch(err){toastr.error(err.message);}
+        return;
+    }
     if (!currentSettings) {
         toastr.error('VectHare settings not loaded');
         return;
@@ -496,6 +622,7 @@ export function initializeSceneMarkers() {
     eventSource.on(event_types.CHAT_CHANGED, async () => {
         ++sceneCacheRefreshVersion;
         cachedSceneChunks = [];
+        managedSceneReadback=null;
         pendingSceneStart = null; // Clear pending on chat change
         // Ensure observer is running (in case chat element was recreated)
         startObserving();

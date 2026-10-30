@@ -14,7 +14,12 @@ export async function f03CollectionRequest(operation,body,headers={},fetchImpl=g
  if(value.productionWritesEnabled!==false||value.backendCertified!==false)throw Error('F03_CAPABILITY_OVERCLAIM');
  if(operation==='preview'&&(value.physicalCollectionProvisioned!==false||value.consentRequired!==true||
    !/^vh2_[a-f0-9]{48}$/.test(value.collectionName)))throw Error('F03_PREVIEW_UNVERIFIED');
- if(operation==='status'&&typeof value.receiptState!=='string')throw Error('F03_STATUS_RESPONSE_INVALID');
+ if(operation==='status'&&(typeof value.receiptState!=='string'||
+   value.physicalPresenceVerified===true||
+   (value.collectionState!==undefined&&(!['UNPROVISIONED','DELETED_TOMBSTONED',
+    'RESERVED_NO_RECEIPT','PROVISION_UNCERTAIN','SCHEMA_RECEIPT_ONLY',
+    'PROVISION_UNVERIFIED'].includes(value.collectionState)||value.registryVerified!==true||
+    value.physicalCollectionProvisioned!==false))))throw Error('F03_STATUS_RESPONSE_INVALID');
  if(operation==='provision'&&(value.physicalCollectionProvisioned!==true||value.recordMutationsEnabled!==false))
   throw Error('F03_PROVISION_RESPONSE_UNVERIFIED');
  return value;
@@ -57,7 +62,7 @@ export function renderF03ProvisionPanel(root,getSettings,doc=globalThis.document
   status.disabled=true;
   try{const {getRequestHeaders}=await import('../../../../script.js');
    const result=await f03CollectionRequest('status',pending.body,getRequestHeaders());
-   output.textContent=`F03 provisioning receipt: ${result.receiptState}${result.receiptCode?' ('+result.receiptCode+')':''}. Production writes remain disabled.`;
+   output.textContent=`F03 registered state: ${result.collectionState||'UNKNOWN'}; receipt: ${result.receiptState}${result.receiptCode?' ('+result.receiptCode+')':''}${Number.isInteger(result.routingGeneration)?`; routing generation: ${result.routingGeneration}`:''}. Physical presence not verified; production writes remain disabled.`;
   }catch(e){output.textContent=`F03 receipt check refused: ${e?.message||'unknown'}`;}
   finally{status.disabled=false;}
  });

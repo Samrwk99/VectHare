@@ -1,0 +1,12 @@
+# P-A.4 — Live Host Acceptance (User-run; not executed here)
+
+Use both matched P-A.4 ZIPs. Back up existing installation and private settings. Confirm plugin startup `3.2.11-p-a.4`, extension manifest `2.2.0-alpha.p-a.4`.
+
+1. **Fresh profile:** Save an actual installed llama.cpp/Ollama/vLLM/KoboldCpp provider endpoint and correct served model/dimension. Test and reload. Then configure an untested profile and try creating a collection or writing a record: both must refuse with `M1_EMBEDDING_PROFILE_UNVERIFIED` with no backend action. Re-test, then verify readiness. Simulate an unreachable local port, wrong dimension and wrong reported model; all must report refusal.
+2. **New saved chat:** On a fresh local Qdrant DB, select saved chat, run Sync, consent once for the new owned collection and for the full saved source, confirm S04 receipts and UUID metadata. Repeat for other backends only with disposable data. No `matrix-denied` or `M1_EMBEDDING_PROFILE_REQUIRED` after verified configuration.
+3. **Repair:** Edit message text and add a new message, run Repair, check one verified update and one insert, no legacy `/chunks/*` write. Delete/swap/branch a message, inspect review state; it must not silently purge. Switch chats mid-operation; stale chat must stop.
+4. **Large saved chat:** Test 250 then ~1000 records; verify entire saved-source totals. Pause/Resume, Stop, browser reload, plugin process restart, interrupted/uncertain response. On restart check S04 receipts and that any ambiguous `WRITE_PENDING` entry is reviewed and never replayed by automation. Real restarted DB acceptance is NOT automatically proved by unit tests.
+5. **Generation retrieval:** Enable F09b verified-v2 injection on a provisioned saved chat; test llama.cpp plus one other actual installed provider with a matching query. Verify source ownership, no injection on switched chat/model or revoked verification, context/token cap, and no World Info conditional autoactivation.
+6. **Diagnostics:** Embedding diagnostic may PASS if verified. Storage diagnostic must say SKIPPED / UNVERIFIED; it must not write/delete test vectors. A production storage PASS is not expected until a disposable fixture has been engineered and accepted separately.
+
+If a backend mutates an unverified profile, mismatched model succeeds, an uncertain operation is automatically replayed, or a legacy hash mutation is invoked: stop testing and retain the exact plugin log and receipt; treat P-A as not accepted.

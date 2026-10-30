@@ -172,7 +172,7 @@ function getSaveAllChangesFunction() {
 async function exerciseSave(updater) {
     const pendingChanges=new Map([[1,{ keywords:['A'] }],[2,{ conditions:{enabled:true} }]]);
     const persisted=[];const messages=[];const calls=[];
-    const ctx=vm.createContext({ pendingChanges, console:silent, currentCollectionId:'collection', currentSettings:{},
+    const ctx=vm.createContext({ pendingChanges, console:silent, denyLegacyManagedEdit:()=>false, currentCollectionId:'collection', currentSettings:{},
         toastr: { warning:m=>messages.push(['warning',m]), success:m=>messages.push(['success',m]), info:m=>messages.push(['info',m]) },
         updateChunkMetadata: async (id,hash,metadata)=>{calls.push(hash);return updater(hash,metadata);},
         getChunkMetadata:()=>({}), saveChunkMetadata:(hash, value)=>persisted.push(hash),

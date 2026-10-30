@@ -40,16 +40,17 @@ import {
     buildChatCollectionId as getChatCollectionId,
     buildLegacyChatCollectionId as getLegacyChatCollectionId,
     parseCollectionId,
-    buildChatSearchPatterns,
-    matchesPatterns,
     parseRegistryKey,
     resolveCollectionKey,
     parseCollectionKey,
     COLLECTION_PREFIXES,
 } from './collection-ids.js';
 
-// Plugin detection state
+// Current discovery result only. Never pin a failed health check forever:
+// the plugin can start, stop or restart while SillyTavern remains open.
 let pluginAvailable = null;
+// Only the most recently started discovery may publish its health/catalogue.
+let discoveryEpoch = 0;
 
 /**
  * Gets or initializes the collection registry
@@ -299,11 +300,8 @@ function getCollectionDisplayName(collectionId, metadata) {
  * Checks if VectHare server plugin is available
  * @returns {Promise<boolean>} True if plugin is available
  */
-async function checkPluginAvailable() {
-    if (pluginAvailable !== null) {
-        return pluginAvailable;
-    }
-
+async function checkPluginAvailable(epoch) {
+    let available = false;
     try {
         const response = await fetch('/api/plugins/similharity/health', {
             method: 'GET',
@@ -312,16 +310,16 @@ async function checkPluginAvailable() {
 
         if (response.ok) {
             const data = await response.json();
-            pluginAvailable = data.status === 'ok';
-            console.log(`VectHare: Plugin ${pluginAvailable ? 'detected' : 'not found'} (v${data.version || 'unknown'})`);
+            available = data.status === 'ok';
+            console.log(`VectHare: Plugin ${available ? 'detected' : 'not found'} (v${data.version || 'unknown'})`);
         } else {
-            pluginAvailable = false;
         }
     } catch (error) {
-        pluginAvailable = false;
+        // Treat network/parse errors as unavailable for this request.
     }
 
-    return pluginAvailable;
+    if (epoch === discoveryEpoch) pluginAvailable = available;
+    return available;
 }
 
 // Cache for plugin collection data
@@ -332,7 +330,10 @@ let pluginCollectionData = null;
  * @param {object} settings VectHare settings
  * @returns {Promise<string[]>} Array of discovered collection IDs
  */
-async function discoverViaPlugin(settings) {
+async function discoverViaPlugin(settings, epoch) {
+    // Treat each discovery as a fresh snapshot. On any HTTP, parsing, or
+    // network failure a previous count must not look like current evidence.
+    pluginCollectionData = null;
     try {
         console.debug('🔍 VectHare: Requesting collection discovery from plugin...');
 
@@ -345,7 +346,7 @@ async function discoverViaPlugin(settings) {
         if (!response.ok) {
             console.warn(`⚠️ VectHare: Plugin collections endpoint failed (status: ${response.status})`);
             console.log('   💡 Make sure the Similharity plugin is installed and running');
-            return [];
+            return null; // Catalogue failed; attempt scoped legacy probes.
         }
 
         const data = await response.json();
@@ -362,16 +363,25 @@ async function discoverViaPlugin(settings) {
 
             // Cache the plugin data (includes chunk counts, sources, AND backends)
             // Key format: "backend:source:collectionId" to handle same collection in multiple backends
-            pluginCollectionData = {};
+            const freshCollectionData = {};
+            const ambiguousKeys = new Set();
             const uniqueKeys = [];
 
             for (const collection of data.collections) {
                 // A plugin catalogue is untrusted/advisory: never guess a
                 // missing backend or silently coalesce two physical owners.
                 const backend = collection?.backend;
-                if (!['standard','qdrant','milvus','lancedb'].includes(backend) ||
+                if (!['standard','vectra','qdrant','milvus','lancedb'].includes(backend) ||
                     typeof collection.id !== 'string' || !collection.id ||
-                    typeof collection.source !== 'string') continue;
+                    typeof collection.source !== 'string' || !collection.source ||
+                    // This catalogue is only advisory. A string, negative or
+                    // unsafe count must not become a browser row (or corrupt
+                    // the total); use a backend-scoped probe instead.
+                    !Number.isSafeInteger(collection.chunkCount) || collection.chunkCount < 0 ||
+                    (collection.model !== undefined && typeof collection.model !== 'string') ||
+                    (collection.models !== undefined && (!Array.isArray(collection.models) ||
+                        collection.models.some(model => !model || typeof model.path !== 'string' ||
+                            !Number.isSafeInteger(model.chunkCount) || model.chunkCount < 0)))) continue;
 
                 // Strip backend prefix from collection.id if it's already there
                 // Some backends (like Qdrant) may return IDs with backend prefix
@@ -394,7 +404,15 @@ async function discoverViaPlugin(settings) {
                 // Cache by "backend:source:id" to uniquely identify each collection
                 const cacheKey = `${backend}:${collection.source}:${collectionId}`;
                 if (!parseCollectionKey(cacheKey)) continue;
-                pluginCollectionData[cacheKey] = collectionData;
+                // An advisory response with duplicate owner keys is ambiguous.
+                // Do not let the last row silently win with an arbitrary count.
+                if (Object.hasOwn(freshCollectionData, cacheKey)) {
+                    delete freshCollectionData[cacheKey];
+                    ambiguousKeys.add(cacheKey);
+                    continue;
+                }
+                if (ambiguousKeys.has(cacheKey)) continue;
+                freshCollectionData[cacheKey] = collectionData;
                 uniqueKeys.push(cacheKey);
 
             }
@@ -403,15 +421,27 @@ async function discoverViaPlugin(settings) {
             // authoritative exhaustive inventory nor ownership proof. Never
             // delete, remap or enable registry entries based on this response.
             // Legacy mappings require reviewed C04 migration with durable backup.
-            console.debug(`VectHare: Discovered ${uniqueKeys.length} candidate collections; registry unchanged pending verification`);
+            if (epoch === discoveryEpoch) pluginCollectionData = freshCollectionData;
+            console.debug(`VectHare: Discovered ${Object.keys(freshCollectionData).length} candidate collections; registry unchanged pending verification`);
 
-            return uniqueKeys;
+            return {
+                keys: uniqueKeys.filter(key => Object.hasOwn(freshCollectionData, key)),
+                blockedKeys: [...ambiguousKeys],
+                // Only a declared, strictly validated coverage list can
+                // suppress extra reads. No field means unknown coverage.
+                coverage: data.catalogueComplete === true && data.ownershipVerified === true ? null :
+                    (data.catalogueComplete === false && Array.isArray(data.coverage) &&
+                     data.coverage.every(value => ['vectra', 'lancedb', 'qdrant', 'milvus', 'standard'].includes(value)))
+                        ? data.coverage : [],
+                complete: data.catalogueComplete === true && data.ownershipVerified === true,
+            };
         }
     } catch (error) {
         console.error('VectHare: Plugin discovery failed:', error);
     }
 
-    return [];
+    // Failed / invalid catalogue is unknown, NOT an authoritative empty list.
+    return null;
 }
 
 /**
@@ -457,7 +487,12 @@ async function discoverViaFallback(settings) {
         if (probed.has(registryKey)) continue;
         probed.add(registryKey);
 
-        // Parse the registry key to get the actual collection ID
+        // A qualified key is only probed using its exact configured backend
+        // and embedding source. A mismatched probe could find a homonymous
+        // collection belonging to a completely different owner.
+        const qualified = parseCollectionKey(registryKey);
+        if (qualified && (qualified.backend !== (settings?.vector_backend || 'standard') ||
+            qualified.source !== settings?.source)) continue;
         const parsed = parseRegistryKey(registryKey);
         const collectionId = parsed.collectionId;
 
@@ -538,20 +573,67 @@ async function discoverViaFallback(settings) {
 }
 
 /**
+ * The legacy plugin catalogue covers only selected local backends. A healthy
+ * response is not evidence that registered remote collections are absent.
+ * Supplement only uncovered backend entries already in the user's registry,
+ * by reading their physical hashes on the currently selected backend/source.
+ * This is advisory discovery, never managed ownership or mutation authority.
+ */
+async function discoverUncoveredRegisteredCollections(settings, coveredBackends, knownKeys, epoch) {
+    const backend = settings?.vector_backend || 'standard';
+    const source = settings?.source;
+    if (coveredBackends.has(backend)) return [];
+    const selected = { ...settings, vector_backend: backend, source };
+    const additional = [];
+    const seen = new Set(knownKeys);
+    for (const key of [...getCollectionRegistry()]) {
+        if (epoch !== discoveryEpoch || (settings?.vector_backend || 'standard') !== backend ||
+            settings?.source !== source) return [];
+        const owner = parseCollectionKey(key);
+        if (!owner || owner.backend !== backend || owner.source !== source || seen.has(key)) continue;
+        seen.add(key);
+        try {
+            const hashes = await getSavedHashes(owner.collectionId, selected);
+            if (epoch !== discoveryEpoch || (settings?.vector_backend || 'standard') !== backend ||
+                settings?.source !== source) return [];
+            if (Array.isArray(hashes) && hashes.length > 0) additional.push(key);
+        } catch (_) {
+            // Unreachable or empty is UNKNOWN, not proof of deletion.
+        }
+    }
+    return additional;
+}
+
+/**
  * Discovers existing collections (uses plugin if available, fallback otherwise)
  * @param {object} settings VectHare settings
  * @returns {Promise<string[]>} Array of discovered collection IDs
  */
-export async function discoverExistingCollections(settings) {
-    const hasPlugin = await checkPluginAvailable();
+export async function discoverExistingCollections(settings, {probeUncovered = true} = {}) {
+    // A healthy plugin can disappear between calls. No retained discovery
+    // results survive a failed health check or an unavailable plugin.
+    const epoch = ++discoveryEpoch;
+    pluginAvailable = null;
+    pluginCollectionData = null;
+    const hasPlugin = await checkPluginAvailable(epoch);
+    if (epoch !== discoveryEpoch) return [];
 
     if (hasPlugin) {
         console.log('VectHare: Using plugin for collection discovery');
-        return await discoverViaPlugin(settings);
+        const discovered = await discoverViaPlugin(settings, epoch);
+        if (epoch !== discoveryEpoch) return [];
+        if (discovered !== null) {
+            if (discovered.complete) return discovered.keys;
+            const extra = probeUncovered ? await discoverUncoveredRegisteredCollections(
+                settings, new Set(discovered.coverage), [...discovered.keys, ...discovered.blockedKeys], epoch) : [];
+            return epoch === discoveryEpoch ? [...discovered.keys, ...extra] : [];
+        }
+        console.warn('VectHare: Plugin catalogue unavailable; trying scoped legacy reads');
     } else {
         console.log('VectHare: Plugin not available, using fallback discovery');
-        return await discoverViaFallback(settings);
     }
+    const discovered = await discoverViaFallback(settings);
+    return epoch === discoveryEpoch ? discovered : [];
 }
 
 /**
@@ -563,55 +645,70 @@ export async function discoverExistingCollections(settings) {
  * @returns {Promise<{hasVectors: boolean, collectionId: string|null, chunkCount: number}>}
  */
 export async function doesChatHaveVectors(settings, overrideChatId, overrideUUID) {
-    // Always run discovery first to ensure registry is current
-    await discoverExistingCollections(settings);
-
-    const registry = getCollectionRegistry();
-
-    // Get current chat identifiers
+    // Snapshot the selected tenant and chat before network reads. A late
+    // result for an earlier chat/backend must never trigger an auto-sync UI.
+    const selectedBackend = settings?.vector_backend || 'standard';
+    const selectedSource = settings?.source;
+    const chatId = overrideChatId || getContext().chatId;
     const uuid = overrideUUID || getChatUUID();
-    const chatId = overrideChatId || (getContext().chatId);
-
-    // Use unified pattern builder from collection-ids.js
-    const searchPatterns = buildChatSearchPatterns(chatId, uuid);
-
-    console.log(`VectHare: Searching for chat vectors. UUID: ${uuid}, Patterns:`, searchPatterns);
+    const missing = () => ({hasVectors:false, collectionId:null, registryKey:null, chunkCount:0});
+    const stillSelected = () =>
+        (settings?.vector_backend || 'standard') === selectedBackend &&
+        settings?.source === selectedSource &&
+        (overrideChatId || getContext().chatId) === chatId &&
+        (overrideUUID || getChatUUID()) === uuid;
+    if (!chatId && !uuid) return missing();
+    // Chat presence has its own exact-identity physical checks below; avoid
+    // probing every registered remote collection on each auto-sync check.
+    await discoverExistingCollections(settings, {probeUncovered:false});
+    const readEpoch = discoveryEpoch;
+    if (!stillSelected()) return missing();
+    const registry = getCollectionRegistry();
+    const legacyId = chatId ? getLegacyChatCollectionId(chatId) : null;
+    const uuidSuffix = uuid ? `_${String(uuid).toLowerCase()}` : null;
+    const belongsToChat = id => typeof id === 'string' && (
+        (legacyId && id.toLowerCase() === legacyId.toLowerCase()) ||
+        // New format is vecthare_chat_<character>_<uuid>. Never match a
+        // character name, UUID substring, or a different chat's UUID prefix.
+        (uuidSuffix && id.toLowerCase().startsWith(COLLECTION_PREFIXES.VECTHARE_CHAT) &&
+            id.toLowerCase().endsWith(uuidSuffix))
+    );
+    console.log(`VectHare: Checking exact chat identity: ${chatId || '(none)'} / ${uuid || '(none)'}`);
 
     // Collect ALL matching collections, then pick the best one
     // This handles ghost collections (empty) vs real collections (has chunks)
     const matchingCollections = [];
 
     for (const registryKey of registry) {
-        // Use unified registry key parser from collection-ids.js
         const parsed = parseRegistryKey(registryKey);
         const collectionId = parsed.collectionId;
+        if (!belongsToChat(collectionId)) continue;
 
-        // Use unified pattern matching from collection-ids.js
-        const matches = matchesPatterns(registryKey, searchPatterns) ||
-                       matchesPatterns(collectionId, searchPatterns);
+        // A collection registered for another backend or embedding source is
+        // not evidence that the selected chat has any vectors here.
+        const owner = parseCollectionKey(registryKey);
+        if (owner && (owner.backend !== selectedBackend ||
+            owner.source !== selectedSource)) continue;
 
-        if (matches) {
-            // Get chunk count, source, and backend from plugin cache if available
-            let chunkCount = 0;
-            let source = parsed.source || 'unknown';
-            let backend = parsed.backend || 'standard';
-
-            if (pluginCollectionData && pluginCollectionData[registryKey]) {
-                const cacheData = pluginCollectionData[registryKey];
-                chunkCount = cacheData.chunkCount || 0;
-                source = cacheData.source || source;
-                backend = cacheData.backend || backend;
-            }
-
-            matchingCollections.push({
-                collectionId,
-                registryKey,
-                chunkCount,
-                source,
-                backend
-            });
-            console.log(`VectHare: Found matching collection ${collectionId} (${chunkCount} chunks, backend: ${backend})`);
+        // Local registry entries and the legacy plugin catalogue can survive
+        // physical deletion, restart or a backend switch. Confirm presence on
+        // the *selected* backend before offering auto-sync/reconnection.
+        let hashes;
+        try {
+            hashes = await getSavedHashes(collectionId, {...settings,vector_backend:selectedBackend,source:selectedSource});
+        } catch (error) {
+            console.warn(`VectHare: Chat collection ${registryKey} could not be checked: ${error.message}`);
+            continue;
         }
+        if (!stillSelected() || readEpoch !== discoveryEpoch) return missing();
+        if (!Array.isArray(hashes) || hashes.length === 0) continue;
+        matchingCollections.push({
+            collectionId,
+            registryKey,
+            chunkCount: hashes.length,
+            source: owner?.source || parsed.source || selectedSource || 'unknown',
+            backend: owner?.backend || parsed.backend || selectedBackend,
+        });
     }
 
     // If we found matches, return ALL of them sorted by chunk count (best first)
@@ -619,6 +716,7 @@ export async function doesChatHaveVectors(settings, overrideChatId, overrideUUID
         // Sort by chunk count descending
         matchingCollections.sort((a, b) => b.chunkCount - a.chunkCount);
 
+        if (!stillSelected() || readEpoch !== discoveryEpoch) return missing();
         const best = matchingCollections[0];
         console.log(`VectHare: Found ${matchingCollections.length} matching collection(s), best is ${best.collectionId} with ${best.chunkCount} chunks`);
 
@@ -637,16 +735,19 @@ export async function doesChatHaveVectors(settings, overrideChatId, overrideUUID
 
     for (const id of [newFormatId, legacyFormatId].filter(Boolean)) {
         try {
-            const hashes = await getSavedHashes(id, settings);
-            if (hashes && hashes.length > 0) {
-                // Found vectors! Register it now
-                registerCollection(id);
-                console.log(`VectHare: Found ${hashes.length} vectors via direct query, registered ${id}`);
+            const hashes = await getSavedHashes(id, {...settings,vector_backend:selectedBackend,source:selectedSource});
+            if (!stillSelected() || readEpoch !== discoveryEpoch) return missing();
+            if (Array.isArray(hashes) && hashes.length > 0) {
+                // A hash-only fallback is not proof of managed ownership.
+                // Preserve discovery for existing legacy users, but do not
+                // silently enroll an unqualified key in the durable registry.
+                console.log(`VectHare: Found ${hashes.length} legacy vectors via direct read for ${id}`);
                 return {
                     hasVectors: true,
                     collectionId: id,
                     registryKey: id,
-                    chunkCount: hashes.length
+                    chunkCount: hashes.length,
+                    unregisteredLegacy: true
                 };
             }
         } catch (e) {
@@ -654,8 +755,9 @@ export async function doesChatHaveVectors(settings, overrideChatId, overrideUUID
         }
     }
 
+    if (!stillSelected() || readEpoch !== discoveryEpoch) return missing();
     console.log('VectHare: No vectors found for current chat');
-    return { hasVectors: false, collectionId: null, registryKey: null, chunkCount: 0 };
+    return missing();
 }
 
 /**
@@ -672,7 +774,9 @@ export async function loadAllCollections(settings, autoDiscover = true) {
 
     // Auto-discover existing collections on first load
     if (autoDiscover) {
-        await discoverExistingCollections(settings);
+        // Every qualified registry row is checked below when absent from the
+        // local catalogue; do not duplicate those reads during discovery.
+        await discoverExistingCollections(settings, {probeUncovered:false});
     }
 
     const registry = getCollectionRegistry();
@@ -738,9 +842,28 @@ export async function loadAllCollections(settings, autoDiscover = true) {
 
                 console.log(`VectHare:   Plugin reported ${chunkCount} chunks (backend: ${backend}, source: ${source}, models: ${models.length})`);
             } else {
-                // Fallback mode: we don't know which backend the collection was created with
-                // Try 'standard' first (most common), only try configured backend if standard fails
-                console.log(`VectHare:   Using fallback mode - trying standard backend first`);
+                // Qualified entries must never be probed through another
+                // backend/source after a plugin failure or missing catalogue
+                // row. That can display another tenant's collection as this one.
+                const qualified = parseCollectionKey(registryKey);
+                if (qualified) {
+                    if (qualified.backend !== (settings?.vector_backend || 'standard') ||
+                        qualified.source !== settings?.source) {
+                        console.warn(`VectHare: Qualified collection ${registryKey} unverified for current backend/source; skipping`);
+                        continue;
+                    }
+                    try {
+                        hashes = await getSavedHashes(collectionId, settings);
+                        chunkCount = hashes?.length || 0;
+                    } catch (err) {
+                        console.warn(`VectHare: Qualified collection ${registryKey} unavailable: ${err.message}`);
+                        continue;
+                    }
+                } else {
+                // Only legacy, unqualified registry entries retain the old
+                // standard-first compatibility probe. This is display-only,
+                // NOT evidence for destructive managed operations.
+                console.log(`VectHare:   Using legacy fallback mode - trying standard backend first`);
                 const standardSettings = { ...settings, vector_backend: 'standard' };
                 try {
                     hashes = await getSavedHashes(collectionId, standardSettings);
@@ -762,6 +885,7 @@ export async function loadAllCollections(settings, autoDiscover = true) {
                         console.warn(`VectHare:   Standard backend failed for ${collectionId}`);
                         chunkCount = 0;
                     }
+                }
                 }
             }
 

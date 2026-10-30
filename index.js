@@ -231,20 +231,9 @@ window['vecthare_rearrangeChat'] = vecthare_rearrangeChat;
  * of edited messages) WITHOUT continuing the backlog.
  */
 async function onRepairClick() {
-    if(['qdrant','lancedb','vectra','milvus'].includes(settings.vector_backend)) {
-        const {m4eVectorizeCurrentChat}=await import('./utils/m4e-managed-vectorization.js');
-        try {
-            const result=await m4eVectorizeCurrentChat(settings,{
-                getChatId:getCurrentChatId,getContext,
-                getHeaders:getRequestHeaders,fetchImpl:globalThis.fetch,
-                confirm:globalThis.confirm,mode:'repair'
-            });
-            if(result.status!=='cancelled')toastr.info(`Managed repair verified ${result.inserted} saved-record updates. Deleted or ambiguous records require review.`, 'VectHare');
-        }catch(e){toastr.error(`Managed repair stopped: ${e.message}`, 'VectHare');}
-        return;
-    }
     await repairChatVectors(settings, getBatchSize());
-    await offerResumeOfUnfinishedVectorization(); // refresh status line + button
+    if(!['qdrant','lancedb','vectra','milvus'].includes(settings.vector_backend))
+        await offerResumeOfUnfinishedVectorization(); // legacy-only resume state
 }
 
 /**

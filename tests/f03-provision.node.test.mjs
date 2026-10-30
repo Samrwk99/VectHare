@@ -22,3 +22,17 @@ test('F03 GUI renders schema setup controls, no auto-execution',async()=>{
  const root={querySelector(){return null;},prepend(){}};
  assert.equal(renderF03ProvisionPanel(root,()=>({}),doc),true);assert.ok(count>=10);
 });
+
+test('P22 F03 status refuses client-side physical proof overclaim and accepts S02-only state',async()=>{
+ const response=(data)=>async()=>({ok:true,json:async()=>({success:true,backend:'qdrant',
+  receiptState:'SCHEMA_VERIFIED_OFFLINE_UNCERTIFIED',productionWritesEnabled:false,
+  backendCertified:false,...data})});
+ const valid={collectionState:'SCHEMA_RECEIPT_ONLY',registryVerified:true,
+  physicalCollectionProvisioned:false,physicalPresenceVerified:false,routingGeneration:3};
+ const result=await f03CollectionRequest('status',base,{},response(valid));
+ assert.equal(result.routingGeneration,3);
+ await assert.rejects(()=>f03CollectionRequest('status',base,{},response({...valid,
+  physicalPresenceVerified:true})),/F03_STATUS_RESPONSE_INVALID/);
+ await assert.rejects(()=>f03CollectionRequest('status',base,{},response({...valid,
+  collectionState:'ACTIVE_AND_OWNED'})),/F03_STATUS_RESPONSE_INVALID/);
+});

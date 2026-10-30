@@ -88,11 +88,8 @@ export function inspectVectorRequest(url, options={}) {
     // M0/D6: remote endpoints and credentials are administrator configured.
     if(req.transport==='plugin'&&/^\/v2\/connections\/(?:qdrant|milvus)$/.test(req.suffix)&&
        ['PUT','DELETE'].includes(req.method))fail(req,'m0-admin-server-config-only');
-    // Active embedding credentials remain server-admin only. A staged local
-    // transformers identity (without secrets) may be configured by the user,
-    // but it never switches the active profile or enables a vector mutation.
-    if(req.transport==='plugin'&&req.suffix==='/v2/embeddings/profile'&&
-       ['PUT','DELETE'].includes(req.method))fail(req,'m0-admin-embedding-profile-only');
+    // P03: authenticated owner-scoped embedding setup is narrowly allowed below.
+    // It never grants permission to mutate saved vectors.
     if(req.transport==='plugin'&&req.suffix==='/v2/embeddings/staged-profile'&&req.method==='PUT'){
         const b=req.body;
         if(!b||typeof b!=='object'||Array.isArray(b)||
@@ -490,6 +487,7 @@ export function inspectVectorRequest(url, options={}) {
             return {intercepted:true,allowed:true,transport:'plugin',operation:'m3RebuildStage',backend:'qdrant',method:'POST'};
         }
         const commands={'/v2/m3/collections/preview':['backend','source','configId'],
+            '/v2/m3/collections/managed-inventory':['backend','source','configId'],
             '/v2/m3/backups/create':['backend','source','configId','confirmation'],
             '/v2/m3/collections/plan':['backend','source','configId','action','backupId'],
             '/v2/m3/collections/rebuild/preview':['backend','source','configId','backupId'],
@@ -514,8 +512,89 @@ export function inspectVectorRequest(url, options={}) {
         if(req.method!=='GET'||req.body!=null||req.parsed.search)fail(req,'m0-capability-inspection-only');
         return {intercepted:true,allowed:true,transport:'plugin',operation:'m0Capabilities',backend:'none',method:'GET'};
     }
+    // P-B.6: owner-attested READ of scene annotations from an actual saved
+    // chat file. No browser-submitted scene/title edits or vector writes.
+    if(req.transport==='plugin'&&req.suffix==='/v2/pb6/scenes/read'){
+        const body=req.body,source=body?.source;
+        const fields=source?.kind==='chat'?['kind','avatar','chatFile']:
+            source?.kind==='group-chat'?['kind','groupId','chatFile']:[];
+        if(req.method!=='POST'||req.parsed.search||!body||typeof body!=='object'||Array.isArray(body)||
+           Object.keys(body).length!==1||!fields.length||!source||typeof source!=='object'||Array.isArray(source)||
+           Object.keys(source).some(k=>!fields.includes(k))||
+           fields.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220))
+            fail(req,'pb6-saved-scene-read-selector-invalid');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:'pb6SavedSceneRead',backend:'none',method:'POST'};
+    }
+    // PB10: strictly read-only, source-bound whole-physical browsing. No IDs,
+    // physical targets, offsets, vectors or client-supplied proof fields.
+    if(req.transport==='plugin'&&req.suffix==='/v2/pb10/physical/browse'){
+        const b=req.body,source=b?.source;
+        const fields=source?.kind==='chat'?['kind','avatar','chatFile']:
+            source?.kind==='group-chat'?['kind','groupId','chatFile']:
+            source?.kind==='lorebook'?['kind','name']:[];
+        if(req.method!=='POST'||req.parsed.search||!b||typeof b!=='object'||Array.isArray(b)||
+           Object.keys(b).some(k=>!['backend','source','configId','cursor'].includes(k))||
+           !['qdrant','lancedb','vectra','milvus'].includes(b.backend)||
+           !['default',undefined,...(b.backend==='qdrant'?['local']:[])].includes(b.configId)||
+           !fields.length||!source||typeof source!=='object'||Array.isArray(source)||
+           Object.keys(source).length!==fields.length||
+           Object.keys(source).some(k=>!fields.includes(k))||
+           fields.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220)||
+           (b.cursor!==undefined&&(typeof b.cursor!=='string'||b.cursor.length>2048||
+             !/^[-_A-Za-z0-9]+\.[-_A-Za-z0-9]+$/.test(b.cursor))))
+            fail(req,'pb10-physical-saved-source-only');
+        return {intercepted:true,allowed:true,transport:'plugin',backend:b.backend,
+            operation:'pb10ReadOnlyPhysicalBrowse',method:'POST'};
+    }
+    // P-B.14: Qdrant native page-only physical read. Scope-checked records,
+    // NOT a collection-wide completeness/ownership proof. Never a mutation path.
+    if(req.transport==='plugin'&&req.suffix==='/v2/pb14/qdrant/physical-page'){
+        const b=req.body,source=b?.source;
+        const fields=source?.kind==='chat'?['kind','avatar','chatFile']:
+            source?.kind==='group-chat'?['kind','groupId','chatFile']:
+            source?.kind==='lorebook'?['kind','name']:[];
+        if(req.method!=='POST'||req.parsed.search||!b||typeof b!=='object'||Array.isArray(b)||
+           Object.keys(b).some(k=>!['backend','source','configId','cursor'].includes(k))||
+           b.backend!=='qdrant'||!['default','local',undefined].includes(b.configId)||
+           !fields.length||!source||typeof source!=='object'||Array.isArray(source)||
+           Object.keys(source).length!==fields.length||
+           Object.keys(source).some(k=>!fields.includes(k))||
+           fields.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220)||
+           (b.cursor!==undefined&&(typeof b.cursor!=='string'||b.cursor.length>2048||
+             !/^[-_A-Za-z0-9]+\.[-_A-Za-z0-9]+$/.test(b.cursor))))
+            fail(req,'pb14-native-qdrant-page-selector-invalid');
+        return {intercepted:true,allowed:true,transport:'plugin',backend:'qdrant',
+            operation:'pb14ReadOnlyNativeQdrantPage',method:'POST'};
+    }
+    // P-B.12: server-owned, UUID-based managed group metadata. The only
+    // mutation here is revision-checked group metadata, NEVER vector writes.
+    if(req.transport==='plugin'&&['/v2/pb12/groups/read','/v2/pb12/groups/update'].includes(req.suffix)){
+        const b=req.body,source=b?.source,isWrite=req.suffix.endsWith('/update');
+        const fields=source?.kind==='chat'?['kind','avatar','chatFile']:
+            source?.kind==='group-chat'?['kind','groupId','chatFile']:
+            source?.kind==='lorebook'?['kind','name']:[];
+        if(req.method!=='POST'||req.parsed.search||!b||typeof b!=='object'||Array.isArray(b)||
+            !['qdrant','lancedb','vectra','milvus'].includes(b.backend)||
+            !['default',undefined,...(b.backend==='qdrant'?['local']:[])].includes(b.configId)||
+            !fields.length||!source||typeof source!=='object'||Array.isArray(source)||
+            Object.keys(source).length!==fields.length||
+            Object.keys(source).some(k=>!fields.includes(k))||
+            fields.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220)||
+            Object.keys(b).some(k=>!['backend','source','configId',...(isWrite?['action','operationId','expectedRevision','expectedProof','expectedStoredGeneration','groups']:[])].includes(k))||
+            (isWrite&&(!['save','prune-orphans','review-generation'].includes(b.action)||
+                typeof b.operationId!=='string'||!/^[0-9a-f-]{36}$/i.test(b.operationId)||
+                !Number.isSafeInteger(b.expectedRevision)||b.expectedRevision<0||
+                typeof b.expectedProof!=='string'||!/^[0-9a-f]{64}$/.test(b.expectedProof)||
+                (b.action==='save'&&!Array.isArray(b.groups))||
+                (b.action!=='save'&&b.groups!==undefined)||
+                (b.action==='review-generation'&&(!Number.isSafeInteger(b.expectedStoredGeneration)||b.expectedStoredGeneration<0))||
+                (b.action!=='review-generation'&&b.expectedStoredGeneration!==undefined))))
+            fail(req,'pb12-managed-group-intent-invalid');
+        return {intercepted:true,allowed:true,transport:'plugin',backend:b.backend,
+            operation:isWrite?'pb12ManagedGroupMetadataUpdate':'pb12ManagedGroupsRead',method:'POST'};
+    }
     // M1: narrowly scoped saved-record operations, never generic or pilot writes.
-    if(req.transport==='plugin' && ['/v2/m1/capabilities','/v2/m1/records/preview','/v2/m1/collections/prepare','/v2/m1/collections/provision','/v2/mutations/execute'].includes(req.suffix)){
+    if(req.transport==='plugin' && ['/v2/m1/capabilities','/v2/m1/preflight','/v2/m1/records/preview','/v2/m1/records/browse','/v2/m1/collections/prepare','/v2/m1/collections/provision','/v2/mutations/execute'].includes(req.suffix)){
         if(req.parsed.search)fail(req,'m1-no-query');
         if(req.suffix==='/v2/m1/capabilities'){
             if(req.method!=='GET'||req.body!=null)fail(req,'m1-capabilities-readonly');
@@ -544,9 +623,12 @@ export function inspectVectorRequest(url, options={}) {
            fields.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220)||
            (body.configId!==undefined&&!['local','default'].includes(body.configId))||
            (['lancedb','vectra','milvus'].includes(body.backend)&&body.configId==='local')||
-           Object.keys(body).some(k=>!['backend','source','configId'].includes(k)))
+           (body.verifyPhysical!==undefined&&(!['/v2/m1/records/preview','/v2/m1/records/browse'].includes(req.suffix)||body.verifyPhysical!==true))||
+           (body.cursor!==undefined&&(!['/v2/m1/records/preview','/v2/m1/records/browse'].includes(req.suffix)||typeof body.cursor!=='string'||body.cursor.length>2048||!/^[-_A-Za-z0-9]+\.[-_A-Za-z0-9]+$/.test(body.cursor)))||
+           Object.keys(body).some(k=>!['backend','source','configId',...(['/v2/m1/records/preview','/v2/m1/records/browse'].includes(req.suffix)?['cursor','verifyPhysical']:[])].includes(k)))
             fail(req,'m1-saved-source-selector-required');
-        return {intercepted:true,allowed:true,transport:'plugin',operation:req.suffix.endsWith('/prepare')?'m1ProvisionPlan':'m1SavedPreview',backend:body.backend,method:'POST'};
+        if(req.suffix==='/v2/m1/records/browse'&&body.verifyPhysical!==true)fail(req,'pb1-browser-physical-verification-required');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:req.suffix.endsWith('/prepare')?'m1ProvisionPlan':req.suffix.endsWith('/preflight')?'m1SavedProfilePreflight':'m1SavedPreview',backend:body.backend,method:'POST'};
     }
     if(req.transport==='plugin'&&/^\/v2\/collections\/[a-f0-9]{64}\/records\/plan$/.test(req.suffix)){
         const b=req.body,source=b?.source;
@@ -554,14 +636,15 @@ export function inspectVectorRequest(url, options={}) {
             source?.kind==='group-chat'?['kind','groupId','chatFile']:
             source?.kind==='lorebook'?['kind','name']:[];
         if(req.method!=='POST'||req.parsed.search||!b||!['qdrant','milvus','lancedb','vectra'].includes(b.backend)||
-           !['insert','update','revectorize','delete','restore'].includes(b.action)||
+           !['insert','update','revectorize','delete','restore','repair-missing','repair-registry'].includes(b.action)||
            !fields.length||!source||typeof source!=='object'||Array.isArray(source)||
            Object.keys(source).some(k=>!fields.includes(k))||
            fields.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220)||
            (b.configId!==undefined&&!['default','local'].includes(b.configId))||
            (['lancedb','vectra','milvus'].includes(b.backend)&&b.configId==='local')||
            !UUID_RE.test(b.recordId||'')||
-           Object.keys(b).some(k=>!['backend','configId','source','action','recordId'].includes(k)))
+           (b.expectedFileFingerprint!==undefined&&!/^[a-f0-9]{64}$/.test(b.expectedFileFingerprint))||
+           Object.keys(b).some(k=>!['backend','configId','source','action','recordId','expectedFileFingerprint'].includes(k)))
            fail(req,'m0-server-derived-plan-shape-required');
         return {intercepted:true,allowed:true,transport:'plugin',operation:'m0PlanOnly',backend:b.backend,method:'POST'};
     }
@@ -592,13 +675,21 @@ export function inspectVectorRequest(url, options={}) {
     }
     // F09b.5: server-owned embedding configuration, write-only credential and
     // bounded test. No embedding vectors or arbitrary URLs are sent to browser.
-    if(req.transport==='plugin'&&['/v2/embeddings/profile','/v2/embeddings/test'].includes(req.suffix)){
+    if(req.transport==='plugin'&&['/v2/embeddings/profile','/v2/embeddings/test','/v2/embeddings/preflight'].includes(req.suffix)){
         const isProfile=req.suffix.endsWith('/profile');
-        if((isProfile&&!['GET','PUT','DELETE'].includes(req.method))||(!isProfile&&req.method!=='POST'))
+        const isPreflight=req.suffix.endsWith('/preflight');
+        if((isProfile&&!['GET','PUT','DELETE'].includes(req.method))||
+           (isPreflight&&req.method!=='GET')||(!isProfile&&!isPreflight&&req.method!=='POST'))
             fail(req,'f09b5-method-forbidden');
         if((req.method==='GET'||req.method==='DELETE')&&req.body!=null)fail(req,'f09b5-body-forbidden');
         if(req.method==='PUT'&&(!req.body||typeof req.body!=='object'||Array.isArray(req.body)||
-            Object.keys(req.body).some(k=>!['source','model','dimension','metric','credential','clearCredential'].includes(k))))
+            Object.keys(req.body).some(k=>!['source','model','dimension','metric','endpoint','credential','clearCredential'].includes(k))||
+            !['transformers','llama_cpp','ollama','vllm','koboldcpp','openai','togetherai','mistral','openrouter'].includes(req.body.source)||
+            typeof req.body.model!=='string'||!Number.isSafeInteger(req.body.dimension)||
+            req.body.dimension<1||req.body.dimension>65536||!['cosine','dot','euclid'].includes(req.body.metric)||
+            (['llama_cpp','vllm','koboldcpp'].includes(req.body.source)&&!/^http:\/\/127\.0\.0\.1:[0-9]{1,5}\/v1\/embeddings$/.test(req.body.endpoint||''))||
+            (req.body.source==='ollama'&&!/^http:\/\/127\.0\.0\.1:[0-9]{1,5}\/api\/embed$/.test(req.body.endpoint||''))||
+            (!['llama_cpp','ollama','vllm','koboldcpp'].includes(req.body.source)&&req.body.endpoint!==undefined)))
             fail(req,'f09b5-profile-shape-forbidden');
         if(req.method==='POST'&&(!req.body||typeof req.body!=='object'||Array.isArray(req.body)||Object.keys(req.body).length))
             fail(req,'f09b5-test-body-forbidden');
@@ -816,6 +907,25 @@ export function inspectVectorRequest(url, options={}) {
            Object.keys(b).some(k=>!['backend','source','embedding','configId','vector','topK'].includes(k)))
             fail(req,'f09b-source-bound-retrieval-required');
         return {intercepted:true,allowed:true,transport:'plugin',operation:'f09bVerifiedRetrieval',backend:b.backend,method:'POST'};
+    }
+    // P-A.2: server-owned text embedding, authenticated F02 read. Never accept
+    // browser vectors, provider IDs, owner/physical collection or credentials.
+    if(req.transport==='plugin'&&req.suffix==='/v2/workflows/retrieve-text'){
+        const b=req.body,source=b?.source;
+        const sourceKeys=source?.kind==='chat'?['kind','avatar','chatFile']:
+            source?.kind==='group-chat'?['kind','groupId','chatFile']:
+            source?.kind==='lorebook'?['kind','name']:[];
+        if(req.method!=='POST'||!b||!sourceKeys.length||
+           Object.keys(source).some(k=>!sourceKeys.includes(k))||
+           sourceKeys.some(k=>typeof source[k]!=='string'||!source[k]||source[k].length>220)||
+           !['qdrant','milvus','lancedb','vectra'].includes(b.backend)||
+           (b.configId!==undefined&&!['local','default'].includes(b.configId))||
+           (b.configId==='local'&&b.backend!=='qdrant')||
+           typeof b.queryText!=='string'||!b.queryText.trim()||b.queryText.length>10000||
+           !Number.isInteger(b.topK)||b.topK<1||b.topK>30||
+           Object.keys(b).some(k=>!['backend','source','configId','queryText','topK'].includes(k)))
+            fail(req,'p-a2-managed-text-query-required');
+        return {intercepted:true,allowed:true,transport:'plugin',operation:'pA2ManagedTextRetrieval',backend:b.backend,method:'POST'};
     }
     // F10: authenticated bounded RECORD EVIDENCE, never an authoritative export,
     // restore, migration or production mutation permission. Strict body shape.

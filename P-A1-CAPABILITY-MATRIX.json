@@ -1,0 +1,11 @@
+{
+  "release": "P-A.1",
+  "source": "M4e.1 original verified baseline; no matrix cell changes in P-A.1",
+  "counts": {
+    "ENABLED": 32,
+    "BLOCKED": 33,
+    "UNSUPPORTED_BY_DESIGN": 5
+  },
+  "liveBackendCertified": false,
+  "notes": "Embedding profile configuration is not a vector write. Original plugin and extension M4e.1 matrix files are retained in both zip files. No edit to unsafe purge or native Standard."
+}

@@ -75,6 +75,17 @@ let activeTab = 'chunks'; // 'chunks' or 'scenes'
 /**
  * Checks if the current collection is a chat collection (supports scenes)
  */
+/** Browser-local hash metadata must never mutate a managed v2 UUID record.
+ * P-B.1 supplies the separate source-authoritative record browser instead. */
+function isManagedV2Result() {
+    return currentResults?.managedV2===true || (currentResults?.chunks||[]).some(c=>
+        Boolean(c?.metadata?.vecthareRecordV2 || c?.recordId && /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(c.recordId)));
+}
+function denyLegacyManagedEdit() {
+    if(!isManagedV2Result())return false;
+    toastr.warning('Managed v2 records must be changed through the saved-source browser (UUID, revision, one-use plan and verified receipt). Edit saved chat text first, then revectorize. Summaries require M7 approval.', 'VectHare');
+    return true;
+}
 function isChatCollection() {
     return currentResults?.collectionType === 'chat';
 }
@@ -162,6 +173,7 @@ function updateChunkData(hash, updates) {
 }
 
 async function saveAllChanges() {
+    if(denyLegacyManagedEdit())return;
     const count = pendingChanges.size;
     if (count === 0) {
         toastr.info('No changes to save', 'VectHare');
@@ -252,6 +264,14 @@ function discardAllChanges() {
 // ============================================================================
 
 export function openVisualizer(results, collectionId, settings) {
+    // The old hash-based editor cannot carry the managed source selector,
+    // generation, UUID, verified revision and one-use write plan. Never open it
+    // for a v2 record and accidentally present a local-only edit as persisted.
+    if(results?.managedV2===true || (results?.chunks||[]).some(c=>
+        Boolean(c?.metadata?.vecthareRecordV2 || c?.recordId && /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(c.recordId)))) {
+        toastr.warning('Managed v2 records use Database Browser → Managed saved records. Edit saved source text first; changes require a verified M1 receipt. The legacy hash editor is not applicable.', 'VectHare');
+        return false;
+    }
     currentResults = results;
     currentCollectionId = collectionId;
     currentSettings = settings;
@@ -1758,6 +1778,7 @@ function bindDetailEvents() {
 
     // Save text changes
     $('#vecthare_save_text').off('click.vecthareDetail').on('click.vecthareDetail', async function() {
+        if(denyLegacyManagedEdit())return;
         const newText = $('#vecthare_chunk_text').text().trim();
         if (!newText) return;
 
@@ -2017,6 +2038,7 @@ function openTextEditor(chunk) {
     });
 
     $('#vecthare_text_save').on('click', async function() {
+        if(denyLegacyManagedEdit())return;
         const newText = $('#vecthare_text_editor_textarea').val().trim();
         if (!newText) return;
 
@@ -2238,6 +2260,7 @@ function openLinkEditor(chunk) {
 // ============================================================================
 
 async function deleteChunk(chunk) {
+    if(denyLegacyManagedEdit())return;
     if (!confirm(`Delete chunk #${chunk.index}?`)) return;
 
     try {

@@ -1,4 +1,6 @@
+import {managedDimensionEvidence} from '../utils/p19-managed-dimensions.js';
 import {qdrantManagedInventory} from '../utils/qdrant-managed-inventory.js';
+import {testEmbeddingProfile} from '../utils/f09b5-embedding-gui.js';
 import { isUnverifiedInventoryRead } from '../utils/diagnostic-inventory.js';
 import { diagnosticLlamaCppUrl } from '../utils/diagnostic-provider-url.js';
 import { textgen_types, textgenerationwebui_settings } from '../../../../textgen-settings.js';
@@ -111,58 +113,21 @@ function getPluginProviderParams(settings) {
  * Uses Similharity plugin's dedicated embedding endpoint to test the provider.
  * This does NOT insert anything into the database - it only tests embedding generation.
  */
-export async function testEmbeddingGeneration(settings) {
+export async function testEmbeddingGeneration(_settings) {
     try {
-        const testText = 'This is a test message for embedding generation.';
-
-        // Use the dedicated get-embedding endpoint which doesn't store anything
-        const response = await fetch('/api/plugins/similharity/get-embedding', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-            body: JSON.stringify({
-                text: testText,
-                source: settings.source || 'transformers',
-                model: settings[getModelField(settings.source)] || null,
-                // Always test the same configured endpoint used by normal vector calls.
-                ...getPluginProviderParams(settings),
-            })
-        });
-
-        if (!response.ok) {
-            const errorText = await response.text();
-            return {
-                name: '[PROD] Embedding Generation',
-                status: response.status===403 ? 'skipped' : 'fail',
-                message: `Failed to generate embedding: ${response.status} ${response.statusText} - ${errorText}`,
-                category: 'production'
-            };
-        }
-
-        const data = await response.json();
-
-        // Verify we actually got an embedding back
-        if (!data.embedding || !Array.isArray(data.embedding) || data.embedding.length === 0) {
-            return {
-                name: '[PROD] Embedding Generation',
-                status: 'fail',
-                message: 'Embedding endpoint returned invalid or empty embedding',
-                category: 'production'
-            };
-        }
-
-        return {
-            name: '[PROD] Embedding Generation',
-            status: 'pass',
-            message: `Successfully generated test embedding (${data.embedding.length} dimensions)`,
-            category: 'production'
-        };
-    } catch (error) {
-        return {
-            name: '[PROD] Embedding Generation',
-            status: 'fail',
-            message: `Embedding generation error: ${error.message}`,
-            category: 'production'
-        };
+        // P19 embedding diagnostic: this only tests the server's currently
+        // configured managed profile. No legacy /get-embedding, request-supplied
+        // endpoint/secret, raw vectors, collection writes or cleanup.
+        const data=await testEmbeddingProfile(getRequestHeaders());
+        if(data.status!=='VECTOR_DIMENSION_VERIFIED'||!Number.isSafeInteger(data.dimension)||data.dimension<1)
+            throw Error('F09B5_UNVERIFIED_RESULT');
+        return {name:'[PROD] Embedding Generation',status:'pass',category:'production',
+            message:`Server-managed embedding provider verified (${data.dimension} dimensions). Database collection match and vector writes not tested.`};
+    } catch(error) {
+        const code=String(error?.message||'F09B5_TEST_UNAVAILABLE').slice(0,90);
+        const missing=/PROFILE_NOT_CONFIGURED|PROFILE_REQUIRED/.test(code);
+        return {name:'[PROD] Embedding Generation',status:missing?'skipped':'fail',category:'production',
+            message:missing?'Configure your server-managed embedding profile first.':`Server-managed embedding test refused: ${code}`};
     }
 }
 
@@ -174,69 +139,11 @@ export async function testEmbeddingGeneration(settings) {
 export async function testVectorStorage(settings) {
     const restricted=mutationDiagnosticRestriction(settings,'[PROD] Vector Storage','production');
     if(restricted)return restricted;
-    // Never create an uncleanable diagnostic vector. The old test inserted a
-    // record even when Phase 0's safe purge gate was necessarily disabled.
-    const backend=settings?.vector_backend || 'standard';
-    if (!['purgeAcknowledgement','tenantFilter','completeInventory','count'].every(cap=>hasVerifiedCapability(backend,cap)))
-        return {name:'[PROD] Vector Storage',status:'warning',category:'production',
-            message:'Storage test skipped: safe scoped cleanup and purge verification are not available (no test vectors created)'};
-    let testCollectionId = null;
-    let outcome;
-    try {
-        testCollectionId = `vh:test:storage_${Date.now()}`;
-        markDiagnosticTestCollection(testCollectionId);
-        const testHash = String(Math.floor(Math.random() * 1000000));
-        const testText = 'VectHare storage test message';
-        const backend = settings.vector_backend || 'standard';
-        const backendType = backend === 'standard' ? 'vectra' : backend;
-
-        const insertResponse = await fetch('/api/plugins/similharity/chunks/insert', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-            body: JSON.stringify({
-                backend: backendType,
-                collectionId: testCollectionId,
-                items: [{
-                    hash: testHash,
-                    text: testText,
-                    index: 0
-                }],
-                source: settings.source || 'transformers',
-                model: settings[getModelField(settings.source)] || null,
-                // Include provider-specific params (apiUrl, apiKey for BananaBread, etc.)
-                ...getPluginProviderParams(settings),
-            })
-        });
-
-        if (!insertResponse.ok) {
-            const errorText = await insertResponse.text();
-            throw new Error(`Failed to store vector: ${insertResponse.status} - ${errorText}`);
-        }
-
-        outcome = {
-            name: '[PROD] Vector Storage',
-            status: 'pass',
-            message: 'Successfully stored test vector',
-            category: 'production'
-        };
-    } catch (error) {
-        outcome = { name: '[PROD] Vector Storage', status: 'fail', message: `Storage test error: ${error.message}`, category: 'production' };
-    } finally {
-        if (testCollectionId) {
-            try {
-                const cleanup = await cleanupTestCollection(testCollectionId, settings);
-                if (!cleanup.success) {
-                    outcome = { name: '[PROD] Vector Storage', status: 'fail', category: 'production',
-                        message: `${outcome?.message || 'Storage test ended'}. Cleanup failed: ${cleanup.reason}` };
-                } else if (outcome?.status === 'pass') {
-                    outcome.message = 'Successfully stored and cleaned up test vector';
-                }
-            } catch (error) {
-                outcome = { name: '[PROD] Vector Storage', status: 'fail', category: 'production', message: `Cleanup error: ${error.message}` };
-            }
-        }
-    }
-    return outcome;
+    // P19: storage mutations need a disposable S04 server-issued fixture with
+    // authorized, verified scoped cleanup. The legacy chunks/insert+purge test
+    // must never execute, even if a capability hint says purge is available.
+    return {name:'[PROD] Vector Storage',status:'warning',category:'production',
+        message:'SKIPPED / UNVERIFIED: no authenticated disposable managed storage fixture with verified cleanup is installed. No vector was inserted or deleted.'};
 }
 
 /**
@@ -294,127 +201,10 @@ export async function testVectorRetrieval(settings) {
  * Uses the dedicated get-embedding endpoint to avoid inserting test data.
  */
 export async function testVectorDimensions(settings) {
-    if (!getCurrentChatId()) {
-        return {
-            name: '[PROD] Vector Dimensions',
-            status: 'warning',
-            message: 'No chat selected - cannot check dimensions',
-            category: 'production'
-        };
-    }
-
-    const collectionId = getChatCollectionId();
-    if (!collectionId) {
-        return {
-            name: '[PROD] Vector Dimensions',
-            status: 'warning',
-            message: 'Could not get collection ID',
-            category: 'production'
-        };
-    }
-
-    try {
-        // Get collection stats to see stored dimensions
-        const statsResponse = await fetch('/api/plugins/similharity/chunks/stats', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-            body: JSON.stringify({
-                backend: settings.vector_backend || 'standard',
-                collectionId: collectionId,
-                source: settings.source || 'transformers',
-                model: settings[getModelField(settings.source)] || null,
-            }),
-        });
-
-        if (!statsResponse.ok) {
-            // Stats endpoint not available or error - skip check
-            return {
-                name: '[PROD] Vector Dimensions',
-                status: 'warning',
-                message: 'Could not fetch collection stats',
-                category: 'production'
-            };
-        }
-
-        const statsData = await statsResponse.json();
-        const storedDimensions = statsData.stats?.embeddingDimensions;
-        const storedCount = statsData.stats?.count ?? statsData.stats?.totalChunks ?? statsData.stats?.total ?? null;
-
-        if (!Number.isFinite(Number(storedDimensions)) || Number(storedDimensions) <= 0) {
-            return {
-                name: '[PROD] Vector Dimensions',
-                status: 'warning',
-                message: storedCount === 0 ? 'Collection is empty; dimensions cannot be compared' : 'Stored vector dimensions are unavailable; comparison not performed',
-                category: 'production'
-            };
-        }
-
-        // Generate a test embedding using the dedicated endpoint (no storage)
-        const testText = 'Dimension test';
-        const embeddingResponse = await fetch('/api/plugins/similharity/get-embedding', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-            body: JSON.stringify({
-                text: testText,
-                source: settings.source || 'transformers',
-                model: settings[getModelField(settings.source)] || null,
-                // Include provider-specific params (apiUrl, apiKey for BananaBread, etc.)
-                ...getPluginProviderParams(settings),
-            })
-        });
-
-        if (!embeddingResponse.ok) {
-            const errorText = await embeddingResponse.text();
-            return {
-                name: '[PROD] Vector Dimensions',
-                status: 'warning',
-                message: `Could not generate test embedding: ${embeddingResponse.status} - ${errorText}`,
-                category: 'production'
-            };
-        }
-
-        const embeddingData = await embeddingResponse.json();
-        let currentDimensions = 0;
-        if (embeddingData.embedding && Array.isArray(embeddingData.embedding)) {
-            currentDimensions = embeddingData.embedding.length;
-        }
-
-        if (currentDimensions === 0) {
-            return {
-                name: '[PROD] Vector Dimensions',
-                status: 'warning',
-                message: 'Could not determine current embedding dimensions',
-                category: 'production'
-            };
-        }
-
-        // Compare dimensions
-        if (storedDimensions !== currentDimensions) {
-            return {
-                name: '[PROD] Vector Dimensions',
-                status: 'fail',
-                message: `Dimension mismatch! Stored: ${storedDimensions}, Current provider: ${currentDimensions}. You likely switched embedding models. Re-vectorize this chat to fix.`,
-                category: 'production',
-                fixable: true,
-                fixAction: 'revectorize',
-                data: { storedDimensions, currentDimensions, collectionId }
-            };
-        }
-
-        return {
-            name: '[PROD] Vector Dimensions',
-            status: 'pass',
-            message: `Dimensions match (${storedDimensions}D)`,
-            category: 'production'
-        };
-    } catch (error) {
-        return {
-            name: '[PROD] Vector Dimensions',
-            status: 'warning',
-            message: `Dimension check error: ${error.message}`,
-            category: 'production'
-        };
-    }
+ if(!getCurrentChatId())return {name:'[PROD] Vector Dimensions',status:'warning',
+  message:'No saved chat selected - physical dimensions UNVERIFIED',category:'production'};
+ const result=await managedDimensionEvidence(settings,{getChatId:getCurrentChatId,getHeaders:getRequestHeaders});
+ return {name:'[PROD] Vector Dimensions',category:'production',...result};
 }
 
 /**
@@ -789,108 +579,11 @@ export async function testTemporallyBlindChunks(settings) {
  * Creates a temporary test collection that is cleaned up after the test.
  */
 export async function testPluginEmbeddingGeneration(settings) {
-    const restricted=mutationDiagnosticRestriction(settings,'[PROD] Plugin Embedding Gen','production');
-    if(restricted)return restricted;
-    const backend = settings.vector_backend || 'standard';
-
-    // Only test for backends that go through the plugin
-    if (backend === 'standard') {
-        return {
-            name: '[PROD] Plugin Embedding Gen',
-            status: 'skipped',
-            message: 'Standard backend uses native ST vectors',
-            category: 'production'
-        };
-    }
-
-    let testCollectionId = null;
-    try {
-        testCollectionId = `vh:test:embed_${Date.now()}`;
-        markDiagnosticTestCollection(testCollectionId);
-        const testHash = String(Math.floor(Math.random() * 1000000));
-        const testText = 'Plugin embedding generation test';
-
-        // Try to insert WITHOUT providing a vector - the plugin must generate it
-        const insertResponse = await fetch('/api/plugins/similharity/chunks/insert', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-            body: JSON.stringify({
-                backend: backend,
-                collectionId: testCollectionId,
-                items: [{
-                    hash: testHash,
-                    text: testText,
-                    index: 0
-                    // NOTE: No vector provided - plugin must generate it
-                }],
-                source: settings.source || 'transformers',
-                model: settings[getModelField(settings.source)] || null,
-                // Include provider-specific params (apiUrl, apiKey for BananaBread, etc.)
-                ...getPluginProviderParams(settings),
-            }),
-        });
-
-        if (!insertResponse.ok) {
-            const errorText = await insertResponse.text();
-            return {
-                name: '[PROD] Plugin Embedding Gen',
-                status: 'fail',
-                message: `Plugin failed to generate embedding: ${insertResponse.status} - ${errorText}`,
-                category: 'production'
-            };
-        }
-
-        // Verify the vector was stored by querying
-        const queryResponse = await fetch('/api/plugins/similharity/chunks/query', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-            body: JSON.stringify({
-                backend: backend,
-                collectionId: testCollectionId,
-                searchText: testText,
-                topK: 1,
-                source: settings.source || 'transformers',
-                model: settings[getModelField(settings.source)] || null,
-                // Include provider-specific params (apiUrl, apiKey for BananaBread, etc.)
-                ...getPluginProviderParams(settings),
-            }),
-        });
-
-        let querySuccess = false;
-        if (queryResponse.ok) {
-            const results = await queryResponse.json();
-            querySuccess = results.results?.length > 0 || results.hashes?.length > 0;
-        }
-
-
-        if (!querySuccess) {
-            return {
-                name: '[PROD] Plugin Embedding Gen',
-                status: 'warning',
-                message: 'Insert succeeded but could not verify vector retrieval',
-                category: 'production'
-            };
-        }
-
-        return {
-            name: '[PROD] Plugin Embedding Gen',
-            status: 'pass',
-            message: `${backend} backend correctly generates embeddings`,
-            category: 'production'
-        };
-    } catch (error) {
-        return { name: '[PROD] Plugin Embedding Gen', status: 'fail', message: `Test error: ${error.message}`, category: 'production' };
-    } finally {
-        if (testCollectionId) {
-            const cleanup = await cleanupTestCollection(testCollectionId, settings).catch(error => ({ success: false, reason: error.message }));
-            if (!cleanup.success) {
-                // Preserve the marker for later recovery and record a visible warning.
-                console.warn(`[VectHare] Diagnostic plugin test cleanup failed for ${testCollectionId}: ${cleanup.reason}`);
-                // Do not override the original diagnostic result from a finally block.
-                // Leave the diagnostic marker for explicit recovery.
-            }
-        }
-    }
+    if((settings?.vector_backend||'standard')==='standard')
+        return {name:'[PROD] Plugin Embedding Gen',status:'skipped',category:'production',
+            message:'Native Standard uses a separate embedding contract; no plugin test was run.'};
+    const result=await testEmbeddingGeneration(settings);
+    return {...result,name:'[PROD] Plugin Embedding Gen'};
 }
 
 /**

@@ -70,6 +70,12 @@ import {
 import { world_names, loadWorldInfo } from "../../../../world-info.js";
 import { icons } from "./icons.js";
 import { openVisualizer } from "./chunk-visualizer.js";
+import { renderSavedBrowser } from "../utils/pb1-saved-browser.js";
+import { renderPB10PhysicalBrowser } from "../utils/pb10-physical-browser.js";
+import { renderPB12ManagedGroups } from "../utils/pb12-managed-groups.js";
+import { renderPB4Lifecycle } from "../utils/pb4-collection-lifecycle.js";
+import { renderPB9Lifecycle } from "../utils/pb9-m4-lifecycle.js";
+import {assertLegacyCollectionDeletionAllowed} from "../utils/pb3-managed-collection-guard.js";
 import { queryCollection } from "../core/core-vector-api.js";
 import {
   exportCollection,
@@ -137,6 +143,9 @@ let browserState = {
 };
 
 // Event binding flags (module-level for proper reset on modal close)
+// In-flight reads may finish out of order (including across close/reopen).
+// Only the newest browser refresh may publish its result.
+let collectionsRefreshEpoch = 0;
 let searchEventsBound = false;
 let bulkEventsBound = false;
 let activationChatListenerBound = false;
@@ -168,6 +177,13 @@ export async function openDatabaseBrowser() {
   if ($("#vecthare_database_browser_modal").length === 0) {
     createBrowserModal();
   }
+  // P-B.1: independent server-owned saved-record browsing; legacy inventory
+  // remains explicitly non-authoritative and cannot grant managed writes.
+  renderSavedBrowser(document.querySelector(".vecthare-database-browser-content"));
+  renderPB10PhysicalBrowser(document.querySelector(".vecthare-database-browser-content"));
+  renderPB12ManagedGroups(document.querySelector(".vecthare-database-browser-content"));
+  renderPB4Lifecycle(document.querySelector(".vecthare-database-browser-content"));
+  renderPB9Lifecycle(document.querySelector(".vecthare-database-browser-content"));
 
   // Rebind only the browser-owned document shortcut on every open.
   bindBrowserKeyboard();
@@ -178,6 +194,8 @@ export async function openDatabaseBrowser() {
   // Load collections
   await refreshCollections();
 
+  // A close while loading must not resurrect the browser.
+  if (!browserState.isOpen) return;
   // Show modal
   $("#vecthare_database_browser_modal").fadeIn(200);
   console.log("VectHare Database Browser: Opened");
@@ -199,6 +217,7 @@ function updatePluginWarningBanner() {
  * Closes the database browser modal
  */
 export function closeDatabaseBrowser() {
+  ++collectionsRefreshEpoch; // Cancel publication from previous open/refresh.
   $("#vecthare_database_browser_modal").fadeOut(200);
   browserState.isOpen = false;
   // The modal remains in the DOM: its search/bulk handlers must remain bound.
@@ -663,16 +682,43 @@ function switchTab(tabName) {
  * Refreshes collections from storage
  */
 async function refreshCollections() {
+  const epoch = ++collectionsRefreshEpoch;
+  const settings = browserState.settings;
+  const backend = settings?.vector_backend;
+  const source = settings?.source;
+  // Previous cards must not remain actionable while a new catalogue read is
+  // pending; the refresh may discover they were removed or changed remotely.
+  browserState.collections = [];
+  browserState.selectedCollection = null;
+  updateStats(0, 0);
+  $("#vecthare_collections_list").html('<div class="vecthare-empty-state">Refreshing collections…</div>');
   try {
-    browserState.collections = await loadAllCollections(browserState.settings);
+    const collections = await loadAllCollections(settings);
+    // Ignore old results, and avoid painting results obtained for a different
+    // backend/source after the user changes configuration mid-request.
+    if (epoch !== collectionsRefreshEpoch) return;
+    if (settings !== browserState.settings ||
+        backend !== settings?.vector_backend || source !== settings?.source) {
+      browserState.collections = [];
+      browserState.selectedCollection = null;
+      updateStats(0, 0);
+      $("#vecthare_collections_list").html('<div class="vecthare-empty-state">Backend or source changed. Refresh collections.</div>');
+      return;
+    }
+    browserState.collections = collections;
+    // A selection from the previous inventory is no longer current, even if
+    // the collection has the same display ID. Never retain old action state.
+    browserState.selectedCollection = null;
 
-    // C01 #189: the browser view can be partial, backend-dependent, and omit
-    // empty collections. Never infer orphan ownership or delete settings from it.
-    // Reconciliation requires an authoritative backend-qualified inventory.
-
+    // C01 #189: this browser is advisory, not deletion/ownership evidence.
     renderCollections();
   } catch (error) {
+    if (epoch !== collectionsRefreshEpoch) return;
+    // A failed read must not leave old entries available for browser actions.
+    browserState.collections = [];
+    browserState.selectedCollection = null;
     console.error("VectHare: Failed to load collections", error);
+    updateStats(0, 0);
     $("#vecthare_collections_list").html(`
             <div class="vecthare-error">
                 Failed to load collections. Check console for details.
@@ -1093,6 +1139,8 @@ function bindCollectionCardEvents() {
       const collection = findCollectionByKey(collectionKey);
 
       if (!collection) return;
+      try { assertLegacyCollectionDeletionAllowed(collection); }
+      catch (err) { toastr.warning('Managed v2 collection deletion requires a verified lifecycle plan and receipt. The old delete button did not run.', 'VectHare'); return; }
 
       const confirmed = confirm(
         `Delete collection "${collection.name}"?\n\n` +
@@ -3709,6 +3757,7 @@ function bindBulkEvents() {
         if (!collection) continue;
 
         try {
+          assertLegacyCollectionDeletionAllowed(collection);
           const collectionSettings = {
             ...browserState.settings,
             vector_backend: collection.backend,

@@ -1,6 +1,7 @@
 import {messageReference, fingerprint, reconcileSceneBoundaries} from '../utils/record-identity.js';
 import {formatCollectionKey} from '../utils/collection-keys.js';
 import {hasVerifiedCapability} from '../utils/backend-contracts.js';
+import {requiresManagedSceneContract} from '../utils/pb3-managed-scene-guard.js';
 import {updateSceneAndReindex} from '../utils/c12-scene-update.js';
 import {rememberCommittedScene,forgetCommittedScene,getSceneTimeline} from './scene-timeline.js';
 import {getVerifiedChatOriginId} from './collection-ids.js';
@@ -147,6 +148,7 @@ export function getContainedChunkHashes(messages, start, end) {
  * @returns {Promise<{success: boolean, hash?: number, error?: string}>}
  */
 export async function createSceneChunk(start, end, sceneData, settings) {
+    if (requiresManagedSceneContract(settings)) return {success:false,error:'PB3_MANAGED_SCENE_METADATA_WRITE_UNAVAILABLE'};
     const collectionId = getCurrentCollectionId();
     if (!collectionId) {
         return { success: false, error: 'No chat selected' };
@@ -240,6 +242,7 @@ export async function createSceneChunk(start, end, sceneData, settings) {
  * @returns {Promise<{success: boolean, error?: string}>}
  */
 export async function deleteSceneChunk(sceneHash, containedHashes, settings) {
+    if (requiresManagedSceneContract(settings)) return {success:false,error:'PB3_MANAGED_SCENE_METADATA_WRITE_UNAVAILABLE'};
     const collectionId = getCurrentCollectionId();
     if (!collectionId) {
         return { success: false, error: 'No chat selected' };
@@ -286,6 +289,7 @@ export async function deleteSceneChunk(sceneHash, containedHashes, settings) {
  * @returns {Promise<{success: boolean, error?: string}>}
  */
 export async function updateSceneChunkMetadata(sceneHash, updates, settings, scene = null) {
+    if (requiresManagedSceneContract(settings)) return {success:false,error:'PB3_MANAGED_SCENE_METADATA_WRITE_UNAVAILABLE'};
     // The old path saved only local settings, leaving vector metadata and the
     // search embedding unchanged. It cannot report a successful scene edit.
     const collectionId = getCurrentCollectionId();

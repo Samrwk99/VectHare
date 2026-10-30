@@ -39,27 +39,26 @@ test('llama.cpp diagnostics prioritise VectHare override and reject missing and 
   assert.throws(()=>providerParams(file,{...settings,use_alt_endpoint:true,alt_endpoint_url:'file:\/\/private'},undefined),/HTTP\(S\)/);
  }
 });
-test('actual [PROD] Embedding Generation request forwards configured llama.cpp address',async()=>{
+test('P19 embedding diagnostics use only server profile test and never browser URL or vector writes',async()=>{
  const calls=[];
  const run=fn('diagnostics/production-tests.js','testEmbeddingGeneration',{
-  getModelField:()=>null, getRequestHeaders:()=>({'Content-Type':'application/json'}),
-  getPluginProviderParams:(value)=>providerParams('diagnostics/production-tests.js',value,'http://127.0.0.1:8766'),
-  fetch:async(url,options)=>{calls.push({url,body:JSON.parse(options.body)});return {ok:true,json:async()=>({embedding:[0.1,0.2]})}}
+  getRequestHeaders:()=>({'X-Test':'value'}),
+  testEmbeddingProfile:async headers=>{calls.push(headers);return {status:'VECTOR_DIMENSION_VERIFIED',dimension:768};},
+  fetch:async()=>{throw Error('legacy vector write must never be dispatched');}
  });
  const result=await run(settings);
  assert.equal(result.status,'pass');assert.equal(calls.length,1);
- assert.equal(calls[0].url,'/api/plugins/similharity/get-embedding');
- assert.equal(calls[0].body.apiUrl,'http://127.0.0.1:8766');
+ assert.equal(calls[0]['X-Test'],'value');assert.match(result.message,/Database collection match and vector writes not tested/);
 });
-test('embedding generation with alternate URL tests the alternate, not SillyTavern fallback',async()=>{
- const calls=[];
- const run=fn('diagnostics/production-tests.js','testEmbeddingGeneration',{
-  getModelField:()=>null,getRequestHeaders:()=>({}),
-  getPluginProviderParams:(value)=>providerParams('diagnostics/production-tests.js',value,'http://localhost:8080'),
-  fetch:async(url,options)=>{calls.push(JSON.parse(options.body));return {ok:true,json:async()=>({embedding:[0.1]})}}
+test('P19 missing profile is actionable, invalid provider response cannot pass',async()=>{
+ const missing=fn('diagnostics/production-tests.js','testEmbeddingGeneration',{
+  getRequestHeaders:()=>({}),testEmbeddingProfile:async()=>{throw Error('F09B5_PROFILE_NOT_CONFIGURED');}
  });
- const result=await run({...settings,use_alt_endpoint:true,alt_endpoint_url:'http://10.0.0.12:9109'});
- assert.equal(result.status,'pass');assert.equal(calls[0].apiUrl,'http://10.0.0.12:9109');
+ const result=await missing(settings);assert.equal(result.status,'skipped');assert.match(result.message,/Configure/);
+ const wrong=fn('diagnostics/production-tests.js','testEmbeddingGeneration',{
+  getRequestHeaders:()=>({}),testEmbeddingProfile:async()=>({status:'TESTED',dimension:0})
+ });
+ assert.equal((await wrong(settings)).status,'fail');
 });
 test('retrieval tests actual backend query even when legacy full inventory is unsafe',async()=>{
  let called=0;

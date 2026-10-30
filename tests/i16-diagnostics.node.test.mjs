@@ -65,12 +65,12 @@ test('#174: group integrity remains warning and not fixable when inventory fails
  assert.equal(result.fixable,undefined);assert.equal(result.data.unverifiedCollections,1);
 });
 
-test('#174: group integrity finds orphan and supports cleanup only after verified list',async()=>{
+test('#174/P29: group integrity detects a candidate but does not offer an unverified fix',async()=>{
  const fn=extracted(config,'checkChunkGroupMemberIntegrity',{
   getCollectionRegistry:()=>['source:A'],getSavedHashes:async()=>[1],VECTOR_LIST_LIMIT
  },{'../core/collection-metadata.js':{getCollectionMeta:()=>({groups:[{name:'g',members:['1','2']}]})}});
  const result=await fn({});assert.equal(result.status,'warning');
- assert.equal(result.fixable,true);assert.equal(result.data.orphanedCount,1);
+ assert.equal(result.fixable,false);assert.equal(result.previewOnly,true);assert.equal(result.data.orphanedCount,1);
 });
 
 test('#173: production trigger diagnostic tests both positive and negative activation',async()=>{
@@ -103,7 +103,7 @@ test('#165: retrieval routes through selected backend, not hard-coded native /ap
 test('#166: dimensions not verifiable -> warning, never PASS',async()=>{
  const fn=extracted(prod,'testVectorDimensions',{
   getCurrentChatId:()=> 'chat',getChatCollectionId:()=> 'c',getRequestHeaders:()=>({}),getModelField:()=> 'model',
-  fetch:async()=>({ok:false})
+  fetch:async()=>({ok:false}),managedDimensionEvidence:async()=>({status:'warning',message:'UNVERIFIED'})
  });
  assert.equal((await fn({vector_backend:'qdrant'})).status,'warning');
  const absent=extracted(prod,'testVectorDimensions',{getCurrentChatId:()=>null});
@@ -147,7 +147,7 @@ test('#168: failed cleanup does not unregister or report successful storage',asy
  assert.equal((await success('vh:test:storage_1700000000000',{source:'x'})).success,true);assert.equal(unregisters,2);
 });
 
-test('#168: storage fixture always attempts cleanup after insertion error',async()=>{
+test('P19 storage diagnostic skips instead of issuing legacy inserts when no managed fixture exists',async()=>{
  let purges=0;
  const cleanup=extracted(prod,'cleanupTestCollection',{
   purgeVectorIndex:async()=>{purges++;return false;},unregisterCollection:()=>{}
@@ -160,7 +160,7 @@ test('#168: storage fixture always attempts cleanup after insertion error',async
   Math,
  });
  const result=await fn({source:'test'});
- assert.equal(result.status,'fail');assert.match(result.message,/Cleanup failed/);assert.equal(purges,1);
+ assert.equal(result.status,'warning');assert.match(result.message,/SKIPPED \/ UNVERIFIED/);assert.equal(purges,0);
 });
 
 test('#196: usage counter updates the exact key and refuses ambiguous aliases',()=>{
@@ -185,7 +185,7 @@ test('#219: diagnostics no longer treats browser Qdrant URL as actual server con
  assert.doesNotMatch(src.slice(i,i+200),/qdrant_cloud_url|settings\.qdrant_mode/);
 });
 
-test('#160/#174: Group Member Fix Now persists via setCollectionMeta only after a trusted read',async()=>{
+test('#160/#174/P29: group repair is preview-only until trusted whole inventory and server receipt',async()=>{
  const meta={groups:[{name:'group',members:['a','b']}]};
  let saved=[];
  const deps={
@@ -194,8 +194,8 @@ test('#160/#174: Group Member Fix Now persists via setCollectionMeta only after 
    '../core/core-vector-api.js':{getSavedHashes:async()=>['a']}
  };
  const fn=extracted('diagnostics/index.js','fixOrphanedGroupMembers',{extension_settings:{vecthare:{source:'source'}},VECTOR_LIST_LIMIT},deps);
- const result=await fn();assert.equal(result.success,true);assert.equal(saved.length,1);
- assert.equal(saved[0].key,'abc');assert.deepEqual(asPlain(saved[0].patch.groups[0].members),['a']);
+ const result=await fn();assert.equal(result.success,false);assert.equal(result.status,'UNVERIFIED');
+ assert.equal(result.previewOnly,true);assert.equal(saved.length,0);
  const bad=extracted('diagnostics/index.js','fixOrphanedGroupMembers',{extension_settings:{vecthare:{}},VECTOR_LIST_LIMIT},{
    ...deps,'../core/core-vector-api.js':{getSavedHashes:async()=>{throw Error('backend offline')}}
  });
@@ -203,7 +203,7 @@ test('#160/#174: Group Member Fix Now persists via setCollectionMeta only after 
  assert.equal((await bad()).success,false);assert.equal(saved.length,0);
 });
 
-test('#168: successful storage must also confirm the cleanup purge',async()=>{
+test('P19 a capability hint cannot authorize the former storage insertion fixture',async()=>{
  const cleanup=extracted(prod,'cleanupTestCollection',{
    purgeVectorIndex:async()=>true,unregisterCollection:()=>{}
  });
@@ -212,7 +212,7 @@ test('#168: successful storage must also confirm the cleanup purge',async()=>{
    fetch:async()=>({ok:true}),getPluginProviderParams:()=>({}),cleanupTestCollection:cleanup
  });
  const result=await fn({source:'transformers'});
- assert.equal(result.status,'pass');assert.match(result.message,/cleaned up/i);
+ assert.equal(result.status,'warning');assert.match(result.message,/No vector was inserted or deleted/i);
 });
 
 test('#174: capped backend inventory cannot authorize a destructive group repair',async()=>{
@@ -231,4 +231,15 @@ test('#174: capped backend inventory cannot authorize a destructive group repair
    '../core/core-vector-api.js':{getSavedHashes:async()=>hashes}
  });
  assert.equal((await fixer()).success,false);assert.equal(mutable.length,0);
+});
+
+test('P-B.8 managed group diagnostics never count legacy hash inventory as authoritative',async()=>{
+ let calls=0;
+ const fn=extracted(config,'checkChunkGroupMemberIntegrity',{
+  getCollectionRegistry:()=>['source:A'],getSavedHashes:async()=>{calls++;return ['1','2'];},VECTOR_LIST_LIMIT
+ },{'../core/collection-metadata.js':{getCollectionMeta:()=>({groups:[{name:'g',members:['1','2']}]})}});
+ const result=await fn({vector_backend:'qdrant'});
+ assert.equal(result.status,'warning');assert.equal(result.fixable,false);
+ assert.equal(result.previewOnly,true);assert.equal(result.data.unverifiedCollections,1);
+ assert.equal(calls,0);assert.match(result.message,/UNVERIFIED/);
 });

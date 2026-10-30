@@ -1,10 +1,11 @@
 /** M1 saved-record UI. No browser vector, content, owner or physical DB name. */
 import {guardedVectorFetch} from './e02-vector-request-gateway.js';
 import {f02CurrentChatSelector} from './f02-public-read-client.js';
+import {preflightEmbeddingProfile} from './f09b5-embedding-gui.js';
 const ROOT='/api/plugins/similharity/v2';
 const KEY=/^[a-f0-9]{64}$/;
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const ACTIONS=['insert','update','revectorize','delete','restore'];
+const ACTIONS=['insert','update','revectorize','delete','restore','repair-missing','repair-registry'];
 const BACKENDS=['qdrant','lancedb','vectra','milvus'];
 const backendName=b=>{if(!BACKENDS.includes(b))throw Error('M1_BACKEND_UNSUPPORTED');return b;};
 async function request(url,body=null,headers={},fetchImpl=globalThis.fetch){
@@ -25,11 +26,22 @@ export async function m1Capabilities(headers={},fetchImpl=globalThis.fetch,backe
  if(selected.length!==4||new Set(selected.map(c=>c.operation)).size!==4)throw Error('M1_CAPABILITY_RESPONSE_INVALID');
  return selected;
 }
-export async function m1Preview(source,configId='default',headers={},fetchImpl=globalThis.fetch,backend='qdrant'){
- const r=await request('/m1/records/preview',{backend:backendName(backend),configId,source},headers,fetchImpl);
- if(!KEY.test(r.logicalKey||'')||!Array.isArray(r.records)||r.records.length>80||
+export async function m1Preflight(source,configId='default',headers={},fetchImpl=globalThis.fetch,backend='qdrant'){
+ const r=await request('/m1/preflight',{backend:backendName(backend),configId,source},headers,fetchImpl);
+ if(typeof r.configured!=='boolean'||typeof r.ready!=='boolean'||
+  (r.configured&&(!r.profile||typeof r.profile.source!=='string'||!Number.isSafeInteger(r.profile.dimension))))
+   throw Error('M1_PROFILE_PREFLIGHT_INVALID');
+ return r;
+}
+export async function m1Preview(source,configId='default',headers={},fetchImpl=globalThis.fetch,backend='qdrant',cursor=null,verifyPhysical=false){
+ const r=await request('/m1/records/preview',{backend:backendName(backend),configId,source,...(cursor?{cursor}:{}),...(verifyPhysical?{verifyPhysical:true}:{})},headers,fetchImpl);
+ if(!KEY.test(r.logicalKey||'')||!Array.isArray(r.records)||r.records.length>50||
   r.records.some(x=>!UUID.test(x.recordId||'')||!Array.isArray(x.availableActions)||
-   x.availableActions.some(a=>!ACTIONS.includes(a))))throw Error('M1_PREVIEW_RESPONSE_INVALID');
+   x.availableActions.some(a=>!ACTIONS.includes(a))||
+   (verifyPhysical&&!['VERIFIED','MISSING','CONFLICT'].includes(x.physicalState)))||
+  (r.nextCursor!==undefined&&(r.nextCursor!==null&&(typeof r.nextCursor!=='string'||r.nextCursor.length>2048)))||
+  (r.totalRecords!==undefined&&(!Number.isSafeInteger(r.totalRecords)||r.totalRecords<0))||
+  (r.offset!==undefined&&(!Number.isSafeInteger(r.offset)||r.offset<0)))throw Error('M1_PREVIEW_RESPONSE_INVALID');
  return r;
 }
 export async function m1PrepareCollection(source,configId='default',headers={},fetchImpl=globalThis.fetch,backend='qdrant'){
@@ -47,9 +59,10 @@ export async function m1ProvisionCollection(operationId,headers={},fetchImpl=glo
     r.productionWritesEnabled!==false)throw Error('M1_PROVISION_RECEIPT_INVALID');
  return r;
 }
-export async function m1Plan({logicalKey,source,configId='default',recordId,action,backend='qdrant'},headers={},fetchImpl=globalThis.fetch){
- if(!KEY.test(logicalKey||'')||!UUID.test(recordId||'')||!ACTIONS.includes(action))throw Error('M1_PLAN_INPUT_INVALID');
- const r=await request(`/collections/${logicalKey}/records/plan`,{backend:backendName(backend),source,configId,recordId,action},headers,fetchImpl);
+export async function m1Plan({logicalKey,source,configId='default',recordId,action,backend='qdrant',expectedFileFingerprint},headers={},fetchImpl=globalThis.fetch){
+ if(!KEY.test(logicalKey||'')||!UUID.test(recordId||'')||!ACTIONS.includes(action)||
+  (expectedFileFingerprint!==undefined&&!KEY.test(expectedFileFingerprint)))throw Error('M1_PLAN_INPUT_INVALID');
+ const r=await request(`/collections/${logicalKey}/records/plan`,{backend:backendName(backend),source,configId,recordId,action,...(expectedFileFingerprint?{expectedFileFingerprint}:{})},headers,fetchImpl);
  if(!UUID.test(r.plan?.operationId||'')||r.plan.logicalKey!==logicalKey||r.plan.recordId!==recordId||
   r.plan.action!==action||r.plan.requiresExplicitApply!==true||r.plan.executionAllowed!==false)
   throw Error('M1_PLAN_RESPONSE_INVALID');
@@ -88,6 +101,13 @@ export function renderM1RecordPanel(root,doc=globalThis.document){
   return f02CurrentChatSelector({getChatId:getCurrentChatId,getContext:()=>globalThis.SillyTavern?.getContext?.()});
  };
  const headers=async()=>{const {getRequestHeaders}=await import('../../../../../script.js');return getRequestHeaders();};
+ const requireProfile=async(h,s)=>{
+  const state=await m1Preflight(s,currentConfig(),h,globalThis.fetch,backend.value);
+  if(!state.configured)throw Error('No managed embedding profile. Open Server-managed embeddings above, save your provider and run its connection test.');
+  if(state.connectionState==='CREDENTIAL_REQUIRED')throw Error('Embedding API credential missing. Configure it in Server-managed embeddings.');
+  if(!state.ready)throw Error(`Embedding profile is ${state.connectionState}. Run Test server embedding in the settings before vectorizing; this verifies the model and vector dimension.`);
+  return state;
+ };
  const supported=a=>caps.find(c=>c.operation===(a==='restore'?'insert':a))?.enabled===true;
  const currentConfig=()=>backend.value==='qdrant'?config.value:'default';
  backend.addEventListener('change',()=>{caps=[];preview=null;source=null;config.disabled=backend.value!=='qdrant';
@@ -102,6 +122,7 @@ export function renderM1RecordPanel(root,doc=globalThis.document){
   provision.disabled=true;status.textContent='Preparing server-owned v2 collection…';
   try{
    const s=await selectedSource(),h=await headers();
+   await requireProfile(h,s);
    if(!caps.find(c=>c.operation==='insert')?.enabled)throw Error(`${backend.value} insert is not enabled`);
    const p=await m1PrepareCollection(s,currentConfig(),h,globalThis.fetch,backend.value);
    if(!globalThis.confirm?.(`Create owned ${backend.value} collection for saved ${s.kind}? The server will select its physical identity and embedding schema. Operation ${p.operationId}.`)){
@@ -117,6 +138,7 @@ export function renderM1RecordPanel(root,doc=globalThis.document){
   refresh.disabled=true;apply.disabled=true;status.textContent='Checking server-attested saved source…';
   try{
    source=await selectedSource();const h=await headers();
+   await requireProfile(h,source);
    caps=await m1Capabilities(h,globalThis.fetch,backend.value);
    try{preview=await m1Preview(source,currentConfig(),h,globalThis.fetch,backend.value);}
    catch(e){preview=null;updateAction();status.textContent=`M1 saved-source preview refused: ${e.message}. If the owned v2 collection does not exist, use Set up owned v2 collection after configuring the backend.`;return;}
@@ -126,7 +148,7 @@ export function renderM1RecordPanel(root,doc=globalThis.document){
     o.textContent=`${i+1}: ${item.recordId.slice(0,8)} (${item.managedState}, rev ${item.revision})`;
     recordSelect.append(o);
    }
-   updateAction();status.textContent=`Saved records: ${preview.records.length}. ${backend.value}: ${caps.map(c=>`${c.operation} ${c.mode}`).join(', ')}. Enabled actions are awaiting manual verification; use disposable data.`;
+   updateAction();status.textContent=`Saved records: ${preview.records.length} shown / ${preview.totalRecords??preview.records.length} total (first page only). ${backend.value}: ${caps.map(c=>`${c.operation} ${c.mode}`).join(', ')}. Enabled actions are awaiting manual verification; use disposable data.`;
   }catch(e){preview=null;status.textContent=`M1 preview refused: ${e.message}`;}
   finally{refresh.disabled=false;}
  });
@@ -135,7 +157,7 @@ export function renderM1RecordPanel(root,doc=globalThis.document){
    const latest=await selectedSource();if(JSON.stringify(latest)!==JSON.stringify(source))throw Error('Source selection changed; refresh first');
    const choice=recordSelect.value,action=actionSelect.value;
    if(!preview.records.some(x=>x.recordId===choice&&x.availableActions.includes(action))||!supported(action))throw Error('Action unavailable for this source or backend');
-   const h=await headers(),plan=await m1Plan({logicalKey:preview.logicalKey,source,configId:currentConfig(),recordId:choice,action,backend:backend.value},h);
+   const h=await headers();await requireProfile(h,source);const plan=await m1Plan({logicalKey:preview.logicalKey,source,configId:currentConfig(),recordId:choice,action,backend:backend.value,expectedFileFingerprint:preview.fileFingerprint},h);
    if(!globalThis.confirm?.(`Apply ${action} to owned saved record ${choice}? Operation ${plan.operationId}. This may change stored vectors.`)){
     status.textContent='M1 plan not applied. The ticket will expire.';return;
    }

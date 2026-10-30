@@ -103,7 +103,7 @@ test('#14: Database Browser keyboard handler binds once per open and detaches on
     const close=section(code,'export function closeDatabaseBrowser() {','/**\n * Creates the browser modal');
     const h=jqHarness();let isOpen=true;
     const ctx=vm.createContext({$:h.$,document:{},browserState:{isOpen},console:quiet});
-    vm.runInContext(`${keyboard}\n${close.replace('export function','function')}\nthis.bind=bindBrowserKeyboard;this.close=closeDatabaseBrowser;`,ctx);
+    vm.runInContext(`let collectionsRefreshEpoch=0; ${keyboard}\n${close.replace('export function','function')}\nthis.bind=bindBrowserKeyboard;this.close=closeDatabaseBrowser;`,ctx);
     ctx.bind();ctx.bind();
     assert.equal(h.events.size,1);
     h.events.get('document|keydown.vecthare_browser')({key:'Escape'});

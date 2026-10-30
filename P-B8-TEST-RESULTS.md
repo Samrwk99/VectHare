@@ -1,0 +1,7 @@
+# P-B.8 automated regression verification — 30 October 2026
+
+- Extension: all **97** `tests/*.node.test.mjs` files, **1,304 passing / 0 failing / 0 cancelled**, bounded groups of 11 with `node --no-opt --experimental-vm-modules --test --test-concurrency=1`. Includes six new P-B.8 regression assertions and revised P29 diagnostic coverage.
+- Plugin: all **101** `tests/*.test.mjs` files, **889 passing / 0 failing / 0 cancelled** using bounded groups of 11. Initial batch 8 was accidentally invoked without Node's `--experimental-vm-modules` flag; 21 VM-harness cases failed with `vm.SourceTextModule is not a constructor` or cascading undefined mock state. **All 109 tests in that batch passed when rerun with the documented VM flag.** Other 9 batches were green. This is not an unresolved product assertion failure; initial runner errors are preserved in local logs.
+- **2,193 distinct passing automated tests in total.** Plugin runtime code is unchanged from P-B.7 except the version identifier and regenerated integrity manifest. A real SillyTavern host, HTTP provider, and physical Qdrant/LanceDB/Vectra/Milvus acceptance were not tested here.
+- New P-B.8 tests assert: registry-only operation with `insert` disabled; `update` required; no insert/physical update/provision; foreign/missing/stale are review-only; uncertain S04 receipt halts without replay; browser exposes correct managed action; legacy local group hash diagnostic cannot authorize a managed patch.
+- Obsolete purge button unchanged; capability matrix stays 32 enabled / 33 blocked / 5 unsupported.

@@ -268,7 +268,8 @@ test('C03 #81: delayed scene cache read from chat A cannot replace cache for B',
     assert.ok(a>=0 && b>a);
     let current='A';const pending=deferred();
     const context=vm.createContext({console:{log(){},error(){}},getCurrentCollectionId:()=>current,
-        currentChatIdentity:()=>({chatId:current}),getSavedHashes:()=>pending.promise});
+        currentChatIdentity:()=>({chatId:current}),getSavedHashes:()=>pending.promise,
+        requiresManagedSceneContract:()=>false});
     const fn=vm.runInContext(`let cachedSceneChunks=[];let currentSettings={};let sceneCacheRefreshVersion=0;${src.slice(a,b+2).replace('export async function','async function')}\nrefreshSceneCache`,context);
     const first=fn();await tick();
     current='B';vm.runInContext('cachedSceneChunks=[{hash:"current-B"}]',context);
