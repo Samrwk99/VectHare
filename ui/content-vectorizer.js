@@ -2504,6 +2504,11 @@ async function startVectorization() {
         return;
     }
 
+    // M4e: the old Replace All path purges BEFORE a trusted source plan;
+    // never allow it on managed backends. M1 only performs confirmed source-bound
+    // inserts/updates; managed empty/restore has a separate M3/M4 lifecycle.
+    const managedBackend=['qdrant','lancedb','vectra','milvus'].includes(extension_settings.vecthare?.vector_backend);
+    if(!managedBackend){
     // Check if vectors already exist for this content (chat specifically)
     // R8 FIX: was source.sourceType === 'current' but getSourceData() returns
     // { type: 'current' } - the property mismatch made this whole flow DEAD
@@ -2558,6 +2563,8 @@ async function startVectorization() {
             toastr.warning('Replacement blocked: could not verify existing vectors. No deletion or replacement started.');
             return;
         }
+    }
+
     }
 
     const btn = $('#vecthare_cv_vectorize');

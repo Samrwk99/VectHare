@@ -76,6 +76,7 @@ import { getSemanticWorldInfoEntries } from './world-info-integration.js';
 import { Queue, LRUCache } from '../utils/data-structures.js';
 import { createReverseSyncThrottle } from '../utils/reverse-sync-throttle.js';
 import { getRequestHeaders } from '../../../../../script.js';
+import {m4eVectorizeCurrentChat} from '../utils/m4e-managed-vectorization.js';
 import { EXTENSION_PROMPT_TAG, LEGACY_WORLD_INFO_PROMPT_TAG, HASH_CACHE_SIZE } from './constants.js';
 // Import from collection-ids.js - single source of truth for collection ID operations
 import {
@@ -3019,18 +3020,27 @@ export async function rearrangeChat(chat, settings, type) {
 export async function vectorizeAll(settings, batchSize) {
     let job = null;
     try {
-        // M4d.3: the legacy Sync Chat path starts with getSavedHashes(), which
-        // is deliberately denied for Qdrant shared/legacy collections.  An
-        // empty database does NOT make that inventory authoritative and must
-        // not be used to infer safe first-write permissions.  The authenticated
-        // M1 saved-record panel is the supported manual first-use path.
-        if (settings?.vector_backend === 'qdrant') {
-            toastr.warning(
-                'Qdrant Sync Chat is not yet supported by the guarded managed-v2 workflow. For an empty database, use the M1 / M4c saved-record panel: select Qdrant, preview your saved chat, set up an owned v2 collection, then plan and confirm saved-record inserts. Automatic Sync Chat awaits M5; no vectors were changed.',
-                'Qdrant: use managed-v2 vectorization',
-                { timeOut: 0, closeButton: true }
-            );
-            return false;
+        // M4e: all managed plugin backends now use the same saved-source
+        // M1/S04 path; never re-enter legacy getSavedHashes/chunks/insert.
+        if (['qdrant','lancedb','vectra','milvus'].includes(settings?.vector_backend)) {
+            try {
+                const outcome=await m4eVectorizeCurrentChat(settings,{
+                    getChatId:getCurrentChatId,getContext,
+                    getHeaders:getRequestHeaders,confirm:globalThis.confirm,
+                    fetchImpl:globalThis.fetch,
+                    progress:({inserted,total})=>console.info(`VectHare managed saved-record vectorization: ${inserted}/${total} verified`)
+                });
+                if(outcome.status==='cancelled')return false;
+                if(outcome.status==='review-required'||outcome.remainingReview||outcome.previewBounded) {
+                    toastr.warning(`Managed ${settings.vector_backend} vectorization verified ${outcome.inserted} inserts. Some changes or further saved records require explicit review; this is not automatic M5 synchronization.`, 'VectHare managed vectorization');
+                } else {
+                    toastr.success(`Verified ${outcome.inserted} saved-record inserts via ${settings.vector_backend}.`, 'VectHare managed vectorization');
+                }
+                return true;
+            } catch(e) {
+                toastr.error(`Managed saved-chat vectorization stopped: ${e.message}. No unsafe legacy write was attempted.`, 'VectHare');
+                return false;
+            }
         }
         // VectHare+: Manual Sync Chat / Continue always runs, regardless of the
         // per-collection auto-sync toggle - auto-sync gating applies ONLY to

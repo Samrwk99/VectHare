@@ -42,12 +42,14 @@ import {
     eventSource,
     event_types,
     getRequestHeaders,
+    getCurrentChatId,
     saveSettingsDebounced,
     extension_prompt_types,
 } from '../../../../script.js';
 import {
     ModuleWorkerWrapper,
     extension_settings,
+    getContext,
 } from '../../../extensions.js';
 import { debounce } from '../../../utils.js';
 import { debounce_timeout } from '../../../constants.js';
@@ -229,6 +231,18 @@ window['vecthare_rearrangeChat'] = vecthare_rearrangeChat;
  * of edited messages) WITHOUT continuing the backlog.
  */
 async function onRepairClick() {
+    if(['qdrant','lancedb','vectra','milvus'].includes(settings.vector_backend)) {
+        const {m4eVectorizeCurrentChat}=await import('./utils/m4e-managed-vectorization.js');
+        try {
+            const result=await m4eVectorizeCurrentChat(settings,{
+                getChatId:getCurrentChatId,getContext,
+                getHeaders:getRequestHeaders,fetchImpl:globalThis.fetch,
+                confirm:globalThis.confirm,mode:'repair'
+            });
+            if(result.status!=='cancelled')toastr.info(`Managed repair verified ${result.inserted} saved-record updates. Deleted or ambiguous records require review.`, 'VectHare');
+        }catch(e){toastr.error(`Managed repair stopped: ${e.message}`, 'VectHare');}
+        return;
+    }
     await repairChatVectors(settings, getBatchSize());
     await offerResumeOfUnfinishedVectorization(); // refresh status line + button
 }
@@ -243,7 +257,7 @@ async function onVectorizeAllClick() {
     // CURRENT chat's state. Previously the check only fired on CHAT_CHANGED,
     // so stopping mid-run and staying in the same chat left no resume
     // affordance at all until the user switched chats or reloaded.
-    await offerResumeOfUnfinishedVectorization();
+    if(!['qdrant','lancedb','vectra','milvus'].includes(settings.vector_backend))await offerResumeOfUnfinishedVectorization();
     return result;
 }
 
@@ -314,6 +328,13 @@ function refreshVectorizationStatusDisplay(result = null) {
 // Read the actual saved hashes, coalescing rapid writes into one DB query.
 // Runs after each committed insert/delete/purge and whenever Status opens.
 async function refreshSavedDatabaseStatus() {
+    if(['qdrant','lancedb','vectra','milvus'].includes(settings.vector_backend)){
+        // M4e: legacy hash-count status is not an authoritative managed-v2
+        // inventory. Do not claim empty, complete or resumable from that path.
+        lastDbStatus=null;
+        updateVectorizationStatus('Managed v2: use saved-record preview for verified status');
+        return;
+    }
     const requestId = ++dbStatusRequestId;
     const collectionId = getChatCollectionId();
     const identityAtStart = JSON.stringify(currentChatIdentity());
@@ -356,6 +377,12 @@ function ensureVectHareStatusInterval() {
 }
 
 async function offerResumeOfUnfinishedVectorization() {
+    if(['qdrant','lancedb','vectra','milvus'].includes(settings.vector_backend)){
+        ++resumeCheckRequestId;
+        updateContinueVectorizationButton('available',0,0);
+        updateVectorizationStatus('Managed v2: preview saved records before sync/repair');
+        return;
+    }
     // A newer refresh or a chat switch invalidates any prior asynchronous work.
     const requestId = ++resumeCheckRequestId;
     const collectionIdAtStart = getChatCollectionId();

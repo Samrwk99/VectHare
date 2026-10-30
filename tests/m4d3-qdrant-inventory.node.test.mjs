@@ -89,14 +89,13 @@ test('Qdrant hash-collision diagnostic uses server proof, avoiding blocked legac
  assert.equal(d.status,'warning');assert.match(d.message,/33.3%/);assert.match(d.message,/legacy\/shared vectors not inspected/);
 });
 
-test('Qdrant legacy Sync Chat explicitly defers to guarded first-use M1 rather than trusting an empty database',()=>{
+test('M4e Qdrant Sync Chat routes through managed M1 saved-record vectorization and avoids legacy hash listing',()=>{
  const code=read('core/chat-vectorization.js');
  const manual=code.slice(code.indexOf('export async function vectorizeAll('),code.indexOf('export async function repairChatVectors('));
- assert.match(manual,/settings\?\.vector_backend === 'qdrant'/);
- assert.match(manual,/set up an owned v2 collection/);
- assert.match(manual,/then plan and confirm saved-record inserts/);
- assert.match(manual,/return false/);
- const automatic=code.slice(code.indexOf('async function synchronizeChatScoped('),code.indexOf('async function synchronizeChatScoped(')+1000);
- assert.match(automatic,/QDRANT_LEGACY_SYNC_REQUIRES_M5_MANAGED_GATEWAY/);
- assert.match(read('utils/m1-record-gui.js'),/m1ProvisionCollection/);
+ assert.match(manual,/m4eVectorizeCurrentChat/);
+ assert.match(manual,/\['qdrant','lancedb','vectra','milvus'\]/);
+ assert.match(manual,/M4e: all managed plugin backends/);
+ assert.match(read('utils/m4e-managed-vectorization.js'),/m1ProvisionCollection/);
+ const managed=manual.slice(0,manual.indexOf('// VectHare+: Manual Sync Chat'));
+ assert.doesNotMatch(managed,/getSavedHashes\(/);
 });

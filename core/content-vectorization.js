@@ -33,6 +33,7 @@ import { progressTracker } from '../ui/progress-tracker.js';
 import { extension_settings, getContext } from '../../../../extensions.js';
 import { getStringHash } from '../../../../utils.js';
 import {formatCollectionKey} from '../utils/collection-keys.js';
+import {M4E_BACKENDS,m4eSavedSource,m4eVectorizeSavedSource} from '../utils/m4e-managed-vectorization.js';
 
 /**
  * Main entry point for content vectorization
@@ -48,6 +49,21 @@ export async function vectorizeContent({ contentType, source, settings }) {
         throw new Error(`Unknown content type: ${contentType}`);
     }
 
+    // M4e: managed backends must NEVER send untrusted browser-generated chunks
+    // through /chunks/insert. Only saved chat/lorebook selectors use M1.
+    const backend=extension_settings.vecthare?.vector_backend;
+    if(M4E_BACKENDS.includes(backend)){
+        const {getCurrentChatId,getRequestHeaders}=await import('../../../../../script.js');
+        const select=()=>m4eSavedSource(contentType,source,{getChatId:getCurrentChatId,getContext});
+        const saved=await select();
+        const outcome=await m4eVectorizeSavedSource({backend,source:saved,
+            configId:backend==='qdrant'&&!extension_settings.vecthare?.qdrant_use_cloud?'local':'default',
+            headers:getRequestHeaders(),fetchImpl:globalThis.fetch,confirm:globalThis.confirm,
+            checkSource:select});
+        if(outcome.status==='cancelled')throw Error('M4E_USER_CANCELLED');
+        if(outcome.remainingReview||outcome.previewBounded)throw Error(`M4E_PARTIAL_MANAGED_APPLY_${outcome.inserted}_VERIFIED_REVIEW_REQUIRED`);
+        return {success:true,chunkCount:outcome.inserted,collectionId:null,managed:true};
+    }
     const sourceName = source.name || source.filename || source.id || contentType;
     progressTracker.show(`Vectorizing ${type.label || contentType}`, 4, 'Steps');
     progressTracker.updateCurrentItem(sourceName);
