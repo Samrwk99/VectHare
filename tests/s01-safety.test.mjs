@@ -1,4 +1,4 @@
-import {registerF09WorkflowRoutes} from '../lib/f09-workflows.js';
+import {registerF09WorkflowRoutes,registerF09ManagedQueryRoute} from '../lib/f09-workflows.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
@@ -249,6 +249,10 @@ test('plugin registration keeps legacy mutation endpoints blocked even without m
         './lib/s04-routes.js':{registerS04Routes:()=>{}},
         './lib/m0-gateway.js':{registerM0GatewayRoutes:()=>{}},
         './lib/m1-saved-records.js':{registerM1Routes:()=>{},readM1HostEvidence:async()=>null},
+            './lib/pb6-scene-source.js':{registerPb6SceneRoutes:()=>{}},
+            './lib/pb10-physical-browse.js':{registerPB10PhysicalRoutes:()=>{}},
+            './lib/pb14-native-qdrant-browser.js':{registerPB14NativeRoutes:()=>{}},
+            './lib/pb12-managed-groups.js':{registerPB12GroupRoutes:()=>{}},
         './lib/m2-jobs.js':{registerM2Routes:()=>{}},
             './lib/m3-collections.js':{registerM3Routes:()=>{}},
             './lib/m4a-lancedb-lifecycle.js':{registerM4aLanceRoutes:()=>{}},
@@ -272,7 +276,7 @@ test('plugin registration keeps legacy mutation endpoints blocked even without m
             './lib/f07-vectra.js':{f07SealedVectra:()=>{},f07VectraLocation:()=>{}},
             './lib/f08-milvus.js':{registerF08MilvusPilotRoutes:()=>{}},
             './lib/f08-milvus-acceptance.js':{registerF08AcceptanceRoutes:()=>{}},
-            './lib/f09-workflows.js':{registerF09WorkflowRoutes:()=>{}},
+            './lib/f09-workflows.js':{registerF09WorkflowRoutes:()=>{},registerF09ManagedQueryRoute:()=>{}},
             './lib/f09b-chat-sync.js':{registerF09bSyncRoutes:()=>{}},
             './lib/f09b3-chat-sync-execute.js':{registerF09b3SyncRoutes:()=>{}},
             './lib/f09b4-chat-lifecycle.js':{registerF09b4LifecycleRoutes:()=>{}},

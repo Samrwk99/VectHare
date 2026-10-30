@@ -43,7 +43,7 @@ function fakeMilvus(){
 async function fixture(){const dir=await fs.mkdtemp(path.join(os.tmpdir(),'m4c-m1-'));await fs.chmod(dir,0o700);
  const req={s03:{userScopeId:'alice',vectorsPath:dir},user:{directories:{}},body:null};
  const snapshot={sourceId:scope.sourceId,sourceKind:'chat',fileHash:hash('file-1'),messages:[{...msg}]};
- const db=fakeMilvus();const deps={getProfile:async()=>({configured:true,profile}),
+ const db=fakeMilvus();const deps={getProfile:async()=>({configured:true,profile,connectionState:'VERIFIED'}),
   bind:async()=>({binding}),readSnapshot:async()=>structuredClone(snapshot),
   getReceipt:async()=>({state:'SCHEMA_VERIFIED_OFFLINE_UNCERTIFIED'}),
   transport:async()=>db,backendPool:{getTrusted:async()=>db},embed:async()=>[0.2,0.4,0.6]};

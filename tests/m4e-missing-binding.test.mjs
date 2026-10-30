@@ -5,7 +5,7 @@ const source={kind:'chat',avatar:'Jane.png',chatFile:'saved'};
 async function call(code){
  let handler;
  const router={post(path,fn){if(path==='/v2/m1/records/preview')handler=fn;},get(){}};
- registerM1Routes(router,{getProfile:async()=>({configured:true,profile:{source:'transformers',model:'host',dimension:3,metric:'cosine'}}),
+ registerM1Routes(router,{getProfile:async()=>({configured:true,profile:{source:'transformers',model:'host',dimension:3,metric:'cosine'},connectionState:'VERIFIED'}),
   bind:async()=>{throw Object.assign(new Error('private server text'),{code,status:409});},
   readSnapshot:async()=>({sourceId:'saved',fileHash:'hash',messages:[],sourceKind:'chat'})});
  let sent,status=200;

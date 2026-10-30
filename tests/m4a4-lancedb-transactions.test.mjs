@@ -59,7 +59,7 @@ async function fixture({populated=false}={}){
  const s02=new CollectionRegistry(path.join(root,'.similharity'));
  await s02.reserve({backend:'lancedb',scope,embedding});
  const req={s03:ctx,user:{directories:{}},body:{backend:'lancedb',source}};
- const deps={getProfile:async()=>({configured:true,profile:embedding,selected:false}),
+ const deps={getProfile:async()=>({configured:true,profile:embedding,selected:false,connectionState:'VERIFIED'}),
   bind:async()=>({binding}),readSnapshot:async()=>({sourceId:scope.sourceId,fileHash:sourceHash}),
   receipt:async()=>({state:'SCHEMA_VERIFIED_OFFLINE_UNCERTIFIED'}),
   connection:async()=>({getDatabase:async()=>db}),

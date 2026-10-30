@@ -16,8 +16,8 @@ const readonly=new Set([
  '/v2/m4a/lancedb/collections/preview','/v2/m4a/lancedb/backups/create',
  '/v2/m4a/lancedb/collections/delete/plan', '/v2/m4a/lancedb/collections/transition/plan',
  '/v2/m2/jobs/preview','/v2/m3/collections/rebuild/source-profile','/v2/m3/collections/rebuild/activation-plan','/v2/m3/collections/rebuild/stage-plan','/v2/m3/collections/preview','/v2/m3/collections/managed-inventory','/v2/m3/collections/rebuild/preview','/v2/m3/backups/create',
- '/v2/sources/attest','/v2/workflows/chat-sync-plan','/v2/workflows/preview',
- '/v2/workflows/retrieve','/v2/m1/records/preview','/v2/m1/collections/prepare','/v2/reads/preflight','/v2/operations/preflight',
+ '/v2/pb12/groups/read','/v2/pb14/qdrant/physical-page','/v2/pb10/physical/browse','/v2/pb6/scenes/read','/v2/sources/attest','/v2/workflows/chat-sync-plan','/v2/workflows/preview',
+ '/v2/workflows/retrieve','/v2/workflows/retrieve-text','/v2/m1/preflight','/v2/m1/records/preview','/v2/m1/records/browse','/v2/m1/collections/prepare','/v2/reads/preflight','/v2/operations/preflight',
  '/v2/recovery/capture','/v2/recovery/status','/v2/recovery/download',
  '/v2/workflows/link-condition-preview','/v2/collections/preview','/v2/collections/status',
  '/v2/reads/bind','/v2/embeddings/test','/v2/identity/resolve',
@@ -28,7 +28,7 @@ const explicitlyDenied=new Set([
  '/v2/operations/submit','/v2/operations/reconcile','/open-folder','/rerank',
  '/v2/mutations/execute','/v2/m1/collections/provision'
 ]);
-const guarded=new Set(['/v2/m4c/milvus/collections/transition/execute','/v2/m4c/milvus/collections/delete/execute','/v2/m4b/vectra/collections/delete/execute','/v2/m4b/vectra/collections/transition/execute','/v2/m4a/lancedb/collections/transition/execute','/v2/m4a/lancedb/collections/delete/execute','/v2/m3/collections/rebuild/activation-execute','/v2/m3/collections/rebuild/stage-execute','/v2/m3/collections/execute','/v2/m3/operations/:operationId/quarantine-terminal','/v2/m3/operations/:operationId/quarantine-proven','/v2/m3/collections/rebuild/continue/:operationId','/v2/m3/operations/:operationId/abandon']);
+const guarded=new Set(['/v2/pb12/groups/update','/v2/m4c/milvus/collections/transition/execute','/v2/m4c/milvus/collections/delete/execute','/v2/m4b/vectra/collections/delete/execute','/v2/m4b/vectra/collections/transition/execute','/v2/m4a/lancedb/collections/transition/execute','/v2/m4a/lancedb/collections/delete/execute','/v2/m3/collections/rebuild/activation-execute','/v2/m3/collections/rebuild/stage-execute','/v2/m3/collections/execute','/v2/m3/operations/:operationId/quarantine-terminal','/v2/m3/operations/:operationId/quarantine-proven','/v2/m3/collections/rebuild/continue/:operationId','/v2/m3/operations/:operationId/abandon']);
 const planned=new Set(['/v2/m3/collections/rebuild/preparation/:operationId/step',
  '/v2/embeddings/staged-profile','/v2/m3/collections/rollback/plan','/v2/collections/:logicalKey/records/plan','/v2/m3/collections/plan',
  '/v2/m2/jobs/create','/v2/m2/jobs/:jobId/resume','/v2/m2/jobs/:jobId/pause',

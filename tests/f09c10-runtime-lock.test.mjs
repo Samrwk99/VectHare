@@ -95,7 +95,7 @@ test('F09c.10: independently launched mutation engine cannot bypass in-flight S0
  const p=planned(ctx),script=`import {MutationEngine} from ${JSON.stringify(new URL('../lib/s04-engine.js',import.meta.url).href)};`+
  `import {OperationLedger} from ${JSON.stringify(new URL('../lib/s04-ledger.js',import.meta.url).href)};`+
  `const p=${JSON.stringify(p)},ctx=${JSON.stringify(ctx)};`+
- `const a={getRecord:async()=>null,insertRecord:async()=>{process.stdout.write('DISPATCH_STARTED\\n');await new Promise(()=>{});},updateRecord:async()=>{},deleteRecord:async()=>{}};`+
+ `const a={getRecord:async()=>null,insertRecord:async()=>{process.stdout.write('DISPATCH_STARTED\\n');await new Promise(()=>{setInterval(()=>{},1000);});},updateRecord:async()=>{},deleteRecord:async()=>{}};`+
  `const e=new MutationEngine({atomicOnly:false,ledger:new OperationLedger(ctx),adapter:a,authorize:async()=>({authorized:true,ownerVerified:true,mutationContractVerified:true,collectionKey:p.collectionKey,backend:p.backend})});`+
  `await e.execute(p,${JSON.stringify(payload())});`;
  const child=spawn(process.execPath,['--input-type=module','-e',script],{stdio:['ignore','pipe','pipe']});
@@ -106,7 +106,7 @@ test('F09c.10: independently launched mutation engine cannot bypass in-flight S0
    child.on('exit',code=>{clearTimeout(timer);reject(Error('child died before dispatch '+code+': '+stderr));});});
   const second=planned(ctx);
   await assert.rejects(()=>engine(ctx).execute(second,payload()),e=>e.code==='F09C5_WRITER_BUSY');
- }finally{child.kill('SIGKILL');await new Promise(r=>child.once('exit',r));}
+ }finally{child.kill('SIGKILL');await new Promise(r=>{if(child.exitCode!==null||child.signalCode!==null)r();else child.once('exit',r);});}
  const third=planned(ctx);
  await assert.rejects(()=>engine(ctx).execute(third,payload()),e=>e.code==='F09C5_WRITER_BUSY');
 }));

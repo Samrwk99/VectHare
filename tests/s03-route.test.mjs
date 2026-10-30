@@ -1,4 +1,4 @@
-import {registerF09WorkflowRoutes} from '../lib/f09-workflows.js';
+import {registerF09WorkflowRoutes,registerF09ManagedQueryRoute} from '../lib/f09-workflows.js';
 import {registerF09bSyncRoutes} from '../lib/f09b-chat-sync.js';
 import {registerF10Routes} from '../lib/f10-recovery-capture.js';
 import test from 'node:test';
@@ -50,6 +50,10 @@ async function registered(pool) {
             './lib/s04-routes.js':{registerS04Routes},
             './lib/m0-gateway.js':{registerM0GatewayRoutes},
             './lib/m1-saved-records.js':{registerM1Routes:()=>{},readM1HostEvidence:async()=>null},
+            './lib/pb6-scene-source.js':{registerPb6SceneRoutes:()=>{}},
+            './lib/pb10-physical-browse.js':{registerPB10PhysicalRoutes:()=>{}},
+            './lib/pb14-native-qdrant-browser.js':{registerPB14NativeRoutes:()=>{}},
+            './lib/pb12-managed-groups.js':{registerPB12GroupRoutes:()=>{}},
             './lib/m2-jobs.js':{registerM2Routes:()=>{}},
             './lib/m3-collections.js':{registerM3Routes:()=>{}},
             './lib/m4a-lancedb-lifecycle.js':{registerM4aLanceRoutes:()=>{}},
@@ -73,7 +77,7 @@ async function registered(pool) {
             './lib/f07-vectra.js':{f07SealedVectra,f07VectraLocation},
             './lib/f08-milvus.js':{registerF08MilvusPilotRoutes},
             './lib/f08-milvus-acceptance.js':{registerF08AcceptanceRoutes},
-            './lib/f09-workflows.js':{registerF09WorkflowRoutes},
+            './lib/f09-workflows.js':{registerF09WorkflowRoutes,registerF09ManagedQueryRoute},
             './lib/f09b-chat-sync.js':{registerF09bSyncRoutes},
             './lib/f09b3-chat-sync-execute.js':{registerF09b3SyncRoutes:()=>{}},
             './lib/f09b4-chat-lifecycle.js':{registerF09b4LifecycleRoutes:()=>{}},
@@ -249,4 +253,54 @@ test('F02 actual plugin router requires authenticated owned-file bind and never 
  assert.equal(page.statusCode,200);assert.deepEqual(page.payload.data.items,[]);assert.equal(called,1);
  const legacy=await call('POST','/chunks/query',{body:{backend:'qdrant'},user});
  assert.equal(legacy.statusCode,409);assert.equal(legacy.payload.code,'S03_SHARED_LEGACY_READ_UNVERIFIED');
+}));
+
+test('PB20: local catalogue explicitly disclaims remote/managed completeness even when empty',async()=>disposable(async dir=>{
+    const call=await registered({async get(){throw Error('no database should be connected');}});
+    const user={profile:{handle:'alice'},directories:{vectors:dir}};
+    const result=await call('GET','/collections',{user});
+    assert.equal(result.statusCode,200);
+    assert.equal(result.payload.success,true);
+    assert.equal(result.payload.catalogueComplete,false);
+    assert.equal(result.payload.ownershipVerified,false);
+    assert.deepEqual(Array.from(result.payload.coverage),['vectra','lancedb']);
+    assert.deepEqual(Array.from(result.payload.collections),[]);
+}));
+
+test('PB20: broken LanceDB scan is not a successful empty or partial collection listing',async()=>disposable(async dir=>{
+    await fs.mkdir(path.join(dir,'lancedb','source-a'),{recursive:true});
+    const call=await registered({async get(_ctx,backend){
+        assert.equal(backend,'lancedb');
+        throw Object.assign(new Error('backend offline secret path'),{code:'ECONNREFUSED'});
+    }});
+    const user={profile:{handle:'alice'},directories:{vectors:dir}};
+    const result=await call('GET','/collections',{user});
+    assert.equal(result.statusCode,503);
+    assert.equal(result.payload.success,false);
+    assert.equal(result.payload.code,'COLLECTION_CATALOGUE_UNAVAILABLE');
+    assert.equal(result.payload.catalogueComplete,false);
+    assert.ok(!JSON.stringify(result.payload).includes('secret path'));
+}));
+
+test('PB20: unreadable Vectra index is never reported as an empty collection',async()=>disposable(async dir=>{
+    const model=path.join(dir,'openai','chat-a','model-a');
+    await fs.mkdir(model,{recursive:true});
+    await fs.writeFile(path.join(model,'index.json'),'{broken');
+    const call=await registered({async get(){throw Error('LanceDB not used');}});
+    const user={profile:{handle:'alice'},directories:{vectors:dir}};
+    const result=await call('GET','/collections',{user});
+    assert.equal(result.statusCode,503);
+    assert.equal(result.payload.code,'COLLECTION_CATALOGUE_UNAVAILABLE');
+    assert.equal(result.payload.catalogueComplete,false);
+}));
+
+test('PB20: bad LanceDB count invalidates whole catalogue instead of showing zero',async()=>disposable(async dir=>{
+    await fs.mkdir(path.join(dir,'lancedb','source-a'),{recursive:true});
+    const call=await registered({async get(){return {
+        async getDatabase(){return {async tableNames(){return ['bad'];},async openTable(){return {async countRows(){return -1;}};}};}
+    };}});
+    const user={profile:{handle:'alice'},directories:{vectors:dir}};
+    const result=await call('GET','/collections',{user});
+    assert.equal(result.statusCode,503);
+    assert.equal(result.payload.code,'COLLECTION_CATALOGUE_UNAVAILABLE');
 }));

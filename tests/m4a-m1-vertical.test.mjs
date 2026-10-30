@@ -42,7 +42,7 @@ function fakeDB(){const records=new Map();let lostAck=false;
 async function fixture(){const dir=await fs.mkdtemp(path.join(os.tmpdir(),'m4a-m1-'));await fs.chmod(dir,0o700);
  const req={s03:{userScopeId:'alice',vectorsPath:dir},user:{directories:{}},body:null};
  const snapshot={sourceId:scope.sourceId,sourceKind:'chat',fileHash:hash('file-1'),messages:[{...msg}]};
- const db=fakeDB();const deps={getProfile:async()=>({configured:true,profile}),
+ const db=fakeDB();const deps={getProfile:async()=>({configured:true,profile,connectionState:'VERIFIED'}),
   bind:async()=>({binding}),readSnapshot:async()=>structuredClone(snapshot),
   getReceipt:async()=>({state:'SCHEMA_VERIFIED_OFFLINE_UNCERTIFIED'}),
   backendPool:{getTrusted:async(_ctx,backend)=>{assert.equal(backend,'lancedb');return db.backend;}},

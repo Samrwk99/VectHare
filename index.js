@@ -7,7 +7,7 @@
  * All chunk operations go through unified /chunks/* endpoints.
  * Backend is specified via `backend` parameter in request body.
  *
- * @version 3.2.11-m4e.1
+ * @version 3.2.23-p-b.23
  */
 
 import path from 'node:path';
@@ -25,10 +25,14 @@ import { safeLegacyPhysicalName } from './lib/s02-identity.js';
 import { registerS04Routes } from './lib/s04-routes.js';
 import {registerM0GatewayRoutes} from './lib/m0-gateway.js';
 import {registerM1Routes,readM1HostEvidence} from './lib/m1-saved-records.js';
+import {registerPb6SceneRoutes} from './lib/pb6-scene-source.js';
+import {registerPB10PhysicalRoutes} from './lib/pb10-physical-browse.js';
+import {registerPB14NativeRoutes} from './lib/pb14-native-qdrant-browser.js';
+import {registerPB12GroupRoutes} from './lib/pb12-managed-groups.js';
 import {m0WriteBoundary} from './lib/m0-write-boundary.js';
 import { registerS05Routes } from './lib/s05-routes.js';
 import {registerF02Routes} from './lib/f02-public-reads.js';
-import {registerF09WorkflowRoutes} from './lib/f09-workflows.js';
+import {registerF09WorkflowRoutes,registerF09ManagedQueryRoute} from './lib/f09-workflows.js';
 import {registerF09bSyncRoutes} from './lib/f09b-chat-sync.js';
 import {registerF09b3SyncRoutes} from './lib/f09b3-chat-sync-execute.js';
 import {registerF09b4LifecycleRoutes} from './lib/f09b4-chat-lifecycle.js';
@@ -60,7 +64,7 @@ import {registerF01HostRoutes} from './lib/f01-host-sources.js';
 import { validateVector as validateS05Vector } from './lib/s05-contract.js';
 
 const pluginName = 'similharity';
-const pluginVersion = '3.2.11-m4e.1';
+const pluginVersion = '3.2.23-p-b.23';
 
 /**
  * Initialize the plugin
@@ -111,6 +115,16 @@ export async function init(router) {
         requireReceipt:!(binding.collection.generation>0)}),
       makeVectraIndex:folder=>new vectra.LocalIndex(folder),
       hostEmbed:(req,source,text,model)=>getEmbeddingForSource(source,text,model,req.user.directories,req)});
+    registerPb6SceneRoutes(router);
+    registerPB10PhysicalRoutes(router,{backendPool,
+      createVectra:(req,binding)=>f07SealedVectra(req,binding,{createIndex:folder=>new vectra.LocalIndex(folder),
+        requireReceipt:!(binding.collection.generation>0)}),
+      makeVectraIndex:folder=>new vectra.LocalIndex(folder)});
+    registerPB14NativeRoutes(router,{backendPool});
+    registerPB12GroupRoutes(router,{backendPool,
+      createVectra:(req,binding)=>f07SealedVectra(req,binding,{createIndex:folder=>new vectra.LocalIndex(folder),
+        requireReceipt:!(binding.collection.generation>0)}),
+      makeVectraIndex:folder=>new vectra.LocalIndex(folder)});
     registerM2Routes(router,{backendPool});
     registerM3Routes(router,{backendPool});
     registerM4aLanceRoutes(router,{backendPool});
@@ -134,6 +148,9 @@ export async function init(router) {
     registerS05Routes(router,{readHandler:f02ReadHandler});
     registerF09WorkflowRoutes(router,{backendPool,createVectra:async(req,binding)=>
       f07SealedVectra(req,binding,{createIndex:folder=>new vectra.LocalIndex(folder)})});
+    registerF09ManagedQueryRoute(router,{backendPool,
+      hostEmbed:(req,s,t,m)=>getEmbeddingForSource(s,t,m,req.user.directories,req),
+      createVectra:async(req,binding)=>f07SealedVectra(req,binding,{createIndex:folder=>new vectra.LocalIndex(folder)})});
     registerF09bSyncRoutes(router,{backendPool,createVectra:async(req,binding)=>
       f07SealedVectra(req,binding,{createIndex:folder=>new vectra.LocalIndex(folder)})});
     const managedEmbed=(source,text,model,directories,req)=>generateManagedEmbedding(req.s03,
@@ -714,7 +731,7 @@ export async function init(router) {
 
     /**
      * GET /api/plugins/similharity/collections
-     * Lists ALL collections across ALL backends
+     * Legacy advisory local Vectra/LanceDB catalogue; never exhaustive
      */
     router.get('/collections', async (req, res) => {
         try {
@@ -724,11 +741,20 @@ export async function init(router) {
             res.json({
                 success: true,
                 count: allCollections.length,
-                collections: allCollections
+                collections: allCollections,
+                // Legacy discovery only enumerates local stores. In particular,
+                // Qdrant/Milvus and managed v2 bindings are NOT an exhaustive
+                // collection inventory or proof of absence after a restart.
+                catalogueComplete: false,
+                coverage: ['vectra', 'lancedb'],
+                ownershipVerified: false
             });
         } catch (error) {
             console.error(`[${pluginName}] collections error:`, error);
-            res.status(500).json({ error: error.message });
+            // A failed/partial scan is not an empty collection. Do not leak
+            // host paths or backend errors into an unauthenticated-looking UI.
+            res.status(503).json({ success: false, code: 'COLLECTION_CATALOGUE_UNAVAILABLE',
+                catalogueComplete: false, ownershipVerified: false });
         }
     });
 
@@ -1471,8 +1497,13 @@ async function scanAllSourcesForCollections(vectorsPath, userContext, backendPoo
 
         // Scan LanceDB
         const lancedbPath = path.join(vectorsPath, 'lancedb');
-        try {
-            await fs.access(lancedbPath);
+        let hasLanceDb = true;
+        try { await fs.access(lancedbPath); }
+        catch (e) {
+            if (e.code === 'ENOENT') hasLanceDb = false;
+            else throw e;
+        }
+        if (hasLanceDb) {
             const lancedbBackend = await backendPool.get(userContext, 'lancedb');
 
             const sourceDirs = await fs.readdir(lancedbPath, { withFileTypes: true });
@@ -1488,6 +1519,8 @@ async function scanAllSourcesForCollections(vectorsPath, userContext, backendPoo
                         try {
                             const table = await db.openTable(tableName);
                             const count = await table.countRows();
+                            if (!Number.isSafeInteger(count) || count < 0)
+                                throw new Error('LanceDB row count unverified');
 
                             allCollections.push({
                                 id: tableName,
@@ -1498,15 +1531,14 @@ async function scanAllSourcesForCollections(vectorsPath, userContext, backendPoo
                             });
                         } catch (e) {
                             console.warn(`[${pluginName}] LanceDB: Failed to open table '${tableName}' in source '${source}':`, e.message);
+                            throw e;
                         }
                     }
                 } catch (e) {
                     console.warn(`[${pluginName}] LanceDB: Failed to scan source '${source}':`, e.message);
+                    throw e;
                 }
             }
-        } catch (e) {
-            // LanceDB folder doesn't exist - this is normal if LanceDB hasn't been used
-            console.debug(`[${pluginName}] LanceDB folder not found or not accessible:`, e.message);
         }
 
         // S03: no cross-tenant remote collection enumeration. Remote inventory
@@ -1514,6 +1546,7 @@ async function scanAllSourcesForCollections(vectorsPath, userContext, backendPoo
 
     } catch (error) {
         console.error(`[${pluginName}] Error scanning collections:`, error);
+        throw error; // No partial list may be presented as a successful scan.
     }
 
     return allCollections;
@@ -1549,10 +1582,9 @@ async function findAllIndexes(dir, relativePath = '') {
             }
         }
     } catch (e) {
-        // Directory may not exist or not be readable - log at debug level since this is recursive
-        if (relativePath === '') {
-            console.warn(`[${pluginName}] Vectra: Failed to scan vectors directory:`, e.message);
-        }
+        // A missing nested directory or permission error mid-traversal
+        // invalidates the scan. Never certify a partial tree as complete.
+        throw e;
     }
 
     return results;
@@ -1567,14 +1599,15 @@ async function getChunkCountFromIndex(indexPath) {
         const store = new vectra.LocalIndex(modelDir);
 
         if (!await store.isIndexCreated()) {
-            return 0;
+            throw new Error('Vectra index not readable');
         }
 
         const items = await store.listItems();
+        if (!Array.isArray(items)) throw new Error('Vectra item list invalid');
         return items.length;
     } catch (e) {
         console.warn(`[${pluginName}] Vectra: Failed to get chunk count from ${indexPath}:`, e.message);
-        return 0;
+        throw e;
     }
 }
 

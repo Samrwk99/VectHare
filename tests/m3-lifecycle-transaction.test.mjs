@@ -58,7 +58,7 @@ async function fx({failWrite=false}={}){
   if(method==='POST'&&suffix==='/points/query')return {result:{points:structuredClone(points)}};
   throw Error('UNEXPECTED_REQUEST:'+method+':'+url);
  }};
- const deps={transport:async()=>transport,getProfile:async()=>({configured:true,profile:embedding}),
+ const deps={transport:async()=>transport,getProfile:async()=>({configured:true,profile:embedding,connectionState:'VERIFIED'}),
   bind:async()=>({binding}),receipt:async()=>({state:'SCHEMA_VERIFIED_OFFLINE_UNCERTIFIED'}),
   jobs:()=>({assertNoLease:async()=>true}),readSnapshot:async()=>({fileHash:backup.savedSourceFingerprint,sourceId:scope.sourceId}),
   registry:()=>({read:async()=>managed}),ledgerCheckpoint:async()=>backup.operationCheckpoint,

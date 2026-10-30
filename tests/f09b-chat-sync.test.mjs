@@ -124,3 +124,18 @@ test('F09b real F02 Qdrant integration scopes each record read to its server-att
  assert.equal(missing.statusCode,404);
  assert.equal(captures.filter(x=>x.uri.endsWith('/points/scroll')).length,4);
 }));
+test('P-B.5 M1 saved-chat reader handles >80 messages and carries exact host edit locator, F09b stays bounded',()=>fixture(async({req,write})=>{
+ const {readM1Snapshot}=await import('../lib/m1-saved-records.js');
+ const rows=Array.from({length:250},(_,i)=>msg(`body ${i}`,i+10000));
+ await write('one',rows);
+ await assert.rejects(readAttestedChatSnapshot(req,source()),e=>e.code==='F09B_SYNC_CHAT_LIMIT');
+ const managed=await readM1Snapshot(req,source());
+ assert.equal(managed.messages.length,250);
+ assert.deepEqual(managed.messages[249].chatLocator,{sendDate:10249,name:'Nina',isUser:false});
+ assert.equal(managed.messages[249].text,'body 249');
+ const original=managed.messages[121].recordId;
+ rows[121].mes='changed';await write('one',rows);
+ const after=await readM1Snapshot(req,source());
+ assert.equal(after.messages[121].recordId,original);
+ assert.equal(after.messages[121].text,'changed');
+}));

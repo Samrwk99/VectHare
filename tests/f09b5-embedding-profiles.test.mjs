@@ -36,7 +36,7 @@ test('F09b.5 fixed endpoint, bounded request, dimension and nonfinite checks',()
 }));
 test('F09b.5 rejects credentials, unknown fields, invalid source, and symlinked store',()=>temp(async(ctx,root)=>{
  await assert.rejects(()=>saveEmbeddingProfile(ctx,{...profile,apiUrl:'http://127.0.0.1'}),/F09B5_FIELDS_FORBIDDEN/);
- await assert.rejects(()=>saveEmbeddingProfile(ctx,{...profile,source:'ollama'}),/F09B5_PROVIDER_MODEL_UNSUPPORTED/);
+ await assert.rejects(()=>saveEmbeddingProfile(ctx,{...profile,source:'unknown_provider'}),/F09B5_PROVIDER_MODEL_UNSUPPORTED/);
  await assert.rejects(()=>saveEmbeddingProfile(ctx,{...profile,credential:'abc\r\n'}),/F09B5_CREDENTIAL_INVALID/);
  await saveEmbeddingProfile(ctx,{...profile,credential:'x'});
  const file=path.join(root,'.similharity-private','embedding-profile.json');
