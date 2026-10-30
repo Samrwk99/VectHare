@@ -1,3 +1,4 @@
+import { diagnosticLlamaCppUrl } from '../utils/diagnostic-provider-url.js';
 import { guardedVectorFetch as fetch } from '../utils/e02-vector-request-gateway.js';
 /**
  * ============================================================================
@@ -52,7 +53,7 @@ function getPluginProviderParams(settings) {
 
     // llamacpp needs apiUrl
     if (source === 'llamacpp') {
-        params.apiUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : settings.llamacpp_url;
+        params.apiUrl = diagnosticLlamaCppUrl(settings, textgenerationwebui_settings?.server_urls?.[textgen_types.LLAMACPP]);
     }
 
     // vllm needs apiUrl

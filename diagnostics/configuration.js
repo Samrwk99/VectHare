@@ -1,3 +1,4 @@
+import { isUnverifiedInventoryRead } from '../utils/diagnostic-inventory.js';
 /**
  * ============================================================================
  * VECTHARE DIAGNOSTICS - CONFIGURATION
@@ -226,9 +227,12 @@ export async function checkChatVectors(settings) {
             message: `${hashes.length} vectorized chunks`
         };
     } catch (error) {
+        if (isUnverifiedInventoryRead(error)) return {
+            name: 'Chat Vectors', status: 'warning',
+            message: 'Vector count cannot be verified through the legacy shared-collection listing API. This does not imply vectors are missing. Use the managed collection inventory or a scoped retrieval test.',
+        };
         return {
-            name: 'Chat Vectors',
-            status: 'fail',
+            name: 'Chat Vectors', status: 'fail',
             message: `Failed to check vectors: ${error.message}`
         };
     }

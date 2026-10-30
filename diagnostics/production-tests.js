@@ -1,3 +1,6 @@
+import { isUnverifiedInventoryRead } from '../utils/diagnostic-inventory.js';
+import { diagnosticLlamaCppUrl } from '../utils/diagnostic-provider-url.js';
+import { textgen_types, textgenerationwebui_settings } from '../../../../textgen-settings.js';
 import { guardedVectorFetch as fetch } from '../utils/e02-vector-request-gateway.js';
 /**
  * ============================================================================
@@ -91,7 +94,7 @@ function getPluginProviderParams(settings) {
 
     // llamacpp needs apiUrl
     if (source === 'llamacpp') {
-        params.apiUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : settings.llamacpp_url;
+        params.apiUrl = diagnosticLlamaCppUrl(settings, textgenerationwebui_settings?.server_urls?.[textgen_types.LLAMACPP]);
     }
 
     // vllm needs apiUrl
@@ -119,8 +122,8 @@ export async function testEmbeddingGeneration(settings) {
                 text: testText,
                 source: settings.source || 'transformers',
                 model: settings[getModelField(settings.source)] || null,
-                // Include provider-specific params (apiUrl, apiKey for BananaBread, etc.)
-
+                // Always test the same configured endpoint used by normal vector calls.
+                ...getPluginProviderParams(settings),
             })
         });
 
@@ -259,25 +262,18 @@ export async function testVectorRetrieval(settings) {
     }
 
     try {
-        const hashes = await getSavedHashes(collectionId, settings);
-
-        if (hashes.length === 0) {
-            return {
-                name: '[PROD] Vector Retrieval',
-                status: 'warning',
-                message: 'No vectors in current chat to test retrieval',
-                category: 'production'
-            };
-        }
-
+        // Retrieval can be tested without claiming authoritative collection inventory.
+        // Legacy Qdrant/Milvus saved-hash listing is deliberately unavailable.
         const result = await queryCollection(collectionId, 'test query', 3, settings);
         if (!result || !Array.isArray(result.hashes) || !Array.isArray(result.metadata)) {
             throw new Error('Selected backend returned an invalid retrieval result');
         }
         return {
             name: '[PROD] Vector Retrieval',
-            status: 'pass',
-            message: `Queried selected ${settings.vector_backend || 'standard'} backend; retrieved ${result.hashes.length} result(s)`,
+            status: result.hashes.length > 0 ? 'pass' : 'warning',
+            message: result.hashes.length > 0
+                ? `Selected ${settings.vector_backend || 'standard'} backend returned ${result.hashes.length} scoped query result(s); this does not certify a complete collection inventory`
+                : 'Backend query succeeded but returned no vectors. Verify that the current chat has indexed content; collection completeness is not established.',
             category: 'production'
         };
     } catch (error) {
@@ -655,11 +651,13 @@ export async function testDuplicateHashes(settings, collectionId) {
             data: { duplicates, collectionId, totalDuplicates: totalDupes }
         };
     } catch (error) {
+        if (isUnverifiedInventoryRead(error)) return {
+            name: '[PROD] Duplicate Hash Check', status: 'warning', category: 'production',
+            message: 'Duplicate-check unverified: complete scoped Qdrant/Milvus inventory is unavailable through the legacy API. No duplicate-free claim or deletion is made.',
+        };
         return {
-            name: '[PROD] Duplicate Hash Check',
-            status: 'fail',
-            message: `Check failed: ${error.message}`,
-            category: 'production'
+            name: '[PROD] Duplicate Hash Check', status: 'fail',
+            message: `Check failed: ${error.message}`, category: 'production'
         };
     }
 }

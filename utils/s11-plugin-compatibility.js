@@ -5,9 +5,9 @@
  */
 import { guardedVectorFetch } from './e02-vector-request-gateway.js';
 export const S11_EXPECTED_PLUGIN = Object.freeze({
-    pluginVersion: '3.2.11-m4d',
+    pluginVersion: '3.2.11-m4d.2',
     contractVersion: 2,
-    sourceFingerprint: '063e174d304d94453d878f3609e41f4d023964eb2a7c63c06c2afd4d795fa371',
+    sourceFingerprint: '3532044ef7450b57b31cd312c07b2f8b8fceb8d361e2d4679d58c93447443c6d',
 });
 export const S11_BACKENDS = Object.freeze(['standard','lancedb','qdrant','milvus']);
 const ROOT = '/api/plugins/similharity';

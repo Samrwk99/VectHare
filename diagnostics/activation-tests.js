@@ -51,7 +51,7 @@ export async function testConditionalActivation() {
             results.push({
                 name: `Condition: ${name}`,
                 status: passed ? 'pass' : 'fail',
-                message: passed ? (detail || 'Test passed') : (detail || 'Test failed'),
+                message: `Synthetic fixture (not your live chat/lorebook): ${detail || (passed ? 'Test passed' : 'Test failed')}`,
                 category: 'production'
             });
         };
@@ -93,7 +93,7 @@ export async function testConditionalActivation() {
 
         // Test: Lorebook active
         const lorebookRule = { type: 'lorebookActive', settings: { values: ['adventure'], matchType: 'any' } };
-        addTest('Lorebook Active', evaluateConditionRule(lorebookRule, context) === true, '"adventure" entry active');
+        addTest('Lorebook Active', evaluateConditionRule(lorebookRule, context) === true, 'Synthetic adventure entry active in test context');
 
         // Test: Random chance (100% should always pass)
         const randomRule100 = { type: 'randomChance', settings: { probability: 100 } };
@@ -156,7 +156,7 @@ export async function testConditionalActivation() {
         const chunks2 = [{ hash: 2001, score: 0.8, text: 'A' }];
         const chunkMetadataMap2 = { 2001: { links: [{ target: '2002', type: 'hard' }] } };
         const linkResult2 = processChunkLinks(chunks2, chunkMetadataMap2, 0.15);
-        addTest('Hard Links', linkResult2.missingHardLinks?.includes(2002), 'Missing hard link detected');
+        addTest('Hard Links', linkResult2.missingHardLinks?.includes(2002), 'Expected missing hard link detected in test fixture (not a real broken link)');
 
         // Test: Filter chunks
         const chunksToFilter = [
