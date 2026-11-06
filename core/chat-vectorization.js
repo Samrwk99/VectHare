@@ -627,9 +627,18 @@ async function rerankWithBananaBread(query, chunks, settings) {
  * @returns {Promise<object>} Progress info
  */
 export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = false) {
-    // Snapshot BEFORE ensureChatBinding's asynchronous file/backend checks.
+    // Background events must not create chat bindings when auto-sync is off.
+    // Explicit Sync Chat / Continue calls bypass this read-only eligibility gate.
     const target = captureChatTarget();
     if (!target) return syncDeferred();
+    if (!bypassAutoSync) {
+        const existingId = peekChatCollectionId();
+        if (!existingId) return syncDeferred();
+        const { isCollectionAutoSyncEnabled } = await import('./collection-metadata.js');
+        if (!isChatTargetCurrent(target, existingId) || !isCollectionAutoSyncEnabled(existingId)) {
+            return syncDeferred();
+        }
+    }
     const binding = await ensureChatBinding();
     if (!isChatTargetCurrent(target)) return syncDeferred();
     const collectionId = binding.writable ? binding.collectionId : null;
@@ -3234,8 +3243,10 @@ export async function repairChatVectors(settings, batchSize = 5) {
  */
 export async function checkUnfinishedVectorization(settings, collectionIdOverride = null) {
     try {
+        const target = captureChatTarget();
+        if (!target) return null;
         const collectionId = collectionIdOverride || getChatCollectionId();
-        if (!collectionId) return null;
+        if (!collectionId || !isChatTargetCurrent(target, collectionId)) return null;
         if (settings.chunking_strategy === 'per_scene') return null;
 
         // VectHare+ FIX (ghost collections): only inspect collections already
@@ -3255,18 +3266,17 @@ export async function checkUnfinishedVectorization(settings, collectionIdOverrid
             return null;
         }
 
-        const context = getContext();
-        if (!getCurrentChatId() || !Array.isArray(context.chat)) return null;
-
         const existingHashes = new Set(await getSavedHashes(collectionId, settings));
+        // A completed read for Chat A must never be paired with Chat B's messages.
+        if (!isChatTargetCurrent(target, collectionId)) return null;
 
         const strategy = settings.chunking_strategy || 'per_message';
         const strategyBatchSize = settings.batch_size || 4;
         const keywordLevel = settings.keyword_extraction_level || 'balanced';
 
         const allMessages = [];
-        for (let i = 0; i < context.chat.length; i++) {
-            const msg = context.chat[i];
+        for (let i = 0; i < target.messages.length; i++) {
+            const msg = target.messages[i];
             if (msg.is_system) continue;
             const rawText = String(substituteParams(msg.mes));
             const text = cleanText(rawText);

@@ -19,6 +19,7 @@ import {
 import {
     ModuleWorkerWrapper,
     extension_settings,
+    getContext,
 } from '../../../extensions.js';
 import { debounce } from '../../../utils.js';
 import { debounce_timeout } from '../../../constants.js';
@@ -29,6 +30,7 @@ import {
     ensureChatBinding, chatFileExists, deletionCandidates, anotherChatClaimsCollection,
     removeChatBinding, releaseToQuarantine, onChatBindingRenamed, onCharacterBindingRenamed,
     isChatCollectionWriteActive, tryBeginChatCollectionDelete, endChatCollectionDelete, chatStoreDestination,
+    getChatOwner, normChat,
 } from './core/collection-ids.js';
 import { purgeAllVectorIndexes, purgeVectorIndex } from './core/core-vector-api.js';
 import { getChatCollectionId } from './core/chat-vectorization.js';
@@ -240,7 +242,15 @@ function showResumeToast(pending, total) {
  */
 let lastDbStatus = null;
 let dbStatusRequestId = 0;
+let resumeCheckId = 0;
 let dbRefreshTimer = null;
+
+function currentStatusChatKey() {
+    const ctx = getContext();
+    const owner = getChatOwner(ctx);
+    const filename = normChat(ctx?.chatId);
+    return owner && filename ? JSON.stringify([owner.type, owner.id, filename]) : null;
+}
 
 function refreshVectorizationStatusDisplay(result = null) {
     if (result) lastDbStatus = { ...result, collectionId: getChatCollectionId() };
@@ -272,6 +282,7 @@ function refreshVectorizationStatusDisplay(result = null) {
 // Runs after each committed insert/delete/purge and whenever Status opens.
 async function refreshSavedDatabaseStatus() {
     const requestId = ++dbStatusRequestId;
+    const chatKey = currentStatusChatKey();
     const collectionId = getChatCollectionId();
     let result = null;
     try {
@@ -280,7 +291,8 @@ async function refreshSavedDatabaseStatus() {
         console.warn('VectHare: Status refresh failed:', error);
     }
     // Ignore replies from a previous chat or a superseded DB read.
-    if (requestId !== dbStatusRequestId || collectionId !== getChatCollectionId()) return;
+    if (requestId !== dbStatusRequestId || chatKey !== currentStatusChatKey() ||
+        collectionId !== getChatCollectionId()) return;
     lastDbStatus = result ? { ...result, collectionId } : null;
 
     if (isVectorizationActive() && result && progressTracker.currentOperation === 'Vectorizing Chat') {
@@ -310,6 +322,10 @@ setInterval(() => {
 }, 3000);
 
 async function offerResumeOfUnfinishedVectorization() {
+    const requestId = ++resumeCheckId;
+    const chatKey = currentStatusChatKey();
+    const isCurrent = () => requestId === resumeCheckId && chatKey === currentStatusChatKey();
+    if (!chatKey) return;
     // VectHare+ FIX (notification behavior): a run already in flight IS the
     // resume — don't nag while it works. BUT we must not bail permanently:
     // this can fire while a run is aborting (e.g. user switched chats mid-run,
@@ -321,6 +337,7 @@ async function offerResumeOfUnfinishedVectorization() {
         let waitedMs = 0;
         while (isVectorizationActive() && waitedMs < 600000) {
             await new Promise(resolve => setTimeout(resolve, 2000));
+            if (!isCurrent()) return;
             waitedMs += 2000;
         }
         if (isVectorizationActive()) {
@@ -330,12 +347,14 @@ async function offerResumeOfUnfinishedVectorization() {
     }
 
     for (let attempt = 1; attempt <= RESUME_CHECK_MAX_ATTEMPTS; attempt++) {
+        if (!isCurrent()) return;
         let result = null;
         try {
             result = await checkUnfinishedVectorization(settings);
         } catch (error) {
             console.warn('VectHare: Resume-on-load check failed:', error.message);
         }
+        if (!isCurrent()) return;
 
         if (result) {
             // Definitive answer — reflect it in the UI (Repair Chunks button +
@@ -364,8 +383,10 @@ async function offerResumeOfUnfinishedVectorization() {
         // Collection not discovered yet — wait for discovery and retry
         if (attempt < RESUME_CHECK_MAX_ATTEMPTS) {
             await new Promise(resolve => setTimeout(resolve, RESUME_CHECK_RETRY_MS));
+            if (!isCurrent()) return;
         }
     }
+    if (!isCurrent()) return;
 
     // Inconclusive: the check couldn't determine state (discovery/init still
     // warming up, or chat truly has no collection).
@@ -634,6 +655,8 @@ jQuery(async () => {
     // Events are fast-path registry updates; the claim in the chat file is the
     // recovery mechanism when an event is missed while the plugin was offline.
     eventSource.on(event_types.CHAT_RENAMED, payload => {
+        ++resumeCheckId;
+        ++dbStatusRequestId;
         onChatBindingRenamed(payload);
         void ensureChatBinding(undefined, { create: false }).then(result => {
             if (result.state === 'active') {
@@ -656,6 +679,9 @@ jQuery(async () => {
 
     // When chat changes, refresh UI state to match settings
     eventSource.on(event_types.CHAT_CHANGED, () => {
+        // Invalidate any outstanding status/backlog checks for the prior chat.
+        ++resumeCheckId;
+        ++dbStatusRequestId;
         // Safe, idempotent, one-time identity discovery. Never enable writes
         // for ambiguous legacy collections.
         void ensureChatBinding(undefined, { create: false }).then(result => {

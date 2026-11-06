@@ -1399,7 +1399,10 @@ export function updateContinueVectorizationButton(mode, pending = 0, total = 0) 
  * Call this when chat changes to keep UI in sync
  * @param {object} settings - VectHare settings object (unused, kept for API compatibility)
  */
+let autoSyncRefreshId = 0;
 export function refreshAutoSyncCheckbox(settings) {
+    const requestId = ++autoSyncRefreshId;
+    const chatId = getCurrentChatId();
     const collectionId = getChatCollectionId();
     if (!collectionId) {
         $('#vecthare_autosync_enabled').prop('checked', false);
@@ -1407,9 +1410,11 @@ export function refreshAutoSyncCheckbox(settings) {
     }
     // Dynamically import to avoid circular dependency
     import('../core/collection-metadata.js').then(({ isCollectionAutoSyncEnabled }) => {
+        if (requestId !== autoSyncRefreshId || getCurrentChatId() !== chatId ||
+            getChatCollectionId() !== collectionId) return;
         const isEnabled = isCollectionAutoSyncEnabled(collectionId);
         $('#vecthare_autosync_enabled').prop('checked', isEnabled);
-    });
+    }).catch(error => console.warn('VectHare: Could not refresh auto-sync state:', error));
 }
 
 export function updateWebLlmStatus() {
@@ -1705,14 +1710,17 @@ function bindSettingsEvents(settings, callbacks) {
                 $checkbox.prop('checked', false);
                 return;
             }
+            const stillCurrent = () => getCurrentChatId() === chatId && getChatCollectionId() === collectionId;
 
             // Import the metadata functions
             const { setCollectionAutoSync } = await import('../core/collection-metadata.js');
+            if (!stillCurrent()) { refreshAutoSyncCheckbox(settings); return; }
 
             // If enabling, check if we need to set up the collection first
             if (enabling) {
                 // SINGLE SOURCE OF TRUTH: Use doesChatHaveVectors which runs discovery
                 const { hasVectors, allMatches } = await doesChatHaveVectors(settings);
+                if (!stillCurrent()) { refreshAutoSyncCheckbox(settings); return; }
 
                 if (!hasVectors) {
                     // No vectors found anywhere - open vectorizer panel
@@ -1724,6 +1732,7 @@ function bindSettingsEvents(settings, callbacks) {
 
                 // Found existing vectors - show confirmation modal with all matches
                 const result = await showAutoSyncConfirmModal(allMatches, settings);
+                if (!stillCurrent()) { refreshAutoSyncCheckbox(settings); return; }
 
                 if (result.action === 'cancel') {
                     // User cancelled - don't enable
