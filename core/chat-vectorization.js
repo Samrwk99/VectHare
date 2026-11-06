@@ -60,6 +60,11 @@ import {
     getAllChatCollectionIds,
     parseCollectionId,
     parseRegistryKey,
+    ensureChatBinding,
+    recordChatStore,
+    beginChatCollectionWrite,
+    endChatCollectionWrite,
+    withChatCollectionPurgeGuard,
 } from './collection-ids.js';
 
 // Hash cache for performance
@@ -67,6 +72,7 @@ const hashCache = new LRUCache(HASH_CACHE_SIZE);
 
 // Synchronization state
 let syncBlocked = false;
+export function isChatSynchronizationActive() { return syncBlocked; }
 
 // VectHare+ R9: one-time warning flag for auto-sync blocked by config mismatch
 let autoSyncFingerprintWarned = false;
@@ -586,14 +592,23 @@ async function rerankWithBananaBread(query, chunks, settings) {
  * @returns {Promise<object>} Progress info
  */
 export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = false) {
-    // Build proper collection ID using chat UUID first
-    const collectionId = getChatCollectionId();
+    // Resolve the actual chat file before any synchronization writes.
+    const binding = await ensureChatBinding();
+    const collectionId = binding.writable ? binding.collectionId : null;
     console.log(`🔍 VectHare DEBUG: getChatCollectionId() returned: "${collectionId}"`);
     console.log(`🔍 VectHare DEBUG: settings.vector_backend = "${settings.vector_backend}"`);
     console.log(`🔍 VectHare DEBUG: settings.source = "${settings.source}"`);
     if (!collectionId) {
         return { remaining: -1, messagesProcessed: 0, chunksCreated: 0 };
     }
+    // Acquire before the first await: a concurrent chat deletion must not
+    // begin between the identity check and a later vector write.
+    try { beginChatCollectionWrite(collectionId); }
+    catch (error) {
+        console.warn('VectHare: Sync skipped during collection deletion', error.message);
+        return { remaining: -1, messagesProcessed: 0, chunksCreated: 0 };
+    }
+    try {
 
     // Check per-collection autoSync setting instead of global enabled_chats.
     // VectHare+: bypassAutoSync lets an explicitly user-started run (Sync Chat /
@@ -849,6 +864,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                 // R13: pass the Stop signal - Stop now cancels the in-flight
                 // embedding/insert request instead of draining it
                 if (chunks.length > 0) {
+                    recordChatStore(collectionId, settings);
                     await insertVectorItems(collectionId, chunks, settings, (embedded, total) => {
                         // R7 FIX: per-item embedding progress is always 1/1 here
                         // (one item per call) and previously clobbered the panel's
@@ -912,6 +928,9 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
         throw error;
     } finally {
         syncBlocked = false;
+    }
+    } finally {
+        endChatCollectionWrite(collectionId);
     }
 }
 
@@ -2082,6 +2101,9 @@ export async function rearrangeChat(chat, settings, type) {
             console.debug('VectHare: No chat selected');
             return;
         }
+        // Resolving an older chat must finish before gathering collections for
+        // retrieval; a provisional/unbound chat contributes no chat vectors.
+        await ensureChatBinding(undefined, { create: false });
 
         const minChatLength = settings.min_chat_length ?? 0;
         if (minChatLength > 0 && chat.length < minChatLength) {
@@ -2443,6 +2465,14 @@ export async function vectorizeAll(settings, batchSize) {
             return;
         }
 
+        // The current chat must have a verified, independent collection.
+        const binding = await ensureChatBinding();
+        if (!binding.writable || !binding.collectionId) {
+            toastr.warning('Chat collection identity is not yet verified. No vectors were written.', 'VectHare');
+            vectorizeRunActive = false;
+            return;
+        }
+
         // Pre-flight check: verify backend is available before starting
         const backendName = settings.vector_backend || 'standard';
         const backendAvailable = await isBackendAvailable(backendName, settings);
@@ -2764,6 +2794,7 @@ export async function vectorizeAll(settings, batchSize) {
  * @param {number} batchSize Embed batch size (unused for deletes)
  */
 export async function repairChatVectors(settings, batchSize = 5) {
+    let writeLockedCollection = null;
     try {
         if (!tryAcquireVectorizationRun()) return;
 
@@ -2774,12 +2805,15 @@ export async function repairChatVectors(settings, batchSize = 5) {
             return;
         }
 
-        const collectionId = getChatCollectionId();
+        const binding = await ensureChatBinding();
+        const collectionId = binding.writable ? binding.collectionId : null;
         if (!collectionId) {
             toastr.error('Could not determine this chat\'s collection', 'Repair aborted');
             vectorizeRunActive = false;
             return;
         }
+        beginChatCollectionWrite(collectionId);
+        writeLockedCollection = collectionId;
 
         // Repair only makes sense for an EXISTING collection (registry entries
         // only exist after a successful insert). Never creates anything.
@@ -3015,6 +3049,7 @@ export async function repairChatVectors(settings, batchSize = 5) {
             try {
                 const chunks = prepareItemsForInsertion([item]);
                 // R13: abortable - Stop cancels the in-flight repair embed
+                recordChatStore(collectionId, settings);
                 await insertVectorItems(collectionId, chunks, settings, (embedded, total) => {
                     progressTracker.updateCurrentItem(`${label} ${done + 1}/${totalUnits} - embedding ${embedded}/${total}`);
                 }, getStopSignal());
@@ -3105,6 +3140,8 @@ export async function repairChatVectors(settings, batchSize = 5) {
         progressTracker.addError(error.message);
         progressTracker.complete(false, 'Repair failed');
         toastr.error(`Repair failed: ${error.message}`, 'VectHare');
+    } finally {
+        if (writeLockedCollection) endChatCollectionWrite(writeLockedCollection);
     }
 }
 
@@ -3195,10 +3232,14 @@ export async function purgeChatIndex(settings) {
         return;
     }
 
-    if (await purgeVectorIndex(collectionId, settings)) {
-        toastr.success('Vector index purged', 'VectHare');
-        console.log('VectHare: Index purged successfully');
-    } else {
-        toastr.error('Failed to purge vector index', 'VectHare');
+    try {
+        if (await withChatCollectionPurgeGuard(collectionId, () => purgeVectorIndex(collectionId, settings))) {
+            toastr.success('Vector index purged', 'VectHare');
+            console.log('VectHare: Index purged successfully');
+        } else {
+            toastr.error('Failed to purge vector index', 'VectHare');
+        }
+    } catch (error) {
+        toastr.warning(error.message, 'Purge aborted');
     }
 }

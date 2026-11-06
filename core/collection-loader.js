@@ -35,6 +35,11 @@ import {
     matchesPatterns,
     parseRegistryKey,
     COLLECTION_PREFIXES,
+    peekChatCollectionId,
+    peekBoundCollectionIdForChat,
+    getBoundChatDetails,
+    isQuarantinedChatCollection,
+    withChatCollectionPurgeGuard,
 } from './collection-ids.js';
 
 // Plugin detection state
@@ -100,6 +105,16 @@ export function unregisterCollection(collectionId) {
  * @returns {Promise<{success: boolean, errors: string[], vectorsDeleted: boolean, registryDeleted: boolean, metadataDeleted: boolean}>}
  */
 export async function deleteCollection(collectionId, settings, registryKey = null) {
+    try {
+        return await withChatCollectionPurgeGuard(collectionId,
+            () => deleteCollectionUnlocked(collectionId, settings, registryKey));
+    } catch (error) {
+        return { success: false, errors: [error.message], vectorsDeleted: false,
+            registryDeleted: false, metadataDeleted: false };
+    }
+}
+
+async function deleteCollectionUnlocked(collectionId, settings, registryKey = null) {
     const errors = [];
     let vectorsDeleted = false;
     let registryDeleted = false;
@@ -109,13 +124,17 @@ export async function deleteCollection(collectionId, settings, registryKey = nul
 
     // Step 1: Delete vectors from backend (most important - actual data)
     try {
-        await purgeVectorIndex(collectionId, settings);
+        if (!await purgeVectorIndex(collectionId, settings)) {
+            throw new Error('Backend did not confirm collection purge');
+        }
         vectorsDeleted = true;
         console.log(`VectHare: ✓ Deleted vectors for ${collectionId}`);
     } catch (error) {
         errors.push(`Vectors: ${error.message}`);
         console.warn(`VectHare: ✗ Failed to delete vectors for ${collectionId}:`, error.message);
-        // Continue anyway - registry/metadata cleanup is still valuable
+        // No registry or metadata cleanup if actual vectors may still exist.
+        return { success: false, errors, vectorsDeleted: false,
+            registryDeleted: false, metadataDeleted: false };
     }
 
     // Step 2: Unregister from registry (try both formats)
@@ -240,6 +259,11 @@ function getCollectionDisplayName(collectionId, metadata) {
     if (collectionMeta.displayName) {
         return collectionMeta.displayName;
     }
+
+    // New opaque chat IDs have no name to decode. Use their verified binding.
+    if (isQuarantinedChatCollection(collectionId)) return '💬 Unassigned (preserved)';
+    const bound = getBoundChatDetails(collectionId);
+    if (bound) return `💬 ${bound.chat}`;
 
     // Generate name based on type
     const context = getContext();
@@ -446,7 +470,9 @@ async function discoverViaPlugin(settings) {
 
             // Remove entries that no longer exist on disk
             const updatedRegistry = getCollectionRegistry();
-            const staleEntries = updatedRegistry.filter(key => !pluginKeySet.has(key));
+            const staleEntries = updatedRegistry.filter(key =>
+                !pluginKeySet.has(key) &&
+                !parseRegistryKey(key).collectionId.startsWith(COLLECTION_PREFIXES.VECTHARE_CHAT));
             if (staleEntries.length > 0) {
                 console.debug(`   🗑️  Removing ${staleEntries.length} stale registry entries:`);
                 for (const staleKey of staleEntries) {
@@ -534,8 +560,9 @@ async function discoverViaFallback(settings) {
                 discovered.push(registryKey);
             }
             console.log(`VectHare: Verified registry entry: ${collectionId} (${result.count} chunks)`);
-        } else {
-            // Remove stale entry
+        } else if (!collectionId.startsWith(COLLECTION_PREFIXES.VECTHARE_CHAT)) {
+            // Chat collections may be on an unavailable backend. Never prune
+            // their registry entries on an inconclusive read.
             unregisterCollection(registryKey);
             console.log(`VectHare: Removed stale registry entry: ${registryKey}`);
         }
@@ -630,102 +657,42 @@ export async function discoverExistingCollections(settings) {
  * @returns {Promise<{hasVectors: boolean, collectionId: string|null, chunkCount: number}>}
  */
 export async function doesChatHaveVectors(settings, overrideChatId, overrideUUID) {
-    // Always run discovery first to ensure registry is current
+    // A foreign chat override must never silently fall back to this chat.
+    // The UUID override is intentionally not used to infer ownership.
+    const currentChat = getContext().chatId;
+    const foreign = overrideChatId && String(overrideChatId).replace(/\.jsonl$/i, '') !==
+        String(currentChat ?? '').replace(/\.jsonl$/i, '');
+    const collectionId = foreign ? peekBoundCollectionIdForChat(overrideChatId) : peekChatCollectionId();
+    if (!collectionId || isQuarantinedChatCollection(collectionId)) {
+        return { hasVectors: false, collectionId: null, registryKey: null, chunkCount: 0, allMatches: [] };
+    }
     await discoverExistingCollections(settings);
-
-    const registry = getCollectionRegistry();
-
-    // Get current chat identifiers
-    const uuid = overrideUUID || getChatUUID();
-    const chatId = overrideChatId || (getContext().chatId);
-
-    const normalizedUUID = uuid ? String(uuid).toLowerCase() : null;
-    const legacyCollectionId = chatId ? getLegacyChatCollectionId(chatId).toLowerCase() : null;
-    console.log(`VectHare: Searching for chat vectors. UUID: ${uuid}`);
-
-    // Collect ALL matching collections, then pick the best one
-    // This handles ghost collections (empty) vs real collections (has chunks)
-    const matchingCollections = [];
-
-    for (const registryKey of registry) {
-        // Use unified registry key parser from collection-ids.js
-        const parsed = parseRegistryKey(registryKey);
-        const collectionId = parsed.collectionId;
-
-        const normalizedCollectionId = String(collectionId).toLowerCase();
-        const prefix = String(COLLECTION_PREFIXES.VECTHARE_CHAT).toLowerCase();
-        const matchesUUID = normalizedUUID &&
-            normalizedCollectionId.startsWith(prefix) &&
-            normalizedCollectionId.endsWith(`_${normalizedUUID}`);
-        const matchesLegacy = legacyCollectionId && normalizedCollectionId === legacyCollectionId;
-        const matches = Boolean(matchesUUID || matchesLegacy);
-
-        if (matches) {
-            // Get chunk count, source, and backend from plugin cache if available
-            let chunkCount = 0;
-            let source = parsed.source || 'unknown';
-            let backend = parsed.backend || 'standard';
-
-            if (pluginCollectionData && pluginCollectionData[registryKey]) {
-                const cacheData = pluginCollectionData[registryKey];
-                chunkCount = cacheData.chunkCount || 0;
-                source = cacheData.source || source;
-                backend = cacheData.backend || backend;
-            }
-
-            matchingCollections.push({
-                collectionId,
-                registryKey,
-                chunkCount,
-                source,
-                backend
-            });
-            console.log(`VectHare: Found matching collection ${collectionId} (${chunkCount} chunks, backend: ${backend})`);
-        }
-    }
-
-    // If we found matches, return ALL of them sorted by chunk count (best first)
-    if (matchingCollections.length > 0) {
-        // Sort by chunk count descending
-        matchingCollections.sort((a, b) => b.chunkCount - a.chunkCount);
-
-        const best = matchingCollections[0];
-        console.log(`VectHare: Found ${matchingCollections.length} matching collection(s), best is ${best.collectionId} with ${best.chunkCount} chunks`);
-
-        return {
-            hasVectors: true,
-            collectionId: best.collectionId,
-            registryKey: best.registryKey,
-            chunkCount: best.chunkCount,
-            allMatches: matchingCollections  // Return ALL matches for user selection
-        };
-    }
-
-    // Not found in registry - try direct query as last resort
-    const newFormatId = getChatCollectionId(uuid);
-    const legacyFormatId = getLegacyChatCollectionId(chatId);
-
-    for (const id of [newFormatId, legacyFormatId].filter(Boolean)) {
+    const matches = getCollectionRegistry().filter(key =>
+        parseRegistryKey(key).collectionId === collectionId);
+    const candidates = [];
+    for (const key of matches) {
+        const parsed = parseRegistryKey(key);
+        let chunkCount = pluginCollectionData?.[key]?.chunkCount || 0;
         try {
-            const hashes = await getSavedHashes(id, settings);
-            if (hashes && hashes.length > 0) {
-                // Found vectors! Register it now
-                registerCollection(id);
-                console.log(`VectHare: Found ${hashes.length} vectors via direct query, registered ${id}`);
-                return {
-                    hasVectors: true,
-                    collectionId: id,
-                    registryKey: id,
-                    chunkCount: hashes.length
-                };
-            }
-        } catch (e) {
-            // Query failed, continue to next format
+            if (!chunkCount) chunkCount = (await getSavedHashes(collectionId, {
+                ...settings,
+                vector_backend: parsed.backend || settings.vector_backend,
+                source: parsed.source || settings.source,
+            })).length;
+        } catch (error) {
+            console.debug('VectHare: Unable to confirm chat vector count', error);
+            continue;
         }
+        if (!chunkCount) continue;
+        candidates.push({ collectionId, registryKey: key, chunkCount,
+            source: parsed.source || settings.source,
+            backend: parsed.backend || settings.vector_backend });
     }
-
-    console.log('VectHare: No vectors found for current chat');
-    return { hasVectors: false, collectionId: null, registryKey: null, chunkCount: 0 };
+    candidates.sort((a, b) => b.chunkCount - a.chunkCount);
+    if (!candidates.length) {
+        return { hasVectors: false, collectionId: null, registryKey: null, chunkCount: 0, allMatches: [] };
+    }
+    return { hasVectors: true, ...candidates[0], allMatches: candidates };
 }
 
 /**

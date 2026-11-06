@@ -33,6 +33,7 @@ import {
 } from './collection-loader.js';
 import { progressTracker } from '../ui/progress-tracker.js';
 import { getStringHash } from '../../../../utils.js';
+import { withChatCollectionPurgeGuard, withChatCollectionWriteGuard } from './collection-ids.js';
 
 // ============================================================================
 // CONSTANTS
@@ -514,6 +515,12 @@ async function insertChunksWithVectors(collectionId, chunks, settings) {
  * @returns {Promise<{ success: boolean, collectionId: string, chunkCount: number, usedVectors: boolean, errors: string[] }>}
  */
 export async function importCollection(exportData, settings, options = {}) {
+    const id = options.collectionId || exportData.collection?.id;
+    const guard = options.overwrite ? withChatCollectionPurgeGuard : withChatCollectionWriteGuard;
+    return guard(id, () => importCollectionUnlocked(exportData, settings, options));
+}
+
+async function importCollectionUnlocked(exportData, settings, options = {}) {
     const sourceCollection = exportData.collection || {};
     const collectionId = options.collectionId || sourceCollection.id;
 
@@ -548,13 +555,10 @@ export async function importCollection(exportData, settings, options = {}) {
         progressTracker.updateProgress(1, 'Preparing collection...');
 
         if (options.overwrite) {
-            try {
-                await purgeVectorIndex(collectionId, settings);
-                console.log(`VectHare Import: Purged existing collection ${collectionId}`);
-            } catch (e) {
-                // Collection might not exist, that's fine - log at debug level
-                console.debug(`VectHare Import: Could not purge ${collectionId} (may not exist):`, e.message);
+            if (!await purgeVectorIndex(collectionId, settings)) {
+                throw new Error(`VectHare Import: Could not safely purge ${collectionId}`);
             }
+            console.log(`VectHare Import: Purged existing collection ${collectionId}`);
         }
 
         // Step 2: Prepare chunks
@@ -713,6 +717,12 @@ export async function importMultipleCollections(multiExportData, settings, optio
  * Silent import (no progress tracker) for batch operations
  */
 async function importCollectionSilent(exportData, settings, options = {}) {
+    const id = options.collectionId || exportData.collection?.id;
+    const guard = options.overwrite ? withChatCollectionPurgeGuard : withChatCollectionWriteGuard;
+    return guard(id, () => importCollectionSilentUnlocked(exportData, settings, options));
+}
+
+async function importCollectionSilentUnlocked(exportData, settings, options = {}) {
     const sourceCollection = exportData.collection || {};
     const collectionId = options.collectionId || sourceCollection.id;
 
@@ -736,13 +746,8 @@ async function importCollectionSilent(exportData, settings, options = {}) {
         (!embeddingInfo.model || !settings.model || embeddingInfo.model === settings.model);
 
     // Handle existing collection
-    if (options.overwrite) {
-        try {
-            await purgeVectorIndex(collectionId, settings);
-        } catch (e) {
-            // Collection might not exist - log at debug level
-            console.debug(`VectHare Import: Could not purge ${collectionId} (may not exist):`, e.message);
-        }
+    if (options.overwrite && !await purgeVectorIndex(collectionId, settings)) {
+        throw new Error(`VectHare Import: Could not safely purge ${collectionId}`);
     }
 
     // Prepare chunks

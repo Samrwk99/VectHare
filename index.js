@@ -14,6 +14,7 @@ import {
     eventSource,
     event_types,
     extension_prompt_types,
+    saveSettingsDebounced,
 } from '../../../../script.js';
 import {
     ModuleWorkerWrapper,
@@ -23,12 +24,17 @@ import { debounce } from '../../../utils.js';
 import { debounce_timeout } from '../../../constants.js';
 
 // VectHare modules - Core
-import { synchronizeChat, rearrangeChat, vectorizeAll, repairChatVectors, checkUnfinishedVectorization, isVectorizationActive, consumeWasLastRunStoppedByUser, flagImmediateReverseSync, parseRegistryKey } from './core/chat-vectorization.js';
+import { synchronizeChat, rearrangeChat, vectorizeAll, repairChatVectors, checkUnfinishedVectorization, isVectorizationActive, isChatSynchronizationActive, consumeWasLastRunStoppedByUser, flagImmediateReverseSync, parseRegistryKey } from './core/chat-vectorization.js';
+import {
+    ensureChatBinding, chatFileExists, deletionCandidates, anotherChatClaimsCollection,
+    removeChatBinding, releaseToQuarantine, onChatBindingRenamed, onCharacterBindingRenamed,
+    isChatCollectionWriteActive, tryBeginChatCollectionDelete, endChatCollectionDelete, chatStoreDestination,
+} from './core/collection-ids.js';
 import { purgeAllVectorIndexes, purgeVectorIndex } from './core/core-vector-api.js';
 import { getChatCollectionId } from './core/chat-vectorization.js';
 import { getDefaultDecaySettings } from './core/temporal-decay.js';
-import { migrateOldEnabledKeys } from './core/collection-metadata.js';
-import { clearCollectionRegistry, discoverExistingCollections, getCollectionRegistry } from './core/collection-loader.js';
+import { migrateOldEnabledKeys, deleteCollectionMeta } from './core/collection-metadata.js';
+import { clearCollectionRegistry, discoverExistingCollections, getCollectionRegistry, unregisterCollection } from './core/collection-loader.js';
 import AsyncUtils from './utils/async-utils.js';
 
 // VectHare modules - UI
@@ -551,25 +557,93 @@ jQuery(async () => {
     // Note: Semantic WI injection happens in the generate_interceptor (rearrangeChat), not here
     eventSource.on(event_types.MESSAGE_SENT, onChatEvent);
     eventSource.on(event_types.MESSAGE_RECEIVED, onChatEvent);
-    // When a chat is deleted, purge its vectors (not full purge, just that chat)
-    eventSource.on(event_types.CHAT_DELETED, async (chatId) => {
-        if (chatId) {
-            const collectionId = getChatCollectionId(chatId);
-            if (collectionId) {
-                await purgeVectorIndex(collectionId, settings);
-                console.log(`VectHare: Purged vectors for deleted chat: ${chatId}`);
+    // SillyTavern supplies a filename, not an owner. Inspect all candidates:
+    // same-named chats belonging to other owners must never be purged.
+    const onChatDeleted = async (filename, type) => {
+        const candidates = deletionCandidates(filename, type);
+        const absent = [];
+        for (const candidate of candidates) {
+            const exists = await chatFileExists(candidate[1].owner, candidate[1].chat);
+            if (exists === null) {
+                console.warn('VectHare: Cannot verify deleted chat owner; preserving vectors', filename);
+                return;
             }
+            if (exists === false) absent.push(candidate);
         }
-    });
-    eventSource.on(event_types.GROUP_CHAT_DELETED, async (chatId) => {
-        if (chatId) {
-            const collectionId = getChatCollectionId(chatId);
-            if (collectionId) {
-                await purgeVectorIndex(collectionId, settings);
-                console.log(`VectHare: Purged vectors for deleted group chat: ${chatId}`);
+        if (absent.length !== 1) {
+            console.warn('VectHare: Deleted chat ownership ambiguous; preserving vectors', filename);
+            return;
+        }
+        const [id, rec] = absent[0];
+        if (isChatSynchronizationActive() || isVectorizationActive() || !tryBeginChatCollectionDelete(id)) {
+            console.warn('VectHare: Collection busy; deletion skipped', id);
+            return;
+        }
+        try {
+        // Legacy collections may contain memories from other historical chats.
+        if (rec.origin !== 'created') {
+            releaseToQuarantine(id);
+            console.log('VectHare: Legacy collection preserved unassigned', id);
+            return;
+        }
+        // Inspect every character/group chat file, including unopened copies.
+        if (await anotherChatClaimsCollection(rec, id) !== false) {
+            console.warn('VectHare: Competing claim or incomplete scan; deletion skipped', id);
+            return;
+        }
+        const keys = getCollectionRegistry().filter(key => parseRegistryKey(key).collectionId === id);
+        if (!rec.stores?.length && keys.length) {
+            console.warn('VectHare: Collection has unknown backend; deletion skipped', id);
+            return;
+        }
+        for (const store of [...(rec.stores || [])]) {
+            // Do not purge a different Qdrant endpoint or tenant after settings
+            // changes. Multitenancy purge has its own unresolved safety issue.
+            const destination = chatStoreDestination({ ...settings, vector_backend: store.backend });
+            if (!store.destination || destination !== store.destination ||
+                (store.backend === 'qdrant' && settings.qdrant_multitenancy)) {
+                console.warn('VectHare: Backend destination unverified; deletion skipped', id);
+                return;
             }
+            const backendSettings = { ...settings, vector_backend: store.backend, source: store.source };
+            if (!await purgeVectorIndex(id, backendSettings)) {
+                console.warn('VectHare: Backend did not confirm purge; binding retained', id);
+                return;
+            }
+            // Persist partial success, so a retry does not need to revisit a
+            // store already deleted. Registry/metadata remain until all finish.
+            rec.stores = rec.stores.filter(item => item !== store);
+            saveSettingsDebounced();
         }
+        for (const key of keys) unregisterCollection(key);
+        deleteCollectionMeta(id);
+        removeChatBinding(id);
+        console.log('VectHare: Deleted verified exclusive chat collection', id);
+        } finally {
+            endChatCollectionDelete(id);
+        }
+    };
+    eventSource.on(event_types.CHAT_DELETED, filename => {
+        void onChatDeleted(filename, 'character').catch(error =>
+            console.error('VectHare: Chat deletion cleanup failed; preserved remaining records', error));
     });
+    eventSource.on(event_types.GROUP_CHAT_DELETED, filename => {
+        void onChatDeleted(filename, 'group').catch(error =>
+            console.error('VectHare: Group chat deletion cleanup failed; preserved remaining records', error));
+    });
+    // Events are fast-path registry updates; the claim in the chat file is the
+    // recovery mechanism when an event is missed while the plugin was offline.
+    eventSource.on(event_types.CHAT_RENAMED, payload => {
+        onChatBindingRenamed(payload);
+        void ensureChatBinding(undefined, { create: false }).then(result => {
+            if (result.state === 'active') {
+                refreshAutoSyncCheckbox(settings);
+                scheduleSavedDatabaseRefresh();
+            }
+        }).catch(error => console.warn('VectHare: Rename binding could not be reconciled', error));
+    });
+    eventSource.on(event_types.CHARACTER_RENAMED,
+        (oldAvatar, newAvatar) => onCharacterBindingRenamed(oldAvatar, newAvatar));
 
     // When WebLLM extension is loaded, refresh the model list
     eventSource.on(event_types.EXTENSION_SETTINGS_LOADED, async (manifest) => {
@@ -582,6 +656,11 @@ jQuery(async () => {
 
     // When chat changes, refresh UI state to match settings
     eventSource.on(event_types.CHAT_CHANGED, () => {
+        // Safe, idempotent, one-time identity discovery. Never enable writes
+        // for ambiguous legacy collections.
+        void ensureChatBinding(undefined, { create: false }).then(result => {
+            if (result.state === 'active') { refreshAutoSyncCheckbox(settings); scheduleSavedDatabaseRefresh(); }
+        }).catch(error => console.warn('VectHare: Chat binding not resolved', error));
         console.log('VectHare: Chat changed, refreshing UI state');
         refreshAutoSyncCheckbox(settings);
         lastDbStatus = null;
@@ -590,6 +669,11 @@ jQuery(async () => {
         // VectHare+: check for interrupted vectorization on the loaded chat
         offerResumeOfUnfinishedVectorization();
     });
+
+    // Also resolve the currently open chat if CHAT_CHANGED fired before load.
+    void ensureChatBinding(undefined, { create: false }).then(result => {
+        if (result.state === 'active') { refreshAutoSyncCheckbox(settings); scheduleSavedDatabaseRefresh(); }
+    }).catch(error => console.warn('VectHare: Initial chat binding not resolved', error));
 
     // VectHare+: one-time resume check at startup (page reload / ST reopen)
     setTimeout(offerResumeOfUnfinishedVectorization, 5000);

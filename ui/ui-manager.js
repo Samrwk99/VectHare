@@ -1693,9 +1693,15 @@ function bindSettingsEvents(settings, callbacks) {
                 return;
             }
 
-            const collectionId = getChatCollectionId();
+            let collectionId = getChatCollectionId();
+            if (!collectionId && enabling) {
+                // A new/unvectorized chat is intentionally not bound on open.
+                // The vectorizer creates the binding only when it writes.
+                $checkbox.prop('checked', false);
+                openContentVectorizer('chat');
+                return;
+            }
             if (!collectionId) {
-                toastr.warning('Could not get collection ID for this chat');
                 $checkbox.prop('checked', false);
                 return;
             }

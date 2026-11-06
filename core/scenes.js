@@ -28,6 +28,7 @@ import {
     deleteVectorItems,
 } from './core-vector-api.js';
 import { getChatCollectionId, getTextWithoutAttachments } from './chat-vectorization.js';
+import { ensureChatBinding, recordChatStore, beginChatCollectionWrite, endChatCollectionWrite } from './collection-ids.js';
 import {
     getChunkMetadata,
     saveChunkMetadata,
@@ -59,15 +60,8 @@ export const SCENE_MODES = {
  * @returns {string|null}
  */
 export function getCurrentCollectionId() {
-    // Try new format first
-    const newFormatId = getChatCollectionId();
-    if (newFormatId) {
-        return newFormatId;
-    }
-    // Fallback to legacy format
-    const chatId = getCurrentChatId();
-    if (!chatId) return null;
-    return `vecthare_chat_${chatId}`;
+    // Never build an unverified fallback ID for an unbound chat.
+    return getChatCollectionId();
 }
 
 /**
@@ -139,7 +133,8 @@ export function getContainedChunkHashes(messages, start, end) {
  * @returns {Promise<{success: boolean, hash?: number, error?: string}>}
  */
 export async function createSceneChunk(start, end, sceneData, settings) {
-    const collectionId = getCurrentCollectionId();
+    const binding = await ensureChatBinding();
+    const collectionId = binding.writable ? binding.collectionId : null;
     if (!collectionId) {
         return { success: false, error: 'No chat selected' };
     }
@@ -184,7 +179,13 @@ export async function createSceneChunk(start, end, sceneData, settings) {
 
     try {
         // Insert scene chunk into vector DB
-        await insertVectorItems(collectionId, [sceneChunk], settings);
+        beginChatCollectionWrite(collectionId);
+        try {
+            recordChatStore(collectionId, settings);
+            await insertVectorItems(collectionId, [sceneChunk], settings);
+        } finally {
+            endChatCollectionWrite(collectionId);
+        }
 
         // Disable contained chunks
         for (const hash of containedHashes) {

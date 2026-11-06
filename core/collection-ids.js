@@ -11,8 +11,9 @@
  * ============================================================================
  */
 
-import { getContext } from '../../../../extensions.js';
-import { getCurrentChatId, chat_metadata } from '../../../../../script.js';
+import { getContext, extension_settings } from '../../../../extensions.js';
+import { getCurrentChatId, chat_metadata, getRequestHeaders, saveSettingsDebounced } from '../../../../../script.js';
+import { getStringHash } from '../../../../utils.js';
 
 // ============================================================================
 // CONSTANTS
@@ -90,24 +91,629 @@ export function getChatUUID() {
  * @param {string} [chatUUID] Optional UUID override
  * @returns {string|null} Collection ID or null if no chat
  */
-export function buildChatCollectionId(chatUUID) {
-    const uuid = chatUUID || getChatUUID();
-    if (!uuid) {
+export function buildChatCollectionId(_chatUUID) {
+    // IDs are no longer derived from names or UUIDs. The argument is deliberately
+    // ignored: callers must resolve the exact chat before using its collection.
+    return peekChatCollectionId();
+}
+
+/** The file claim survives ordinary chat and character renames. */
+export const normChat = name => String(name ?? '').replace(/\\/g, '/').split('/').pop().replace(/\.jsonl$/i, '');
+
+export function getChatOwner(ctx = getContext()) {
+    if (ctx?.groupId !== undefined && ctx.groupId !== null && ctx.groupId !== '') {
+        return { type: 'group', id: String(ctx.groupId) };
+    }
+    const avatar = ctx?.characters?.[ctx.characterId]?.avatar;
+    return avatar ? { type: 'character', id: String(avatar) } : null;
+}
+
+const sameOwner = (a, b) => Boolean(a && b && a.type === b.type && a.id === b.id);
+const ownerKey = owner => owner ? `${owner.type === 'group' ? 'group' : 'char'}:${owner.id}` : null;
+const claimOwnerKey = claim => claim?.ownerId?.startsWith?.('char:') || claim?.ownerId?.startsWith?.('group:')
+    ? claim.ownerId : claim?.ownerType && claim?.ownerId != null
+        ? ownerKey({ type: claim.ownerType, id: claim.ownerId }) : null;
+const claimMatchesRecord = (claim, id, record) => Boolean(
+    claim?.collectionId === id && record &&
+    (claimOwnerKey(claim) === ownerKey(record.owner) ||
+        record.renamedOwners?.includes(claimOwnerKey(claim))) &&
+    (normChat(claim.chat) === record.chat ||
+        record.renamedChats?.includes(normChat(claim.chat)))
+);
+
+const sameChat = (a, b) => sameOwner(a.owner, b.owner) && a.chat === b.chat;
+const emptyBindingStore = { version: 1, byCollection: {} };
+const readBindingStore = () => extension_settings.vecthare?.chatCollectionBindings || emptyBindingStore;
+const bindingStore = () => (extension_settings.vecthare.chatCollectionBindings ??= {
+    version: 1, byCollection: {},
+});
+const entries = () => Object.entries(readBindingStore().byCollection);
+const currentSnapshot = (ctx = getContext()) => ({
+    owner: getChatOwner(ctx),
+    chat: normChat(ctx.chatId),
+    uuid: ctx.chatMetadata?.integrity ? String(ctx.chatMetadata.integrity) : null,
+    claim: ctx.chatMetadata?.vecthare_binding ?? null,
+    mainChat: normChat(ctx.chatMetadata?.main_chat),
+    name: String(ctx.name2 || ''),
+});
+const liveSnapshotMatches = snap => sameChat(snap, currentSnapshot());
+const matchesClaim = (claim, id) => claim && claim.collectionId === id;
+const findBound = (owner, chat) => entries().filter(([, rec]) =>
+    rec.status === 'active' && sameOwner(rec.owner, owner) && rec.chat === chat);
+
+/** Synchronous and read-only, including for UI / retrieval. */
+export function peekChatCollectionId(ctx = getContext()) {
+    const snap = currentSnapshot(ctx);
+    if (!snap.owner || !snap.chat) return null;
+    const hits = findBound(snap.owner, snap.chat);
+    if (hits.length !== 1) return null;
+    const [id] = hits[0];
+    // A restored or overwritten filename without its own claim must never
+    // inherit the previously bound chat's vectors.
+    return claimMatchesRecord(snap.claim, id, hits[0][1]) ? id : null;
+}
+
+/** Exact, read-only lookup for a different filename under the known current owner. */
+export function peekBoundCollectionIdForChat(chat, ctx = getContext()) {
+    const owner = getChatOwner(ctx), name = normChat(chat);
+    if (!owner || !name) return null;
+    const hits = findBound(owner, name);
+    return hits.length === 1 ? hits[0][0] : null;
+}
+
+export function isQuarantinedChatCollection(id) {
+    return readBindingStore().byCollection[parseRegistryKey(id).collectionId || id]?.status === 'quarantined';
+}
+
+export function getBoundChatDetails(id) {
+    const rec = readBindingStore().byCollection[parseRegistryKey(id).collectionId || id];
+    return rec?.status === 'active' ? rec : null;
+}
+
+function freshId() {
+    let id;
+    do {
+        const bytes = new Uint8Array(16);
+        crypto.getRandomValues(bytes); // Also works in insecure HTTP LAN contexts.
+        id = COLLECTION_PREFIXES.VECTHARE_CHAT + Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+    } while (bindingStore().byCollection[id]);
+    return id;
+}
+
+function quarantine(id, registryKeys = []) {
+    const old = bindingStore().byCollection[id];
+    if (old?.status === 'active') return false; // Never revoke a confirmed current owner here.
+    bindingStore().byCollection[id] = {
+        owner: null, chat: null, origin: old?.origin || 'legacy',
+        status: 'quarantined', stores: old?.stores || storeHints(id, registryKeys),
+        createdAt: old?.createdAt || Date.now(),
+    };
+    saveSettingsDebounced();
+    return true;
+}
+
+/** Preserve an old collection but free its owner/filename for a new chat. */
+export function releaseToQuarantine(id) {
+    const rec = bindingStore().byCollection[id];
+    if (!rec) return;
+    bindingStore().byCollection[id] = {
+        ...rec, owner: null, chat: null, status: 'quarantined',
+    };
+    saveSettingsDebounced();
+}
+
+function storeHints(id, keys = []) {
+    const relevant = [...new Set([
+        ...(extension_settings.vecthare.vecthare_collection_registry || []),
+        ...discoveredLegacyKeys, ...keys,
+    ])]
+        .filter(key => parseRegistryKey(key).collectionId === id)
+        .map(key => parseRegistryKey(key));
+    return [...new Map(relevant.filter(p => p.backend && p.source)
+        .map(p => [`${p.backend}:${p.source}`, { backend: p.backend, source: p.source }])).values()];
+}
+
+async function postJson(path, payload) {
+    const response = await fetch(path, {
+        method: 'POST', headers: getRequestHeaders(), body: JSON.stringify(payload),
+    });
+    if (!response.ok) throw new Error(`${path}: HTTP ${response.status}`);
+    return response.json();
+}
+
+/** Complete list, or null on errors/incomplete or malformed chat headers. */
+async function ownerChats(owner, ctx = getContext()) {
+    try {
+        if (owner.type === 'character') {
+            const [simple, detailed] = await Promise.all([
+                postJson('/api/characters/chats', { avatar_url: owner.id, simple: true }),
+                postJson('/api/characters/chats', { avatar_url: owner.id, metadata: true }),
+            ]);
+            if (!Array.isArray(simple) || !Array.isArray(detailed)) return null;
+            const known = new Map(detailed.map(item => [normChat(item.file_name), item.chat_metadata]));
+            const result = [];
+            // An unparseable header or a server ignoring metadata:true must not
+            // silently hide a competing chat; read its header directly instead.
+            for (let i = 0; i < simple.length; i += 4) {
+                const batch = await Promise.all(simple.slice(i, i + 4).map(async item => {
+                    const chat = normChat(item.file_name);
+                    if (known.get(chat)) return { chat, meta: known.get(chat) };
+                    const data = await postJson('/api/chats/get', { avatar_url: owner.id, file_name: chat });
+                    if (!Array.isArray(data) || !data[0] || typeof data[0] !== 'object') return null;
+                    return { chat, meta: data[0].chat_metadata ?? {} };
+                }));
+                if (batch.includes(null)) return null;
+                result.push(...batch);
+            }
+            return result;
+        }
+        const group = ctx.groups?.find(group => String(group.id) === owner.id);
+        if (!Array.isArray(group?.chats)) return null;
+        const result = [];
+        // Bounded concurrency: 4 group header reads maximum at once.
+        for (let i = 0; i < group.chats.length; i += 4) {
+            // /group/info omits chat_metadata; read the actual saved header.
+            const batch = await Promise.all(group.chats.slice(i, i + 4).map(chat =>
+                postJson('/api/chats/group/get', { id: chat })));
+            if (batch.some(data => !Array.isArray(data) || !data[0] || typeof data[0] !== 'object')) return null;
+            result.push(...batch.map((data, j) => ({ chat: normChat(group.chats[i + j]), meta: data[0].chat_metadata ?? {} })));
+        }
+        return result;
+    } catch (error) {
+        console.warn('VectHare: Could not inspect sibling chat identities:', error);
         return null;
     }
-
-    const context = getContext();
-    const charName = context?.name2 || 'chat';
-
-    // Sanitize character name (lowercase, alphanumeric only)
-    const sanitizedChar = charName
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '_')
-        .replace(/^_|_$/g, '')
-        .substring(0, 30);
-
-    return `${COLLECTION_PREFIXES.VECTHARE_CHAT}${sanitizedChar}_${uuid}`;
 }
+
+/** true = exists, false = absent, null = cannot safely determine. */
+export async function chatFileExists(owner, chat, ctx = getContext()) {
+    if (!owner || !chat) return null;
+    try {
+        if (owner.type === 'character') {
+            if (!(ctx.characters || []).some(c => c.avatar === owner.id)) return null;
+            const files = await postJson('/api/characters/chats', { avatar_url: owner.id, simple: true });
+            if (!Array.isArray(files)) return null;
+            return files.some(file => normChat(file.file_name) === normChat(chat));
+        }
+        const group = ctx.groups?.find(g => String(g.id) === owner.id);
+        if (!Array.isArray(group?.chats)) return null;
+        // Group deletion updates this list; a surviving entry needs a file check.
+        if (!group.chats.some(name => normChat(name) === normChat(chat))) return false;
+        const data = await postJson('/api/chats/group/get', { id: chat });
+        return Array.isArray(data) && data[0] && typeof data[0] === 'object' ? true : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+/** Other live chat files with the same UUID or copied collection claim. */
+async function competingChats(snap, candidateId = null, ctx = getContext()) {
+    const owners = [snap.owner];
+    // Legacy IDs also collide across different avatars with the same display name.
+    if (candidateId?.startsWith(COLLECTION_PREFIXES.VECTHARE_CHAT)) {
+        const suffix = snap.uuid ? `_${snap.uuid}` : '';
+        const slug = suffix && candidateId.endsWith(suffix)
+            ? candidateId.slice(COLLECTION_PREFIXES.VECTHARE_CHAT.length, -suffix.length) : null;
+        if (slug) {
+            const sanitize = n => String(n || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').substring(0, 30);
+            for (const c of ctx.characters || []) {
+                if (c.avatar && sanitize(c.name) === slug) owners.push({ type: 'character', id: c.avatar });
+            }
+            for (const g of ctx.groups || []) {
+                if (g.id != null && sanitize(g.name) === slug) owners.push({ type: 'group', id: String(g.id) });
+            }
+        }
+    }
+    const found = [];
+    const distinctOwners = owners.filter((o, i) => owners.findIndex(p => sameOwner(o, p)) === i);
+    for (const owner of distinctOwners) {
+        const list = await ownerChats(owner, ctx);
+        if (list === null) return null;
+        for (const file of list) {
+            if (sameOwner(owner, snap.owner) && file.chat === snap.chat) continue;
+            const peerClaim = file.meta?.vecthare_binding?.collectionId;
+            // Different bindings are already isolated, even if two old chats
+            // share an integrity UUID. Only unbound peers or peers claiming
+            // this exact collection make its ownership ambiguous.
+            if (candidateId && peerClaim === candidateId ||
+                snap.uuid && String(file.meta?.integrity) === snap.uuid && !peerClaim) {
+                found.push({ owner, chat: file.chat });
+            }
+        }
+    }
+    return found;
+}
+
+const sanitizeLegacyName = name => String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_|_$/g, '').substring(0, 30);
+
+function legacyIdBelongsToOtherOwner(id, snap, ctx = getContext()) {
+    if (!snap.uuid || !id.endsWith(`_${snap.uuid}`)) return false;
+    const slug = id.slice(COLLECTION_PREFIXES.VECTHARE_CHAT.length, -(snap.uuid.length + 1));
+    if (!slug || slug === sanitizeLegacyName(snap.name)) return false;
+    return [...(ctx.characters || []), ...(ctx.groups || [])]
+        .some(candidate => sanitizeLegacyName(candidate?.name) === slug);
+}
+
+const inflight = new Map();
+export function ensureChatBinding(ctx = getContext(), opts = {}) {
+    const snap = currentSnapshot(ctx);
+    if (!snap.owner || !snap.chat) return Promise.resolve({ state: 'unbound', writable: false });
+    const create = opts.create !== false;
+    const key = JSON.stringify([snap.owner.type, snap.owner.id, snap.chat]);
+    if (inflight.has(key)) {
+        return inflight.get(key).then(result =>
+            create && result.state === 'unbound' ? ensureChatBinding(ctx, { create: true }) : result);
+    }
+    const promise = resolveChatBinding(snap, { create }).finally(() => inflight.delete(key));
+    inflight.set(key, promise);
+    return promise;
+}
+
+/** Save a new claim first; update the reverse index only after disk verification. */
+async function commit(snap, id, rec, retireId = null) {
+    if (!liveSnapshotMatches(snap)) return { state: 'changed', writable: false };
+    const ctx = getContext();
+    if (!ctx.chatMetadata || typeof ctx.saveMetadata !== 'function') {
+        return { state: 'provisional', writable: false };
+    }
+    const originalClaim = ctx.chatMetadata.vecthare_binding;
+    const claim = { collectionId: id, chat: snap.chat, ownerId: ownerKey(snap.owner) };
+    ctx.chatMetadata.vecthare_binding = claim; // Fresh reference for ST change tracking.
+    try {
+        await ctx.saveMetadata();
+        if (!liveSnapshotMatches(snap)) return { state: 'changed', writable: false };
+        const data = snap.owner.type === 'character'
+            ? await postJson('/api/chats/get', { avatar_url: snap.owner.id, file_name: snap.chat })
+            : await postJson('/api/chats/group/get', { id: snap.chat });
+        const saved = Array.isArray(data) ? data[0]?.chat_metadata?.vecthare_binding : null;
+        if (!matchesClaim(saved, id) || claimOwnerKey(saved) !== ownerKey(snap.owner) ||
+            normChat(saved.chat) !== snap.chat || !liveSnapshotMatches(snap)) {
+            return { state: 'provisional', writable: false };
+        }
+        // One synchronous settings transition: no two active records claim a filename.
+        if (retireId && bindingStore().byCollection[retireId]) {
+            const old = bindingStore().byCollection[retireId];
+            bindingStore().byCollection[retireId] = { ...old, owner: null, chat: null, status: 'quarantined' };
+        }
+        bindingStore().byCollection[id] = rec;
+        saveSettingsDebounced();
+        return { state: 'active', collectionId: id, writable: true };
+    } catch (error) {
+        console.warn('VectHare: Chat binding could not be persisted:', error);
+        return { state: 'provisional', writable: false };
+    } finally {
+        if (ctx.chatMetadata.vecthare_binding === claim && !bindingStore().byCollection[id]) {
+            ctx.chatMetadata.vecthare_binding = originalClaim;
+        }
+    }
+}
+
+// Read-only discovery: never alter persisted registry during identity checks.
+// The plugin may be absent (Standard backend works without it).
+let legacyDiscoveryPromise;
+let discoveredLegacyKeys = [];
+function discoverLegacyCollectionsOnce() {
+    if (!legacyDiscoveryPromise) {
+        legacyDiscoveryPromise = (async () => {
+            try {
+                const response = await fetch('/api/plugins/similharity/collections', {
+                    method: 'GET', headers: getRequestHeaders(),
+                });
+                if (!response.ok) return false;
+                const data = await response.json();
+                if (!data?.success || !Array.isArray(data.collections)) return false;
+                discoveredLegacyKeys = data.collections
+                    .filter(item => item?.id && item?.source)
+                    .map(item => {
+                        const backend = item.backend || 'standard';
+                        const raw = String(item.id);
+                        const id = raw.startsWith(`${backend}:`) ? raw.slice(backend.length + 1) : raw;
+                        return `${backend}:${item.source}:${id}`;
+                    });
+                return true;
+            } catch (error) {
+                return false;
+            }
+        })().then(success => {
+            if (!success) legacyDiscoveryPromise = null; // Retry on next use.
+            return success;
+        });
+    }
+    return legacyDiscoveryPromise;
+}
+
+async function resolveChatBinding(snap, opts = { create: true }) {
+    const hits = findBound(snap.owner, snap.chat);
+    if (hits.length > 1) return { state: 'provisional', writable: false };
+    if (hits.length === 1) {
+        const [id, rec] = hits[0];
+        if (claimMatchesRecord(snap.claim, id, rec)) {
+            // Heal stale owner/chat fields following a confirmed rename event.
+            if (claimOwnerKey(snap.claim) !== ownerKey(snap.owner) || normChat(snap.claim.chat) !== snap.chat) {
+                return commit(snap, id, rec);
+            }
+            return { state: 'active', collectionId: id, writable: true };
+        }
+        // A replacement file with the same filename *and UUID* cannot inherit
+        // old vectors on that evidence alone. Preserve the old record until a
+        // new claim is successfully saved.
+        return commitFresh(snap, opts, id);
+    }
+
+    const claimId = typeof snap.claim?.collectionId === 'string' ? snap.claim.collectionId : null;
+    if (claimId) {
+        if (!claimId.startsWith(COLLECTION_PREFIXES.VECTHARE_CHAT)) {
+            return { state: 'provisional', writable: false };
+        }
+        const previous = bindingStore().byCollection[claimId];
+        // Cross-owner imports and copied branches never inherit their source's
+        // collection. An old claim is trusted only through an explicit rename.
+        const sameOwnerClaim = claimOwnerKey(snap.claim) === ownerKey(snap.owner);
+        const renamedOwner = previous?.renamedOwners?.includes(claimOwnerKey(snap.claim)) &&
+            sameOwner(previous.owner, snap.owner);
+        if (!sameOwnerClaim && !renamedOwner) {
+            // If the original owner still exists, the file is an import/copy.
+            // If it is missing, this could be a missed character rename:
+            // preserving the old vectors is safer than guessing.
+            const original = previous?.owner;
+            const knownOwner = original && (
+                original.type === 'character'
+                    ? (getContext().characters || []).some(char => char.avatar === original.id)
+                    : (getContext().groups || []).some(group => String(group.id) === original.id)
+            );
+            return knownOwner ? commitFresh(snap, opts) : { state: 'provisional', writable: false };
+        }
+        if (previous?.status === 'quarantined') return commitFresh(snap, opts);
+        if (previous) {
+            if (sameOwner(previous.owner, snap.owner) && previous.chat === snap.chat &&
+                claimMatchesRecord(snap.claim, claimId, previous)) {
+                return commit(snap, claimId, previous); // Heal old filename/owner in saved claim.
+            }
+            // Same collection claimed under a different filename: if the old
+            // file exists, this is a copied branch; otherwise the distinction
+            // between missed rename and copy is unknowable (fail closed).
+            const copiedBranch = snap.mainChat && snap.mainChat === normChat(snap.claim.chat) &&
+                snap.chat !== snap.mainChat;
+            if (copiedBranch) return commitFresh(snap, opts);
+            const originalExists = await chatFileExists(previous.owner, previous.chat);
+            if (originalExists === true) return commitFresh(snap, opts);
+            return { state: 'provisional', writable: false };
+        }
+        // An unregistered claim naming another file may be a copied branch
+        // whose parent was deleted. Never silently adopt that old collection.
+        if (normChat(snap.claim.chat) !== snap.chat) return commitFresh(snap, opts);
+        // Registry lost but claim survived: inspect all competing files first.
+        const peers = await competingChats(snap, claimId);
+        if (peers === null) return { state: 'provisional', writable: false };
+        if (peers.length) return commitFresh(snap, opts);
+        return commit(snap, claimId, { owner: snap.owner, chat: snap.chat,
+            origin: 'legacy', status: 'active', uuid: snap.uuid,
+            stores: storeHints(claimId), createdAt: Date.now() });
+    }
+
+    // Use persisted candidates first. A failed backend discovery must never
+    // unregister an existing chat's registry entry or change ownership.
+    const discovered = snap.uuid ? await discoverLegacyCollectionsOnce() : true;
+    // A failed discovery is not conclusive: inspect persisted evidence first.
+    // A new chat with no legacy evidence should not stay blocked forever.
+    // Legacy collection discovery is limited to old UUID/filename formats.
+    const known = new Set([
+        ...discoveredLegacyKeys,
+        ...(extension_settings.vecthare.vecthare_collection_registry || []),
+        ...Object.keys(extension_settings.vecthare.collections || {}),
+    ].map(key => parseRegistryKey(key).collectionId));
+    const candidates = [...known].filter(id => id && id.startsWith(COLLECTION_PREFIXES.VECTHARE_CHAT) &&
+        (snap.uuid && id.endsWith('_' + snap.uuid) || id === buildLegacyChatCollectionId(snap.chat)) &&
+        !bindingStore().byCollection[id] && !legacyIdBelongsToOtherOwner(id, snap));
+    // Different characters can legitimately share a UUID while using different
+    // legacy collections. Never quarantine them merely for matching the suffix.
+    const ownSlug = snap.name.toLowerCase().replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_|_$/g, '').substring(0, 30);
+    const exactOwnId = `${COLLECTION_PREFIXES.VECTHARE_CHAT}${ownSlug}_${snap.uuid}`;
+    const narrowed = candidates.length > 1 && candidates.includes(exactOwnId)
+        ? [exactOwnId] : candidates;
+    if (narrowed.length > 1) {
+        // Historical character rename or duplicated candidates: no safe guess.
+        for (const id of narrowed) quarantine(id);
+        return commitFresh(snap, opts);
+    }
+    if (!discovered && snap.uuid && !narrowed.length &&
+        extension_settings.vecthare.vector_backend !== 'standard') {
+        // The plugin's discovery endpoint is unavailable. Probe only the two
+        // deterministic old IDs before assuming there is no legacy data.
+        // Unknown old renamed-character IDs still require manual recovery.
+        const legacyIds = [...new Set([exactOwnId, buildLegacyChatCollectionId(snap.chat)])];
+        const { getSavedHashes } = await import('./core-vector-api.js');
+        const s = extension_settings.vecthare;
+        try {
+            for (const legacyId of legacyIds) {
+                const hashes = await getSavedHashes(legacyId, s);
+                if (!Array.isArray(hashes)) return { state: 'provisional', writable: false };
+                if (hashes.length) return { state: 'provisional', writable: false };
+            }
+        } catch (error) {
+            return { state: 'provisional', writable: false };
+        }
+    }
+    if (narrowed.length === 1) {
+        const id = narrowed[0];
+        const peers = await competingChats(snap, id);
+        if (peers === null) return { state: 'provisional', writable: false };
+        // A missing parent does not prove a unique-UUID branch's collection
+        // is shared. Only live competing claims/UUIDs justify quarantine.
+        if (peers.length) {
+            quarantine(id);
+            return commitFresh(snap, opts);
+        }
+
+        // Old registry entries may be bare IDs with no backend/source. Probe
+        // those using the current store, without treating an unknown hint as
+        // proof of ownership or causing a permanent provisional state.
+        const cur = extension_settings.vecthare;
+        const probe = storeHints(id).map(store => ({ ...store, hinted: true }));
+        const currentStore = { backend: cur.vector_backend || 'standard', source: cur.source || 'transformers' };
+        if (!probe.some(store => store.backend === currentStore.backend && store.source === currentStore.source)) {
+            probe.push(currentStore);
+        }
+        const { getSavedHashes } = await import('./core-vector-api.js');
+        const stores = [];
+        for (const store of probe) {
+            try {
+                const hashes = await getSavedHashes(id, { ...cur, vector_backend: store.backend, source: store.source });
+                if (!Array.isArray(hashes)) return { state: 'provisional', writable: false };
+                if (hashes.length) stores.push({ backend: store.backend, source: store.source });
+            } catch (error) {
+                return { state: 'provisional', writable: false }; // Backend unavailable, not empty.
+            }
+        }
+        // A registered legacy ID must remain attached to its uniquely verified
+        // chat even when hashes are empty. Standard's vector/list endpoint can
+        // report some read errors as [], so [] cannot justify a new identity.
+        return commit(snap, id, { owner: snap.owner, chat: snap.chat, origin: 'legacy', uuid: snap.uuid,
+            status: 'active', stores: stores.length ? stores : storeHints(id), createdAt: Date.now() });
+    }
+    return commitFresh(snap, opts);
+}
+
+function commitFresh(snap, opts = { create: true }, retireId = null) {
+    if (!opts.create) return Promise.resolve({ state: 'unbound', writable: false });
+    const id = freshId();
+    return commit(snap, id, { owner: snap.owner, chat: snap.chat, origin: 'created', uuid: snap.uuid,
+        status: 'active', stores: [], createdAt: Date.now() }, retireId);
+}
+
+/** Small local guard: a known collection must not be purged during a write. */
+const activeChatCollectionWrites = new Map();
+const deletingChatCollections = new Set();
+export function beginChatCollectionWrite(id) {
+    if (id && deletingChatCollections.has(id)) {
+        throw new Error('Chat collection is being deleted; write cancelled');
+    }
+    if (id) activeChatCollectionWrites.set(id, (activeChatCollectionWrites.get(id) || 0) + 1);
+}
+/** Exclusive lock, acquired synchronously before any asynchronous delete checks. */
+export function tryBeginChatCollectionDelete(id) {
+    if (!id || deletingChatCollections.has(id) || isChatCollectionWriteActive(id)) return false;
+    deletingChatCollections.add(id);
+    return true;
+}
+export function endChatCollectionDelete(id) { deletingChatCollections.delete(id); }
+export function endChatCollectionWrite(id) {
+    const count = activeChatCollectionWrites.get(id) || 0;
+    if (count > 1) activeChatCollectionWrites.set(id, count - 1);
+    else activeChatCollectionWrites.delete(id);
+}
+export function isChatCollectionWriteActive(id) { return (activeChatCollectionWrites.get(id) || 0) > 0; }
+
+/** Exclusively guards a destructive operation on a chat collection. */
+export async function withChatCollectionPurgeGuard(id, task) {
+    if (!id?.startsWith(COLLECTION_PREFIXES.VECTHARE_CHAT)) return await task();
+    if (!tryBeginChatCollectionDelete(id)) throw new Error('Chat collection is busy; operation cancelled');
+    try { return await task(); }
+    finally { endChatCollectionDelete(id); }
+}
+
+/** Keeps an import's writes from overlapping automatic chat deletion. */
+export async function withChatCollectionWriteGuard(id, task) {
+    if (!id?.startsWith(COLLECTION_PREFIXES.VECTHARE_CHAT)) return await task();
+    beginChatCollectionWrite(id);
+    try { return await task(); }
+    finally { endChatCollectionWrite(id); }
+}
+
+/** Identifies the configured destination; does not store Qdrant credentials. */
+export function chatStoreDestination(settings) {
+    const backend = settings.vector_backend || 'standard';
+    if (backend === 'qdrant') {
+        return JSON.stringify([
+            settings.qdrant_use_cloud, settings.qdrant_url || '',
+            settings.qdrant_host || '', settings.qdrant_port || '',
+            // Deterministic change detector, not an authentication mechanism.
+            getStringHash(String(settings.qdrant_api_key || '')),
+            Boolean(settings.qdrant_multitenancy),
+        ]);
+    }
+    if (backend === 'milvus') return JSON.stringify([
+        settings.milvus_address || '', settings.milvus_host || '', settings.milvus_port || '',
+        settings.milvus_username || '', getStringHash(String(settings.milvus_token || '')),
+    ]);
+    return backend;
+}
+
+/** Record every destination before its first write, even if that write fails. */
+export function recordChatStore(id, settings) {
+    const rec = bindingStore().byCollection[id];
+    if (!rec || rec.status !== 'active') return;
+    const backend = settings.vector_backend || 'standard';
+    const source = settings.source || 'transformers';
+    const destination = chatStoreDestination(settings);
+    rec.stores ??= [];
+    if (!rec.stores.some(s => s.backend === backend && s.source === source && s.destination === destination)) {
+        rec.stores.push({ backend, source, destination });
+        saveSettingsDebounced();
+    }
+}
+
+/** Rename events update the registry; the saved claim is healed on next load. */
+export function onChatBindingRenamed({ avatarId, groupId, oldFileName, newFileName } = {}) {
+    const owner = groupId != null ? { type: 'group', id: String(groupId) }
+        : avatarId ? { type: 'character', id: String(avatarId) } : null;
+    if (!owner) return;
+    const oldName = normChat(oldFileName);
+    const hits = findBound(owner, oldName);
+    if (hits.length !== 1) return;
+    const [id, rec] = hits[0];
+    // ST may sanitize a requested filename server-side while its rename event
+    // still contains the requested spelling. The selected chat is authoritative
+    // only if it is demonstrably the chat carrying this exact claim.
+    const live = getContext();
+    const selected = getChatOwner(live);
+    const currentClaim = live.chatMetadata?.vecthare_binding?.collectionId;
+    const actual = sameOwner(owner, selected) && currentClaim === id ? normChat(live.chatId) : null;
+    const newName = actual || normChat(newFileName);
+    if (findBound(owner, newName).length) return;
+    rec.renamedChats = [...new Set([...(rec.renamedChats || []), oldName])];
+    rec.chat = newName;
+    saveSettingsDebounced();
+}
+export function onCharacterBindingRenamed(oldAvatar, newAvatar) {
+    if (!oldAvatar || !newAvatar || oldAvatar === newAvatar) return;
+    for (const [, rec] of entries()) {
+        if (!sameOwner(rec.owner, { type: 'character', id: oldAvatar })) continue;
+        if (findBound({ type: 'character', id: newAvatar }, rec.chat).length) continue;
+        rec.renamedOwners = [...new Set([...(rec.renamedOwners || []), ownerKey(rec.owner)])];
+        rec.owner = { type: 'character', id: String(newAvatar) };
+    }
+    saveSettingsDebounced();
+}
+
+export async function anotherChatClaimsCollection(rec, id, ctx = getContext()) {
+    const owners = [
+        ...(ctx.characters || []).filter(char => char.avatar)
+            .map(char => ({ type: 'character', id: String(char.avatar) })),
+        ...(ctx.groups || []).filter(group => group.id != null)
+            .map(group => ({ type: 'group', id: String(group.id) })),
+    ];
+    if (!owners.some(owner => sameOwner(owner, rec.owner))) return null;
+    for (const owner of owners) {
+        const all = await ownerChats(owner, ctx);
+        if (all === null) return null;
+        if (all.some(file => !(sameOwner(owner, rec.owner) && file.chat === rec.chat) &&
+            file.meta?.vecthare_binding?.collectionId === id)) return true;
+    }
+    return false;
+}
+
+export function deletionCandidates(filename, type) {
+    const chat = normChat(filename);
+    return entries().filter(([, rec]) => rec.status === 'active' && rec.owner?.type === type && rec.chat === chat);
+}
+export function removeChatBinding(id) {
+    delete bindingStore().byCollection[id];
+    saveSettingsDebounced();
+}
+
 
 /**
  * Builds a legacy chat collection ID (for backwards compatibility checks)
@@ -171,11 +777,9 @@ export function buildDocumentCollectionId(documentName, timestamp) {
  * @param {string} [chatUUID] Optional UUID override
  * @returns {{current: string|null, legacy: string|null}} Both format IDs
  */
-export function getAllChatCollectionIds(chatId, chatUUID) {
-    return {
-        current: buildChatCollectionId(chatUUID),
-        legacy: buildLegacyChatCollectionId(chatId),
-    };
+export function getAllChatCollectionIds(chatId, _chatUUID) {
+    const current = chatId ? peekBoundCollectionIdForChat(chatId) : peekChatCollectionId();
+    return { current, legacy: null }; // Keep the existing return shape; never guess a shared legacy ID.
 }
 
 // ============================================================================

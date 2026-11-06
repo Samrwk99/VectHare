@@ -19,6 +19,11 @@ import { getBackend } from '../backends/backend-manager.js';
 // Import from collection-ids.js - single source of truth for collection ID operations
 import {
     buildChatCollectionId,
+    ensureChatBinding,
+    recordChatStore,
+    beginChatCollectionWrite,
+    endChatCollectionWrite,
+    withChatCollectionPurgeGuard,
     buildLorebookCollectionId,
     buildCharacterCollectionId,
     buildDocumentCollectionId,
@@ -49,6 +54,12 @@ export async function vectorizeContent({ contentType, source, settings }) {
     progressTracker.updateCurrentItem(sourceName);
 
     try {
+        // Content Vectorizer shares the same chat identity as Sync Chat.
+        const chatBinding = contentType === 'chat' ? await ensureChatBinding() : null;
+        if (contentType === 'chat' && !chatBinding?.writable) {
+            throw new Error('Chat collection identity could not be verified; vectorization cancelled');
+        }
+
         // Step 1: Resolve source
         progressTracker.updateProgress(1, 'Loading content...');
         const rawContent = await resolveSource(contentType, source);
@@ -77,7 +88,9 @@ export async function vectorizeContent({ contentType, source, settings }) {
 
         // Step 3: Enrich and hash
         progressTracker.updateProgress(3, 'Processing chunks...');
-        const collectionId = generateCollectionId(contentType, source, settings);
+        const collectionId = contentType === 'chat'
+            ? chatBinding.collectionId
+            : generateCollectionId(contentType, source, settings);
         
         // Get full extension settings for keyword extraction (includes custom_stopwords)
         const vecthareSettings = extension_settings.vecthare;
@@ -107,14 +120,22 @@ export async function vectorizeContent({ contentType, source, settings }) {
         }
 
         try {
-            await insertVectorItems(collectionId, hashedChunks, vecthareSettings, (embedded, total) => {
+            if (contentType === 'chat') {
+                beginChatCollectionWrite(collectionId);
+            }
+            try {
+                if (contentType === 'chat') recordChatStore(collectionId, vecthareSettings);
+                await insertVectorItems(collectionId, hashedChunks, vecthareSettings, (embedded, total) => {
             // Update progress with streaming count
             console.log(`[Content Vectorization] Processing progress callback: ${embedded}/${total}`);
             progressTracker.updateEmbeddingProgress(embedded, total);
 
             // Streaming approach: embedding and writing happen together
             progressTracker.updateCurrentItem(`Processing: ${embedded}/${total} chunks (${total - embedded} remaining)`);
-            });
+                });
+            } finally {
+                if (contentType === 'chat') endChatCollectionWrite(collectionId);
+            }
         } catch (error) {
             // Surface insert errors to the UI so users see why vectorization may have failed
             console.error('VectHare: insertVectorItems failed', error);
@@ -624,14 +645,9 @@ function generateCollectionId(contentType, source, settings) {
 
     switch (contentType) {
         case 'chat':
-            // Use UUID-based ID (single source of truth)
-            const chatCollectionId = buildChatCollectionId();
-            if (chatCollectionId) {
-                return chatCollectionId;
-            }
-            // Fall through to legacy generation if UUID not available
-            console.warn('VectHare: Chat UUID not available, using legacy ID generation');
-            break;
+            // Only the verified resolver may provide a chat ID. Never invent a
+            // name-based or UUID-based fallback when the binding is absent.
+            return buildChatCollectionId();
 
         case 'lorebook':
             return buildLorebookCollectionId(sourceName, timestamp);
@@ -789,6 +805,10 @@ function enrichChunks(chunks, contentType, source, settings, preparedContent, ve
  */
 export async function deleteContentCollection(collectionId) {
     const vecthareSettings = extension_settings.vecthare;
-    await purgeVectorIndex(collectionId, vecthareSettings);
+    await withChatCollectionPurgeGuard(collectionId, async () => {
+        if (!await purgeVectorIndex(collectionId, vecthareSettings)) {
+            throw new Error('Backend did not confirm collection purge');
+        }
+    });
     console.log(`VectHare: Deleted collection: ${collectionId}`);
 }

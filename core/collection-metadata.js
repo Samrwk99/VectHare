@@ -10,6 +10,7 @@
  */
 
 import { extension_settings } from '../../../../extensions.js';
+import { isQuarantinedChatCollection } from './collection-ids.js';
 import { saveSettingsDebounced } from '../../../../../script.js';
 import { parseRegistryKey } from './collection-ids.js';
 
@@ -337,6 +338,7 @@ export function setCollectionEnabled(collectionId, enabled) {
  * @returns {boolean} Whether collection is enabled (default: true)
  */
 export function isCollectionEnabled(collectionId) {
+    if (isQuarantinedChatCollection(collectionId)) return false;
     const meta = getCollectionMeta(collectionId);
     return meta.enabled !== false;
 }
@@ -1068,6 +1070,7 @@ async function evaluateAdvancedConditions(meta, context, collectionId) {
  * @returns {Promise<boolean>} Whether the collection should be queried
  */
 export async function shouldCollectionActivate(collectionId, context) {
+    if (isQuarantinedChatCollection(collectionId)) return false;
     const meta = getCollectionMeta(collectionId);
     const currentChatId = context?.currentChatId;
     const currentCharacterId = context?.currentCharacterId;

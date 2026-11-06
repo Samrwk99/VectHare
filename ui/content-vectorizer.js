@@ -2455,6 +2455,11 @@ async function startVectorization() {
     // stacked vectors on top of existing ones.
     if (currentContentType === 'chat' && source.type === 'current') {
         try {
+            // Resolve legacy or copied-branch ownership before checking for
+            // existing vectors; otherwise Replace All can miss the collection.
+            const { ensureChatBinding } = await import('../core/collection-ids.js');
+            const binding = await ensureChatBinding();
+            if (!binding.writable) throw new Error('Chat collection identity is not verified');
             const { doesChatHaveVectors } = await import('../core/collection-loader.js');
             const existing = await doesChatHaveVectors(currentSettings);
 
@@ -2479,24 +2484,22 @@ async function startVectorization() {
                 // User wants to replace - purge existing first
                 const { purgeVectorIndex } = await import('../core/core-vector-api.js');
                 const { unregisterCollection } = await import('../core/collection-loader.js');
-                await purgeVectorIndex(existing.collectionId, currentSettings);
-                // R8 FIX: unregister with the registry key (backend:source:id)
-                // when available - the bare collectionId never matched a registry
-                // entry, leaving a stale key behind.
-                unregisterCollection(existing.registryKey || existing.collectionId);
-                // R8 FIX: clear the stored vectorization config fingerprint.
-                // Without this, Replace All with changed settings would leave the
-                // old fingerprint behind and the NEXT Sync Chat would be blocked
-                // by the mismatch check - making the prescribed escape hatch from
-                // the blocked-run toast a dead end. Fresh start = no fingerprint;
-                // the next chat sync adopts the current settings.
-                const { setCollectionMeta } = await import('../core/collection-metadata.js');
-                setCollectionMeta(existing.collectionId, { vectorizationConfigFingerprint: null });
+                const { withChatCollectionPurgeGuard } = await import('../core/collection-ids.js');
+                await withChatCollectionPurgeGuard(existing.collectionId, async () => {
+                    if (!await purgeVectorIndex(existing.collectionId, currentSettings)) {
+                        throw new Error('Existing vectors could not be purged; replacement cancelled');
+                    }
+                    // Only clear registry and fingerprint after confirmed purge.
+                    unregisterCollection(existing.registryKey || existing.collectionId);
+                    const { setCollectionMeta } = await import('../core/collection-metadata.js');
+                    setCollectionMeta(existing.collectionId, { vectorizationConfigFingerprint: null });
+                });
                 toastr.info('Cleared existing vectors', 'VectHare');
             }
         } catch (e) {
-            console.warn('VectHare: Could not check for existing vectors:', e);
-            // Continue anyway
+            console.warn('VectHare: Could not safely check/replace existing vectors:', e);
+            toastr.error('Replacement cancelled: ' + e.message, 'VectHare');
+            return;
         }
     }
 
