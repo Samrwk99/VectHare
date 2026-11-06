@@ -36,6 +36,7 @@ import { renderSettings, openDiagnosticsModal, loadWebLlmModels, updateWebLlmSta
 import { progressTracker } from './ui/progress-tracker.js';
 import { initializeVisualizer } from './ui/chunk-visualizer.js';
 import { initializeDatabaseBrowser } from './ui/database-browser.js';
+import { checkBackendHealth } from './ui/health-dashboard.js';
 import { initializeSceneMarkers, updateAllMarkerStates, setSceneSettings } from './ui/scene-markers.js';
 import { initializeWorldInfoIntegration } from './core/world-info-integration.js';
 
@@ -478,6 +479,9 @@ jQuery(async () => {
         onPurge: onPurgeClick,
         onRunDiagnostics: onRunDiagnosticsClick
     });
+
+    // Fresh check on page load; no health cache is trusted for the indicator.
+    void checkBackendHealth(settings);
 
     progressTracker.setStartCallback(onVectorizeAllClick);
     window.addEventListener('vecthare:database-changed', event => {

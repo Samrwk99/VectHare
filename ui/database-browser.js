@@ -12,6 +12,7 @@
 
 import {
   loadAllCollections,
+  checkPluginAvailable,
   setCollectionEnabled,
   registerCollection,
   unregisterCollection,
@@ -87,27 +88,7 @@ import {
   isVectHarePNG,
 } from "../core/png-export.js";
 
-// Plugin availability cache
-let pluginAvailable = null;
-
-/**
- * Check if the Similharity plugin is available
- * @returns {Promise<boolean>}
- */
-async function checkPluginAvailable() {
-  if (pluginAvailable !== null) return pluginAvailable;
-
-  try {
-    const response = await fetch("/api/plugins/similharity/health", {
-      method: "GET",
-      headers: getRequestHeaders(),
-    });
-    pluginAvailable = response.ok;
-  } catch {
-    pluginAvailable = false;
-  }
-  return pluginAvailable;
-}
+// Plugin availability is managed by collection-loader.js.
 
 // Browser state
 let browserState = {
@@ -158,8 +139,8 @@ export async function openDatabaseBrowser() {
 
   browserState.isOpen = true;
 
-  // Check plugin availability
-  browserState.pluginAvailable = await checkPluginAvailable();
+  // Refresh plugin availability whenever the Database Browser opens.
+  browserState.pluginAvailable = await checkPluginAvailable(true);
 
   // Create modal if it doesn't exist
   if ($("#vecthare_database_browser_modal").length === 0) {
