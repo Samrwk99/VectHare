@@ -604,6 +604,12 @@ export function renderSettings(containerId, settings, callbacks) {
                             <input type="text" id="vecthare_rag_xml_tag" class="vecthare-input" placeholder="e.g., retrieved_context" />
                             <small class="vecthare_hint">Wraps all RAG content in &lt;tag&gt;...&lt;/tag&gt;. Leave empty for no wrapping.</small>
 
+                            <label class="checkbox_label" for="vecthare_include_keywords_in_rag_context" style="margin-top: 12px;">
+                                <input id="vecthare_include_keywords_in_rag_context" type="checkbox" class="checkbox" />
+                                <span>Include Keywords in RAG Context</span>
+                            </label>
+                            <small class="vecthare_hint">Show stored keyword annotations in injected Qdrant RAG memories. Does not affect keyword searching or Semantic World Info.</small>
+
                             <div class="vecthare_info" style="margin-top: 16px; padding: 8px 12px; border-radius: 4px; background: var(--SmartThemeBlurTintColor); font-size: 0.85em;">
                                 <i class="fa-solid fa-info-circle"></i>
                                 <span>Collection and chunk-level context can be set in the Database Browser and Chunk Visualizer respectively.</span>
@@ -2470,6 +2476,14 @@ function bindSettingsEvents(settings, callbacks) {
             const sanitized = $(this).val().replace(/[^a-zA-Z0-9_-]/g, '');
             $(this).val(sanitized);
             settings.rag_xml_tag = sanitized;
+            applySettingsSnapshot(settings);
+            saveSettingsDebounced();
+        });
+
+    $('#vecthare_include_keywords_in_rag_context')
+        .prop('checked', settings.include_keywords_in_rag_context === true)
+        .on('change', function() {
+            settings.include_keywords_in_rag_context = $(this).prop('checked');
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });

@@ -1750,6 +1750,44 @@ function deduplicateChunks(chunks, chat, settings, debugData) {
  * @param {object} settings VectHare settings
  * @returns {string} Formatted injection text
  */
+function getRagInjectionChunkText(chunk, settings) {
+    const text = typeof chunk?.text === 'string' && chunk.text
+        ? chunk.text
+        : '(text not available)';
+
+    // Only alter the text sent to regular Qdrant RAG prompts.
+    if (settings?.include_keywords_in_rag_context === true || settings?.vector_backend !== 'qdrant') {
+        return text;
+    }
+
+    const keywords = chunk?.metadata?.keywords;
+    if (!Array.isArray(keywords) || keywords.length === 0) {
+        return text;
+    }
+
+    // Matches Qdrant's generated suffix, without stripping arbitrary user-authored tags.
+    const keywordTexts = keywords.map(kw => kw?.text || kw).join(' ');
+    const suffix = ` [KEYWORDS: ${keywordTexts}]`;
+    const trimmedText = text.trimEnd();
+
+    if (!trimmedText.endsWith(suffix)) {
+        return text;
+    }
+
+    // Handle repeated identical suffixes; preserve trailing whitespace exactly.
+    let originalText = trimmedText;
+    while (originalText.endsWith(suffix)) {
+        originalText = originalText.slice(0, -suffix.length);
+    }
+
+    // Do not turn a suffix-only chunk into empty injected memory text.
+    if (!originalText.trim()) {
+        return text;
+    }
+
+    return originalText + text.slice(trimmedText.length);
+}
+
 function buildNestedInjectionText(chunks, settings) {
     // Group chunks by collection
     const byCollection = new Map();
@@ -1775,7 +1813,7 @@ function buildNestedInjectionText(chunks, settings) {
             const chunkMeta = getChunkMetadata(chunk.hash) || {};
             const chunkContext = chunkMeta.context ? substituteParams(chunkMeta.context) : '';
             const chunkXmlTag = chunkMeta.xmlTag || '';
-            const text = chunk.text || '(text not available)';
+            const text = getRagInjectionChunkText(chunk, settings);
 
             // Build chunk with optional wrapping
             let chunkBlock = '';
