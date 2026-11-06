@@ -190,21 +190,27 @@ window['vecthare_rearrangeChat'] = vecthare_rearrangeChat;
  * of edited messages) WITHOUT continuing the backlog.
  */
 async function onRepairClick() {
-    await repairChatVectors(settings, getBatchSize());
-    offerResumeOfUnfinishedVectorization(); // refresh status line + button
+    invalidateSavedVectorizationStatus();
+    try {
+        await repairChatVectors(settings, getBatchSize());
+    } finally {
+        invalidateSavedVectorizationStatus();
+        void offerResumeOfUnfinishedVectorization(); // refresh status line + button
+    }
 }
 
 /**
  * Action: Vectorize all messages in current chat (full sync: repair + backlog)
  */
 async function onVectorizeAllClick() {
-    await vectorizeAll(settings, getBatchSize());
-    // VectHare+ FIX: after a run ends (especially Stop / partial / failure),
-    // re-run the backlog check so the Continue button + toast reflect the
-    // CURRENT chat's state. Previously the check only fired on CHAT_CHANGED,
-    // so stopping mid-run and staying in the same chat left no resume
-    // affordance at all until the user switched chats or reloaded.
-    offerResumeOfUnfinishedVectorization();
+    invalidateSavedVectorizationStatus();
+    try {
+        await vectorizeAll(settings, getBatchSize());
+    } finally {
+        // Re-read after the run, including Stop, failure and partial completion.
+        invalidateSavedVectorizationStatus();
+        void offerResumeOfUnfinishedVectorization();
+    }
 }
 
 /**
@@ -243,46 +249,113 @@ function showResumeToast(pending, total) {
 let lastDbStatus = null;
 let dbStatusRequestId = 0;
 let resumeCheckId = 0;
+let activeResumeStatusReadId = 0;
 let dbRefreshTimer = null;
 
 function currentStatusChatKey() {
     const ctx = getContext();
     const owner = getChatOwner(ctx);
     const filename = normChat(ctx?.chatId);
-    return owner && filename ? JSON.stringify([owner.type, owner.id, filename]) : null;
+    return owner && filename ? JSON.stringify([
+        owner.type, owner.id, filename, getChatCollectionId(),
+        settings.chunking_strategy, settings.batch_size,
+        settings.conversation_turn_order, settings.keyword_extraction_level,
+        settings.chunk_size, settings.vector_backend, settings.source,
+        settings.qdrant_url, settings.qdrant_host, settings.qdrant_port,
+        settings.qdrant_use_cloud, settings.qdrant_multitenancy
+    ]) : null;
 }
 
-function refreshVectorizationStatusDisplay(result = null) {
-    if (result) lastDbStatus = { ...result, collectionId: getChatCollectionId() };
-    if (isVectorizationActive()) {
-        // Live progress from the tracker while a run is in flight
-        const s = progressTracker.stats;
-        const db = lastDbStatus?.collectionId === getChatCollectionId() ? lastDbStatus : null;
-        const done = db ? (db.total - db.pending) : (s.totalChunksToEmbed > 0 ? s.embeddedChunks : s.processedItems);
-        const total = db ? db.total : (s.totalChunksToEmbed > 0 ? s.totalChunksToEmbed : s.totalItems);
-        const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-        updateVectorizationStatus(`Running — ${pct}% (${done}/${total}) — click to view`);
-        return;
+function unavailableVectorizationStatus() {
+    if (settings.chunking_strategy === 'per_scene') {
+        return 'Per-scene: chat progress is managed through scene markers';
     }
-    if (!result && lastDbStatus?.collectionId === getChatCollectionId()) result = lastDbStatus;
-    if (result && typeof result.total === 'number' && result.total > 0) {
-        if (result.hasBacklog) {
-            const doneCount = result.total - result.pending;
-            const pct = Math.round((doneCount / result.total) * 100);
-            updateVectorizationStatus(`Vectorized: ${pct}% (${doneCount}/${result.total}) — click for details`);
-        } else {
-            updateVectorizationStatus(`Fully vectorized (${result.total}/${result.total}) ✓`);
+    const collectionId = getChatCollectionId();
+    if (!collectionId) return 'Saved vector status unavailable — no current chat collection';
+    const known = getCollectionRegistry().some(key => {
+        const entry = parseRegistryKey(key);
+        return entry.collectionId === collectionId &&
+            (!entry.backend || entry.backend === settings.vector_backend) &&
+            (!entry.source || entry.source === settings.source);
+    });
+    return known ? 'Saved vector status unavailable — database check inconclusive'
+        : 'No registry entry found for this chat — saved status unverified';
+}
+
+function invalidateSavedVectorizationStatus() {
+    lastDbStatus = null;
+    ++dbStatusRequestId;
+    ++resumeCheckId;
+    if (!isVectorizationActive() && !progressTracker.isPaused && progressTracker.isDatabaseSnapshot) {
+        progressTracker.setDatabaseStatus(null, unavailableVectorizationStatus());
+    }
+    refreshVectorizationStatusDisplay();
+}
+
+function isValidSavedStatus(result) {
+    return result != null &&
+        Number.isSafeInteger(result.total) && Number.isSafeInteger(result.pending) &&
+        result.total >= 0 && result.pending >= 0 && result.pending <= result.total;
+}
+
+function refreshVectorizationStatusDisplay() {
+    if (isVectorizationActive() || progressTracker.isPaused) {
+        const state = progressTracker.isPaused ? 'Paused' : 'Running';
+        if (settings.chunking_strategy === 'per_scene') {
+            updateVectorizationStatus(`${state} — click to view`);
+            return;
         }
+        const s = progressTracker.stats;
+        const useEmbedding = progressTracker.currentOperation !== 'Vectorizing Chat' &&
+            s.totalChunksToEmbed > 0;
+        const done = useEmbedding ? s.embeddedChunks : s.processedItems;
+        const total = useEmbedding ? s.totalChunksToEmbed : s.totalItems;
+        if (!Number.isFinite(done) || !Number.isFinite(total) ||
+            done < 0 || total <= 0 || done > total) {
+            updateVectorizationStatus(`${state} — progress unavailable — click to view`);
+            return;
+        }
+        const pct = Math.round(done / total * 100);
+        updateVectorizationStatus(`${state} — ${pct}% (${done}/${total}) — click to view`);
         return;
     }
-    updateVectorizationStatus('Status: no saved vector data for this chat');
+    if (settings.chunking_strategy === 'per_scene') {
+        updateVectorizationStatus(unavailableVectorizationStatus());
+        return;
+    }
+    const statusKey = currentStatusChatKey();
+    const result = statusKey && lastDbStatus?.statusKey === statusKey &&
+        isValidSavedStatus(lastDbStatus) ? lastDbStatus : null;
+    if (!result) {
+        updateVectorizationStatus(unavailableVectorizationStatus());
+        return;
+    }
+    if (result.total === 0) {
+        updateVectorizationStatus('No eligible message groups in this chat');
+        return;
+    }
+    const done = result.total - result.pending;
+    const pct = Math.round(done / result.total * 100);
+    updateVectorizationStatus(result.pending > 0
+        ? `Vectorized: ${pct}% (${done}/${result.total}) — click for details`
+        : `Fully vectorized (${result.total}/${result.total}) ✓`);
 }
 
 // Read the actual saved hashes, coalescing rapid writes into one DB query.
 // Runs after each committed insert/delete/purge and whenever Status opens.
 async function refreshSavedDatabaseStatus() {
-    const requestId = ++dbStatusRequestId;
     const chatKey = currentStatusChatKey();
+    if (!chatKey) {
+        lastDbStatus = null;
+        if (!isVectorizationActive() && !progressTracker.isPaused && progressTracker.isDatabaseSnapshot) {
+            progressTracker.setDatabaseStatus(null, unavailableVectorizationStatus());
+        }
+        refreshVectorizationStatusDisplay();
+        return;
+    }
+    // Let startup/operation resume checks finish their retries and button update.
+    if (activeResumeStatusReadId && activeResumeStatusReadId === dbStatusRequestId) return;
+    const requestId = ++dbStatusRequestId;
     const collectionId = getChatCollectionId();
     let result = null;
     try {
@@ -290,22 +363,24 @@ async function refreshSavedDatabaseStatus() {
     } catch (error) {
         console.warn('VectHare: Status refresh failed:', error);
     }
-    // Ignore replies from a previous chat or a superseded DB read.
+    // A status read only publishes while its chat and request still match.
     if (requestId !== dbStatusRequestId || chatKey !== currentStatusChatKey() ||
         collectionId !== getChatCollectionId()) return;
-    lastDbStatus = result ? { ...result, collectionId } : null;
+    result = isValidSavedStatus(result) ? result : null;
+    lastDbStatus = result ? { ...result, statusKey: chatKey } : null;
 
-    if (isVectorizationActive() && result && progressTracker.currentOperation === 'Vectorizing Chat') {
-        // This is collection-wide *persisted* progress, not just the last
-        // in-memory batch. Shows each saved chunk even mid-batch.
-        const done = result.total - result.pending;
-        progressTracker.stats.totalItems = result.total;
-        progressTracker.updateEmbeddingProgress(done, result.total);
-        progressTracker.updateProgress(done, progressTracker.isPaused ? '' : `${result.pending} message groups remaining`);
-    } else if (!isVectorizationActive() && progressTracker.isDatabaseSnapshot) {
-        progressTracker.setDatabaseStatus(result);
+    // A periodic refresh may supersede a resume check. Keep its button usable.
+    if (result && !isVectorizationActive() && !progressTracker.isPaused) {
+        updateContinueVectorizationButton(
+            result.pending > 0 ? 'backlog' : 'available', result.pending, result.total);
     }
-    refreshVectorizationStatusDisplay(result);
+    // Saved snapshots never mutate active or paused run counters.
+    if (!isVectorizationActive() && !progressTracker.isPaused && progressTracker.isDatabaseSnapshot) {
+        progressTracker.setDatabaseStatus(
+            settings.chunking_strategy === 'per_scene' ? null : result,
+            unavailableVectorizationStatus());
+    }
+    refreshVectorizationStatusDisplay();
 }
 
 function scheduleSavedDatabaseRefresh() {
@@ -324,92 +399,108 @@ setInterval(() => {
 async function offerResumeOfUnfinishedVectorization() {
     const requestId = ++resumeCheckId;
     const chatKey = currentStatusChatKey();
-    const isCurrent = () => requestId === resumeCheckId && chatKey === currentStatusChatKey();
     if (!chatKey) return;
-    // VectHare+ FIX (notification behavior): a run already in flight IS the
-    // resume — don't nag while it works. BUT we must not bail permanently:
-    // this can fire while a run is aborting (e.g. user switched chats mid-run,
-    // CHAT_CHANGED beats the "chat changed" cleanup), and a bare return would
-    // strand the NEW chat's backlog unchecked. So wait (bounded, up to 10 min)
-    // for the active run to finish, then proceed with the normal check.
-    if (isVectorizationActive()) {
-        console.debug('VectHare: Resume check waiting for active vectorization run to finish...');
-        let waitedMs = 0;
-        while (isVectorizationActive() && waitedMs < 600000) {
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            if (!isCurrent()) return;
-            waitedMs += 2000;
-        }
-        if (isVectorizationActive()) {
-            console.debug('VectHare: Resume check gave up waiting (run exceeded 10 min wait window)');
-            return;
-        }
-    }
-
-    for (let attempt = 1; attempt <= RESUME_CHECK_MAX_ATTEMPTS; attempt++) {
-        if (!isCurrent()) return;
-        let result = null;
-        try {
-            result = await checkUnfinishedVectorization(settings);
-        } catch (error) {
-            console.warn('VectHare: Resume-on-load check failed:', error.message);
-        }
-        if (!isCurrent()) return;
-
-        if (result) {
-            // Definitive answer — reflect it in the UI (Repair Chunks button +
-            // R10 status line) and stop polling.
-            // R23: 'available' instead of hiding on no-backlog - the button is a
-            // working tool (repair is a safe no-op when clean), and the old
-            // hide-on-clean made it flicker away based on racy async timing.
-            updateContinueVectorizationButton(
-                result.hasBacklog ? 'backlog' : 'available',
-                result.pending,
-                result.total
-            );
-            refreshVectorizationStatusDisplay(result);
-            if (!isVectorizationActive() && progressTracker.isDatabaseSnapshot) progressTracker.setDatabaseStatus(result);
-            // R9: if the user just pressed Stop, they KNOW it's unfinished - don't
-            // immediately nag with the toast. Button still updates (persistent
-            // affordance). Flag is consume-on-read so later natural checks toast.
-            const justStoppedByUser = consumeWasLastRunStoppedByUser();
-            if (result.hasBacklog && !isVectorizationActive() && !justStoppedByUser) {
-                console.log(`VectHare: Unfinished vectorization detected (${result.pending}/${result.total} pending)`);
-                showResumeToast(result.pending, result.total);
-            }
-            return;
-        }
-
-        // Collection not discovered yet — wait for discovery and retry
-        if (attempt < RESUME_CHECK_MAX_ATTEMPTS) {
-            await new Promise(resolve => setTimeout(resolve, RESUME_CHECK_RETRY_MS));
-            if (!isCurrent()) return;
-        }
-    }
-    if (!isCurrent()) return;
-
-    // Inconclusive: the check couldn't determine state (discovery/init still
-    // warming up, or chat truly has no collection).
-    // R23 FIX: previously "leave the button in whatever state it was" - which,
-    // combined with hide-on-clean calls elsewhere, is exactly how the user saw
-    // the Repair Chunks button vanish after actions and reappear after reload.
-    // Now: inconclusive state is resolved by REGISTRY TRUTH instead of timing.
-    // - Collection known to the registry -> button shows as 'available'
-    //   (repair is a safe no-op when clean; better a present harmless button
-    //   than a racy vanishing one)
-    // - Collection unknown -> genuinely no collection -> hidden (correct)
-    // R11 status-line refresh retained.
+    const statusReadId = ++dbStatusRequestId;
+    activeResumeStatusReadId = statusReadId;
+    const isCurrent = () => requestId === resumeCheckId &&
+        statusReadId === dbStatusRequestId && chatKey === currentStatusChatKey();
     try {
-        const collectionId = getChatCollectionId();
-        const known = collectionId && getCollectionRegistry().some(
-            key => parseRegistryKey(key).collectionId === collectionId
-        );
-        updateContinueVectorizationButton(known ? 'available' : 'hide');
-    } catch (e) {
-        console.warn('VectHare: R23 inconclusive-state button resolution failed:', e.message);
+        // VectHare+ FIX (notification behavior): a run already in flight IS the
+        // resume — don't nag while it works. BUT we must not bail permanently:
+        // this can fire while a run is aborting (e.g. user switched chats mid-run,
+        // CHAT_CHANGED beats the "chat changed" cleanup), and a bare return would
+        // strand the NEW chat's backlog unchecked. So wait (bounded, up to 10 min)
+        // for the active run to finish, then proceed with the normal check.
+        if (isVectorizationActive()) {
+            console.debug('VectHare: Resume check waiting for active vectorization run to finish...');
+            let waitedMs = 0;
+            while (isVectorizationActive() && waitedMs < 600000) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                if (!isCurrent()) return;
+                waitedMs += 2000;
+            }
+            if (isVectorizationActive()) {
+                console.debug('VectHare: Resume check gave up waiting (run exceeded 10 min wait window)');
+                return;
+            }
+        }
+
+        for (let attempt = 1; attempt <= RESUME_CHECK_MAX_ATTEMPTS; attempt++) {
+            if (!isCurrent()) return;
+            let result = null;
+            try {
+                result = await checkUnfinishedVectorization(settings);
+            } catch (error) {
+                console.warn('VectHare: Resume-on-load check failed:', error.message);
+            }
+            if (!isCurrent()) return;
+
+            if (isValidSavedStatus(result)) {
+                // Definitive answer — reflect it in the UI (Repair Chunks button +
+                // R10 status line) and stop polling.
+                // R23: 'available' instead of hiding on no-backlog - the button is a
+                // working tool (repair is a safe no-op when clean), and the old
+                // hide-on-clean made it flicker away based on racy async timing.
+                updateContinueVectorizationButton(
+                    result.pending > 0 ? 'backlog' : 'available',
+                    result.pending,
+                    result.total
+                );
+                lastDbStatus = { ...result, statusKey: chatKey };
+                refreshVectorizationStatusDisplay();
+                if (!isVectorizationActive() && !progressTracker.isPaused && progressTracker.isDatabaseSnapshot) {
+                    progressTracker.setDatabaseStatus(
+                        settings.chunking_strategy === 'per_scene' ? null : result,
+                        unavailableVectorizationStatus());
+                }
+                // R9: if the user just pressed Stop, they KNOW it's unfinished - don't
+                // immediately nag with the toast. Button still updates (persistent
+                // affordance). Flag is consume-on-read so later natural checks toast.
+                const justStoppedByUser = consumeWasLastRunStoppedByUser();
+                if (result.pending > 0 && !isVectorizationActive() && !justStoppedByUser) {
+                    console.log(`VectHare: Unfinished vectorization detected (${result.pending}/${result.total} pending)`);
+                    showResumeToast(result.pending, result.total);
+                }
+                return;
+            }
+
+            // Collection not discovered yet — wait for discovery and retry
+            if (attempt < RESUME_CHECK_MAX_ATTEMPTS) {
+                await new Promise(resolve => setTimeout(resolve, RESUME_CHECK_RETRY_MS));
+                if (!isCurrent()) return;
+            }
+        }
+        if (!isCurrent()) return;
+
+        // Inconclusive: the check couldn't determine state (discovery/init still
+        // warming up, or chat truly has no collection).
+        // R23 FIX: previously "leave the button in whatever state it was" - which,
+        // combined with hide-on-clean calls elsewhere, is exactly how the user saw
+        // the Repair Chunks button vanish after actions and reappear after reload.
+        // Now: inconclusive state is resolved by REGISTRY TRUTH instead of timing.
+        // - Collection known to the registry -> button shows as 'available'
+        //   (repair is a safe no-op when clean; better a present harmless button
+        //   than a racy vanishing one)
+        // - Collection unknown -> genuinely no collection -> hidden (correct)
+        // R11 status-line refresh retained.
+        try {
+            const collectionId = getChatCollectionId();
+            const known = collectionId && getCollectionRegistry().some(
+                key => parseRegistryKey(key).collectionId === collectionId
+            );
+            updateContinueVectorizationButton(known ? 'available' : 'hide');
+        } catch (e) {
+            console.warn('VectHare: R23 inconclusive-state button resolution failed:', e.message);
+        }
+        lastDbStatus = null;
+        refreshVectorizationStatusDisplay();
+        if (!isVectorizationActive() && !progressTracker.isPaused && progressTracker.isDatabaseSnapshot) {
+            progressTracker.setDatabaseStatus(null, unavailableVectorizationStatus());
+        }
+        console.debug('VectHare: Resume check inconclusive after retries; saved status unavailable');
+    } finally {
+        if (activeResumeStatusReadId === statusReadId) activeResumeStatusReadId = 0;
     }
-    refreshVectorizationStatusDisplay();
-    console.debug('VectHare: Resume check inconclusive after retries (no vector collection discovered yet)');
 }
 
 /**
@@ -506,6 +597,19 @@ jQuery(async () => {
         onPurge: onPurgeClick,
         onRunDiagnostics: onRunDiagnosticsClick
     });
+
+    // Delegation runs after the controls' own settings update handlers.
+    const savedStatusSettingsSelector = [
+        '#vecthare_chunking_strategy', '#vecthare_turn_order',
+        '#vecthare_batch_size', '#vecthare_chunk_size',
+        '#vecthare_vector_backend', '#vecthare_source',
+        '#vecthare_qdrant_use_cloud', '#vecthare_qdrant_host',
+        '#vecthare_qdrant_port', '#vecthare_qdrant_url',
+        '#vecthare_qdrant_api_key', '#vecthare_qdrant_multitenancy'
+    ].join(', ');
+    jQuery(document).off('.vecthareSavedStatus').on(
+        'input.vecthareSavedStatus change.vecthareSavedStatus',
+        savedStatusSettingsSelector, invalidateSavedVectorizationStatus);
 
     // Fresh check on page load; no health cache is trusted for the indicator.
     void checkBackendHealth(settings);
@@ -655,9 +759,8 @@ jQuery(async () => {
     // Events are fast-path registry updates; the claim in the chat file is the
     // recovery mechanism when an event is missed while the plugin was offline.
     eventSource.on(event_types.CHAT_RENAMED, payload => {
-        ++resumeCheckId;
-        ++dbStatusRequestId;
         onChatBindingRenamed(payload);
+        invalidateSavedVectorizationStatus();
         void ensureChatBinding(undefined, { create: false }).then(result => {
             if (result.state === 'active') {
                 refreshAutoSyncCheckbox(settings);
@@ -679,9 +782,8 @@ jQuery(async () => {
 
     // When chat changes, refresh UI state to match settings
     eventSource.on(event_types.CHAT_CHANGED, () => {
-        // Invalidate any outstanding status/backlog checks for the prior chat.
-        ++resumeCheckId;
-        ++dbStatusRequestId;
+        // Invalidate all cached status and outstanding reads for the prior chat.
+        invalidateSavedVectorizationStatus();
         // Safe, idempotent, one-time identity discovery. Never enable writes
         // for ambiguous legacy collections.
         void ensureChatBinding(undefined, { create: false }).then(result => {
@@ -689,8 +791,6 @@ jQuery(async () => {
         }).catch(error => console.warn('VectHare: Chat binding not resolved', error));
         console.log('VectHare: Chat changed, refreshing UI state');
         refreshAutoSyncCheckbox(settings);
-        lastDbStatus = null;
-        ++dbStatusRequestId;
         scheduleSavedDatabaseRefresh();
         // VectHare+: check for interrupted vectorization on the loaded chat
         offerResumeOfUnfinishedVectorization();

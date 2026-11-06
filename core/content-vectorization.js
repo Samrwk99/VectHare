@@ -102,7 +102,8 @@ export async function vectorizeContent({ contentType, source, settings }) {
         }));
 
         // Step 4: Insert into vector store (streaming: embed + write together)
-        progressTracker.updateProgress(4, 'Processing chunks...');
+        progressTracker.stats.embeddingBasePercent = Math.round(3 / progressTracker.stats.totalItems * 100);
+        progressTracker.updateProgress(3, 'Embedding and saving chunks...');
 
         // Ensure backend is initialized and healthy before attempting inserts.
         // Some backends (LanceDB/Qdrant) require initialization which may fail
@@ -170,6 +171,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
         registerCollection(collectionId);
         console.log(`VectHare: Registered collection ${collectionId}`);
 
+        progressTracker.updateProgress(4, 'Finalizing...');
         progressTracker.complete(true, `Vectorized ${hashedChunks.length} chunks`);
 
         return {

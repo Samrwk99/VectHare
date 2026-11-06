@@ -889,13 +889,24 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
             }
         }
 
+        // Show existing saved groups before processing new ones.
+        if (bypassAutoSync && progressTracker.currentOperation === 'Vectorizing Chat') {
+            const done = groupedItems.length - queue.size;
+            progressTracker.stats.totalItems = groupedItems.length;
+            progressTracker.stats.embeddedChunks = done;
+            progressTracker.stats.totalChunksToEmbed = groupedItems.length;
+            progressTracker.updateProgress(done,
+                queue.size > 0 ? `${queue.size} ${strategy === 'per_message' ? 'messages' : 'message groups'} remaining` : 'Finalizing...');
+        }
+
         if (queue.isEmpty()) {
-            return { remaining: 0, messagesProcessed: 0, chunksCreated: 0 };
+            return { remaining: 0, messagesProcessed: 0, chunksCreated: 0, groupsCompleted: 0, total: groupedItems.length };
         }
 
         // Step 3: Process batch
         let itemsProcessed = 0;
         let chunksCreated = 0;
+        let groupsCompleted = 0;
         let itemsFailed = 0;
         const label = strategy === 'per_message' ? 'Message' : 'Group';
 
@@ -950,12 +961,14 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                     // An in-flight insert can finish after switching chats. Keep
                     // its original collection registered, then stop this sync.
                     if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
+                    groupsCompleted++;
                 }
             } catch (itemError) {
                 // R13: an aborted request (user pressed Stop) is a CLEAN stop,
                 // not a failed item - exit the batch loop immediately. The loop
                 // top then handles the normal stop bookkeeping.
                 if (isVectorizationStopped()) {
+                    queue.enqueue(item); // Aborted item is still pending.
                     break;
                 }
                 // Log error but continue processing other items
@@ -975,9 +988,10 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
         }
 
         return {
-            remaining: queue.size,
+            remaining: queue.size + itemsFailed,
             messagesProcessed: itemsProcessed,
             chunksCreated,
+            groupsCompleted,
             itemsFailed,
             total: groupedItems.length // R7: whole-collection group count for progress display
         };
@@ -2632,8 +2646,12 @@ export async function vectorizeAll(settings, batchSize) {
 
         if (!isChatTargetCurrent(target, binding.collectionId)) throw new ChatSwitchStop();
 
-        // Show progress panel
-        progressTracker.show('Vectorizing Chat', totalMessages, 'Messages');
+        // Count the grouped units actually used by synchronization.
+        const totalGroups = collectGroupedItems(target.messages, settings).length;
+        const progressUnit = !settings.chunking_strategy || settings.chunking_strategy === 'per_message'
+            ? 'Messages' : 'Message groups';
+        progressTracker.show('Vectorizing Chat', totalGroups, progressUnit);
+        progressTracker.stats.groupsCompletedThisRun = 0;
         progressShown = true;
 
         let finished = false;
@@ -2715,7 +2733,7 @@ export async function vectorizeAll(settings, batchSize) {
                     if (!isChatTargetCurrent(target, binding.collectionId)) throw new ChatSwitchStop();
                 }
                 if (!isVectorizationStopped() && !isVectorizationPaused()) {
-                    progressTracker.updateProgress(processedCount, 'Resumed after message generation');
+                    progressTracker.updateProgress(progressTracker.stats.processedItems, 'Resumed after message generation');
                 }
             }
 
@@ -2794,29 +2812,22 @@ export async function vectorizeAll(settings, batchSize) {
             }
             transientBlockCount = 0;
 
-            // R7 FIX (chunk progress): drive the panel's chunk counter from
-            // whole-collection truth (done = total groups - remaining) instead
-            // of the misleading per-item 1/1 embedding callback. This also
-            // self-corrects when the chat grows during a catch-up run.
-            if (result.total > 0) {
-                progressTracker.updateEmbeddingProgress(result.total - result.remaining, result.total);
-            }
+            // The denominator follows the current grouping snapshot.
+            progressTracker.stats.totalItems = result.total;
+            progressTracker.updateEmbeddingProgress(result.total - result.remaining, result.total);
 
             finished = result.remaining <= 0;
             iteration++;
 
-            // Update progress with actual counts
             processedCount += result.messagesProcessed;
             totalChunks += result.chunksCreated;
+            progressTracker.stats.groupsCompletedThisRun += result.groupsCompleted;
 
-            // R10 FIX (user feedback): the Messages counter previously showed
-            // processedCount - THIS SESSION's work, resetting to 0 on every new
-            // run - while the Chunks line showed whole-collection progress.
-            // Both now report the same collection-wide truth: done = total
-            // groups - remaining. processedCount is still used for toasts.
             progressTracker.updateProgress(
-                result.total > 0 ? (result.total - result.remaining) : processedCount,
-                result.remaining > 0 ? `Processing... ${result.remaining} messages remaining` : 'Finalizing...'
+                result.total - result.remaining,
+                result.remaining > 0
+                    ? `Processing... ${result.remaining} ${progressUnit.toLowerCase()} remaining`
+                    : 'Finalizing...'
             );
             progressTracker.updateChunks(totalChunks);
 
@@ -2826,7 +2837,7 @@ export async function vectorizeAll(settings, batchSize) {
 
         vectorizeRunActive = false;
         resetControlState();
-        progressTracker.complete(true, `Vectorized ${processedCount} messages (${totalChunks} chunks)`);
+        progressTracker.complete(true, `Completed ${progressTracker.stats.groupsCompletedThisRun} ${progressUnit.toLowerCase()} this run (${totalChunks} chunks written)`);
         toastr.success('Chat vectorized successfully', 'VectHare');
         console.log(`VectHare: ✅ Vectorization complete after ${iteration} iterations`);
     } catch (error) {
@@ -3067,13 +3078,15 @@ export async function repairChatVectors(settings, batchSize = 5) {
         }
 
         if (hashesToDelete.length === 0 && replacements.length === 0) {
+            if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
             // R16 FIX: complete() (not bare hide()) - the old bare hide left
             // the panel's Pause/Stop controls bound to a dead run; a later
             // panel reveal resurrected clickable controls for a run that no
             // longer existed. complete() hides controls and shows an honest
             // green-tick line.
-            progressTracker.complete(true, 'Nothing to repair - all vectorized chunks match the current chat');
-            toastr.success('Nothing to repair - all vectorized chunks match the current chat.', 'Repair');
+            progressTracker.show('Repairing Chunks', 0, 'Items');
+            progressTracker.complete(true, 'Nothing to repair — no repair work detected for the current chat');
+            toastr.success('Nothing to repair — no repair work detected for the current chat.', 'Repair');
             vectorizeRunActive = false;
             resetControlState();
             return;
@@ -3112,7 +3125,10 @@ export async function repairChatVectors(settings, batchSize = 5) {
 
         let done = 0;
         let inserted = 0;
-        let failed = 0;
+        let deleted = 0;
+        let replacementFailures = 0;
+        let deletionFailures = 0;
+        const writtenReplacements = [];
         // R20: hashes of FAILED replacements - their ghosts must NOT be deleted
         // in Phase 2 (insert-before-delete guarantee: the stale vector stays as
         // the recall fallback until the replacement exists)
@@ -3123,8 +3139,12 @@ export async function repairChatVectors(settings, batchSize = 5) {
         // embed leaves the stale vector in place rather than a hole; the ghost
         // cleanup on the next pass will retry)
         for (const item of replacements) {
+            while (isVectorizationPaused() && !isVectorizationStopped() &&
+                isChatTargetCurrent(target, collectionId)) {
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
             if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
-            if (isVectorizationStopped() || isVectorizationPaused()) break;
+            if (isVectorizationStopped()) break;
             try {
                 const chunks = prepareItemsForInsertion([item]);
                 // R13: abortable - Stop cancels the in-flight repair embed
@@ -3133,92 +3153,137 @@ export async function repairChatVectors(settings, batchSize = 5) {
                     progressTracker.updateCurrentItem(`${label} ${done + 1}/${totalUnits} - embedding ${embedded}/${total}`);
                 }, getStopSignal());
                 inserted++;
+                writtenReplacements.push(item);
+                done++;
             } catch (err) {
-                // R13: user abort is a clean stop, not a failed item
+                // An aborted or failed request may have an uncertain write outcome.
+                failedHashes.add(String(item.hash));
                 if (isVectorizationStopped()) break;
-                console.warn(`VectHare: Repair - failed to re-vectorize group (hash ${item.hash}):`, err.message);
-                failedHashes.add(String(item.hash)); // R20: keep its stale vector as fallback
-                failed++;
+                console.warn(`VectHare: Repair - replacement write not acknowledged (hash ${item.hash}):`, err.message);
+                replacementFailures++;
             }
-            done++;
-            progressTracker.updateProgress(done, `Repairing... ${totalUnits - done} remaining`);
+            progressTracker.updateProgress(done,
+                `Repairing... ${totalUnits - done} outstanding` +
+                `${replacementFailures ? ` (${replacementFailures} replacement write errors)` : ''}`);
         }
 
-        // Phase 2: delete stale vectors (cheap, safe, always finished even if
-        // stopped mid-phase-1: pure cleanup that only removes wrong data).
-        // R20 FIX (design contradiction): hashes of FAILED replacements were
-        // still deleted here, violating the documented insert-before-delete
-        // guarantee - a failed embed + delete = temporary recall hole (the
-        // next sync's hash-diff backfills it, but the contract promised the
-        // stale vector would REMAIN until the replacement exists). Failed
-        // replacements' ghosts are now deferred to the next pass.
-        const safeDeletes = hashesToDelete.filter(h => !failedHashes.has(h));
-        if (safeDeletes.length > 0) {
-            // Cancellation before a destructive operation, not after it finished.
+        // Check acknowledged replacement hashes BEFORE deleting any stale records.
+        let hashesFound = 0;
+        let verificationUnavailable = false;
+        const hashesNotFound = [];
+        if (writtenReplacements.length > 0 && !isVectorizationStopped()) {
+            while (isVectorizationPaused() && !isVectorizationStopped() &&
+                isChatTargetCurrent(target, collectionId)) {
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
             if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
-            try {
-                // R17: abortable+timed delete
-                await deleteVectorItems(collectionId, safeDeletes, settings, getStopSignal());
-                console.log(`VectHare: Repair removed ${safeDeletes.length} stale/duplicate vector(s)${failedHashes.size > 0 ? ` (${failedHashes.size} ghost(s) of failed replacements deferred to the next pass)` : ''}`);
-            } catch (delError) {
-                console.warn('VectHare: Repair - deletion failed (will retry next pass):', delError.message);
-                failed += safeDeletes.length;
-            }
-            done += safeDeletes.length;
-            progressTracker.updateProgress(Math.min(done, totalUnits), `Repairing... cleaned ${safeDeletes.length} stale vector(s)`);
-        }
-
-        // R15: VERIFY the work. Re-read the collection and confirm every
-        // replacement's hash is actually present. An insert can silently
-        // fail (backend accepts then drops, embeds nothing, etc.) and until
-        // now repair reported success based on "no exception thrown" alone.
-        let confirmed = 0;
-        const unconfirmed = [];
-        if (replacements.length > 0) {
-            try {
-                const verifyHashes = new Set(
-                    (await getSavedHashes(collectionId, settings, false, getStopSignal())).map(h => String(h))
-                );
-                for (const item of replacements) {
-                    if (verifyHashes.has(String(item.hash))) {
-                        confirmed++;
-                    } else {
-                        unconfirmed.push(item);
+            if (!isVectorizationStopped()) {
+                try {
+                    const savedHashes = await getSavedHashes(collectionId, settings, false, getStopSignal());
+                    if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
+                    if (!isVectorizationStopped()) {
+                        const verifyHashes = new Set(savedHashes.map(hash => String(hash)));
+                        for (const item of writtenReplacements) {
+                            if (verifyHashes.has(String(item.hash))) hashesFound++;
+                            else hashesNotFound.push(item);
+                        }
+                        console.log(`VectHare: Repair hash check - ${hashesFound}/${writtenReplacements.length} acknowledged replacement hashes found`);
+                        for (const item of hashesNotFound) {
+                            console.warn(`VectHare: Repair replacement hash not found: ${item.hash}`);
+                        }
+                    }
+                } catch (verifyError) {
+                    if (verifyError instanceof ChatSwitchStop) throw verifyError;
+                    verificationUnavailable = true;
+                    if (!isVectorizationStopped()) {
+                        console.warn('VectHare: Repair hash check unavailable:', verifyError.message);
                     }
                 }
-                console.log(`VectHare: Repair verification - ${confirmed}/${replacements.length} replacement(s) confirmed in DB: [${replacements.map(r => r.hash).join(', ')}]`);
-                for (const item of unconfirmed) {
-                    console.warn(`VectHare: Repair verification FAILED for hash ${item.hash} (message index ${item.metadata?.messageId ?? item.metadata?.messageIds?.join(',')}): "${String(item.text).substring(0, 80)}..."`);
-                }
-            } catch (verifyError) {
-                console.warn('VectHare: Repair verification read failed (cannot confirm inserts):', verifyError.message);
             }
         }
+
+        const replacementChecksPassed =
+            inserted === replacements.length && replacementFailures === 0 &&
+            !verificationUnavailable && hashesFound === writtenReplacements.length;
+
+        // Hash-only deletion could also remove valid copies of current content.
+        const deferredDuplicateKeys = [
+            ...new Set(
+                hashesToDelete
+                    .map(hash => String(hash))
+                    .filter(hash => currentHashSet.has(hash))
+            ),
+        ];
+
+        // Defer all cleanup if any replacement is unresolved.
+        const safeDeletes = replacementChecksPassed
+            ? hashesToDelete.filter(hash =>
+                !failedHashes.has(String(hash)) && !currentHashSet.has(String(hash)))
+            : [];
+
+        while (isVectorizationPaused() && !isVectorizationStopped() &&
+                isChatTargetCurrent(target, collectionId)) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
+        if (safeDeletes.length > 0 && !isVectorizationStopped()) {
+            try {
+                await deleteVectorItems(collectionId, safeDeletes, settings, getStopSignal());
+                if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
+                deleted += safeDeletes.length;
+                done += safeDeletes.length;
+                console.log(`VectHare: Repair deletion acknowledged for ${safeDeletes.length} stale deletion key(s)`);
+            } catch (delError) {
+                if (delError instanceof ChatSwitchStop) throw delError;
+                if (!isVectorizationStopped()) {
+                    deletionFailures += safeDeletes.length;
+                    console.warn('VectHare: Repair - deletion not acknowledged; database outcome may be uncertain:', delError.message);
+                }
+            }
+            progressTracker.updateProgress(done, `Repairing... ${totalUnits - done} outstanding`);
+        }
+
+        // Do not finish a merely paused repair; Resume or Stop remains available.
+        while (isVectorizationPaused() && !isVectorizationStopped() &&
+                isChatTargetCurrent(target, collectionId)) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
+
+        const stopped = isVectorizationStopped();
+        const passSucceeded =
+            !stopped && replacementFailures === 0 && deletionFailures === 0 &&
+            !verificationUnavailable && inserted === replacements.length &&
+            hashesFound === replacements.length && deleted === hashesToDelete.length;
+        const unresolved = Math.max(0, totalUnits - (hashesFound + deleted));
+        const summary =
+            `Repair pass ${stopped ? 'stopped' : passSucceeded ? 'complete' : 'incomplete'}: ` +
+            `${inserted}/${replacements.length} replacement writes acknowledged, ` +
+            `${hashesFound}/${inserted} replacement hashes found, ` +
+            `${deleted}/${hashesToDelete.length} deletion keys acknowledged` +
+            `${deferredDuplicateKeys.length
+                ? `, ${deferredDuplicateKeys.length} current-content hash key(s) deferred (hash-only deletion could remove valid copies)`
+                : ''}` +
+            `${verificationUnavailable ? ', hash check unavailable' : ''}` +
+            `${replacementFailures ? `, ${replacementFailures} replacement write errors` : ''}` +
+            `${deletionFailures ? `, ${deletionFailures} deletion keys without acknowledgement` : ''}` +
+            `${unresolved ? `, ${unresolved} work units unresolved` : ''}`;
 
         vectorizeRunActive = false;
         resetControlState();
-        const unconfirmedCount = unconfirmed.length;
-        // R21: report ACTUAL deletions (safeDeletes), not planned (hashesToDelete) -
-        // deferred ghosts of failed replacements were being counted as removed
-        progressTracker.complete(true, `Repair complete: ${confirmed}/${inserted} re-vectorized & verified, ${safeDeletes.length} stale removed${failedHashes.size > 0 ? `, ${failedHashes.size} deferred (failed replacements)` : ''}${unconfirmedCount > 0 ? `, ${unconfirmedCount} NOT confirmed in DB` : ''}${failed > 0 ? `, ${failed} failed` : ''}`);
-        if (unconfirmedCount > 0) {
-            // Honest failure report: inserts were attempted but did not land.
-            toastr.warning(
-                `Repair finished but ${unconfirmedCount} updated chunk(s) did NOT appear in the database (details in console). They will be retried automatically on the next Sync Chat.`,
-                'Repair: verification failed',
-                { timeOut: 15000 }
-            );
+        progressTracker.updateProgress(hashesFound + deleted);
+        progressTracker.complete(passSucceeded, summary);
+        if (passSucceeded) {
+            toastr.success(summary, 'Repair');
         } else {
-            toastr.success(
-                `Repair complete: ${confirmed} chunk(s) updated & verified in DB, ${safeDeletes.length} stale/duplicate vector(s) removed.${failedHashes.size > 0 ? ` ${failedHashes.size} stale vector(s) kept as fallback (their replacements failed; retry next pass).` : ''}`,
-                'Repair'
-            );
+            toastr.warning(summary + '. Unresolved work can be checked on a later repair pass.',
+                'Repair', { timeOut: 15000 });
         }
     } catch (error) {
         vectorizeRunActive = false;
         resetControlState();
         if (error instanceof ChatSwitchStop) {
-            if (progressShown) progressTracker.complete(true, 'Repair stopped because you switched chats — completed changes saved');
+            if (progressShown) progressTracker.complete(false, 'Repair stopped because you switched chats — completed changes saved');
             toastr.info('Repair stopped because you switched chats. Completed changes are saved.', 'VectHare');
             console.info('VectHare: Repair stopped after chat switch; completed changes preserved');
             return;

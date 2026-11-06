@@ -21,6 +21,7 @@ export class ProgressTracker {
         this.isVisible = false;
         this.isPaused = false;
         this.terminalStatus = '';
+        this.currentStatus = '';
         this.isDatabaseSnapshot = false;
         this.startCallback = null;
         this.currentOperation = null;
@@ -76,42 +77,56 @@ export class ProgressTracker {
     openStatus() {
         if (!this.panel) this.createPanel();
         // Keep real run controls/progress intact, including a paused run.
-        if (this.isComplete && !this.isPaused || !this.currentOperation) {
-            this.currentOperation = 'Current Chat · Database Progress';
-            this.isComplete = true;
+        if (!this.isPaused && (this.isComplete || !this.currentOperation)) {
             this.isDatabaseSnapshot = true;
-            this.terminalStatus = 'Checking saved database progress…';
-            this.hideControls();
+            this.setDatabaseStatus(null, 'Checking saved database progress…');
         }
         this.reveal();
     }
 
     /** Show a database-backed snapshot when no manual job is active. */
-    setDatabaseStatus(result) {
-        if (!this.panel || !this.isDatabaseSnapshot) return;
-        const total = result?.total || 0;
-        const done = Math.max(0, total - (result?.pending || 0));
+    setDatabaseStatus(result, unavailableMessage = 'Saved vector status unavailable') {
+        if (!this.panel || !this.isDatabaseSnapshot || this.isPaused) return;
+        const validResult = result != null &&
+            Number.isSafeInteger(result.total) && Number.isSafeInteger(result.pending) &&
+            result.total >= 0 && result.pending >= 0 && result.pending <= result.total;
+        if (!validResult) result = null;
+        const total = result ? result.total : 0;
+        const done = result ? total - result.pending : 0;
+        const chunksKnown = result && Number.isSafeInteger(result.storedChunks) &&
+            result.storedChunks >= 0;
+
+        if (this.timeIntervalId) {
+            clearInterval(this.timeIntervalId);
+            this.timeIntervalId = null;
+        }
         this.currentOperation = 'Current Chat · Database Progress';
         this.isComplete = true;
         this.isPaused = false;
         this.isStopping = false;
+        this.currentStatus = '';
         this.currentEta = '';
-        this.stats.totalItems = total;
-        this.stats.processedItems = done;
-        this.stats.totalChunks = result?.storedChunks || 0;
-        this.stats.totalChunksToEmbed = 0;
-        this.stats.embeddedChunks = 0;
-        this.stats.startTime = null;
-        this.stats.errors = [];
+        this.stats = {
+            totalItems: total, processedItems: done,
+            currentBatch: 0, totalBatches: 0,
+            totalChunks: chunksKnown ? result.storedChunks : 0,
+            embeddedChunks: 0, totalChunksToEmbed: 0,
+            startTime: null, lastBatchTime: null, lastBatchSize: 0,
+            lastBatchStartTime: null, errors: [],
+            groupsCompletedThisRun: 0, embeddingBasePercent: 0, lastPercent: 0,
+            databaseResultUnknown: !validResult,
+            storedChunkCountKnown: !!chunksKnown,
+        };
         this.terminalStatus = result
-            ? (total ? `Saved in database: ${done}/${total} groups · ${total - done} pending`
-                : 'No message groups to vectorize in this chat')
-            : 'No saved vector collection found for this chat';
-        if (this.elements?.statLabel) this.elements.statLabel.textContent = 'Message groups';
+            ? (total ? `Saved group progress: ${done}/${total} groups · ${result.pending} pending`
+                : 'No eligible message groups in this chat')
+            : unavailableMessage;
+        if (this.elements?.statLabel) this.elements.statLabel.textContent = result ? 'Message groups' : 'Progress';
         if (this.elements?.time) this.elements.time.textContent = '—';
         if (this.elements?.speed) this.elements.speed.textContent = '—';
         if (this.elements?.errors) this.elements.errors.style.display = 'none';
         this.hideControls();
+        this.updateCurrentItem(null);
         this.updateDisplay();
     }
 
@@ -139,6 +154,7 @@ export class ProgressTracker {
         this.isComplete = false;
         this.isPaused = false;
         this.terminalStatus = '';
+        this.currentStatus = '';
         this.isStopping = false; // R10: fresh run must not inherit a stale stopping state
         this.currentEta = '';
         this.stats = {
@@ -153,6 +169,8 @@ export class ProgressTracker {
             lastBatchTime: null,
             lastBatchSize: 0,
             lastBatchStartTime: Date.now(),
+            groupsCompletedThisRun: 0, embeddingBasePercent: 0, lastPercent: 0,
+            databaseResultUnknown: false, storedChunkCountKnown: false,
             errors: [],
         };
 
@@ -224,6 +242,7 @@ export class ProgressTracker {
      */
     updateProgress(processedItems, status = '') {
         this.stats.processedItems = processedItems;
+        if (status) this.currentStatus = status;
         this.updateDisplay(status);
     }
 
@@ -515,9 +534,16 @@ export class ProgressTracker {
         // Prioritize embedding progress if available, otherwise use processed items
         let percent = 0;
         if (this.stats.totalChunksToEmbed > 0 && this.stats.embeddedChunks >= 0) {
-            percent = Math.round((this.stats.embeddedChunks / this.stats.totalChunksToEmbed) * 100);
+            const base = Math.min(Math.max(this.stats.embeddingBasePercent || 0, 0), 99);
+            const ratio = Math.min(this.stats.embeddedChunks / this.stats.totalChunksToEmbed, 1);
+            percent = Math.round(base + (100 - base) * ratio);
         } else if (this.stats.totalItems > 0) {
             percent = Math.round((this.stats.processedItems / this.stats.totalItems) * 100);
+        }
+        // Keep Content Vectorizer progress monotonic without masking chat sync recalculations.
+        if (!this.isDatabaseSnapshot && this.stats.embeddingBasePercent > 0) {
+            percent = Math.max(percent, this.stats.lastPercent || 0);
+            this.stats.lastPercent = percent;
         }
 
         // PERF: Use cached element references instead of repeated getElementById calls
@@ -533,21 +559,26 @@ export class ProgressTracker {
         // to "Processing chunks..." two seconds after Stop was pressed.
         const status = statusOverride
             || (this.isComplete && this.terminalStatus)
-            || (this.isStopping ? '⏹ Stopping - waiting for the in-flight embedding to finish...' : this.generateStatusMessage());
+            || (this.isStopping ? '⏹ Stopping - waiting for the in-flight embedding to finish...' : this.currentStatus || this.generateStatusMessage());
         if (els.status) els.status.textContent = status;
 
-        // Update progress bar
-        if (els.percent) els.percent.textContent = `${percent}%`;
-        if (els.bar) els.bar.style.width = `${percent}%`;
-
-        // Update stats
+        // Unknown saved status must not appear as verified 0% or 0/0.
+        const unknownSnapshot = this.isDatabaseSnapshot && this.stats.databaseResultUnknown;
+        if (els.percent) els.percent.textContent = unknownSnapshot ? '—' : `${percent}%`;
+        if (els.bar) els.bar.style.width = `${unknownSnapshot ? 0 : percent}%`;
         if (els.processed) {
-            els.processed.textContent = `${this.stats.processedItems} / ${this.stats.totalItems}`;
+            els.processed.textContent = unknownSnapshot ? '—' :
+                `${this.stats.processedItems} / ${this.stats.totalItems}`;
         }
 
-        // Show chunks - with embedding progress if available
+        // Chat progress is in groups; this line counts writes from this run.
         if (els.chunks) {
-            if (this.stats.totalChunksToEmbed > 0) {
+            if (this.isDatabaseSnapshot) {
+                els.chunks.textContent = this.stats.storedChunkCountKnown ?
+                    String(this.stats.totalChunks) : '—';
+            } else if (this.currentOperation === 'Vectorizing Chat') {
+                els.chunks.textContent = `${this.stats.totalChunks} written this run`;
+            } else if (this.stats.totalChunksToEmbed > 0) {
                 // Show embedding progress: "45/100 (55 left)"
                 const remaining = this.stats.totalChunksToEmbed - this.stats.embeddedChunks;
                 const displayText = `${this.stats.embeddedChunks}/${this.stats.totalChunksToEmbed} (${remaining} left)`;
@@ -561,9 +592,12 @@ export class ProgressTracker {
             }
         }
 
-        // Calculate speed based on last batch timing (more accurate for streaming)
+        // Chat speed is based on chunks written during this run.
         let speed = '0.0';
-        if (this.stats.lastBatchTime && this.stats.lastBatchSize > 0) {
+        if (this.currentOperation === 'Vectorizing Chat' && this.stats.startTime) {
+            const elapsed = (Date.now() - this.stats.startTime) / 1000;
+            speed = elapsed > 0 ? (this.stats.totalChunks / elapsed).toFixed(1) : '0.0';
+        } else if (this.stats.lastBatchTime && this.stats.lastBatchSize > 0) {
             // Use last batch performance for real-time speed
             const batchSpeed = (this.stats.lastBatchSize / (this.stats.lastBatchTime / 1000)).toFixed(1);
             speed = batchSpeed;
@@ -572,13 +606,15 @@ export class ProgressTracker {
             const elapsed = (Date.now() - this.stats.startTime) / 1000;
             speed = elapsed > 0 ? (this.stats.embeddedChunks / elapsed).toFixed(1) : '0.0';
         }
-        if (els.speed) els.speed.textContent = this.isDatabaseSnapshot ? '—' : `${speed}/s`;
+        if (els.speed) els.speed.textContent = this.isDatabaseSnapshot ? '—' : `${speed}${this.currentOperation === 'Vectorizing Chat' ? ' chunks/s' : '/s'}`;
 
         // R7/R10: compute ETA and stash it for the elapsed-time timer to append.
         // R10: while a Stop is draining, show "stopping…" instead of a nonsense
         // countdown; ETA is also recomputed by the 2s status timer (see
         // startTimeUpdater) so it stays fresh even during long single embeds.
-        if (this.isStopping) {
+        if (this.isComplete) {
+            this.currentEta = '';
+        } else if (this.isStopping) {
             this.currentEta = ' · stopping…';
         } else {
             const done = this.stats.totalChunksToEmbed > 0
@@ -588,13 +624,23 @@ export class ProgressTracker {
                 ? this.stats.totalChunksToEmbed
                 : this.stats.totalItems;
             const elapsedSec = this.stats.startTime ? (Date.now() - this.stats.startTime) / 1000 : 0;
-            if (done > 0 && totalUnits > done && elapsedSec > 2) {
-                const etaSec = Math.round((elapsedSec / done) * (totalUnits - done));
+            const completedForEta = this.currentOperation === 'Vectorizing Chat'
+                ? this.stats.groupsCompletedThisRun || 0 : done;
+            if (completedForEta > 0 && totalUnits > done && elapsedSec > 2) {
+                const etaSec = Math.round((elapsedSec / completedForEta) * (totalUnits - done));
                 const mins = Math.floor(etaSec / 60);
                 const secs = etaSec % 60;
                 this.currentEta = ` · ETA ${mins > 0 ? `${mins}m ` : ''}${secs}s`;
             } else {
                 this.currentEta = '';
+            }
+        }
+        if (els.time) {
+            if (this.isDatabaseSnapshot) {
+                els.time.textContent = '—';
+            } else if (this.stats.startTime) {
+                const elapsed = ((Date.now() - this.stats.startTime) / 1000).toFixed(1);
+                els.time.textContent = `${elapsed}s${this.currentEta}`;
             }
         }
 
