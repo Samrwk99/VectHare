@@ -28,7 +28,20 @@
  * Qdrant Backend Manager
  * Manages Qdrant REST API connection and operations
  */
+const KNOWN_EMBEDDING_SOURCES = new Set([
+    'transformers', 'openai', 'cohere', 'ollama', 'llamacpp',
+    'vllm', 'koboldcpp', 'webllm', 'bananabread', 'openrouter',
+    'electronhub', 'mistral', 'nomicai', 'palm', 'vertexai',
+    'togetherai', 'extras',
+]);
+
 class QdrantBackend {
+    _isNotFound(error) {
+        // Other 404s (unsupported endpoint, proxy route, etc.) are real errors.
+        return error?.status === 404 &&
+            /(?:collection.{0,120}(?:does(?:\s+not|n't)\s+exist|not\s+found)|not\s+found:\s*collection)/i.test(String(error.message));
+    }
+
     constructor() {
         this.baseUrl = null;
         this.apiKey = null;
@@ -47,19 +60,13 @@ class QdrantBackend {
      */
     _parseCollectionName(collectionName) {
         if (!collectionName) return collectionName;
-
-        // New format: backend:source:id (e.g., "qdrant:bananabread:chat_123")
-        // Old format: source:id (e.g., "bananabread:chat_123")
         if (collectionName.startsWith('qdrant:')) {
-            // Strip "qdrant:" prefix to get "source:id"
-            return collectionName.substring(7); // 'qdrant:'.length === 7
+            return collectionName.slice('qdrant:'.length);
         }
-        // Now strip the source prefix if present
-        if (collectionName.indexOf(':') !== -1) {
-            collectionName = collectionName.split(':')[1];
+        const separator = collectionName.indexOf(':');
+        if (separator !== -1 && KNOWN_EMBEDDING_SOURCES.has(collectionName.slice(0, separator))) {
+            return collectionName.slice(separator + 1);
         }
-
-        // Already in correct format or old format
         return collectionName;
     }
 
@@ -86,24 +93,20 @@ class QdrantBackend {
     async _request(method, endpoint, body = null, maxRetries = 3) {
         const url = `${this.baseUrl}${endpoint}`;
 
-        // Add explicit timeout of 60s to prevent indefinite hangs during heavy operations (like wait=true)
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 60000);
-
-        const options = {
-            method,
-            headers: this._getHeaders(),
-            signal: controller.signal,
-        };
-        if (body) {
-            options.body = JSON.stringify(body);
-        }
-
         let lastError;
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 60000);
+            const options = {
+                method,
+                headers: this._getHeaders(),
+                signal: controller.signal,
+            };
+            if (body) {
+                options.body = JSON.stringify(body);
+            }
             try {
                 const response = await fetch(url, options);
-                clearTimeout(timeoutId);
 
                 if (!response.ok) {
                     const errorText = await response.text();
@@ -124,7 +127,9 @@ class QdrantBackend {
                         continue;
                     }
 
-                    throw new Error(`Qdrant ${method} ${endpoint} failed: ${response.status} ${errorMessage}`);
+                    const error = new Error(`Qdrant ${method} ${endpoint} failed: ${response.status} ${errorMessage}`);
+                    error.status = response.status;
+                    throw error;
                 }
 
                 // Some endpoints return empty response
@@ -255,11 +260,13 @@ class QdrantBackend {
             { field: 'type', schema: { type: 'keyword', is_tenant: true } },
             { field: 'sourceId', schema: { type: 'keyword', is_tenant: true } },
             // REGULAR KEYWORD FIELDS
+            { field: 'content_type', schema: { type: 'keyword' } },
             { field: 'embeddingSource', schema: 'keyword' },
             { field: 'embeddingModel', schema: 'keyword' },
             { field: 'characterName', schema: 'keyword' },
             { field: 'chatId', schema: 'keyword' },
-            { field: 'keywords', schema: 'keyword' },
+            { field: 'keywords', schema: 'keyword' }, // legacy string keyword arrays
+            { field: 'keywords[].text', schema: { type: 'text', tokenizer: 'word', lowercase: true } }, // keyword objects
             // TEXT FIELDS (for full-text search)
             { field: 'text', schema: 'text' },
             // INTEGER FIELDS
@@ -531,8 +538,9 @@ class QdrantBackend {
                 metadata: result.payload,
             }));
         } catch (error) {
+            if (this._isNotFound(error)) return [];
             console.error(`[Qdrant] Query failed for ${mainCollection}:`, error.message);
-            return [];
+            throw error;
         }
     }
 
@@ -562,7 +570,7 @@ class QdrantBackend {
 
         // Default options
         const vectorWeight = options.vectorWeight ?? 0.5;
-        const keywordWeight = options.keywordWeight ?? 0.5;
+        const keywordWeight = options.keywordWeight ?? options.textWeight ?? 0.5;
         const fusionMethod = options.fusionMethod || 'rrf';
         const rrfK = options.rrfK || 60;
         const keywordBoost = options.keywordBoost || 1.5;
@@ -646,7 +654,6 @@ class QdrantBackend {
                 vector: queryVector,
                 limit: topK * 2, // Fetch more for fusion
                 with_payload: true,
-                score_threshold: 0.1, // Filter very low scores
             };
 
             if (must.length > 0) {
@@ -668,6 +675,7 @@ class QdrantBackend {
             // STRATEGY 2: Keyword Search (Full-Text Matching)
             // ================================================================
             let keywordResults = [];
+            let keywordSearchTruncated = false;
 
             if (keywords && keywords.length > 0) {
                 console.log(`[Qdrant] Starting keyword search with ${keywords.length} keywords: ${keywords.join(', ')}`);
@@ -687,16 +695,24 @@ class QdrantBackend {
                         key: 'keywords',
                         match: { any: [keyword] }
                     });
+                    // Qdrant text-match uses the case-insensitive keyword-object index.
+                    keywordConditions.push({
+                        key: 'keywords[].text',
+                        match: { text: keyword }
+                    });
                 }
 
                 // Scroll through points matching keyword filter
                 let offset = null;
-                const maxScrollIterations = 10;
-                let scrollCount = 0;
+                const seenOffsets = new Set();
+                const maxKeywordCandidates = 20000;
+                const keywordPageSize = 500;
+                let candidatesExamined = 0;
 
                 do {
                     const scrollPayload = {
-                        limit: 100,
+                        limit: Math.min(keywordPageSize, maxKeywordCandidates - candidatesExamined),
+                        // Full payload is needed by later RAG metadata/conditions.
                         with_payload: true,
                         with_vector: false,
                         filter: {
@@ -709,8 +725,20 @@ class QdrantBackend {
                         scrollPayload.offset = offset;
                     }
 
-                    const scrollResponse = await this._request('POST', `/collections/${mainCollection}/points/scroll`, scrollPayload);
+                    let scrollResponse;
+                    try {
+                        scrollResponse = await this._request('POST', `/collections/${mainCollection}/points/scroll`, scrollPayload);
+                    } catch (error) {
+                        const missingIndex = (error?.status === 400 || error?.status === 422)
+                            && /(?:index|unindexed|strict.mode)/i.test(String(error.message));
+                        if (!missingIndex) throw error;
+                        console.warn(`[Qdrant] Keyword index unavailable for ${mainCollection}; using vector-only results:`, error.message);
+                        keywordResults = [];
+                        keywordSearchTruncated = false;
+                        break;
+                    }
                     const points = scrollResponse.result?.points || [];
+                    candidatesExamined += points.length;
 
                     // Calculate keyword match scores for each point
                     for (const point of points) {
@@ -741,16 +769,30 @@ class QdrantBackend {
                     }
 
                     offset = scrollResponse.result?.next_page_offset;
-                    scrollCount++;
-
-                    // Safety limit
-                    if (scrollCount >= maxScrollIterations) {
-                        console.warn(`[Qdrant] Keyword search exceeded max iterations (${maxScrollIterations})`);
+                    if (offset !== null && offset !== undefined) {
+                        const offsetKey = JSON.stringify(offset);
+                        if (seenOffsets.has(offsetKey)) {
+                            keywordSearchTruncated = true;
+                            console.warn('[Qdrant] Keyword scroll repeated an offset; keeping results gathered so far');
+                            break;
+                        }
+                        seenOffsets.add(offsetKey);
+                    }
+                    if (candidatesExamined >= maxKeywordCandidates && offset != null) {
+                        keywordSearchTruncated = true;
+                        console.warn(`[Qdrant] Keyword search capped at ${maxKeywordCandidates} matching candidates`);
                         break;
                     }
 
                 } while (offset !== null && offset !== undefined);
 
+                const matchCount = result => Array.isArray(result.matchedKeywords)
+                    ? result.matchedKeywords.length
+                    : (result.matchedKeywords || 0);
+                keywordResults.sort((a, b) =>
+                    ((b.keywordScore ?? 0) - (a.keywordScore ?? 0)) ||
+                    (matchCount(b) - matchCount(a))
+                );
                 console.log(`[Qdrant] Keyword search complete: ${keywordResults.length} results`);
             } else {
                 console.log(`[Qdrant] No keywords provided, skipping keyword search`);
@@ -768,14 +810,18 @@ class QdrantBackend {
                 rrfK,
                 topK,
             });
+            if (keywordSearchTruncated) {
+                for (const result of fusedResults) result.debug.keywordSearchTruncated = true;
+            }
 
             console.log(`[Qdrant] Hybrid query: ${vectorResults.length} vector + ${keywordResults.length} keyword = ${fusedResults.length} fused results`);
 
             return fusedResults;
 
         } catch (error) {
+            if (this._isNotFound(error)) return [];
             console.error(`[Qdrant] Hybrid query failed for ${mainCollection}:`, error.message);
-            return [];
+            throw error;
         }
     }
 
@@ -797,7 +843,7 @@ class QdrantBackend {
             resultsMap.set(result.hash, {
                 ...result,
                 vectorRank: index + 1,
-                vectorScore: result.vectorScore || result.score,
+                vectorScore: result.vectorScore ?? result.score,
                 keywordScore: 0,
                 keywordRank: Infinity,
             });
@@ -821,24 +867,36 @@ class QdrantBackend {
             }
         });
 
-        // Calculate fused scores
+        // RRF determines ranking; score remains on the 0–1 relevance scale used by RAG.
         const fusedResults = Array.from(resultsMap.values()).map(result => {
-            let fusedScore;
-
+            let rankScore;
+            let relevanceScore;
             if (method === 'rrf') {
-                // Reciprocal Rank Fusion (RRF)
-                const vectorRRF = 1 / (rrfK + result.vectorRank);
-                const keywordRRF = 1 / (rrfK + result.keywordRank);
-                fusedScore = (vectorWeight * vectorRRF) + (keywordWeight * keywordRRF);
+                // Missing channels use Infinity ranks, never 0 (see resultsMap above).
+                const hasVector = Number.isFinite(result.vectorRank);
+                const hasKeyword = Number.isFinite(result.keywordRank);
+                rankScore = (vectorWeight * (hasVector ? 1 / (rrfK + result.vectorRank) : 0))
+                    + (keywordWeight * (hasKeyword ? 1 / (rrfK + result.keywordRank) : 0));
+
+                const vectorSimilarity = Math.max(0, Math.min(1, Number(result.vectorScore) || 0));
+                const keywordRelevance = Math.max(0, Math.min(1, Number(result.keywordScore) || 0));
+                const presentVectorWeight = hasVector ? vectorWeight : 0;
+                const presentKeywordWeight = hasKeyword ? keywordWeight : 0;
+                const presentWeight = presentVectorWeight + presentKeywordWeight;
+                // Keyword score and cosine similarity are useful evidence, not calibrated probabilities.
+                relevanceScore = presentWeight > 0
+                    ? (presentVectorWeight * vectorSimilarity + presentKeywordWeight * keywordRelevance) / presentWeight
+                    : 0;
             } else {
-                // Weighted linear combination
-                fusedScore = (vectorWeight * result.vectorScore) + (keywordWeight * result.keywordScore);
+                // Preserve the existing weighted-fusion calculation and ordering.
+                rankScore = (vectorWeight * result.vectorScore) + (keywordWeight * result.keywordScore);
+                relevanceScore = rankScore;
             }
 
             return {
                 hash: result.hash,
                 text: result.text,
-                score: fusedScore,
+                score: relevanceScore,
                 metadata: result.metadata,
                 debug: {
                     vectorScore: result.vectorScore,
@@ -847,14 +905,18 @@ class QdrantBackend {
                     keywordRank: result.keywordRank,
                     matchedKeywords: result.matchedKeywords || 0,
                     fusionMethod: method,
+                    rankScore,
                 },
             };
         });
 
-        // Sort by fused score and return top K
-        return fusedResults
-            .sort((a, b) => b.score - a.score)
-            .slice(0, topK);
+        const compareFused = method === 'rrf'
+            ? (a, b) => (b.debug.rankScore - a.debug.rankScore)
+                || (b.score - a.score)
+                || String(a.hash).localeCompare(String(b.hash))
+            : (a, b) => (b.score - a.score)
+                || String(a.hash).localeCompare(String(b.hash));
+        return fusedResults.sort(compareFused).slice(0, topK);
     }
 
     /**
@@ -928,8 +990,9 @@ class QdrantBackend {
             console.log(">>> [Qdrant] Listed", items.length, "items from", mainCollection);
             return items;
         } catch (error) {
+            if (this._isNotFound(error)) return [];
             console.error(`[Qdrant] Failed to list items from ${mainCollection}:`, error.message);
-            return [];
+            throw error;
         }
     }
 
@@ -1024,7 +1087,9 @@ class QdrantBackend {
 
             console.log(`[Qdrant] Deleted ${hashes.length} items from ${mainCollection}`);
         } catch (error) {
+            if (this._isNotFound(error)) return;
             console.error(`[Qdrant] Delete failed for ${mainCollection}:`, error.message);
+            throw error;
         }
     }
 
@@ -1173,8 +1238,9 @@ class QdrantBackend {
                 metadata: p.payload,
             };
         } catch (error) {
+            if (this._isNotFound(error)) return null;
             console.error(`[Qdrant] getItem failed:`, error.message);
-            return null;
+            throw error;
         }
     }
 

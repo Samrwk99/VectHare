@@ -14,7 +14,9 @@
  * ============================================================================
  */
 
-import { MilvusClient, DataType } from '@zilliz/milvus2-sdk-node';
+// Load the Milvus SDK only if this backend is selected.
+let MilvusClient;
+let DataType;
 
 /**
  * Milvus Backend Manager
@@ -48,6 +50,7 @@ class MilvusBackend {
         console.log(`[Milvus] Initializing connection to ${this.config.address}...`);
         
         try {
+            ({ MilvusClient, DataType } = await import('@zilliz/milvus2-sdk-node'));
             this.client = new MilvusClient({
                 address: this.config.address,
                 token: this.config.token,
