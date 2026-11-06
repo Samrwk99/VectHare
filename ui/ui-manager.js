@@ -401,8 +401,8 @@ export function renderSettings(containerId, settings, callbacks) {
                             <label for="vecthare_insert_batch_size">
                                 <small>Insert Batch Size: <span id="vecthare_insert_batch_size_value">50</span></small>
                             </label>
-                            <input type="range" id="vecthare_insert_batch_size" class="vecthare-slider" min="10" max="100" step="10" />
-                            <small class="vecthare_hint">Chunks per insert batch (50-100 recommended for faster bulk operations)</small>
+                            <input type="range" id="vecthare_insert_batch_size" class="vecthare-slider" min="1" max="100" step="1" />
+                            <small class="vecthare_hint">Chunks per insert batch (1-100; 50-100 recommended for faster bulk operations)</small>
 
                             <label for="vecthare_min_chat_length" style="margin-top: 16px;">
                                 <small>Minimum Messages Before Injection</small>
