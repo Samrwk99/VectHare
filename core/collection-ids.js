@@ -286,37 +286,69 @@ export async function chatFileExists(owner, chat, ctx = getContext()) {
     }
 }
 
+/** Legacy name-prefixed IDs have an extra separator after the prefix. */
+function legacyNameSuffixMatches(id, snap) {
+    const prefix = COLLECTION_PREFIXES.VECTHARE_CHAT;
+    if (!id?.startsWith(prefix)) return [];
+    const matches = [];
+    for (const [kind, value] of [['uuid', snap.uuid], ['chat', snap.chat]]) {
+        if (!value) continue;
+        const suffix = `_${value}`;
+        // A bare vecthare_chat_<filename> ID has no room for this separator.
+        if (id.length >= prefix.length + suffix.length && id.endsWith(suffix)) {
+            matches.push({ kind, slug: id.slice(prefix.length, -suffix.length) });
+        }
+    }
+    return matches;
+}
+
 /** Other live chat files with the same UUID or copied collection claim. */
 async function competingChats(snap, candidateId = null, ctx = getContext()) {
     const owners = [snap.owner];
-    // Legacy IDs also collide across different avatars with the same display name.
-    if (candidateId?.startsWith(COLLECTION_PREFIXES.VECTHARE_CHAT)) {
-        const suffix = snap.uuid ? `_${snap.uuid}` : '';
-        const slug = suffix && candidateId.endsWith(suffix)
-            ? candidateId.slice(COLLECTION_PREFIXES.VECTHARE_CHAT.length, -suffix.length) : null;
-        if (slug) {
-            const sanitize = n => String(n || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').substring(0, 30);
+    const addOwner = owner => {
+        if (!owners.some(existing => sameOwner(existing, owner))) owners.push(owner);
+    };
+    const bareId = snap.chat ? buildLegacyChatCollectionId(snap.chat) : null;
+    const bareLegacy = Boolean(candidateId && bareId && candidateId === bareId);
+    const matches = bareLegacy ? [] : legacyNameSuffixMatches(candidateId, snap);
+    // A filename-suffixed collection can predate its chat's current UUID.
+    const ownSlug = sanitizeLegacyName(snap.name || 'chat');
+    const selected = matches.find(match => match.slug === ownSlug) || matches[0];
+    const byFilename = bareLegacy || selected?.kind === 'chat' || (!selected && !snap.uuid);
+
+    if (bareLegacy) {
+        // No character scope in the historical ID; all owners can collide.
+        for (const c of ctx.characters || []) if (c.avatar) addOwner({ type: 'character', id: c.avatar });
+        for (const g of ctx.groups || []) if (g.id != null) addOwner({ type: 'group', id: String(g.id) });
+    } else {
+        // Include every current owner whose sanitized historical name matches
+        // any plausible slug (including the empty slug).
+        for (const match of matches) {
             for (const c of ctx.characters || []) {
-                if (c.avatar && sanitize(c.name) === slug) owners.push({ type: 'character', id: c.avatar });
+                if (c.avatar && sanitizeLegacyName(c.name || 'chat') === match.slug) {
+                    addOwner({ type: 'character', id: c.avatar });
+                }
             }
             for (const g of ctx.groups || []) {
-                if (g.id != null && sanitize(g.name) === slug) owners.push({ type: 'group', id: String(g.id) });
+                if (g.id != null && sanitizeLegacyName(g.name || 'chat') === match.slug) {
+                    addOwner({ type: 'group', id: String(g.id) });
+                }
             }
         }
     }
     const found = [];
-    const distinctOwners = owners.filter((o, i) => owners.findIndex(p => sameOwner(o, p)) === i);
-    for (const owner of distinctOwners) {
+    for (const owner of owners) {
         const list = await ownerChats(owner, ctx);
         if (list === null) return null;
         for (const file of list) {
             if (sameOwner(owner, snap.owner) && file.chat === snap.chat) continue;
             const peerClaim = file.meta?.vecthare_binding?.collectionId;
-            // Different bindings are already isolated, even if two old chats
-            // share an integrity UUID. Only unbound peers or peers claiming
-            // this exact collection make its ownership ambiguous.
-            if (candidateId && peerClaim === candidateId ||
-                snap.uuid && String(file.meta?.integrity) === snap.uuid && !peerClaim) {
+            // Existing independent bindings stay independent. Unbound files
+            // only compete when their matching identifier is the same.
+            const sameIdentifier = byFilename
+                ? file.chat === snap.chat
+                : !!snap.uuid && String(file.meta?.integrity) === snap.uuid;
+            if ((candidateId && peerClaim === candidateId) || (!peerClaim && sameIdentifier)) {
                 found.push({ owner, chat: file.chat });
             }
         }
@@ -327,12 +359,19 @@ async function competingChats(snap, candidateId = null, ctx = getContext()) {
 const sanitizeLegacyName = name => String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '_')
     .replace(/^_|_$/g, '').substring(0, 30);
 
+// Original VectHare: name + integrity UUID, falling back to the filename.
+function oldNamedChatCollectionId(snap, suffix = snap.uuid || snap.chat) {
+    return suffix ? `${COLLECTION_PREFIXES.VECTHARE_CHAT}${sanitizeLegacyName(snap.name || 'chat')}_${suffix}` : null;
+}
+
 function legacyIdBelongsToOtherOwner(id, snap, ctx = getContext()) {
-    if (!snap.uuid || !id.endsWith(`_${snap.uuid}`)) return false;
-    const slug = id.slice(COLLECTION_PREFIXES.VECTHARE_CHAT.length, -(snap.uuid.length + 1));
-    if (!slug || slug === sanitizeLegacyName(snap.name)) return false;
-    return [...(ctx.characters || []), ...(ctx.groups || [])]
-        .some(candidate => sanitizeLegacyName(candidate?.name) === slug);
+    const bareId = snap.chat ? buildLegacyChatCollectionId(snap.chat) : null;
+    if (id === bareId) return false; // Bare IDs never carry an owner slug.
+    const matches = legacyNameSuffixMatches(id, snap);
+    const ownSlug = sanitizeLegacyName(snap.name || 'chat');
+    if (matches.some(match => match.slug === ownSlug)) return false;
+    return matches.some(match => [...(ctx.characters || []), ...(ctx.groups || [])]
+        .some(owner => sanitizeLegacyName(owner?.name || 'chat') === match.slug));
 }
 
 const inflight = new Map();
@@ -494,7 +533,7 @@ async function resolveChatBinding(snap, opts = { create: true }) {
 
     // Use persisted candidates first. A failed backend discovery must never
     // unregister an existing chat's registry entry or change ownership.
-    const discovered = snap.uuid ? await discoverLegacyCollectionsOnce() : true;
+    const discovered = await discoverLegacyCollectionsOnce();
     // A failed discovery is not conclusive: inspect persisted evidence first.
     // A new chat with no legacy evidence should not stay blocked forever.
     // Legacy collection discovery is limited to old UUID/filename formats.
@@ -503,27 +542,28 @@ async function resolveChatBinding(snap, opts = { create: true }) {
         ...(extension_settings.vecthare.vecthare_collection_registry || []),
         ...Object.keys(extension_settings.vecthare.collections || {}),
     ].map(key => parseRegistryKey(key).collectionId));
+    const oldNamedId = oldNamedChatCollectionId(snap);
+    const oldNamedFilenameId = oldNamedChatCollectionId(snap, snap.chat);
+    const bareLegacyId = snap.chat ? buildLegacyChatCollectionId(snap.chat) : null;
+    const preferredIds = [oldNamedId, oldNamedFilenameId, bareLegacyId].filter(Boolean);
     const candidates = [...known].filter(id => id && id.startsWith(COLLECTION_PREFIXES.VECTHARE_CHAT) &&
-        (snap.uuid && id.endsWith('_' + snap.uuid) || id === buildLegacyChatCollectionId(snap.chat)) &&
+        ((snap.uuid && id.endsWith('_' + snap.uuid)) || preferredIds.includes(id)) &&
         !bindingStore().byCollection[id] && !legacyIdBelongsToOtherOwner(id, snap));
-    // Different characters can legitimately share a UUID while using different
-    // legacy collections. Never quarantine them merely for matching the suffix.
-    const ownSlug = snap.name.toLowerCase().replace(/[^a-z0-9]+/g, '_')
-        .replace(/^_|_$/g, '').substring(0, 30);
-    const exactOwnId = `${COLLECTION_PREFIXES.VECTHARE_CHAT}${ownSlug}_${snap.uuid}`;
-    const narrowed = candidates.length > 1 && candidates.includes(exactOwnId)
-        ? [exactOwnId] : candidates;
+    // Keep all matching historical formats for this chat. If more than one
+    // exists, don't silently adopt one and strand the other.
+    const narrowed = candidates.length > 1 && candidates.some(id => preferredIds.includes(id))
+        ? candidates.filter(id => preferredIds.includes(id)) : candidates;
     if (narrowed.length > 1) {
         // Historical character rename or duplicated candidates: no safe guess.
         for (const id of narrowed) quarantine(id);
         return commitFresh(snap, opts);
     }
-    if (!discovered && snap.uuid && !narrowed.length &&
+    if (!discovered && !narrowed.length &&
         extension_settings.vecthare.vector_backend !== 'standard') {
         // The plugin's discovery endpoint is unavailable. Probe only the two
         // deterministic old IDs before assuming there is no legacy data.
         // Unknown old renamed-character IDs still require manual recovery.
-        const legacyIds = [...new Set([exactOwnId, buildLegacyChatCollectionId(snap.chat)])];
+        const legacyIds = [...new Set(preferredIds)];
         const { getSavedHashes } = await import('./core-vector-api.js');
         const s = extension_settings.vecthare;
         try {

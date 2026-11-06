@@ -65,6 +65,9 @@ import {
     beginChatCollectionWrite,
     endChatCollectionWrite,
     withChatCollectionPurgeGuard,
+    getChatOwner,
+    normChat,
+    peekChatCollectionId,
 } from './collection-ids.js';
 
 // Hash cache for performance
@@ -73,6 +76,38 @@ const hashCache = new LRUCache(HASH_CACHE_SIZE);
 // Synchronization state
 let syncBlocked = false;
 export function isChatSynchronizationActive() { return syncBlocked; }
+
+// #39: Identity is owner + filename + collection ID. ST may reuse or mutate
+// ctx.chat across awaits, so only read target.messages immediately after a check.
+function captureChatTarget(ctx = getContext()) {
+    const owner = getChatOwner(ctx);
+    const chatId = normChat(ctx?.chatId);
+    if (!owner || !chatId || !Array.isArray(ctx?.chat)) return null;
+    return { owner, chatId, messages: ctx.chat };
+}
+
+function isChatTargetCurrent(target, collectionId = null) {
+    if (!target) return false;
+    const ctx = getContext();
+    const owner = getChatOwner(ctx);
+    let reason = null;
+    if (!owner || owner.type !== target.owner.type || owner.id !== target.owner.id) reason = 'owner';
+    else if (normChat(ctx?.chatId) !== target.chatId) reason = 'chat file';
+    else if (ctx.chat !== target.messages) reason = 'chat array';
+    else if (collectionId !== null && peekChatCollectionId(ctx) !== collectionId) reason = 'collection ID';
+    if (reason) console.debug(`VectHare: Chat target changed (${reason})`);
+    return reason === null;
+}
+
+const syncDeferred = () => ({ remaining: -1, messagesProcessed: 0, chunksCreated: 0 });
+
+// A deliberate, non-error stop: completed writes remain in their original chat.
+class ChatSwitchStop extends Error {
+    constructor() {
+        super('Chat changed during vectorization');
+        this.name = 'ChatSwitchStop';
+    }
+}
 
 // VectHare+ R9: one-time warning flag for auto-sync blocked by config mismatch
 let autoSyncFingerprintWarned = false;
@@ -592,9 +627,13 @@ async function rerankWithBananaBread(query, chunks, settings) {
  * @returns {Promise<object>} Progress info
  */
 export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = false) {
-    // Resolve the actual chat file before any synchronization writes.
+    // Snapshot BEFORE ensureChatBinding's asynchronous file/backend checks.
+    const target = captureChatTarget();
+    if (!target) return syncDeferred();
     const binding = await ensureChatBinding();
+    if (!isChatTargetCurrent(target)) return syncDeferred();
     const collectionId = binding.writable ? binding.collectionId : null;
+    if (collectionId && !isChatTargetCurrent(target, collectionId)) return syncDeferred();
     console.log(`🔍 VectHare DEBUG: getChatCollectionId() returned: "${collectionId}"`);
     console.log(`🔍 VectHare DEBUG: settings.vector_backend = "${settings.vector_backend}"`);
     console.log(`🔍 VectHare DEBUG: settings.source = "${settings.source}"`);
@@ -681,29 +720,25 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
     try {
         await waitUntilCondition(() => !syncBlocked && !is_send_press, 1000);
     } catch {
-        syncBlocked = false; // VEC-30: Reset flag on timeout
-        return { remaining: -1, messagesProcessed: 0, chunksCreated: 0 };
+        // Another sync may own syncBlocked; never unlock it on our timeout.
+        return syncDeferred();
     }
 
+    if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
     try {
         syncBlocked = true;
-        const context = getContext();
 
-        if (!getCurrentChatId() || !Array.isArray(context.chat)) {
-            return { remaining: -1, messagesProcessed: 0, chunksCreated: 0 };
-        }
+        // Snapshot groups while the original chat is still active; never read a
+        // different chat's messages after a backend await.
+        const strategy = settings.chunking_strategy || 'per_message';
+        const groupedItems = collectGroupedItems(target.messages, settings);
 
         // NOTE: Registration happens AFTER first successful insert to prevent ghosts
         let isRegistered = false;
 
         // Step 1: What's already vectorized? (source of truth = DB)
         const existingHashes = new Set(await getSavedHashes(collectionId, settings));
-
-        // Step 2: Build list of messages NOT in DB
-        const strategy = settings.chunking_strategy || 'per_message';
-
-        // R12: gathering extracted to collectGroupedItems (shared with repairChatVectors)
-        const groupedItems = collectGroupedItems(context.chat, settings);
+        if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
 
         // ========================================================================
         // VectHare+ Step 1.5: Reverse sync (ghost vector cleanup)
@@ -746,11 +781,13 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
             try {
                 const { getChunkMetadata } = await import('./collection-metadata.js');
 
-                // Keep-set = exactly the hashes forward sync would keep
-                const keepHashes = new Set(groupedItems.map(item => String(item.hash)));
-
                 const collectionData = await getSavedHashes(collectionId, settings, true, null, settings.vector_backend === 'qdrant');
+                if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
 
+                // Rebuild next to the delete decision: edits or other writes
+                // during the backend read must not create false ghost hashes.
+                const keepHashes = new Set(collectGroupedItems(target.messages, settings)
+                    .map(item => String(item.hash)));
                 const allStoredHashes = Array.isArray(collectionData) ? collectionData : (collectionData?.hashes || []);
 
                 const metaByHash = (collectionData && !Array.isArray(collectionData) && Array.isArray(collectionData.metadata) && collectionData.metadata.length > 0)
@@ -788,7 +825,9 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                         .filter(([h, c]) => c > 1 && !isProtected(h, metaByHash.get(h) || null))
                         .map(([h]) => h);
                     if (duplicateHashes.length > 0) {
+                        if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
                         await deleteVectorItems(collectionId, duplicateHashes, settings);
+                        if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
                         console.warn(`VectHare: Removed ${duplicateHashes.length} duplicated vector(s); re-vectorizing them cleanly this pass`);
                         for (const h of duplicateHashes) {
                             existingHashes.delete(Number(h));
@@ -803,7 +842,9 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                     }
 
                     if (ghostHashes.length > 0) {
+                        if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
                         await deleteVectorItems(collectionId, ghostHashes, settings);
+                        if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
                         console.log(`VectHare: Reverse sync removed ${ghostHashes.length} obsolete vector(s) (changed/deleted sources)`);
                         // VectHare+ FIX: do NOT deleteChunkMetadata(ghost) here.
                         // Chunk metadata is stored GLOBALLY by hash (shared across
@@ -828,6 +869,9 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
             }
         }
 
+        // A chat switch during reverse-sync must not reach forward inserts.
+        if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
+
         // Filter out already vectorized items (by their grouped hash)
         const queue = new Queue();
         for (const item of groupedItems) {
@@ -847,6 +891,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
         const label = strategy === 'per_message' ? 'Message' : 'Group';
 
         while (!queue.isEmpty() && itemsProcessed < batchSize) {
+            if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
             // VectHare+: honor Pause/Stop inside the batch loop. The rest of the
             // queue is left untouched (nothing lost) and every already-successful
             // item is already persisted, so any later run continues seamlessly.
@@ -864,6 +909,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                 // R13: pass the Stop signal - Stop now cancels the in-flight
                 // embedding/insert request instead of draining it
                 if (chunks.length > 0) {
+                    if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
                     recordChatStore(collectionId, settings);
                     await insertVectorItems(collectionId, chunks, settings, (embedded, total) => {
                         // R7 FIX: per-item embedding progress is always 1/1 here
@@ -892,6 +938,9 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                         isRegistered = true;
                         console.log(`VectHare: Registered collection ${registryKey} after first successful insert`);
                     }
+                    // An in-flight insert can finish after switching chats. Keep
+                    // its original collection registered, then stop this sync.
+                    if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
                 }
             } catch (itemError) {
                 // R13: an aborted request (user pressed Stop) is a CLEAN stop,
@@ -2442,6 +2491,7 @@ export async function rearrangeChat(chat, settings, type) {
  * @param {number} batchSize Batch size
  */
 export async function vectorizeAll(settings, batchSize) {
+    let progressShown = false;
     try {
         // VectHare+: Manual Sync Chat / Continue always runs, regardless of the
         // per-collection auto-sync toggle - auto-sync gating applies ONLY to
@@ -2458,8 +2508,8 @@ export async function vectorizeAll(settings, batchSize) {
             return;
         }
 
-        const chatId = getCurrentChatId();
-        if (!chatId) {
+        const target = captureChatTarget();
+        if (!target) {
             toastr.info('No chat selected', 'Vectorization aborted');
             vectorizeRunActive = false;
             return;
@@ -2467,6 +2517,7 @@ export async function vectorizeAll(settings, batchSize) {
 
         // The current chat must have a verified, independent collection.
         const binding = await ensureChatBinding();
+        if (!isChatTargetCurrent(target)) throw new ChatSwitchStop();
         if (!binding.writable || !binding.collectionId) {
             toastr.warning('Chat collection identity is not yet verified. No vectors were written.', 'VectHare');
             vectorizeRunActive = false;
@@ -2486,9 +2537,9 @@ export async function vectorizeAll(settings, batchSize) {
             return;
         }
 
-        // Calculate total messages to vectorize
-        const context = getContext();
-        const totalMessages = context.chat ? context.chat.filter(x => !x.is_system).length : 0;
+        // A backend health check may have completed after a chat switch.
+        if (!isChatTargetCurrent(target, binding.collectionId)) throw new ChatSwitchStop();
+        const totalMessages = target.messages.filter(x => !x.is_system).length;
 
         // VectHare+ FIX: empty chat previously ran a full "cycle" and produced a
         // nonsense success ("Vectorized 0 messages") plus a progress panel with
@@ -2528,7 +2579,7 @@ export async function vectorizeAll(settings, batchSize) {
         // compared at the start of every run.
         // ====================================================================
         {
-            const fpCollectionId = getChatCollectionId();
+            const fpCollectionId = binding.collectionId;
             if (fpCollectionId) {
                 try {
                     const { getCollectionMeta, setCollectionMeta } = await import('./collection-metadata.js');
@@ -2570,8 +2621,11 @@ export async function vectorizeAll(settings, batchSize) {
             }
         }
 
+        if (!isChatTargetCurrent(target, binding.collectionId)) throw new ChatSwitchStop();
+
         // Show progress panel
         progressTracker.show('Vectorizing Chat', totalMessages, 'Messages');
+        progressShown = true;
 
         let finished = false;
         let iteration = 0;
@@ -2591,6 +2645,11 @@ export async function vectorizeAll(settings, batchSize) {
                 console.log('VectHare: Vectorization paused');
             },
             onResume: () => {
+                // A stale Resume click must never restart a run for another chat.
+                if (!isChatTargetCurrent(target, binding.collectionId)) {
+                    stopVectorization();
+                    return;
+                }
                 resumeVectorization();
                 // R9 FIX (ETA inflation): shift the run clock forward by the pause
                 // duration - otherwise paused minutes counted against the average
@@ -2636,6 +2695,7 @@ export async function vectorizeAll(settings, batchSize) {
         });
 
         while (!finished) {
+            if (!isChatTargetCurrent(target, binding.collectionId)) throw new ChatSwitchStop();
             if (is_send_press) {
                 // VectHare+: wait out the generation instead of aborting the run.
                 // R6 FIX: honor Stop while waiting - previously a hung generation
@@ -2643,6 +2703,7 @@ export async function vectorizeAll(settings, batchSize) {
                 // user would most want it.
                 while (is_send_press && !isVectorizationStopped() && !isVectorizationPaused()) {
                     await new Promise(resolve => setTimeout(resolve, 500));
+                    if (!isChatTargetCurrent(target, binding.collectionId)) throw new ChatSwitchStop();
                 }
                 if (!isVectorizationStopped() && !isVectorizationPaused()) {
                     progressTracker.updateProgress(processedCount, 'Resumed after message generation');
@@ -2653,6 +2714,7 @@ export async function vectorizeAll(settings, batchSize) {
             // nothing is lost meanwhile, every completed item is already persisted
             while (isVectorizationPaused() && !isVectorizationStopped()) {
                 await new Promise(resolve => setTimeout(resolve, 300));
+                if (!isChatTargetCurrent(target, binding.collectionId)) throw new ChatSwitchStop();
             }
 
             // VectHare+: honor Stop — end cleanly, keep everything completed so far.
@@ -2666,6 +2728,7 @@ export async function vectorizeAll(settings, batchSize) {
                 return;
             }
 
+            if (!isChatTargetCurrent(target, binding.collectionId)) throw new ChatSwitchStop();
             // VectHare+: bypassAutoSync=true - the run was explicitly started by
             // the user (Sync Chat / Continue button); synchronizeChat's autoSync
             // gate must not block a manual run.
@@ -2673,6 +2736,7 @@ export async function vectorizeAll(settings, batchSize) {
             // explicitly started by the user (Sync Chat / Continue button), so
             // synchronizeChat's autoSync gate must not block a manual run.
             const result = await synchronizeChat(settings, batchSize, true);
+            if (!isChatTargetCurrent(target, binding.collectionId)) throw new ChatSwitchStop();
 
             // VectHare+ BUG FIX (infinite failure loop): items that permanently
             // fail to embed are never written to the DB, so they re-enter the
@@ -2749,12 +2813,6 @@ export async function vectorizeAll(settings, batchSize) {
 
             console.log(`VectHare: Vectorization iteration ${iteration}, ${result.remaining > 0 ? result.remaining + ' remaining' : 'complete'} (${result.chunksCreated} chunks this batch)`);
 
-            if (chatId !== getCurrentChatId()) {
-                progressTracker.complete(false, 'Chat changed during vectorization');
-                vectorizeRunActive = false;
-                resetControlState();
-                throw new Error('Chat changed');
-            }
         }
 
         vectorizeRunActive = false;
@@ -2763,9 +2821,15 @@ export async function vectorizeAll(settings, batchSize) {
         toastr.success('Chat vectorized successfully', 'VectHare');
         console.log(`VectHare: ✅ Vectorization complete after ${iteration} iterations`);
     } catch (error) {
-        console.error('VectHare: Failed to vectorize all', error);
         vectorizeRunActive = false;
-        resetControlState(); // VectHare+: never let pause/stop flags leak past a failed run
+        resetControlState(); // Never let pause/stop flags leak into the next run.
+        if (error instanceof ChatSwitchStop) {
+            if (progressShown) progressTracker.complete(true, 'Stopped because you switched chats — completed vectors saved');
+            toastr.info('Vectorization stopped because you switched chats. Completed vectors are saved; return to the original chat to continue.', 'VectHare');
+            console.info('VectHare: Vectorization stopped after chat switch; completed vectors preserved');
+            return;
+        }
+        console.error('VectHare: Failed to vectorize all', error);
         progressTracker.addError(error.message);
         progressTracker.complete(false, 'Vectorization failed');
         toastr.error(`Vectorization failed: ${error.message}`, 'VectHare');
@@ -2795,23 +2859,26 @@ export async function vectorizeAll(settings, batchSize) {
  */
 export async function repairChatVectors(settings, batchSize = 5) {
     let writeLockedCollection = null;
+    let progressShown = false;
     try {
         if (!tryAcquireVectorizationRun()) return;
 
-        const chatId = getCurrentChatId();
-        if (!chatId) {
+        const target = captureChatTarget();
+        if (!target) {
             toastr.info('No chat selected', 'Repair aborted');
             vectorizeRunActive = false;
             return;
         }
 
         const binding = await ensureChatBinding();
+        if (!isChatTargetCurrent(target)) throw new ChatSwitchStop();
         const collectionId = binding.writable ? binding.collectionId : null;
         if (!collectionId) {
             toastr.error('Could not determine this chat\'s collection', 'Repair aborted');
             vectorizeRunActive = false;
             return;
         }
+        if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
         beginChatCollectionWrite(collectionId);
         writeLockedCollection = collectionId;
 
@@ -2850,12 +2917,7 @@ export async function repairChatVectors(settings, batchSize = 5) {
             console.warn('VectHare: Repair fingerprint check failed (continuing):', fpError.message);
         }
 
-        const context = getContext();
-        if (!getCurrentChatId() || !Array.isArray(context.chat)) {
-            toastr.info('No chat loaded', 'Repair aborted');
-            vectorizeRunActive = false;
-            return;
-        }
+        if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
 
         // Full metadata read - REQUIRED. Without per-chunk metadata we cannot
         // identify protected scene/summary chunks, so repair must not run.
@@ -2872,6 +2934,7 @@ export async function repairChatVectors(settings, batchSize = 5) {
             return;
         }
 
+        if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
         const storedHashes = Array.isArray(collectionData) ? collectionData : (collectionData?.hashes || []);
         const metadataArr = (!Array.isArray(collectionData) && Array.isArray(collectionData?.metadata)) ? collectionData.metadata : [];
 
@@ -2906,7 +2969,8 @@ export async function repairChatVectors(settings, batchSize = 5) {
         };
 
         // Current chat, grouped EXACTLY like sync (shared helper)
-        const groupedItems = collectGroupedItems(context.chat, settings);
+        if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
+        const groupedItems = collectGroupedItems(target.messages, settings);
         const groupByHash = new Map(groupedItems.map(it => [String(it.hash), it]));
         const currentHashSet = new Set(groupByHash.keys());
 
@@ -3009,10 +3073,15 @@ export async function repairChatVectors(settings, batchSize = 5) {
         // ---- Execute with progress panel + Pause/Stop ----
         const totalUnits = hashesToDelete.length + replacements.length;
         progressTracker.show('Repairing Chunks', totalUnits, 'Items');
+        progressShown = true;
         resetControlState();
         progressTracker.setControls({
             onPause: () => { pauseVectorization(); progressTracker.markPaused('Repair paused - completed fixes are saved'); },
             onResume: () => {
+                if (!isChatTargetCurrent(target, collectionId)) {
+                    stopVectorization();
+                    return;
+                }
                 resumeVectorization();
                 progressTracker.isComplete = false;
                 progressTracker.isPaused = false;
@@ -3045,6 +3114,7 @@ export async function repairChatVectors(settings, batchSize = 5) {
         // embed leaves the stale vector in place rather than a hole; the ghost
         // cleanup on the next pass will retry)
         for (const item of replacements) {
+            if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
             if (isVectorizationStopped() || isVectorizationPaused()) break;
             try {
                 const chunks = prepareItemsForInsertion([item]);
@@ -3075,6 +3145,8 @@ export async function repairChatVectors(settings, batchSize = 5) {
         // replacements' ghosts are now deferred to the next pass.
         const safeDeletes = hashesToDelete.filter(h => !failedHashes.has(h));
         if (safeDeletes.length > 0) {
+            // Cancellation before a destructive operation, not after it finished.
+            if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
             try {
                 // R17: abortable+timed delete
                 await deleteVectorItems(collectionId, safeDeletes, settings, getStopSignal());
@@ -3134,9 +3206,15 @@ export async function repairChatVectors(settings, batchSize = 5) {
             );
         }
     } catch (error) {
-        console.error('VectHare: Repair failed', error);
         vectorizeRunActive = false;
         resetControlState();
+        if (error instanceof ChatSwitchStop) {
+            if (progressShown) progressTracker.complete(true, 'Repair stopped because you switched chats — completed changes saved');
+            toastr.info('Repair stopped because you switched chats. Completed changes are saved.', 'VectHare');
+            console.info('VectHare: Repair stopped after chat switch; completed changes preserved');
+            return;
+        }
+        console.error('VectHare: Repair failed', error);
         progressTracker.addError(error.message);
         progressTracker.complete(false, 'Repair failed');
         toastr.error(`Repair failed: ${error.message}`, 'VectHare');
