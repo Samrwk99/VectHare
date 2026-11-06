@@ -20,7 +20,7 @@ import { openContentVectorizer } from './content-vectorizer.js';
 import { openSearchDebugModal, getLastSearchDebug } from './search-debug.js';
 import { openTextCleaningManager } from './text-cleaning-manager.js';
 import { resetBackendHealth } from '../backends/backend-manager.js';
-import { getHealthIndicatorHtml, getHealthModalHtml, initializeHealthDashboard } from './health-dashboard.js';
+import { getHealthIndicatorHtml, getHealthModalHtml, initializeHealthDashboard, checkBackendHealth } from './health-dashboard.js';
 import { getChatCollectionId } from '../core/chat-vectorization.js';
 import { doesChatHaveVectors } from '../core/collection-loader.js';
 import { getModelField } from '../core/providers.js';
@@ -603,6 +603,12 @@ export function renderSettings(containerId, settings, callbacks) {
                             </label>
                             <input type="text" id="vecthare_rag_xml_tag" class="vecthare-input" placeholder="e.g., retrieved_context" />
                             <small class="vecthare_hint">Wraps all RAG content in &lt;tag&gt;...&lt;/tag&gt;. Leave empty for no wrapping.</small>
+
+                            <label class="checkbox_label" for="vecthare_include_keywords_in_rag_context" style="margin-top: 12px;">
+                                <input id="vecthare_include_keywords_in_rag_context" type="checkbox" class="checkbox" />
+                                <span>Include Keywords in RAG Context</span>
+                            </label>
+                            <small class="vecthare_hint">Show stored keyword annotations in injected Qdrant RAG memories. Does not affect keyword searching or Semantic World Info.</small>
 
                             <div class="vecthare_info" style="margin-top: 16px; padding: 8px 12px; border-radius: 4px; background: var(--SmartThemeBlurTintColor); font-size: 0.85em;">
                                 <i class="fa-solid fa-info-circle"></i>
@@ -1829,8 +1835,9 @@ function bindSettingsEvents(settings, callbacks) {
             }
 
             console.log(`VectHare: Vector backend changed to ${settings.vector_backend}`);
-            // Reset health cache so new backend gets properly initialized
+            // Preserve existing invalidation and check the newly selected backend.
             resetBackendHealth();
+            void checkBackendHealth(settings);
         });
 
     // Qdrant cloud toggle
@@ -1854,22 +1861,26 @@ function bindSettingsEvents(settings, callbacks) {
             console.log('VectHare: Qdrant mode changed, forcing re-initialization...');
             resetBackendHealth('qdrant');
 
-            // Proactively reinitialize if Qdrant is the current backend
+            // Only an actual mode change triggers reinitialization.
             if (settings.vector_backend === 'qdrant') {
-                try {
-                    const { initializeBackend } = await import('../backends/backend-manager.js');
-                    await initializeBackend('qdrant', settings, false);
+                const modeChecked = settings.qdrant_use_cloud;
+                const healthy = await checkBackendHealth(settings);
+                // Ignore completion notifications for a mode no longer selected.
+                if (settings.vector_backend !== 'qdrant' || settings.qdrant_use_cloud !== modeChecked) return;
+                if (healthy) {
                     toastr.success(
                         `Qdrant re-initialized in ${settings.qdrant_use_cloud ? 'cloud' : 'local'} mode`,
                         'VectHare'
                     );
-                } catch (e) {
-                    console.error('VectHare: Failed to reinitialize Qdrant:', e);
-                    toastr.warning('Failed to reinitialize Qdrant: ' + e.message, 'VectHare');
+                } else {
+                    toastr.warning('Failed to reinitialize Qdrant', 'VectHare');
                 }
             }
-        })
-        .trigger('change');
+        });
+
+    // Display saved mode without firing the change handler during page load.
+    $('#vecthare_qdrant_local_settings').toggle(!settings.qdrant_use_cloud);
+    $('#vecthare_qdrant_cloud_settings').toggle(!!settings.qdrant_use_cloud);
 
     // Qdrant settings
     $('#vecthare_qdrant_host')
@@ -1992,8 +2003,9 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
             toggleProviderSettings(settings.source, settings);
             console.log(`VectHare: Embedding provider changed to ${settings.source}`);
-            // Reset health cache since provider change may affect backend connectivity
+            // Keep existing cache reset and refresh the displayed health.
             resetBackendHealth();
+            void checkBackendHealth(settings);
         });
 
     // Score threshold
@@ -2470,6 +2482,14 @@ function bindSettingsEvents(settings, callbacks) {
             const sanitized = $(this).val().replace(/[^a-zA-Z0-9_-]/g, '');
             $(this).val(sanitized);
             settings.rag_xml_tag = sanitized;
+            applySettingsSnapshot(settings);
+            saveSettingsDebounced();
+        });
+
+    $('#vecthare_include_keywords_in_rag_context')
+        .prop('checked', settings.include_keywords_in_rag_context === true)
+        .on('change', function() {
+            settings.include_keywords_in_rag_context = $(this).prop('checked');
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });

@@ -16,11 +16,80 @@
  * ============================================================================
  */
 
-import { getBackendMetrics } from '../backends/backend-manager.js';
+import { getBackendMetrics, initializeBackend, resetBackendHealth } from '../backends/backend-manager.js';
 import { extension_settings } from '../../../../extensions.js';
 
 let refreshInterval = null;
 let isModalOpen = false;
+
+// Serialize explicit health checks to keep older results from racing new settings.
+let pendingCheck = null;
+let checkQueue = Promise.resolve();
+let checkRevision = 0;
+
+function getHealthDisplay(backendName, metrics) {
+    if (pendingCheck?.backendName === backendName || !metrics?.lastHealthCheck) {
+        const checking = pendingCheck?.backendName === backendName;
+        return {
+            css: 'vecthare-health-warning',
+            icon: '&#x26A0;',
+            label: checking ? 'Checking' : 'Not checked',
+        };
+    }
+    return {
+        css: getHealthClass(metrics.healthy, metrics.errors),
+        icon: getHealthIcon(metrics.healthy, metrics.errors),
+        label: metrics.healthy ? 'Healthy' : 'Unhealthy',
+    };
+}
+
+function updateHealthIndicator() {
+    const indicator = document.getElementById('vecthare_health_indicator');
+    if (!indicator) return;
+    const backendName = getCurrentBackend();
+    const metrics = getBackendMetrics().backends.find(b => b.name === backendName);
+    const display = getHealthDisplay(backendName, metrics);
+    indicator.className = `vecthare-health-indicator ${display.css}`;
+    indicator.title = `Backend Health: ${display.label}`;
+}
+
+/** Freshly verify the selected backend; reuse an identical in-flight request. */
+export function checkBackendHealth(settings) {
+    const backendName = settings.vector_backend || 'standard';
+    const configKey = JSON.stringify([
+        backendName, settings.source, settings.qdrant_use_cloud,
+        settings.qdrant_host, settings.qdrant_port, settings.qdrant_url,
+        settings.qdrant_api_key, settings.milvus_address, settings.milvus_host,
+        settings.milvus_port,
+    ]);
+    if (pendingCheck?.key === configKey) return pendingCheck.promise;
+
+    const revision = ++checkRevision;
+    const snapshot = { ...settings };
+    const record = { key: configKey, backendName, promise: null };
+    const previous = checkQueue;
+    pendingCheck = record;
+
+    record.promise = previous.then(async () => {
+        if (revision !== checkRevision) return false;
+        // Force a real health check rather than reuse the 60-second instance cache.
+        resetBackendHealth(backendName);
+        return (await initializeBackend(backendName, snapshot, false)) !== null;
+    }).catch(error => {
+        console.warn(`VectHare: Health check failed for ${backendName}:`, error);
+        return false;
+    }).finally(() => {
+        if (pendingCheck === record) {
+            pendingCheck = null;
+            updateHealthIndicator();
+            updateDashboard();
+        }
+    });
+    checkQueue = record.promise;
+    updateHealthIndicator();
+    updateDashboard();
+    return record.promise;
+}
 
 /**
  * Get the current backend name from settings
@@ -90,8 +159,9 @@ function renderDashboard() {
         maxLatency: null,
     };
 
-    const healthClass = getHealthClass(currentMetrics.healthy, currentMetrics.errors);
-    const healthIcon = getHealthIcon(currentMetrics.healthy, currentMetrics.errors);
+    const display = getHealthDisplay(currentBackend, currentMetrics);
+    const healthClass = display.css;
+    const healthIcon = display.icon;
 
     return `
         <div class="vecthare-health-dashboard">
@@ -99,7 +169,7 @@ function renderDashboard() {
             <div class="vecthare-health-summary">
                 <div class="vecthare-health-status ${healthClass}">
                     <span class="vecthare-health-icon">${healthIcon}</span>
-                    <span class="vecthare-health-label">${currentMetrics.healthy ? 'Healthy' : 'Unhealthy'}</span>
+                    <span class="vecthare-health-label">${display.label}</span>
                 </div>
                 <div class="vecthare-health-uptime">
                     <small>Uptime: ${metrics.uptimeFormatted}</small>
@@ -273,12 +343,10 @@ export function getHealthIndicatorHtml() {
     const currentBackend = getCurrentBackend();
     const currentMetrics = metrics.backends.find(b => b.name === currentBackend);
 
-    const healthy = currentMetrics?.healthy ?? false;
-    const errors = currentMetrics?.errors ?? 0;
-    const healthClass = getHealthClass(healthy, errors);
+    const display = getHealthDisplay(currentBackend, currentMetrics);
 
     return `
-        <button id="vecthare_health_indicator" class="vecthare-health-indicator ${healthClass}" title="Backend Health">
+        <button id="vecthare_health_indicator" class="vecthare-health-indicator ${display.css}" title="Backend Health: ${display.label}">
             <span class="vecthare-health-dot"></span>
         </button>
     `;
@@ -330,18 +398,7 @@ export function initializeHealthDashboard() {
     $(document).on('click', '#vecthare_health_refresh', updateDashboard);
 
     // Update health indicator periodically
-    setInterval(() => {
-        const indicator = document.getElementById('vecthare_health_indicator');
-        if (indicator) {
-            const metrics = getBackendMetrics();
-            const currentBackend = getCurrentBackend();
-            const currentMetrics = metrics.backends.find(b => b.name === currentBackend);
-            const healthy = currentMetrics?.healthy ?? false;
-            const errors = currentMetrics?.errors ?? 0;
-
-            indicator.className = `vecthare-health-indicator ${getHealthClass(healthy, errors)}`;
-        }
-    }, 10000);
+    setInterval(updateHealthIndicator, 10000);
 }
 
 /**

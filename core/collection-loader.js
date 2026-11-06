@@ -39,6 +39,7 @@ import {
 
 // Plugin detection state
 let pluginAvailable = null;
+let pluginAvailabilityCheckId = 0;
 
 /**
  * Gets or initializes the collection registry
@@ -287,10 +288,14 @@ function getCollectionDisplayName(collectionId, metadata) {
  * Checks if VectHare server plugin is available
  * @returns {Promise<boolean>} True if plugin is available
  */
-async function checkPluginAvailable() {
-    if (pluginAvailable !== null) {
+export async function checkPluginAvailable(forceRefresh = false) {
+    if (!forceRefresh && pluginAvailable !== null) {
         return pluginAvailable;
     }
+
+    // Prevent older requests from overwriting newer detection results.
+    const checkId = ++pluginAvailabilityCheckId;
+    let available = false;
 
     try {
         const response = await fetch('/api/plugins/similharity/health', {
@@ -300,16 +305,21 @@ async function checkPluginAvailable() {
 
         if (response.ok) {
             const data = await response.json();
-            pluginAvailable = data.status === 'ok';
-            console.log(`VectHare: Plugin ${pluginAvailable ? 'detected' : 'not found'} (v${data.version || 'unknown'})`);
-        } else {
-            pluginAvailable = false;
+            available = data.status === 'ok';
+
+            console.log(
+                `VectHare: Plugin ${available ? 'detected' : 'not found'} (v${data.version || 'unknown'})`
+            );
         }
     } catch (error) {
-        pluginAvailable = false;
+        available = false;
     }
 
-    return pluginAvailable;
+    if (checkId === pluginAvailabilityCheckId) {
+        pluginAvailable = available;
+    }
+
+    return available;
 }
 
 // Cache for plugin collection data
@@ -629,10 +639,9 @@ export async function doesChatHaveVectors(settings, overrideChatId, overrideUUID
     const uuid = overrideUUID || getChatUUID();
     const chatId = overrideChatId || (getContext().chatId);
 
-    // Use unified pattern builder from collection-ids.js
-    const searchPatterns = buildChatSearchPatterns(chatId, uuid);
-
-    console.log(`VectHare: Searching for chat vectors. UUID: ${uuid}, Patterns:`, searchPatterns);
+    const normalizedUUID = uuid ? String(uuid).toLowerCase() : null;
+    const legacyCollectionId = chatId ? getLegacyChatCollectionId(chatId).toLowerCase() : null;
+    console.log(`VectHare: Searching for chat vectors. UUID: ${uuid}`);
 
     // Collect ALL matching collections, then pick the best one
     // This handles ghost collections (empty) vs real collections (has chunks)
@@ -643,9 +652,13 @@ export async function doesChatHaveVectors(settings, overrideChatId, overrideUUID
         const parsed = parseRegistryKey(registryKey);
         const collectionId = parsed.collectionId;
 
-        // Use unified pattern matching from collection-ids.js
-        const matches = matchesPatterns(registryKey, searchPatterns) ||
-                       matchesPatterns(collectionId, searchPatterns);
+        const normalizedCollectionId = String(collectionId).toLowerCase();
+        const prefix = String(COLLECTION_PREFIXES.VECTHARE_CHAT).toLowerCase();
+        const matchesUUID = normalizedUUID &&
+            normalizedCollectionId.startsWith(prefix) &&
+            normalizedCollectionId.endsWith(`_${normalizedUUID}`);
+        const matchesLegacy = legacyCollectionId && normalizedCollectionId === legacyCollectionId;
+        const matches = Boolean(matchesUUID || matchesLegacy);
 
         if (matches) {
             // Get chunk count, source, and backend from plugin cache if available

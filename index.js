@@ -36,6 +36,7 @@ import { renderSettings, openDiagnosticsModal, loadWebLlmModels, updateWebLlmSta
 import { progressTracker } from './ui/progress-tracker.js';
 import { initializeVisualizer } from './ui/chunk-visualizer.js';
 import { initializeDatabaseBrowser } from './ui/database-browser.js';
+import { checkBackendHealth } from './ui/health-dashboard.js';
 import { initializeSceneMarkers, updateAllMarkerStates, setSceneSettings } from './ui/scene-markers.js';
 import { initializeWorldInfoIntegration } from './core/world-info-integration.js';
 
@@ -130,6 +131,7 @@ const defaultSettings = {
     // Wraps ALL injected content with context prompts and/or XML tags
     rag_context: '',      // Natural language context shown before all RAG content
     rag_xml_tag: '',      // XML tag to wrap all RAG content (e.g., "retrieved_context")
+    include_keywords_in_rag_context: false,
 
     // Collection-level metadata (managed by collection-metadata.js)
     collections: {},
@@ -478,6 +480,9 @@ jQuery(async () => {
         onRunDiagnostics: onRunDiagnosticsClick
     });
 
+    // Fresh check on page load; no health cache is trusted for the indicator.
+    void checkBackendHealth(settings);
+
     progressTracker.setStartCallback(onVectorizeAllClick);
     window.addEventListener('vecthare:database-changed', event => {
         const collectionId = event.detail?.collectionId;
@@ -534,18 +539,18 @@ jQuery(async () => {
     })();
 
     // Register event handlers
-    eventSource.on(event_types.MESSAGE_DELETED, onChatEvent);
-    eventSource.on(event_types.MESSAGE_EDITED, onChatEvent);
-    // VectHare+ R10: edits/deletes flag the reverse-sync (repair) pass to run
-    // on the very next sync instead of waiting out the 5-minute throttle -
-    // the DB is corrected as soon as anything observes the change.
-    eventSource.on(event_types.MESSAGE_EDITED, () => flagImmediateReverseSync());
-    eventSource.on(event_types.MESSAGE_DELETED, () => flagImmediateReverseSync());
+    // VectHare+ R10: edits, deletes, and swipes flag cleanup before the next sync.
+    const onChatMutationEvent = (...args) => {
+        flagImmediateReverseSync();
+        return onChatEvent(...args);
+    };
+    eventSource.on(event_types.MESSAGE_DELETED, onChatMutationEvent);
+    eventSource.on(event_types.MESSAGE_EDITED, onChatMutationEvent);
+    eventSource.on(event_types.MESSAGE_SWIPED, onChatMutationEvent);
     // Run vector sync tasks on message events
     // Note: Semantic WI injection happens in the generate_interceptor (rearrangeChat), not here
     eventSource.on(event_types.MESSAGE_SENT, onChatEvent);
     eventSource.on(event_types.MESSAGE_RECEIVED, onChatEvent);
-    eventSource.on(event_types.MESSAGE_SWIPED, onChatEvent);
     // When a chat is deleted, purge its vectors (not full purge, just that chat)
     eventSource.on(event_types.CHAT_DELETED, async (chatId) => {
         if (chatId) {

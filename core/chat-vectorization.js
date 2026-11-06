@@ -79,7 +79,10 @@ let autoSyncFingerprintWarned = false;
  * sync rather than up to 5 minutes later.
  */
 export function flagImmediateReverseSync() {
-    lastReverseSyncAt = 0;
+    const id = getChatCollectionId();
+    if (!id) return;
+    lastReverseSyncByCollection.delete(id);
+    reverseSyncGeneration.set(id, (reverseSyncGeneration.get(id) ?? 0) + 1);
 }
 
 /**
@@ -120,7 +123,8 @@ async function computeVectorizationConfigFingerprint(settings) {
 
 // VectHare+ R6: reverse-sync throttle timestamp (module-scope so it spans
 // event-driven sync passes AND vectorizeAll loop iterations)
-let lastReverseSyncAt = 0;
+const lastReverseSyncByCollection = new Map();
+const reverseSyncGeneration = new Map();
 
 // VectHare+: guards against concurrent vectorizeAll runs (they share one
 // singleton progress panel and would interleave Pause/Stop wiring)
@@ -721,15 +725,16 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
         // per-message tax on large collections.
         // ========================================================================
         const REVERSE_SYNC_MIN_INTERVAL_MS = 5 * 60 * 1000;
-        if (existingHashes.size > 0 && Date.now() - lastReverseSyncAt >= REVERSE_SYNC_MIN_INTERVAL_MS) {
-            lastReverseSyncAt = Date.now();
+        const generation = reverseSyncGeneration.get(collectionId) ?? 0;
+        const lastAt = lastReverseSyncByCollection.get(collectionId) ?? 0;
+        if (existingHashes.size > 0 && Date.now() - lastAt >= REVERSE_SYNC_MIN_INTERVAL_MS) {
             try {
                 const { getChunkMetadata } = await import('./collection-metadata.js');
 
                 // Keep-set = exactly the hashes forward sync would keep
                 const keepHashes = new Set(groupedItems.map(item => String(item.hash)));
 
-                const collectionData = await getSavedHashes(collectionId, settings, true);
+                const collectionData = await getSavedHashes(collectionId, settings, true, null, settings.vector_backend === 'qdrant');
 
                 const allStoredHashes = Array.isArray(collectionData) ? collectionData : (collectionData?.hashes || []);
 
@@ -795,8 +800,15 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                 } else {
                     console.debug('VectHare: Reverse sync skipped - chunk metadata unavailable from backend');
                 }
+                if ((reverseSyncGeneration.get(collectionId) ?? 0) === generation) {
+                    lastReverseSyncByCollection.set(collectionId, Date.now());
+                }
             } catch (reverseSyncError) {
-                // Never block forward vectorization on reverse-sync failure
+                // Never block forward vectorization on reverse-sync failure.
+                if ((reverseSyncGeneration.get(collectionId) ?? 0) === generation) {
+                    lastReverseSyncByCollection.set(collectionId,
+                        Date.now() - REVERSE_SYNC_MIN_INTERVAL_MS + 30000);
+                }
                 console.warn('VectHare: Reverse sync failed (forward vectorization continues):', reverseSyncError.message);
             }
         }
@@ -980,6 +992,13 @@ function buildSearchQuery(chat, settings) {
     return recentMessages.join('\n').trim();
 }
 
+// Shared by early candidate filtering and the final Stage 9 deduplication.
+// VectHare's existing setting defines 0 as checking the ENTIRE chat.
+function getRecentMessagesForDedup(chat, settings) {
+    const depth = settings.deduplication_depth ?? 50;
+    return depth > 0 && depth < chat.length ? chat.slice(-depth) : chat;
+}
+
 /**
  * Stage 3: Query all active collections and merge results
  * @param {string[]} activeCollections Collections that passed activation filters
@@ -992,6 +1011,8 @@ function buildSearchQuery(chat, settings) {
 async function queryAndMergeCollections(activeCollections, queryText, settings, chat, debugData) {
     let chunksForVisualizer = [];
     const effectiveTopK = settings.top_k ?? settings.insert;
+    // Retrieve replacement candidates before Stage 9 dedup, without reducing configured top-K.
+    const candidateTopK = Math.max(effectiveTopK, Math.min(100, effectiveTopK * 3));
 
     // PERF: Build hash-to-message Map once for O(1) lookups instead of O(n) find() per chunk
     const chatHashMap = new Map();
@@ -1008,7 +1029,7 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
 
     for (const collectionId of activeCollections) {
         try {
-            const queryResults = await queryCollection(collectionId, queryText, effectiveTopK, settings);
+            const queryResults = await queryCollection(collectionId, queryText, candidateTopK, settings);
 
             // TRACE: Vector query results for this collection
             addTrace(debugData, 'vector_search', `Query completed for ${collectionId}`, {
@@ -1048,7 +1069,7 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
 
                 // TRACE: Record initial chunk state
                 recordChunkFate(debugData, hash, 'vector_search', 'passed', null, {
-                    finalScore: meta.score || 1.0,
+                    finalScore: meta.score ?? 1.0,
                     originalScore: meta.originalScore,
                     keywordBoost: meta.keywordBoost,
                     matchedKeywords: meta.matchedKeywords,
@@ -1060,13 +1081,13 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
                 return {
                     hash: hash,
                     metadata: meta,
-                    score: meta.score || 1.0,
+                    score: meta.score ?? 1.0,
                     originalScore: meta.originalScore,
                     keywordBoost: meta.keywordBoost,
                     matchedKeywords: meta.matchedKeywords,
                     matchedKeywordsWithWeights: meta.matchedKeywordsWithWeights,
                     keywordBoosted: meta.keywordBoosted,
-                    similarity: meta.score || 1.0,
+                    similarity: meta.score ?? 1.0,
                     text: text,
                     index: meta.messageId || meta.index || 0,
                     collectionId: collectionId,
@@ -1087,7 +1108,13 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
         }
     }
 
-    // Sort merged results by score (descending) and limit to topK
+    // Filter exact recent-message duplicates before the global top-K.
+    // Stage 9 remains authoritative after summary/group/link processing.
+    const recentHashes = new Set(getRecentMessagesForDedup(chat, settings)
+        .filter(message => message.mes)
+        .map(message => getStringHash(getTextWithoutAttachments(message))));
+    chunksForVisualizer = chunksForVisualizer.filter(chunk => !recentHashes.has(chunk.hash));
+
     chunksForVisualizer.sort((a, b) => b.score - a.score);
     chunksForVisualizer = chunksForVisualizer.slice(0, effectiveTopK);
 
@@ -1107,7 +1134,7 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
  */
 async function expandSummaryChunks(chunks, activeCollections, settings, debugData) {
     const expandedChunks = [];
-    const parentHashesNeeded = new Map(); // parentHash -> { summaryChunk, collectionId }
+    const parentHashesNeeded = new Map(); // [collectionId, parentHash] -> { parentHash, summaryChunk, collectionId }
 
     // First pass: identify which chunks are summaries and need parent expansion
     for (const chunk of chunks) {
@@ -1117,10 +1144,15 @@ async function expandSummaryChunks(chunks, activeCollections, settings, debugDat
 
         if (isSummary && parentHash) {
             // Track this summary for parent lookup
-            parentHashesNeeded.set(String(parentHash), {
-                summaryChunk: chunk,
-                collectionId: chunk.collectionId
-            });
+            const parentKey = JSON.stringify([chunk.collectionId, String(parentHash)]);
+            const previous = parentHashesNeeded.get(parentKey);
+            if (!previous || (chunk.score ?? -Infinity) > (previous.summaryChunk.score ?? -Infinity)) {
+                parentHashesNeeded.set(parentKey, {
+                    parentHash: String(parentHash),
+                    summaryChunk: chunk,
+                    collectionId: chunk.collectionId
+                });
+            }
 
             addTrace(debugData, 'summary_expansion', `Summary chunk found, will expand to parent`, {
                 summaryHash: chunk.hash,
@@ -1142,12 +1174,11 @@ async function expandSummaryChunks(chunks, activeCollections, settings, debugDat
     // Second pass: fetch parent chunks from the vector DB
     // Group by collection for efficiency
     const parentsByCollection = new Map();
-    for (const [parentHash, info] of parentHashesNeeded) {
-        const collectionId = info.collectionId;
+    for (const { parentHash, summaryChunk, collectionId } of parentHashesNeeded.values()) {
         if (!parentsByCollection.has(collectionId)) {
             parentsByCollection.set(collectionId, []);
         }
-        parentsByCollection.get(collectionId).push({ parentHash, summaryChunk: info.summaryChunk });
+        parentsByCollection.get(collectionId).push({ parentHash, summaryChunk });
     }
 
     // Fetch parents from each collection
@@ -1647,10 +1678,8 @@ function deduplicateChunks(chunks, chat, settings, debugData) {
         deduplicationDepth: deduplicationDepth
     });
 
-    // Only check the most recent N messages (within context window)
-    const recentMessages = deduplicationDepth > 0 && deduplicationDepth < chat.length
-        ? chat.slice(-deduplicationDepth)
-        : chat;
+    // Use the exact same depth semantics as the early top-K candidate filter.
+    const recentMessages = getRecentMessagesForDedup(chat, settings);
 
     console.log(`[VectHare Dedup] Building hash set from ${recentMessages.length} recent messages (depth: ${deduplicationDepth})`);
     console.log(`[VectHare Dedup] Total chat length: ${chat.length}, checking duplicates in last ${recentMessages.length} messages`);
@@ -1734,6 +1763,44 @@ function deduplicateChunks(chunks, chat, settings, debugData) {
  * @param {object} settings VectHare settings
  * @returns {string} Formatted injection text
  */
+function getRagInjectionChunkText(chunk, settings) {
+    const text = typeof chunk?.text === 'string' && chunk.text
+        ? chunk.text
+        : '(text not available)';
+
+    // Only alter the text sent to regular Qdrant RAG prompts.
+    if (settings?.include_keywords_in_rag_context === true || settings?.vector_backend !== 'qdrant') {
+        return text;
+    }
+
+    const keywords = chunk?.metadata?.keywords;
+    if (!Array.isArray(keywords) || keywords.length === 0) {
+        return text;
+    }
+
+    // Matches Qdrant's generated suffix, without stripping arbitrary user-authored tags.
+    const keywordTexts = keywords.map(kw => kw?.text || kw).join(' ');
+    const suffix = ` [KEYWORDS: ${keywordTexts}]`;
+    const trimmedText = text.trimEnd();
+
+    if (!trimmedText.endsWith(suffix)) {
+        return text;
+    }
+
+    // Handle repeated identical suffixes; preserve trailing whitespace exactly.
+    let originalText = trimmedText;
+    while (originalText.endsWith(suffix)) {
+        originalText = originalText.slice(0, -suffix.length);
+    }
+
+    // Do not turn a suffix-only chunk into empty injected memory text.
+    if (!originalText.trim()) {
+        return text;
+    }
+
+    return originalText + text.slice(trimmedText.length);
+}
+
 function buildNestedInjectionText(chunks, settings) {
     // Group chunks by collection
     const byCollection = new Map();
@@ -1759,7 +1826,7 @@ function buildNestedInjectionText(chunks, settings) {
             const chunkMeta = getChunkMetadata(chunk.hash) || {};
             const chunkContext = chunkMeta.context ? substituteParams(chunkMeta.context) : '';
             const chunkXmlTag = chunkMeta.xmlTag || '';
-            const text = chunk.text || '(text not available)';
+            const text = getRagInjectionChunkText(chunk, settings);
 
             // Build chunk with optional wrapping
             let chunkBlock = '';
