@@ -267,7 +267,59 @@ function evictLRUBackendIfNeeded() {
  * @param {boolean} throwOnFail - Whether to throw on health check failure (default: true)
  * @returns {Promise<VectorBackend|null>} The backend instance or null if failed and throwOnFail=false
  */
+const pendingInitializations = new Map();
+const backendConfigKeys = new Map();
+const backendInitGenerations = new Map();
+
 export async function initializeBackend(backendName, settings, throwOnFail = true) {
+    const name = normalizeBackendName(backendName);
+    const snapshot = { ...settings };
+    const key = JSON.stringify(name === 'qdrant' ? [
+        snapshot.qdrant_use_cloud, snapshot.qdrant_url,
+        snapshot.qdrant_host, snapshot.qdrant_port, snapshot.qdrant_api_key,
+    ] : name === 'milvus' ? [
+        snapshot.milvus_address, snapshot.milvus_host, snapshot.milvus_port,
+        snapshot.milvus_username, snapshot.milvus_password, snapshot.milvus_token,
+        snapshot.milvus_dimensions,
+    ] : []);
+    if (backendConfigKeys.get(name) !== key) {
+        resetBackendHealth(name);
+        backendConfigKeys.set(name, key);
+    }
+    const generation = backendInitGenerations.get(name) || 0;
+    let record = pendingInitializations.get(name);
+    if (!record || record.key !== key || record.generation !== generation) {
+        const previous = record?.promise;
+        record = { key, generation, promise: null };
+        record.promise = (async () => {
+            if (previous) await previous.catch(() => {});
+            if ((backendInitGenerations.get(name) || 0) !== generation) {
+                throw new Error('Backend configuration changed during initialization');
+            }
+            const backend = await initializeBackendOnce(name, snapshot, true);
+            if ((backendInitGenerations.get(name) || 0) !== generation) {
+                delete backendInstances[name];
+                delete backendHealthStatus[name];
+                delete backendHealthTimestamps[name];
+                throw new Error('Backend configuration changed during initialization');
+            }
+            return backend;
+        })().finally(() => {
+            if (pendingInitializations.get(name) === record) {
+                pendingInitializations.delete(name);
+            }
+        });
+        pendingInitializations.set(name, record);
+    }
+    try {
+        return await record.promise;
+    } catch (error) {
+        if (throwOnFail) throw error;
+        return null;
+    }
+}
+
+async function initializeBackendOnce(backendName, settings, throwOnFail = true) {
     // Normalize backend name (vectra -> standard, etc.)
     const normalizedName = normalizeBackendName(backendName);
 
@@ -418,6 +470,11 @@ export async function isBackendAvailable(backendName, settings) {
  * @param {string} [backendName] - Specific backend to reset, or all if omitted
  */
 export function resetBackendHealth(backendName = null) {
+    const names = backendName ? [normalizeBackendName(backendName)] : Object.keys(BACKENDS);
+    for (const name of names) {
+        backendInitGenerations.set(name, (backendInitGenerations.get(name) || 0) + 1);
+        backendConfigKeys.delete(name);
+    }
     if (backendName) {
         const normalizedName = normalizeBackendName(backendName);
         delete backendHealthStatus[normalizedName];

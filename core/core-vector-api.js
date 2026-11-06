@@ -422,31 +422,30 @@ async function createKoboldCppEmbeddings(items, settings, onProgress = null, abo
                 }
 
                 const cleanUrl = serverUrl.replace(/\/$/, '');
-                // R13: signalAbort - Stop truly cancels client-side embedding fetches
-                const response = await fetch(`${cleanUrl}/v1/embeddings`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        input: batchItems,
-                        model: settings.koboldcpp_model || 'koboldcpp',
-                    }),
-                    signal: abortSignal || undefined,
-                });
-
-                if (!response.ok) {
-                    // Try legacy endpoint if v1 fails (fallback)
-                    if (response.status === 404) {
-                        console.warn('VectHare: KoboldCpp /v1/embeddings not found, trying legacy endpoint...');
-                        // Fallthrough to retry or handle legacy?
-                        // Better to throw specific error so we can potentially retry with legacy logic if we wanted,
-                        // but for now let's stick to the directive of using OpenAI compatible endpoint.
+                const controller = new AbortController();
+                const abort = () => controller.abort();
+                if (abortSignal?.aborted) abort();
+                abortSignal?.addEventListener('abort', abort, { once: true });
+                const timer = setTimeout(abort, API_TIMEOUT_MS * 4);
+                let data;
+                try {
+                    const response = await fetch(`${cleanUrl}/v1/embeddings`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            input: batchItems,
+                            model: settings.koboldcpp_model || 'koboldcpp',
+                        }),
+                        signal: controller.signal,
+                    });
+                    if (!response.ok) {
+                        throw new Error(`Failed to get KoboldCpp embeddings: ${response.status} ${response.statusText}`);
                     }
-                    throw new Error(`Failed to get KoboldCpp embeddings: ${response.status} ${response.statusText}`);
+                    data = await response.json();
+                } finally {
+                    clearTimeout(timer);
+                    abortSignal?.removeEventListener('abort', abort);
                 }
-
-                const data = await response.json();
 
                 // OpenAI format: { data: [{ embedding: [], index: 0, ... }, ...], model: "..." }
                 if (!data.data || !Array.isArray(data.data) || data.data.length !== batchItems.length) {
@@ -695,6 +694,27 @@ export async function getSavedHashes(collectionId, settings, includeMetadata = f
     // SKEW-TOLERANT: a concurrent write between the two reads can only cause
     // a missing hash to map to {} (treated as unprotected-but-current), never
     // to ANOTHER chunk's metadata (the R16 index-zipping failure mode).
+    // Qdrant reads one complete metadata snapshot. Other backends retain
+    // their authoritative hash read and hash-keyed metadata join.
+    if (settings.vector_backend === 'qdrant') {
+        const data = await withOpGuard(
+            () => backend.listChunks(collectionId, settings, {
+                offset: 0, limit: Number.MAX_SAFE_INTEGER,
+            }), abortSignal, 'Read collection metadata');
+        const items = data?.items;
+        if (!Array.isArray(items) || data.hasMore !== false ||
+            !Number.isSafeInteger(data.total) || data.total !== items.length || items.some(item =>
+            item?.hash === undefined || !item.metadata ||
+            typeof item.metadata.text !== 'string' ||
+            String(item.metadata.hash) !== String(item.hash))) {
+            throw new Error('Incomplete or invalid Qdrant metadata response');
+        }
+        return {
+            hashes: items.map(item => item.hash),
+            metadata: items.map(item => item.metadata),
+        };
+    }
+
     const hashes = await withOpGuard(
         () => backend.getSavedHashes(collectionId, settings),
         abortSignal,
@@ -783,8 +803,8 @@ export async function insertVectorItems(collectionId, items, settings, onProgres
         } else {
             // Server-side embeddings - backend handles everything
             // VEC-6: Use configurable batch size for optimized bulk inserts
-            // Some providers need smaller batches - Ollama and Transformers work best with batch size of 1
-            const smallBatchProviders = ['transformers', 'ollama'];
+            // Keep the one-item cap for Transformers; Ollama uses the configured batch size.
+            const smallBatchProviders = ['transformers'];
             const configuredBatchSize = settings.insert_batch_size || 50;
             const BATCH_SIZE = smallBatchProviders.includes(settings.source) ? 1 : configuredBatchSize;
             const batches = chunkArray(items, BATCH_SIZE);
@@ -858,14 +878,12 @@ async function streamEmbeddingsAndWrite(backend, collectionId, items, textString
 
         console.log(`VectHare: Embedding batch ${batchNum}/${totalBatches} (items ${i + 1}-${batchEnd})`);
 
-        // VEC-6: Retry logic per batch instead of per chunk
+        // Generate this batch once; provider/back-end retries are handled downstream.
         let additionalArgs;
         try {
-            // R13: abortable - Stop cancels client-side embedding work instantly
-            // (abort never retried: isAbortError guard in RETRY_CONFIG)
-            additionalArgs = await makeAbortable(AsyncUtils.retry(async () => {
-                return await getAdditionalArgs(batchTextStrings, settings, null, abortSignal);
-            }, RETRY_CONFIG), abortSignal);
+            // R13: abortable - Stop cancels client-side embedding work instantly.
+            additionalArgs = await makeAbortable(
+                getAdditionalArgs(batchTextStrings, settings, null, abortSignal), abortSignal);
         } catch (error) {
             if (isAbortError(error)) throw error; // R13: propagate verbatim, no wrapping
             throw new Error(`VectHare: Failed to generate embeddings for batch ${batchNum} after retries: ${error.message}`);
@@ -1135,6 +1153,30 @@ export async function queryMultipleCollections(collectionIds, searchText, topK, 
         } catch (clientEmbedError) {
             // VEC-35: Fallback to server-side embedding when client-side fails
             console.warn(`[VectHare] Client-side embedding failed for ${settings.source}: ${clientEmbedError.message}. Falling back to server-side embedding.`);
+        }
+    }
+
+    if (!queryVector && !clientSideEmbeddingSources.includes(settings.source) &&
+        collectionIds.length > 1 && settings.vector_backend === 'qdrant') {
+        try {
+            const modelField = getModelField(settings.source);
+            const response = await fetch('/api/plugins/similharity/get-embedding', {
+                method: 'POST', headers: getRequestHeaders(),
+                body: JSON.stringify(getVectorsRequestBody({
+                    source: settings.source,
+                    model: modelField ? settings[modelField] || '' : '',
+                    text: searchText,
+                }, settings)),
+            });
+            if (!response.ok) throw new Error(`Query embedding failed: ${response.status}`);
+            const data = await response.json();
+            if (!Array.isArray(data.embedding) || !data.embedding.length ||
+                !data.embedding.every(Number.isFinite)) {
+                throw new Error('Invalid query embedding');
+            }
+            queryVector = data.embedding;
+        } catch (error) {
+            console.warn('VectHare: Shared query embedding unavailable; using per-collection fallback:', error.message);
         }
     }
 

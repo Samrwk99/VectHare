@@ -32,7 +32,6 @@ import { getRequestHeaders } from '../../../../../script.js';
 import { VectorBackend } from './backend-interface.js';
 import { getModelField } from '../core/providers.js';
 import { getProviderSpecificParams } from './provider-params.js';
-import { VECTOR_LIST_LIMIT } from '../core/constants.js';
 
 const BACKEND_TYPE = 'qdrant';
 const MULTITENANCY_COLLECTION = 'vecthare_multitenancy';
@@ -206,7 +205,8 @@ export class QdrantBackend extends VectorBackend {
             collectionId: actualCollectionId,
             source: settings.source || 'transformers',
             model: getModelFromSettings(settings),
-            limit: VECTOR_LIST_LIMIT,
+            limit: Number.MAX_SAFE_INTEGER,
+            hashesOnly: true,
         };
 
         // Add content_type filter for multitenancy mode
@@ -230,7 +230,14 @@ export class QdrantBackend extends VectorBackend {
         }
 
         const data = await response.json();
-        return data.items ? data.items.map(item => item.hash) : [];
+        // A truncated or malformed read must not masquerade as an empty collection.
+        if (!Array.isArray(data?.items) || data.hasMore !== false ||
+            !Number.isSafeInteger(data.total) || data.total !== data.items.length ||
+            data.items.some(item => item?.hash === undefined || item.hash === null ||
+                !['string', 'number'].includes(typeof item.hash))) {
+            throw new Error(`[Qdrant] Incomplete or invalid saved-hash response for ${collectionId}`);
+        }
+        return data.items.map(item => item.hash);
     }
 
     async insertVectorItems(collectionId, items, settings) {
@@ -713,7 +720,8 @@ export class QdrantBackend extends VectorBackend {
             vectorWeight = 0.5,
             textWeight = 0.5,
             fusionMethod = 'rrf',
-            rrfK = 60
+            rrfK = 60,
+            queryVector = null
         } = hybridOptions;
 
         const strippedCollectionId = this._stripRegistryPrefix(collectionId);
@@ -728,6 +736,7 @@ export class QdrantBackend extends VectorBackend {
             source: settings.source || 'transformers',
             model: getModelFromSettings(settings),
             ...getProviderSpecificParams(settings, true),
+            queryVector,
             // Hybrid-specific parameters
             hybrid: true,
             hybridOptions: {
@@ -784,6 +793,6 @@ export class QdrantBackend extends VectorBackend {
         }
 
         // Fallback to regular vector search
-        return this.queryCollection(collectionId, searchText, topK, settings);
+        return this.queryCollection(collectionId, searchText, topK, settings, queryVector);
     }
 }

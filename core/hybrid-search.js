@@ -48,7 +48,8 @@ export async function hybridSearch(collectionId, searchText, topK, settings, opt
                 vectorWeight,
                 textWeight,
                 fusionMethod,
-                rrfK
+                rrfK,
+                queryVector
             });
         } catch (error) {
             console.warn(`[HybridSearch] Native hybrid failed, falling back to client-side:`, error.message);

@@ -169,7 +169,7 @@ let settings = { ...defaultSettings };
 const moduleWorker = new ModuleWorkerWrapper(() => synchronizeChat(settings, getBatchSize()));
 
 // Batch size based on provider
-const getBatchSize = () => ['transformers', 'ollama'].includes(settings.source) ? 1 : 5;
+const getBatchSize = () => settings.source === 'transformers' ? 1 : 5;
 
 // Chat event handler (debounced)
 const onChatEvent = debounce(async () => await moduleWorker.update(), debounce_timeout.relaxed);
@@ -352,7 +352,37 @@ function refreshVectorizationStatusDisplay() {
 
 // Read the actual saved hashes, coalescing rapid writes into one DB query.
 // Runs after each committed insert/delete/purge and whenever Status opens.
-async function refreshSavedDatabaseStatus() {
+let savedStatusRead = null;
+let savedStatusRefreshQueued = false;
+
+function refreshSavedDatabaseStatus() {
+    savedStatusRefreshQueued = true;
+    if (savedStatusRead) return savedStatusRead;
+    savedStatusRead = (async () => {
+        while (savedStatusRefreshQueued) {
+            if (isVectorizationActive() || isChatSynchronizationActive() ||
+                isChatCollectionWriteActive(getChatCollectionId())) {
+                clearTimeout(dbRefreshTimer);
+                dbRefreshTimer = setTimeout(() => {
+                    void refreshSavedDatabaseStatus();
+                }, 1000);
+                return;
+            }
+            savedStatusRefreshQueued = false;
+            await readSavedDatabaseStatus();
+        }
+    })().finally(() => {
+        savedStatusRead = null;
+        if (savedStatusRefreshQueued && !isVectorizationActive() &&
+            !isChatSynchronizationActive() &&
+            !isChatCollectionWriteActive(getChatCollectionId())) {
+            scheduleSavedDatabaseRefresh();
+        }
+    });
+    return savedStatusRead;
+}
+
+async function readSavedDatabaseStatus() {
     const chatKey = currentStatusChatKey();
     if (!chatKey) {
         lastDbStatus = null;
@@ -374,7 +404,9 @@ async function refreshSavedDatabaseStatus() {
     }
     // A status read only publishes while its chat and request still match.
     if (requestId !== dbStatusRequestId || chatKey !== currentStatusChatKey() ||
-        collectionId !== getChatCollectionId()) return;
+        collectionId !== getChatCollectionId() ||
+        isVectorizationActive() || isChatSynchronizationActive() ||
+        isChatCollectionWriteActive(collectionId)) return;
     result = isValidSavedStatus(result) ? result : null;
     lastDbStatus = result ? { ...result, statusKey: chatKey } : null;
 

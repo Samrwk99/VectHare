@@ -427,17 +427,17 @@ function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel
  * @param {object} settings VectHare settings
  * @returns {object[]} Grouped items
  */
-function collectGroupedItems(chat, settings) {
+function collectGroupedItems(chat, settings, hashOnly = false) {
     const strategy = settings.chunking_strategy || 'per_message';
     const strategyBatchSize = settings.batch_size || 4;
-    const keywordLevel = settings.keyword_extraction_level || 'balanced';
+    const keywordLevel = hashOnly ? 'off' : (settings.keyword_extraction_level || 'balanced');
 
     const allMessages = [];
     for (let i = 0; i < chat.length; i++) {
         const msg = chat[i];
         if (msg.is_system) continue;
-        const rawText = String(substituteParams(msg.mes));
-        const text = cleanText(rawText);
+        const text = hashOnly ? getTextWithoutAttachments(msg)
+            : cleanText(String(substituteParams(msg.mes)));
         allMessages.push({
             text,
             raw: getTextWithoutAttachments(msg), // R22: unsubstituted, consumed by grouped strategies' stable hashing
@@ -797,7 +797,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
 
                 // Rebuild next to the delete decision: edits or other writes
                 // during the backend read must not create false ghost hashes.
-                const keepHashes = new Set(collectGroupedItems(target.messages, settings)
+                const keepHashes = new Set(collectGroupedItems(target.messages, settings, true)
                     .map(item => String(item.hash)));
                 const allStoredHashes = Array.isArray(collectionData) ? collectionData : (collectionData?.hashes || []);
 
@@ -3339,7 +3339,7 @@ export async function checkUnfinishedVectorization(settings, collectionIdOverrid
         if (!isChatTargetCurrent(target, collectionId)) return null;
 
         // Match Sync Chat's message preparation, grouping and raw-text hashes.
-        const groupedItems = collectGroupedItems(target.messages, settings);
+        const groupedItems = collectGroupedItems(target.messages, settings, true);
         const pending = groupedItems.filter(
             item => !existingHashes.has(String(item.hash))
         ).length;
