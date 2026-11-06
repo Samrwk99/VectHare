@@ -335,6 +335,15 @@ function refreshVectorizationStatusDisplay() {
         return;
     }
     const done = result.total - result.pending;
+    const storedHashesKnown = Number.isSafeInteger(result.storedChunks) &&
+        result.storedChunks >= 0;
+    if (done === 0 && storedHashesKnown && result.storedChunks > 0) {
+        updateVectorizationStatus(
+            `${result.storedChunks} stored hash(es) reported; ` +
+            'no matching current group hashes found — click for details'
+        );
+        return;
+    }
     const pct = Math.round(done / result.total * 100);
     updateVectorizationStatus(result.pending > 0
         ? `Vectorized: ${pct}% (${done}/${result.total}) — click for details`

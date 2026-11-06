@@ -746,7 +746,9 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
         let isRegistered = false;
 
         // Step 1: What's already vectorized? (source of truth = DB)
-        const existingHashes = new Set(await getSavedHashes(collectionId, settings));
+        const existingHashes = new Set(
+            (await getSavedHashes(collectionId, settings)).map(hash => String(hash))
+        );
         if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
 
         // ========================================================================
@@ -839,8 +841,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                         if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
                         console.warn(`VectHare: Removed ${duplicateHashes.length} duplicated vector(s); re-vectorizing them cleanly this pass`);
                         for (const h of duplicateHashes) {
-                            existingHashes.delete(Number(h));
-                            existingHashes.delete(h);
+                            existingHashes.delete(String(h));
                         }
                     }
 
@@ -884,7 +885,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
         // Filter out already vectorized items (by their grouped hash)
         const queue = new Queue();
         for (const item of groupedItems) {
-            if (!existingHashes.has(item.hash)) {
+            if (!existingHashes.has(String(item.hash))) {
                 queue.enqueue(item);
             }
         }
@@ -3331,31 +3332,17 @@ export async function checkUnfinishedVectorization(settings, collectionIdOverrid
             return null;
         }
 
-        const existingHashes = new Set(await getSavedHashes(collectionId, settings));
+        const existingHashes = new Set(
+            (await getSavedHashes(collectionId, settings)).map(hash => String(hash))
+        );
         // A completed read for Chat A must never be paired with Chat B's messages.
         if (!isChatTargetCurrent(target, collectionId)) return null;
 
-        const strategy = settings.chunking_strategy || 'per_message';
-        const strategyBatchSize = settings.batch_size || 4;
-        const keywordLevel = settings.keyword_extraction_level || 'balanced';
-
-        const allMessages = [];
-        for (let i = 0; i < target.messages.length; i++) {
-            const msg = target.messages[i];
-            if (msg.is_system) continue;
-            const rawText = String(substituteParams(msg.mes));
-            const text = cleanText(rawText);
-            allMessages.push({
-                text,
-                raw: getTextWithoutAttachments(msg), // R22: unsubstituted, for stable hashing
-                hash: getStringHash(getTextWithoutAttachments(msg)), // R22: raw text, not substituted - stable identity across reloads
-                index: i,
-                is_user: msg.is_user
-            });
-        }
-
-        const groupedItems = groupMessagesByStrategy(allMessages, strategy, strategyBatchSize, keywordLevel, settings.conversation_turn_order);
-        const pending = groupedItems.filter(item => !existingHashes.has(item.hash)).length;
+        // Match Sync Chat's message preparation, grouping and raw-text hashes.
+        const groupedItems = collectGroupedItems(target.messages, settings);
+        const pending = groupedItems.filter(
+            item => !existingHashes.has(String(item.hash))
+        ).length;
 
         return {
             hasBacklog: pending > 0,

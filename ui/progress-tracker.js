@@ -118,7 +118,11 @@ export class ProgressTracker {
             storedChunkCountKnown: !!chunksKnown,
         };
         this.terminalStatus = result
-            ? (total ? `Saved group progress: ${done}/${total} groups · ${result.pending} pending`
+            ? (total
+                ? (done === 0 && chunksKnown && result.storedChunks > 0
+                    ? `${result.storedChunks} stored hash(es) reported; ` +
+                      `no matching current group hashes found (${result.pending} pending)`
+                    : `Saved group progress: ${done}/${total} groups · ${result.pending} pending`)
                 : 'No eligible message groups in this chat')
             : unavailableMessage;
         if (this.elements?.statLabel) this.elements.statLabel.textContent = result ? 'Message groups' : 'Progress';
