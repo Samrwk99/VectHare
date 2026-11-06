@@ -79,7 +79,7 @@ function normalizeTokenBoundaries(text) {
 }
 
 function extractQueryTokens(query) {
-    return new Set(normalizeTokenBoundaries(String(query || '').toLowerCase()).match(/[a-z]{3,}/g) || []);
+    return new Set(normalizeTokenBoundaries(String(query || '').toLowerCase()).match(/\b[a-z]{3,}\b/g) || []);
 }
 
 /** Weight increment per frequency count above minimum */

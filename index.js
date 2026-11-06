@@ -534,18 +534,18 @@ jQuery(async () => {
     })();
 
     // Register event handlers
-    eventSource.on(event_types.MESSAGE_DELETED, onChatEvent);
-    eventSource.on(event_types.MESSAGE_EDITED, onChatEvent);
-    // VectHare+ R10: edits/deletes flag the reverse-sync (repair) pass to run
-    // on the very next sync instead of waiting out the 5-minute throttle -
-    // the DB is corrected as soon as anything observes the change.
-    eventSource.on(event_types.MESSAGE_EDITED, () => flagImmediateReverseSync());
-    eventSource.on(event_types.MESSAGE_DELETED, () => flagImmediateReverseSync());
+    // VectHare+ R10: edits, deletes, and swipes flag cleanup before the next sync.
+    const onChatMutationEvent = (...args) => {
+        flagImmediateReverseSync();
+        return onChatEvent(...args);
+    };
+    eventSource.on(event_types.MESSAGE_DELETED, onChatMutationEvent);
+    eventSource.on(event_types.MESSAGE_EDITED, onChatMutationEvent);
+    eventSource.on(event_types.MESSAGE_SWIPED, onChatMutationEvent);
     // Run vector sync tasks on message events
     // Note: Semantic WI injection happens in the generate_interceptor (rearrangeChat), not here
     eventSource.on(event_types.MESSAGE_SENT, onChatEvent);
     eventSource.on(event_types.MESSAGE_RECEIVED, onChatEvent);
-    eventSource.on(event_types.MESSAGE_SWIPED, onChatEvent);
     // When a chat is deleted, purge its vectors (not full purge, just that chat)
     eventSource.on(event_types.CHAT_DELETED, async (chatId) => {
         if (chatId) {

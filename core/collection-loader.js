@@ -629,10 +629,9 @@ export async function doesChatHaveVectors(settings, overrideChatId, overrideUUID
     const uuid = overrideUUID || getChatUUID();
     const chatId = overrideChatId || (getContext().chatId);
 
-    // Use unified pattern builder from collection-ids.js
-    const searchPatterns = buildChatSearchPatterns(chatId, uuid);
-
-    console.log(`VectHare: Searching for chat vectors. UUID: ${uuid}, Patterns:`, searchPatterns);
+    const normalizedUUID = uuid ? String(uuid).toLowerCase() : null;
+    const legacyCollectionId = chatId ? getLegacyChatCollectionId(chatId).toLowerCase() : null;
+    console.log(`VectHare: Searching for chat vectors. UUID: ${uuid}`);
 
     // Collect ALL matching collections, then pick the best one
     // This handles ghost collections (empty) vs real collections (has chunks)
@@ -643,9 +642,13 @@ export async function doesChatHaveVectors(settings, overrideChatId, overrideUUID
         const parsed = parseRegistryKey(registryKey);
         const collectionId = parsed.collectionId;
 
-        // Use unified pattern matching from collection-ids.js
-        const matches = matchesPatterns(registryKey, searchPatterns) ||
-                       matchesPatterns(collectionId, searchPatterns);
+        const normalizedCollectionId = String(collectionId).toLowerCase();
+        const prefix = String(COLLECTION_PREFIXES.VECTHARE_CHAT).toLowerCase();
+        const matchesUUID = normalizedUUID &&
+            normalizedCollectionId.startsWith(prefix) &&
+            normalizedCollectionId.endsWith(`_${normalizedUUID}`);
+        const matchesLegacy = legacyCollectionId && normalizedCollectionId === legacyCollectionId;
+        const matches = Boolean(matchesUUID || matchesLegacy);
 
         if (matches) {
             // Get chunk count, source, and backend from plugin cache if available

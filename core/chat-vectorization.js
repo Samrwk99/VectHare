@@ -79,7 +79,10 @@ let autoSyncFingerprintWarned = false;
  * sync rather than up to 5 minutes later.
  */
 export function flagImmediateReverseSync() {
-    lastReverseSyncAt = 0;
+    const id = getChatCollectionId();
+    if (!id) return;
+    lastReverseSyncByCollection.delete(id);
+    reverseSyncGeneration.set(id, (reverseSyncGeneration.get(id) ?? 0) + 1);
 }
 
 /**
@@ -120,7 +123,8 @@ async function computeVectorizationConfigFingerprint(settings) {
 
 // VectHare+ R6: reverse-sync throttle timestamp (module-scope so it spans
 // event-driven sync passes AND vectorizeAll loop iterations)
-let lastReverseSyncAt = 0;
+const lastReverseSyncByCollection = new Map();
+const reverseSyncGeneration = new Map();
 
 // VectHare+: guards against concurrent vectorizeAll runs (they share one
 // singleton progress panel and would interleave Pause/Stop wiring)
@@ -721,15 +725,16 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
         // per-message tax on large collections.
         // ========================================================================
         const REVERSE_SYNC_MIN_INTERVAL_MS = 5 * 60 * 1000;
-        if (existingHashes.size > 0 && Date.now() - lastReverseSyncAt >= REVERSE_SYNC_MIN_INTERVAL_MS) {
-            lastReverseSyncAt = Date.now();
+        const generation = reverseSyncGeneration.get(collectionId) ?? 0;
+        const lastAt = lastReverseSyncByCollection.get(collectionId) ?? 0;
+        if (existingHashes.size > 0 && Date.now() - lastAt >= REVERSE_SYNC_MIN_INTERVAL_MS) {
             try {
                 const { getChunkMetadata } = await import('./collection-metadata.js');
 
                 // Keep-set = exactly the hashes forward sync would keep
                 const keepHashes = new Set(groupedItems.map(item => String(item.hash)));
 
-                const collectionData = await getSavedHashes(collectionId, settings, true);
+                const collectionData = await getSavedHashes(collectionId, settings, true, null, settings.vector_backend === 'qdrant');
 
                 const allStoredHashes = Array.isArray(collectionData) ? collectionData : (collectionData?.hashes || []);
 
@@ -795,8 +800,15 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                 } else {
                     console.debug('VectHare: Reverse sync skipped - chunk metadata unavailable from backend');
                 }
+                if ((reverseSyncGeneration.get(collectionId) ?? 0) === generation) {
+                    lastReverseSyncByCollection.set(collectionId, Date.now());
+                }
             } catch (reverseSyncError) {
-                // Never block forward vectorization on reverse-sync failure
+                // Never block forward vectorization on reverse-sync failure.
+                if ((reverseSyncGeneration.get(collectionId) ?? 0) === generation) {
+                    lastReverseSyncByCollection.set(collectionId,
+                        Date.now() - REVERSE_SYNC_MIN_INTERVAL_MS + 30000);
+                }
                 console.warn('VectHare: Reverse sync failed (forward vectorization continues):', reverseSyncError.message);
             }
         }
@@ -1048,7 +1060,7 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
 
                 // TRACE: Record initial chunk state
                 recordChunkFate(debugData, hash, 'vector_search', 'passed', null, {
-                    finalScore: meta.score || 1.0,
+                    finalScore: meta.score ?? 1.0,
                     originalScore: meta.originalScore,
                     keywordBoost: meta.keywordBoost,
                     matchedKeywords: meta.matchedKeywords,
@@ -1060,13 +1072,13 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
                 return {
                     hash: hash,
                     metadata: meta,
-                    score: meta.score || 1.0,
+                    score: meta.score ?? 1.0,
                     originalScore: meta.originalScore,
                     keywordBoost: meta.keywordBoost,
                     matchedKeywords: meta.matchedKeywords,
                     matchedKeywordsWithWeights: meta.matchedKeywordsWithWeights,
                     keywordBoosted: meta.keywordBoosted,
-                    similarity: meta.score || 1.0,
+                    similarity: meta.score ?? 1.0,
                     text: text,
                     index: meta.messageId || meta.index || 0,
                     collectionId: collectionId,
@@ -1107,7 +1119,7 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
  */
 async function expandSummaryChunks(chunks, activeCollections, settings, debugData) {
     const expandedChunks = [];
-    const parentHashesNeeded = new Map(); // parentHash -> { summaryChunk, collectionId }
+    const parentHashesNeeded = new Map(); // [collectionId, parentHash] -> { parentHash, summaryChunk, collectionId }
 
     // First pass: identify which chunks are summaries and need parent expansion
     for (const chunk of chunks) {
@@ -1117,10 +1129,15 @@ async function expandSummaryChunks(chunks, activeCollections, settings, debugDat
 
         if (isSummary && parentHash) {
             // Track this summary for parent lookup
-            parentHashesNeeded.set(String(parentHash), {
-                summaryChunk: chunk,
-                collectionId: chunk.collectionId
-            });
+            const parentKey = JSON.stringify([chunk.collectionId, String(parentHash)]);
+            const previous = parentHashesNeeded.get(parentKey);
+            if (!previous || (chunk.score ?? -Infinity) > (previous.summaryChunk.score ?? -Infinity)) {
+                parentHashesNeeded.set(parentKey, {
+                    parentHash: String(parentHash),
+                    summaryChunk: chunk,
+                    collectionId: chunk.collectionId
+                });
+            }
 
             addTrace(debugData, 'summary_expansion', `Summary chunk found, will expand to parent`, {
                 summaryHash: chunk.hash,
@@ -1142,12 +1159,11 @@ async function expandSummaryChunks(chunks, activeCollections, settings, debugDat
     // Second pass: fetch parent chunks from the vector DB
     // Group by collection for efficiency
     const parentsByCollection = new Map();
-    for (const [parentHash, info] of parentHashesNeeded) {
-        const collectionId = info.collectionId;
+    for (const { parentHash, summaryChunk, collectionId } of parentHashesNeeded.values()) {
         if (!parentsByCollection.has(collectionId)) {
             parentsByCollection.set(collectionId, []);
         }
-        parentsByCollection.get(collectionId).push({ parentHash, summaryChunk: info.summaryChunk });
+        parentsByCollection.get(collectionId).push({ parentHash, summaryChunk });
     }
 
     // Fetch parents from each collection

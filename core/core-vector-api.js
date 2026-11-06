@@ -659,7 +659,7 @@ export function throwIfSourceInvalid(settings) {
  * @param {boolean} includeMetadata If true, returns {hashes: [], metadata: []} instead of just hashes
  * @returns {Promise<number[]|{hashes: number[], metadata: object[]}>} Saved hashes or full data
  */
-export async function getSavedHashes(collectionId, settings, includeMetadata = false, abortSignal = null) {
+export async function getSavedHashes(collectionId, settings, includeMetadata = false, abortSignal = null, strictMetadata = false) {
     // R17: guarded - collection reads during/around runs were unabortable+untimed
     const backend = await withOpGuard(() => getBackend(settings), abortSignal, 'Backend initialization (read)');
 
@@ -711,12 +711,27 @@ export async function getSavedHashes(collectionId, settings, includeMetadata = f
             'Read collection metadata'
         );
         const items = data?.items || data?.chunks || [];
-        const metaByHash = new Map(items.map(item => [String(item.hash), item.metadata || item]));
+        const metaByHash = new Map(items.map(item => {
+            // Flat records are accepted only when their hash and text are explicit.
+            const metadata = strictMetadata
+                ? (item?.metadata ?? (item?.hash !== undefined && typeof item?.text === 'string' ? item : null))
+                : (item?.metadata || item);
+            return [String(item?.hash), metadata];
+        }));
+        if (strictMetadata && hashes.some(hash => {
+            const metadata = metaByHash.get(String(hash));
+            return !metadata || typeof metadata !== 'object' ||
+                String(metadata.hash) !== String(hash) ||
+                typeof metadata.text !== 'string';
+        })) {
+            throw new Error(`VectHare: Incomplete chunk metadata for ${collectionId}`);
+        }
         return {
             hashes: hashes,
             metadata: hashes.map(h => metaByHash.get(String(h)) || {}),
         };
     } catch (error) {
+        if (strictMetadata) throw error;
         console.warn('VectHare: Metadata read failed, returning hashes only:', error.message);
         // Fallback: hashes-only (old format) - callers treat missing metadata
         // as "cannot classify protected chunks" and skip accordingly.
