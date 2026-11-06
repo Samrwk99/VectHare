@@ -992,6 +992,13 @@ function buildSearchQuery(chat, settings) {
     return recentMessages.join('\n').trim();
 }
 
+// Shared by early candidate filtering and the final Stage 9 deduplication.
+// VectHare's existing setting defines 0 as checking the ENTIRE chat.
+function getRecentMessagesForDedup(chat, settings) {
+    const depth = settings.deduplication_depth ?? 50;
+    return depth > 0 && depth < chat.length ? chat.slice(-depth) : chat;
+}
+
 /**
  * Stage 3: Query all active collections and merge results
  * @param {string[]} activeCollections Collections that passed activation filters
@@ -1004,6 +1011,8 @@ function buildSearchQuery(chat, settings) {
 async function queryAndMergeCollections(activeCollections, queryText, settings, chat, debugData) {
     let chunksForVisualizer = [];
     const effectiveTopK = settings.top_k ?? settings.insert;
+    // Retrieve replacement candidates before Stage 9 dedup, without reducing configured top-K.
+    const candidateTopK = Math.max(effectiveTopK, Math.min(100, effectiveTopK * 3));
 
     // PERF: Build hash-to-message Map once for O(1) lookups instead of O(n) find() per chunk
     const chatHashMap = new Map();
@@ -1020,7 +1029,7 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
 
     for (const collectionId of activeCollections) {
         try {
-            const queryResults = await queryCollection(collectionId, queryText, effectiveTopK, settings);
+            const queryResults = await queryCollection(collectionId, queryText, candidateTopK, settings);
 
             // TRACE: Vector query results for this collection
             addTrace(debugData, 'vector_search', `Query completed for ${collectionId}`, {
@@ -1099,7 +1108,13 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
         }
     }
 
-    // Sort merged results by score (descending) and limit to topK
+    // Filter exact recent-message duplicates before the global top-K.
+    // Stage 9 remains authoritative after summary/group/link processing.
+    const recentHashes = new Set(getRecentMessagesForDedup(chat, settings)
+        .filter(message => message.mes)
+        .map(message => getStringHash(getTextWithoutAttachments(message))));
+    chunksForVisualizer = chunksForVisualizer.filter(chunk => !recentHashes.has(chunk.hash));
+
     chunksForVisualizer.sort((a, b) => b.score - a.score);
     chunksForVisualizer = chunksForVisualizer.slice(0, effectiveTopK);
 
@@ -1663,10 +1678,8 @@ function deduplicateChunks(chunks, chat, settings, debugData) {
         deduplicationDepth: deduplicationDepth
     });
 
-    // Only check the most recent N messages (within context window)
-    const recentMessages = deduplicationDepth > 0 && deduplicationDepth < chat.length
-        ? chat.slice(-deduplicationDepth)
-        : chat;
+    // Use the exact same depth semantics as the early top-K candidate filter.
+    const recentMessages = getRecentMessagesForDedup(chat, settings);
 
     console.log(`[VectHare Dedup] Building hash set from ${recentMessages.length} recent messages (depth: ${deduplicationDepth})`);
     console.log(`[VectHare Dedup] Total chat length: ${chat.length}, checking duplicates in last ${recentMessages.length} messages`);
