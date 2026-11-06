@@ -275,7 +275,16 @@ class QdrantBackend {
             { field: 'importance', schema: 'integer' },
         ];
 
+        const info = await this._request('GET', `/collections/${collectionName}`);
+        const existingIndexes = info.result?.payload_schema || {};
         for (const { field, schema } of indexConfigs) {
+            const existing = existingIndexes[field];
+            const type = typeof schema === 'string' ? schema : schema.type;
+            if (existing?.data_type === type &&
+                (typeof schema === 'string' || Object.entries(schema).every(
+                    ([key, value]) => key === 'type' || existing.params?.[key] === value))) {
+                continue;
+            }
             try {
                 await this._request('PUT', `/collections/${collectionName}/index`, {
                     field_name: field,
@@ -298,13 +307,9 @@ class QdrantBackend {
      */
     async ensurePayloadIndexes(collectionName) {
         try {
-            const collections = await this._request('GET', '/collections');
-            const exists = collections.result?.collections?.some(c => c.name === collectionName);
-            if (exists) {
-                await this.createPayloadIndexes(collectionName);
-                console.log(`[Qdrant] Ensured payload indexes for ${collectionName}`);
-            }
+            await this.createPayloadIndexes(collectionName);
         } catch (error) {
+            if (this._isNotFound(error)) return;
             console.error(`[Qdrant] Failed to ensure indexes for ${collectionName}:`, error.message);
         }
     }
@@ -343,29 +348,17 @@ class QdrantBackend {
             throw new Error(`[Qdrant] Vector dimension mismatch. Expected ${expectedDimension}, but found: ${examples}${mismatchedItems.length > 3 ? '...' : ''} (${mismatchedItems.length} total mismatches)`);
         }
 
-        // Check if collection exists and validate dimension matches
+        // Never delete stored memories as a side effect of an embedding-model change.
         try {
-            const collections = await this._request('GET', '/collections');
-            const exists = collections.result?.collections?.some(c => c.name === mainCollection);
-
-            if (exists) {
-                const collectionInfo = await this._request('GET', `/collections/${mainCollection}`);
-                const existingDimension = collectionInfo.result?.config?.params?.vectors?.size;
-
-                if (existingDimension && existingDimension !== expectedDimension) {
-                    console.warn(`[Qdrant] Vector dimension mismatch. Collection has ${existingDimension} dimensions, but insert requires ${expectedDimension}. Dropping collection to recreate...`);
-                    await this.purgeAll();
-                    // Wait slightly for deletion to propagate (optional but safe)
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                }
+            const info = await this._request('GET', `/collections/${mainCollection}`);
+            const size = info.result?.config?.params?.vectors?.size;
+            if (size && size !== expectedDimension) {
+                throw new Error(`Vector dimension mismatch: stored ${size}, supplied ${expectedDimension}. Existing data preserved.`);
             }
         } catch (error) {
-             console.debug('[Qdrant] Could not check existing collection dimension:', error.message);
+            if (!this._isNotFound(error)) throw error;
+            await this.ensureCollection(mainCollection, expectedDimension);
         }
-
-        // Ensure collection exists (use first vector's size)
-        const vectorSize = expectedDimension;
-        await this.ensureCollection(mainCollection, vectorSize);
 
         // Format points for Qdrant with multitenancy payload
         // NOTE: Spread item.metadata FIRST so critical fields can override it
@@ -962,9 +955,9 @@ class QdrantBackend {
 
             do {
                 const scrollPayload = {
-                    limit: 100,
-                    with_payload: true,
-                    with_vector: options.includeVectors || false,
+                    limit: options.hashesOnly ? 1000 : 100,
+                    with_payload: options.hashesOnly ? { include: ['hash'] } : true,
+                    with_vector: !options.hashesOnly && Boolean(options.includeVectors),
                 };
 
                 if (offset !== null) {
@@ -977,13 +970,20 @@ class QdrantBackend {
                 }
 
                 const response = await this._request('POST', `/collections/${mainCollection}/points/scroll`, scrollPayload);
+                if (options.hashesOnly && (!Array.isArray(response?.result?.points) ||
+                    response.result.points.some(point => point?.payload?.hash === undefined ||
+                        point.payload.hash === null))) {
+                    throw new Error(`Invalid Qdrant hash-only scroll response for ${mainCollection}`);
+                }
 
-                items.push(...(response.result?.points || []).map(p => ({
-                    hash: p.payload.hash,
-                    text: p.payload.text,
-                    metadata: p.payload,
-                    vector: options.includeVectors ? p.vector : undefined,
-                })));
+                items.push(...(response.result?.points || []).map(p =>
+                    options.hashesOnly ? { hash: p.payload.hash } : {
+                        hash: p.payload.hash,
+                        text: p.payload.text,
+                        metadata: p.payload,
+                        vector: options.includeVectors ? p.vector : undefined,
+                    }
+                ));
                 offset = response.result?.next_page_offset;
             } while (offset !== null && offset !== undefined);
 

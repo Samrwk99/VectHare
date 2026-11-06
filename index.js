@@ -987,6 +987,7 @@ async function _getLegacySingleEmbedding(source, text, model, directories, req) 
                 offset = 0,
                 limit = 100,
                 includeVectors = false,
+                hashesOnly = false,
                 filters = {}
             } = req.body;
 
@@ -1004,6 +1005,7 @@ async function _getLegacySingleEmbedding(source, text, model, directories, req) 
                 offset,
                 limit,
                 includeVectors,
+                hashesOnly,
                 filters
             });
 
@@ -1802,29 +1804,28 @@ async function scanAllSourcesForCollections(vectorsPath) {
                     const hasVecthareMain = collections.some(col => col.name === 'vecthare_main'); //just-in-case support for multitenancy?
 
                     for (const collectionName of collections) {
-                        const items = await qdrantBackend.listItems(collectionName, {});
-                        console.log('Discovered Qdrant Collection:', collectionName + " " + items.length + " items");
-
-                        // Extract source from collection name (format: "source:id" or "backend:source:id")
-                        let source = 'unknown';
-                        const parts = collectionName.split(':');
-                        if (parts.length === 2) {
-                            // Format: "source:id"
-                            source = parts[0];
-                        } else if (parts.length === 3) {
-                            // Format: "backend:source:id"
-                            source = parts[1];
-                        } else if (items.length > 0 && items[0].metadata?.embeddingSource) {
-                            // Fallback: get from item metadata
-                            source = items[0].metadata.embeddingSource;
+                        const name = qdrantBackend._parseCollectionName(collectionName);
+                        const route = `/collections/${name}`;
+                        const countResponse = await qdrantBackend._request(
+                            'POST', `${route}/points/count`, { exact: true });
+                        const sampleResponse = await qdrantBackend._request(
+                            'POST', `${route}/points/scroll`, {
+                                limit: 1,
+                                with_payload: { include: ['embeddingSource'] },
+                                with_vector: false,
+                            });
+                        const chunkCount = countResponse.result?.count;
+                        if (!Number.isSafeInteger(chunkCount) || chunkCount < 0) {
+                            throw new Error(`Invalid Qdrant count for ${collectionName}`);
                         }
-
-                         allCollections.push({
-                            id: collectionName,
-                            source: source,
-                            backend: 'qdrant',
-                            chunkCount: items.length,
-                            modelCount: 1
+                        const parts = collectionName.split(':');
+                        const legacySource = parts.length === 2 ? parts[0]
+                            : parts.length === 3 ? parts[1] : 'unknown';
+                        const source = sampleResponse.result?.points?.[0]
+                            ?.payload?.embeddingSource || legacySource;
+                        allCollections.push({
+                            id: collectionName, source, backend: 'qdrant',
+                            chunkCount, modelCount: 1,
                         });
                     }
                 }
