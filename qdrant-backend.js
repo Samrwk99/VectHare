@@ -28,7 +28,20 @@
  * Qdrant Backend Manager
  * Manages Qdrant REST API connection and operations
  */
+const KNOWN_EMBEDDING_SOURCES = new Set([
+    'transformers', 'openai', 'cohere', 'ollama', 'llamacpp',
+    'vllm', 'koboldcpp', 'webllm', 'bananabread', 'openrouter',
+    'electronhub', 'mistral', 'nomicai', 'palm', 'vertexai',
+    'togetherai', 'extras',
+]);
+
 class QdrantBackend {
+    _isNotFound(error) {
+        // Other 404s (unsupported endpoint, proxy route, etc.) are real errors.
+        return error?.status === 404 &&
+            /(?:collection.{0,120}(?:does(?:\s+not|n't)\s+exist|not\s+found)|not\s+found:\s*collection)/i.test(String(error.message));
+    }
+
     constructor() {
         this.baseUrl = null;
         this.apiKey = null;
@@ -47,19 +60,13 @@ class QdrantBackend {
      */
     _parseCollectionName(collectionName) {
         if (!collectionName) return collectionName;
-
-        // New format: backend:source:id (e.g., "qdrant:bananabread:chat_123")
-        // Old format: source:id (e.g., "bananabread:chat_123")
         if (collectionName.startsWith('qdrant:')) {
-            // Strip "qdrant:" prefix to get "source:id"
-            return collectionName.substring(7); // 'qdrant:'.length === 7
+            return collectionName.slice('qdrant:'.length);
         }
-        // Now strip the source prefix if present
-        if (collectionName.indexOf(':') !== -1) {
-            collectionName = collectionName.split(':')[1];
+        const separator = collectionName.indexOf(':');
+        if (separator !== -1 && KNOWN_EMBEDDING_SOURCES.has(collectionName.slice(0, separator))) {
+            return collectionName.slice(separator + 1);
         }
-
-        // Already in correct format or old format
         return collectionName;
     }
 
@@ -86,24 +93,20 @@ class QdrantBackend {
     async _request(method, endpoint, body = null, maxRetries = 3) {
         const url = `${this.baseUrl}${endpoint}`;
 
-        // Add explicit timeout of 60s to prevent indefinite hangs during heavy operations (like wait=true)
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 60000);
-
-        const options = {
-            method,
-            headers: this._getHeaders(),
-            signal: controller.signal,
-        };
-        if (body) {
-            options.body = JSON.stringify(body);
-        }
-
         let lastError;
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 60000);
+            const options = {
+                method,
+                headers: this._getHeaders(),
+                signal: controller.signal,
+            };
+            if (body) {
+                options.body = JSON.stringify(body);
+            }
             try {
                 const response = await fetch(url, options);
-                clearTimeout(timeoutId);
 
                 if (!response.ok) {
                     const errorText = await response.text();
@@ -124,7 +127,9 @@ class QdrantBackend {
                         continue;
                     }
 
-                    throw new Error(`Qdrant ${method} ${endpoint} failed: ${response.status} ${errorMessage}`);
+                    const error = new Error(`Qdrant ${method} ${endpoint} failed: ${response.status} ${errorMessage}`);
+                    error.status = response.status;
+                    throw error;
                 }
 
                 // Some endpoints return empty response
@@ -255,6 +260,7 @@ class QdrantBackend {
             { field: 'type', schema: { type: 'keyword', is_tenant: true } },
             { field: 'sourceId', schema: { type: 'keyword', is_tenant: true } },
             // REGULAR KEYWORD FIELDS
+            { field: 'content_type', schema: { type: 'keyword' } },
             { field: 'embeddingSource', schema: 'keyword' },
             { field: 'embeddingModel', schema: 'keyword' },
             { field: 'characterName', schema: 'keyword' },
@@ -531,8 +537,9 @@ class QdrantBackend {
                 metadata: result.payload,
             }));
         } catch (error) {
+            if (this._isNotFound(error)) return [];
             console.error(`[Qdrant] Query failed for ${mainCollection}:`, error.message);
-            return [];
+            throw error;
         }
     }
 
@@ -562,7 +569,7 @@ class QdrantBackend {
 
         // Default options
         const vectorWeight = options.vectorWeight ?? 0.5;
-        const keywordWeight = options.keywordWeight ?? 0.5;
+        const keywordWeight = options.keywordWeight ?? options.textWeight ?? 0.5;
         const fusionMethod = options.fusionMethod || 'rrf';
         const rrfK = options.rrfK || 60;
         const keywordBoost = options.keywordBoost || 1.5;
@@ -646,7 +653,6 @@ class QdrantBackend {
                 vector: queryVector,
                 limit: topK * 2, // Fetch more for fusion
                 with_payload: true,
-                score_threshold: 0.1, // Filter very low scores
             };
 
             if (must.length > 0) {
@@ -751,6 +757,13 @@ class QdrantBackend {
 
                 } while (offset !== null && offset !== undefined);
 
+                const matchCount = result => Array.isArray(result.matchedKeywords)
+                    ? result.matchedKeywords.length
+                    : (result.matchedKeywords || 0);
+                keywordResults.sort((a, b) =>
+                    ((b.keywordScore ?? 0) - (a.keywordScore ?? 0)) ||
+                    (matchCount(b) - matchCount(a))
+                );
                 console.log(`[Qdrant] Keyword search complete: ${keywordResults.length} results`);
             } else {
                 console.log(`[Qdrant] No keywords provided, skipping keyword search`);
@@ -774,8 +787,9 @@ class QdrantBackend {
             return fusedResults;
 
         } catch (error) {
+            if (this._isNotFound(error)) return [];
             console.error(`[Qdrant] Hybrid query failed for ${mainCollection}:`, error.message);
-            return [];
+            throw error;
         }
     }
 
@@ -928,8 +942,9 @@ class QdrantBackend {
             console.log(">>> [Qdrant] Listed", items.length, "items from", mainCollection);
             return items;
         } catch (error) {
+            if (this._isNotFound(error)) return [];
             console.error(`[Qdrant] Failed to list items from ${mainCollection}:`, error.message);
-            return [];
+            throw error;
         }
     }
 
@@ -1024,7 +1039,9 @@ class QdrantBackend {
 
             console.log(`[Qdrant] Deleted ${hashes.length} items from ${mainCollection}`);
         } catch (error) {
+            if (this._isNotFound(error)) return;
             console.error(`[Qdrant] Delete failed for ${mainCollection}:`, error.message);
+            throw error;
         }
     }
 
@@ -1173,8 +1190,9 @@ class QdrantBackend {
                 metadata: p.payload,
             };
         } catch (error) {
+            if (this._isNotFound(error)) return null;
             console.error(`[Qdrant] getItem failed:`, error.message);
-            return null;
+            throw error;
         }
     }
 
