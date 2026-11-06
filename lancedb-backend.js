@@ -18,7 +18,8 @@
 
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import * as lancedb from '@lancedb/lancedb';
+// Load the LanceDB SDK only if this backend is selected.
+let lancedb;
 
 /**
  * Sanitize collection ID for LanceDB table names
@@ -50,6 +51,7 @@ class LanceDBBackend {
      * @param {string} vectorsPath - Path to vectors directory
      */
     async initialize(vectorsPath) {
+        lancedb ??= await import('@lancedb/lancedb');
         this.basePath = path.join(vectorsPath, 'lancedb');
 
         // Ensure base directory exists
