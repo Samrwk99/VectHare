@@ -1,3 +1,5 @@
+import { itemMetadata } from './item-metadata.js';
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * LANCEDB BACKEND (via Unified Plugin API)
@@ -15,7 +17,7 @@
 
 import { getRequestHeaders } from '../../../../../script.js';
 import { VectorBackend } from './backend-interface.js';
-import { getModelField } from '../core/providers.js';
+import { getModelField, getValidProviderIds } from '../core/providers.js';
 import { VECTOR_LIST_LIMIT } from '../core/constants.js';
 
 const BACKEND_TYPE = 'lancedb';
@@ -40,8 +42,10 @@ export class LanceDBBackend extends VectorBackend {
         }
 
         const knownBackends = ['standard', 'lancedb', 'vectra', 'milvus', 'qdrant'];
-        const knownSources = ['transformers', 'openai', 'cohere', 'ollama', 'llamacpp',
-            'vllm', 'koboldcpp', 'webllm', 'bananabread', 'openrouter', 'togetherai', 'mistral'];
+        // #13: a hand-written provider list omitted supported providers, so their
+        // registry prefixes were never stripped and the collection was addressed by
+        // the wrong name. The provider registry is the single source of truth.
+        const knownSources = getValidProviderIds();
 
         const parts = collectionId.split(':');
 
@@ -70,7 +74,7 @@ export class LanceDBBackend extends VectorBackend {
             throw new Error(`Failed to initialize LanceDB: ${response.status} ${response.statusText} - ${errorBody}`);
         }
 
-        console.log('VectHare: Using LanceDB backend (disk-based, scalable)');
+        vhLog('VectHare: Using LanceDB backend (disk-based, scalable)');
     }
 
     async healthCheck() {
@@ -99,7 +103,8 @@ export class LanceDBBackend extends VectorBackend {
                 collectionId: actualCollectionId,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                limit: VECTOR_LIST_LIMIT, // Get all for hash comparison
+                limit: VECTOR_LIST_LIMIT,
+                allHashes: true, // VH-027: every hash, not the first VECTOR_LIST_LIMIT
             }),
         });
 
@@ -109,7 +114,13 @@ export class LanceDBBackend extends VectorBackend {
         }
 
         const data = await response.json();
-        return data.items ? data.items.map(item => item.hash) : [];
+        // VH-027: the plugin answers allHashes with every hash and complete:true.
+        // An older plugin ignores it and returns a capped page: never treat that as everything.
+        if (data.complete === true && Array.isArray(data.items)) return data.items.map(item => item.hash);
+        if (Array.isArray(data.items) && data.hasMore === false && Number(data.total) === data.items.length) {
+            return data.items.map(item => item.hash);
+        }
+        throw new Error(`[LanceDB] The stored hash list of ${collectionId} could not be read completely (update the Similharity plugin). Nothing was changed.`);
     }
 
     async insertVectorItems(collectionId, items, settings) {
@@ -127,19 +138,7 @@ export class LanceDBBackend extends VectorBackend {
                     text: item.text,
                     index: item.index,
                     vector: item.vector,
-                    metadata: {
-                        ...item.metadata,
-                        // Pass through VectHare-specific fields
-                        importance: item.importance,
-                        keywords: item.keywords,
-                        customWeights: item.customWeights,
-                        disabledKeywords: item.disabledKeywords,
-                        chunkGroup: item.chunkGroup,
-                        conditions: item.conditions,
-                        summary: item.summary,
-                        isSummaryChunk: item.isSummaryChunk,
-                        parentHash: item.parentHash,
-                    } || {},
+                    metadata: itemMetadata(item),
                 })),
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
@@ -151,7 +150,7 @@ export class LanceDBBackend extends VectorBackend {
             throw new Error(`[LanceDB] Failed to insert ${items.length} vectors into ${collectionId}: ${response.status} ${response.statusText} - ${errorBody}`);
         }
 
-        console.log(`VectHare LanceDB: Inserted ${items.length} vectors into ${collectionId}`);
+        vhLog(`VectHare LanceDB: Inserted ${items.length} vectors into ${collectionId}`);
     }
 
     async deleteVectorItems(collectionId, hashes, settings) {
@@ -174,9 +173,9 @@ export class LanceDBBackend extends VectorBackend {
         }
     }
 
-    async queryCollection(collectionId, searchText, topK, settings) {
+    async queryCollection(collectionId, searchText, topK, settings, queryVector = null) {
         const actualCollectionId = this._stripRegistryPrefix(collectionId);
-        console.log(`[LanceDB] queryCollection: original=${collectionId}, stripped=${actualCollectionId}`);
+        vhLog(`[LanceDB] queryCollection: original=${collectionId}, stripped=${actualCollectionId}`);
         const response = await fetch('/api/plugins/similharity/chunks/query', {
             method: 'POST',
             headers: getRequestHeaders(),
@@ -184,6 +183,8 @@ export class LanceDBBackend extends VectorBackend {
                 backend: BACKEND_TYPE,
                 collectionId: actualCollectionId,
                 searchText: searchText,
+                // #52: reuse one query embedding across collections when given.
+                ...(Array.isArray(queryVector) && queryVector.length ? { queryVector } : {}),
                 topK: topK,
                 threshold: 0.0,
                 source: settings.source || 'transformers',
@@ -210,7 +211,7 @@ export class LanceDBBackend extends VectorBackend {
         return { hashes, metadata };
     }
 
-    async queryMultipleCollections(collectionIds, searchText, topK, threshold, settings) {
+    async queryMultipleCollections(collectionIds, searchText, topK, threshold, settings, queryVector = null) {
         // Query each collection separately
         const results = {};
 
@@ -224,6 +225,8 @@ export class LanceDBBackend extends VectorBackend {
                         backend: BACKEND_TYPE,
                         collectionId: actualCollectionId,
                         searchText: searchText,
+                        // #52: reuse one query embedding across collections when given.
+                        ...(Array.isArray(queryVector) && queryVector.length ? { queryVector } : {}),
                         topK: topK,
                         threshold: threshold,
                         source: settings.source || 'transformers',
@@ -280,30 +283,10 @@ export class LanceDBBackend extends VectorBackend {
         return this.purgeVectorIndex(collectionId, settings);
     }
 
-    async purgeAllVectorIndexes(settings) {
-        // Get all collections and purge ALL of them - no filtering
-        const response = await fetch('/api/plugins/similharity/collections', {
-            headers: getRequestHeaders(),
-        });
-
-        if (!response.ok) {
-            const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`[LanceDB] Failed to get collections: ${response.status} ${response.statusText} - ${errorBody}`);
-        }
-
-        const data = await response.json();
-
-        // Purge ALL collections - don't filter by backend
-        for (const collection of data.collections || []) {
-            try {
-                await this.purgeVectorIndex(collection.id, {
-                    ...settings,
-                    source: collection.source,
-                });
-            } catch (e) {
-                console.error(`Failed to purge ${collection.id}:`, e);
-            }
-        }
+    async purgeAllVectorIndexes(_settings) {
+        // Never call a backend-wide purge: Standard shares ST's vector directory,
+        // and LanceDB/Milvus may share physical storage with other consumers.
+        throw new Error('Unsafe global purge is forbidden; delete verified VectHare collections individually');
     }
 
     // ========================================================================
@@ -335,6 +318,32 @@ export class LanceDBBackend extends VectorBackend {
     }
 
     /**
+     * P5: stored records for the given hashes only (verification after writes).
+     * Returns null when the plugin cannot answer, so the caller reads in full.
+     */
+    async getChunksByHashes(collectionId, hashes, settings) {
+        const actualCollectionId = this._stripRegistryPrefix(collectionId);
+        const response = await fetch('/api/plugins/similharity/chunks/get-by-hashes', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                backend: BACKEND_TYPE,
+                collectionId: actualCollectionId,
+                source: settings.source || 'transformers',
+                model: getModelFromSettings(settings),
+                hashes,
+            }),
+        });
+        if (response.status === 404) return null; // older plugin without this route
+        if (!response.ok) {
+            const errorBody = await response.text().catch(() => '');
+            throw new Error(`Reading chunks by hash failed: HTTP ${response.status} ${errorBody}`.trim());
+        }
+        const data = await response.json();
+        return data?.success === true && data.complete === true && Array.isArray(data.items) ? data : null;
+    }
+
+    /**
      * List chunks with pagination
      */
     async listChunks(collectionId, settings, options = {}) {
@@ -350,6 +359,7 @@ export class LanceDBBackend extends VectorBackend {
                 offset: options.offset || 0,
                 limit: options.limit || 100,
                 includeVectors: options.includeVectors || false,
+                strictRead: options.strictRead === true,
             }),
         });
 

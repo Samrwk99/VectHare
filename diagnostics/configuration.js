@@ -10,10 +10,25 @@
  */
 
 import { getCurrentChatId, chat_metadata } from '../../../../../script.js';
-import { getSavedHashes } from '../core/core-vector-api.js';
+import { getSavedHashes, resolveEmbeddingSettingsForEdit } from '../core/core-vector-api.js';
+
+/**
+ * VH-050: Diagnostics read a collection with the settings it was made with
+ * (provider, model, backend), so a provider switch does not make a full
+ * collection look empty. Falls back to the current settings.
+ */
+export async function savedHashesFor(collectionId, settings, includeMetadata = false) {
+    let readSettings = settings;
+    try {
+        readSettings = await resolveEmbeddingSettingsForEdit(collectionId, settings) || settings;
+    } catch {
+        readSettings = settings;
+    }
+    return getSavedHashes(collectionId, readSettings, includeMetadata);
+}
 import { getChatCollectionId, getChatUUID, parseCollectionId } from '../core/chat-vectorization.js';
 import { VALID_EMOTIONS, VALID_GENERATION_TYPES, validateConditionRule } from '../core/conditional-activation.js';
-import { getTemporallyBlindCount, getTemporallyBlindChunks, isChunkTemporallyBlind, isCollectionEnabled } from '../core/collection-metadata.js';
+import { getTemporallyBlindCount, getTemporallyBlindChunks, isChunkTemporallyBlind, isCollectionEnabled, getChunkMetadata } from '../core/collection-metadata.js';
 import { getCollectionRegistry } from '../core/collection-loader.js';
 
 /**
@@ -212,7 +227,7 @@ export async function checkChatVectors(settings) {
                 message: 'Could not get collection ID'
             };
         }
-        const hashes = await getSavedHashes(collectionId, settings);
+        const hashes = await savedHashesFor(collectionId, settings);
         if (hashes.length === 0) {
             return {
                 name: 'Chat Vectors',
@@ -287,7 +302,7 @@ export async function checkTemporallyBlindChunks(settings) {
                 category: 'configuration'
             };
         }
-        const hashes = await getSavedHashes(collectionId, settings);
+        const hashes = await savedHashesFor(collectionId, settings);
         const blindInChat = blindChunks.filter(hash => hashes.includes(parseInt(hash)));
 
         return {
@@ -391,23 +406,25 @@ export function checkCollectionIdFormat() {
         };
     }
 
-    if (parsed.prefix !== 'vh') {
+    // VH-071: chat collections are vecthare_chat_* (parseCollectionId reports format 'vecthare').
+    if (parsed.format !== 'vecthare' && parsed.format !== 'vh') {
         return {
             name: 'Collection ID Format',
             status: 'fail',
-            message: `Collection ID missing 'vh' prefix: ${collectionId}`,
+            message: `Collection ID is not a VectHare id: ${collectionId}`,
             category: 'configuration'
         };
     }
 
-    // UUID format check (should be like a1b2c3d4-e5f6-7890-abcd-ef1234567890)
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    const isValidUUID = uuidRegex.test(parsed.sourceId);
+    // Chat ids are vecthare_chat_<32 hex> (a hash of the chat's binding).
+    const rawId = String(parsed.rawId ?? parsed.sourceId ?? '');
+    const kind = /^[0-9a-f]{32}$/i.test(rawId) ? 'bound id'
+        : /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawId) ? 'UUID' : 'older id';
 
     return {
         name: 'Collection ID Format',
         status: 'pass',
-        message: `${parsed.type}:${parsed.sourceId.substring(0, 8)}... (${isValidUUID ? 'UUID' : 'fallback ID'})`,
+        message: `${parsed.type}:${rawId.substring(0, 8)}... (${kind})`,
         category: 'configuration'
     };
 }
@@ -486,7 +503,7 @@ export async function checkHashCollisionRate(settings) {
             };
         }
 
-        const hashes = await getSavedHashes(collectionId, settings);
+        const hashes = await savedHashesFor(collectionId, settings);
         if (hashes.length === 0) {
             return {
                 name: 'Hash Collision Rate',
@@ -602,20 +619,14 @@ export async function checkConditionRuleValidity(settings) {
             };
         }
 
-        // Get chunks with conditions
-        const hashesResult = await getSavedHashes(collectionId, settings, true);
-        if (!hashesResult || !Array.isArray(hashesResult)) {
-            return {
-                name: 'Condition Rules',
-                status: 'pass',
-                message: 'No chunks with conditions',
-                category: 'configuration'
-            };
-        }
-
-        const chunksWithConditions = hashesResult.filter(item =>
-            item.metadata?.conditions && Object.keys(item.metadata.conditions).length > 0
-        );
+        // Get chunks with conditions. VH-068: getSavedHashes(…, true) answers
+        // { hashes, metadata }, and conditions are kept in the chunk notes.
+        const saved = await savedHashesFor(collectionId, settings, true);
+        const hashes = Array.isArray(saved) ? saved : (saved?.hashes || []);
+        const chunksWithConditions = hashes.map((hash, i) => {
+            const conditions = getChunkMetadata(String(hash), collectionId)?.conditions ?? saved?.metadata?.[i]?.conditions;
+            return { hash, metadata: { conditions } };
+        }).filter(item => item.metadata.conditions && Object.keys(item.metadata.conditions).length > 0);
 
         if (chunksWithConditions.length === 0) {
             return {
@@ -630,12 +641,13 @@ export async function checkConditionRuleValidity(settings) {
         const invalidConditions = [];
         for (const chunk of chunksWithConditions) {
             const conditions = chunk.metadata.conditions;
-            for (const [ruleType, rule] of Object.entries(conditions)) {
-                const validation = validateConditionRule(ruleType, rule);
+            // VH-068: stored shape is { enabled, logic, rules: [...] }; each rule is validated.
+            for (const rule of Array.isArray(conditions?.rules) ? conditions.rules : []) {
+                const validation = validateConditionRule(rule);
                 if (!validation.valid) {
                     invalidConditions.push({
                         hash: chunk.hash,
-                        rule: ruleType,
+                        rule: rule?.type || 'unknown',
                         error: validation.errors?.join(', ') || 'Invalid rule'
                     });
                 }
@@ -881,7 +893,7 @@ export async function checkChunkGroupMemberIntegrity(settings) {
             // Get actual chunk hashes in this collection
             let existingHashes;
             try {
-                existingHashes = new Set((await getSavedHashes(collectionId, settings)).map(h => String(h)));
+                existingHashes = new Set((await savedHashesFor(collectionId, settings)).map(h => String(h)));
             } catch {
                 // Collection may not exist on backend yet
                 continue;

@@ -1,3 +1,5 @@
+import { vhLog } from '../utils/log.js';
+import { safePatternTest, riskyRegexReason } from './safe-regex.js';
 /**
  * ============================================================================
  * VECTHARE CONDITIONAL ACTIVATION SYSTEM
@@ -35,13 +37,13 @@ async function initExpressionsExtension() {
         expressionsExtensionStatus.available = true;
         expressionsExtensionStatus.enabled = true;
         expressionsExtensionStatus.lastCheck = Date.now();
-        console.log('VectHare Conditions: Character Expressions extension loaded for emotion detection');
+        vhLog('VectHare Conditions: Character Expressions extension loaded for emotion detection');
     } catch (e) {
         expressionsExtensionStatus.available = false;
         expressionsExtensionStatus.enabled = false;
         expressionsExtensionStatus.error = e.message;
         expressionsExtensionStatus.lastCheck = Date.now();
-        console.log('VectHare Conditions: Character Expressions extension not available, using keyword-based emotion detection');
+        vhLog('VectHare Conditions: Character Expressions extension not available, using keyword-based emotion detection');
     }
 }
 
@@ -149,7 +151,7 @@ function parseEmotionPattern(pattern) {
         if (match) {
             try {
                 const regex = new RegExp(match[1], match[2]);
-                return (text) => regex.test(text);
+                return (text) => safePatternTest(regex, text, 'emotion condition'); // VH-043
             } catch (e) {
                 console.warn(`VectHare: Invalid regex pattern: ${pattern}`, e);
                 return () => false;
@@ -240,7 +242,7 @@ function evaluatePatternCondition(rule, context) {
                 const regexPattern = pattern.slice(1, lastSlash);
                 const flags = pattern.slice(lastSlash + 1) || (caseSensitive ? '' : 'i');
                 const regex = new RegExp(regexPattern, flags);
-                return regex.test(searchText);
+                return safePatternTest(regex, searchText, 'pattern condition'); // VH-043
             } catch (e) {
                 console.warn(`VectHare: Invalid pattern regex: ${pattern}`, e);
                 return false;
@@ -400,7 +402,7 @@ function evaluateScoreThresholdCondition(rule, context) {
     const passes = chunkScore >= threshold;
 
     if (!passes) {
-        console.log(`VectHare: Chunk ${context.currentChunkHash} score ${chunkScore.toFixed(3)} below threshold ${threshold}`);
+        vhLog(`VectHare: Chunk ${context.currentChunkHash} score ${chunkScore.toFixed(3)} below threshold ${threshold}`);
     }
 
     return passes;
@@ -469,7 +471,7 @@ function evaluateFrequencyCondition(rule, context) {
 
     // Check max activations
     if (chunkHistory.count >= maxActivations) {
-        console.log(`VectHare Conditions: Chunk ${chunkHash} reached max activations (${maxActivations})`);
+        vhLog(`VectHare Conditions: Chunk ${chunkHash} reached max activations (${maxActivations})`);
         return false;
     }
 
@@ -477,7 +479,7 @@ function evaluateFrequencyCondition(rule, context) {
     if (cooldownMessages > 0 && chunkHistory.lastActivation !== null) {
         const messagesSinceLastActivation = context.messageCount - chunkHistory.lastActivation;
         if (messagesSinceLastActivation < cooldownMessages) {
-            console.log(`VectHare Conditions: Chunk ${chunkHash} on cooldown (${messagesSinceLastActivation}/${cooldownMessages} messages)`);
+            vhLog(`VectHare Conditions: Chunk ${chunkHash} on cooldown (${messagesSinceLastActivation}/${cooldownMessages} messages)`);
             return false;
         }
     }
@@ -559,9 +561,9 @@ function evaluateEmotionCondition(rule, context) {
                 );
 
                 if (expressionsResult) {
-                    console.log(`VectHare Conditions: Expressions match: "${detectedEmotion}" matches target [${targetEmotions.join(', ')}]`);
+                    vhLog(`VectHare Conditions: Expressions match: "${detectedEmotion}" matches target [${targetEmotions.join(', ')}]`);
                 } else {
-                    console.log(`VectHare Conditions: Expressions detected "${detectedEmotion}" but not in targets [${targetEmotions.join(', ')}]`);
+                    vhLog(`VectHare Conditions: Expressions detected "${detectedEmotion}" but not in targets [${targetEmotions.join(', ')}]`);
                 }
             }
         } catch (error) {
@@ -580,14 +582,14 @@ function evaluateEmotionCondition(rule, context) {
             const found = matchesEmotionPatterns(targetEmotion, emotionText);
 
             if (found) {
-                console.log(`VectHare Conditions: Pattern match: "${targetEmotion}" found in recent messages`);
+                vhLog(`VectHare Conditions: Pattern match: "${targetEmotion}" found in recent messages`);
             }
 
             return found;
         });
 
         if (!patternsResult) {
-            console.log(`VectHare Conditions: No pattern match for [${targetEmotions.join(', ')}]`);
+            vhLog(`VectHare Conditions: No pattern match for [${targetEmotions.join(', ')}]`);
         }
     }
 
@@ -906,7 +908,7 @@ export function filterChunksByConditions(chunks, baseContext) {
         return evaluateConditions(chunk, chunkContext);
     });
 
-    console.log(`VectHare Conditions: Filtered ${chunks.length} chunks to ${filtered.length} based on conditions`);
+    vhLog(`VectHare Conditions: Filtered ${chunks.length} chunks to ${filtered.length} based on conditions`);
 
     return filtered;
 }
@@ -1157,6 +1159,15 @@ export function validateConditionRule(rule) {
                 errors.push('Cooldown messages must be 0 or positive');
             }
             break;
+    }
+
+    // VH-043: a /regex/ value with nested repetition can freeze the page on every
+    // generation; refuse it here (matching also skips it, for imported rules).
+    const regexValues = [rule.value, ...(rule.settings?.values || []), ...(rule.settings?.patterns || [])]
+        .filter(v => typeof v === 'string' && v.startsWith('/') && v.lastIndexOf('/') > 0);
+    for (const value of regexValues) {
+        const risky = riskyRegexReason(value.slice(1, value.lastIndexOf('/')));
+        if (risky) errors.push(`Pattern ${value} can freeze the page: ${risky}`);
     }
 
     return {

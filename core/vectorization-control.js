@@ -1,3 +1,4 @@
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * VECTORIZATION RUN CONTROL (VectHare+)
@@ -45,7 +46,7 @@ export function getStopSignal() {
  */
 export function pauseVectorization() {
     paused = true;
-    console.log('VectHare: Vectorization paused by user (in-flight work will finish and be saved)');
+    vhLog('VectHare: Vectorization paused by user (in-flight work will finish and be saved)');
 }
 
 /**
@@ -53,7 +54,7 @@ export function pauseVectorization() {
  */
 export function resumeVectorization() {
     paused = false;
-    console.log('VectHare: Vectorization resumed');
+    vhLog('VectHare: Vectorization resumed');
 }
 
 /**
@@ -65,7 +66,7 @@ export function stopVectorization() {
     paused = false;
     // R13: cancel in-flight embedding/insert requests immediately
     stopAbortController.abort();
-    console.log('VectHare: Vectorization stopped by user (all completed vectors are kept, in-flight requests cancelled)');
+    vhLog('VectHare: Vectorization stopped by user (all completed vectors are kept, in-flight requests cancelled)');
 }
 
 /**

@@ -64,7 +64,6 @@ import {
     testKeywordBoosting,
     testLorebookKeywordExtraction,
     fixOrphanedMetadata,
-    fixDuplicateHashes
 } from './production-tests.js';
 
 import { testConditionalActivation } from './activation-tests.js';
@@ -308,7 +307,7 @@ export function getFixSuggestion(check) {
             return 'Click "Fix Now" to clean orphaned local metadata entries that no longer have corresponding vectors on the server.';
 
         case '[PROD] Duplicate Hash Check':
-            return 'Click "Fix Now" to remove duplicate entries. Then re-vectorize the chat to restore clean data. Duplicates usually happen from the native ST vectors extension.';
+            return 'Re-vectorize this chat (Vectorize, then confirm the rebuild): the rebuild writes a clean collection and replaces the old one only after it succeeds. Duplicates usually come from the native ST vectors extension.';
 
         case 'Chat Metadata Integrity':
             return 'Start a new chat or send a message to generate a valid chat UUID. If this persists, the chat file may be corrupted.';
@@ -344,20 +343,11 @@ export async function executeFixAction(check) {
     }
 
     switch (check.fixAction) {
-        case 'cleanOrphanedMetadata':
-            if (check.data?.orphanedHashes) {
-                return await fixOrphanedMetadata(check.data.orphanedHashes);
-            }
-            return { success: false, message: 'No orphaned hashes found in check data' };
-
-        case 'removeDuplicateHashes':
-            if (check.data?.duplicates && check.data?.collectionId) {
-                // Need settings for the fix function - get from VectHare
-                const { getVectHareSettings } = await import('../ui/ui-settings.js');
-                const settings = getVectHareSettings();
-                return await fixDuplicateHashes(check.data.duplicates, check.data.collectionId, settings);
-            }
-            return { success: false, message: 'No duplicate data found in check' };
+        case 'cleanOrphanedMetadata': {
+            const { extension_settings } = await import('../../../../extensions.js');
+            if (!extension_settings.vecthare) return { success: false, message: 'VectHare settings are unavailable' };
+            return await fixOrphanedMetadata(extension_settings.vecthare);
+        }
 
         case 'cleanOrphanedGroupMembers':
             return await fixOrphanedGroupMembers();
@@ -381,21 +371,27 @@ export async function executeFixAction(check) {
  */
 async function fixOrphanedGroupMembers() {
     try {
-        const { getCollectionMeta, saveCollectionMeta } = await import('../core/collection-metadata.js');
+        const { getCollectionMeta, setCollectionMeta } = await import('../core/collection-metadata.js');
         const { getCollectionRegistry } = await import('../core/collection-loader.js');
         const { getSavedHashes } = await import('../core/core-vector-api.js');
-        const { getVectHareSettings } = await import('../ui/ui-settings.js');
+        const { parseRegistryKey } = await import('../core/collection-ids.js');
+        const { extension_settings } = await import('../../../../extensions.js');
 
-        const settings = getVectHareSettings();
+        const settings = extension_settings.vecthare;
+        if (!settings) return { success: false, message: 'VectHare settings are unavailable' };
         const registry = getCollectionRegistry();
         let totalCleaned = 0;
         let collectionsFixed = 0;
 
         for (const registryKey of registry) {
-            let collectionId = registryKey;
-            if (registryKey.includes(':')) {
-                collectionId = registryKey.substring(registryKey.indexOf(':') + 1);
-            }
+            const parsed = parseRegistryKey(registryKey);
+            const collectionId = parsed.collectionId;
+            if (!collectionId) continue;
+            const storeSettings = {
+                ...settings,
+                vector_backend: parsed.backend || settings.vector_backend,
+                source: parsed.source || settings.source,
+            };
 
             const meta = getCollectionMeta(collectionId);
             const groups = meta?.groups || [];
@@ -405,7 +401,11 @@ async function fixOrphanedGroupMembers() {
             // Get actual chunk hashes
             let existingHashes;
             try {
-                existingHashes = new Set((await getSavedHashes(collectionId, settings)).map(h => String(h)));
+                const hashes = await getSavedHashes(collectionId, storeSettings);
+                // A failed backend may report [] instead of throwing; never clear
+                // stored group memberships on an inconclusive empty result.
+                if (!Array.isArray(hashes) || hashes.length === 0) continue;
+                existingHashes = new Set(hashes.map(h => String(h)));
             } catch {
                 continue;
             }
@@ -422,7 +422,7 @@ async function fixOrphanedGroupMembers() {
             }
 
             if (collectionModified) {
-                saveCollectionMeta(collectionId, meta);
+                setCollectionMeta(collectionId, { groups: meta.groups });
                 collectionsFixed++;
             }
         }

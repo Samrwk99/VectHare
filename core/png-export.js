@@ -1,3 +1,4 @@
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * VECTHARE PNG EXPORT/IMPORT
@@ -13,7 +14,7 @@
  * We insert a zTXt chunk containing compressed JSON data.
  * zTXt format: keyword + null + compression_method (0=deflate) + compressed_data
  *
- * Uses browser's native CompressionStream API for deflate compression.
+ * Uses browser's native CompressionStream API for zlib (deflate) compression.
  * Falls back to storing as tEXt (base64, uncompressed) if compression unavailable.
  *
  * @author VectHare
@@ -77,155 +78,78 @@ function crc32(data) {
 // COMPRESSION UTILITIES
 // ============================================================================
 
-/**
- * Compresses data using browser's native CompressionStream (deflate-raw)
- * @param {Uint8Array} data - Data to compress
- * @returns {Promise<Uint8Array>} Compressed data
- */
-async function compressDeflateRaw(data) {
-    // Check if CompressionStream supports deflate-raw
-    if (typeof CompressionStream !== 'undefined') {
-        try {
-            const cs = new CompressionStream('deflate-raw');
-            const writer = cs.writable.getWriter();
-            writer.write(data);
-            writer.close();
+// VH-079: the largest JSON text an import will decompress (a browser cannot
+// hold a much longer string anyway); protects against decompression bombs.
+const MAX_DECOMPRESSED_BYTES = 512 * 1024 * 1024;
 
-            const chunks = [];
-            const reader = cs.readable.getReader();
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                chunks.push(value);
-            }
-
-            // Combine chunks
-            const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-            const result = new Uint8Array(totalLength);
-            let offset = 0;
-            for (const chunk of chunks) {
-                result.set(chunk, offset);
-                offset += chunk.length;
-            }
-            return result;
-        } catch (e) {
-            // deflate-raw might not be supported, try regular deflate
-            console.warn('VectHare PNG: deflate-raw not supported, trying deflate');
+/** Runs `data` through a (De)CompressionStream, stopping past `limit` bytes. */
+async function streamThrough(stream, data, limit = Infinity) {
+    const writer = stream.writable.getWriter();
+    writer.write(data).catch(() => {});
+    writer.close().catch(() => {});
+    const chunks = [];
+    let total = 0;
+    const reader = stream.readable.getReader();
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.length;
+        if (total > limit) {
+            await reader.cancel().catch(() => {});
+            throw new Error('the compressed VectHare data is larger than an import can handle');
         }
-
-        try {
-            // Regular deflate includes zlib header (2 bytes) and checksum (4 bytes)
-            // We need to strip them for zTXt which expects raw deflate
-            const cs = new CompressionStream('deflate');
-            const writer = cs.writable.getWriter();
-            writer.write(data);
-            writer.close();
-
-            const chunks = [];
-            const reader = cs.readable.getReader();
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                chunks.push(value);
-            }
-
-            const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-            const result = new Uint8Array(totalLength);
-            let offset = 0;
-            for (const chunk of chunks) {
-                result.set(chunk, offset);
-                offset += chunk.length;
-            }
-
-            // Strip zlib header (2 bytes) and adler32 checksum (4 bytes)
-            // zlib format: [CMF][FLG][...compressed data...][ADLER32]
-            if (result.length > 6) {
-                return result.slice(2, result.length - 4);
-            }
-            return result;
-        } catch (e) {
-            console.warn('VectHare PNG: Compression failed, will use uncompressed tEXt', e);
-            return null;
-        }
+        chunks.push(value);
     }
-    return null;
+    const result = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.length; }
+    return result;
 }
 
 /**
- * Decompresses deflate-raw data using browser's native DecompressionStream
+ * Compresses data for a zTXt chunk. VH-079: the PNG specification requires a
+ * zlib stream (2-byte header + Adler-32), which CompressionStream('deflate')
+ * produces; older builds wrote raw deflate, which standard PNG tools reject.
+ * @param {Uint8Array} data - Data to compress
+ * @returns {Promise<Uint8Array|null>} Compressed data, or null (use tEXt)
+ */
+async function compressDeflateRaw(data) {
+    if (typeof CompressionStream === 'undefined') return null;
+    try {
+        return await streamThrough(new CompressionStream('deflate'), data);
+    } catch (e) {
+        console.warn('VectHare PNG: Compression failed, will use uncompressed tEXt', e);
+        return null;
+    }
+}
+
+/** A zlib stream starts with a deflate CMF byte and a header check (RFC 1950). */
+function looksLikeZlib(data) {
+    return data.length >= 2 && (data[0] & 0x0f) === 8 && (data[0] >> 4) <= 7 &&
+        (((data[0] << 8) | data[1]) % 31) === 0;
+}
+
+/**
+ * Decompresses a zTXt payload: the standard zlib form (VH-079) or the raw
+ * deflate older VectHare builds wrote, so old exports stay readable.
  * @param {Uint8Array} data - Compressed data
  * @returns {Promise<Uint8Array>} Decompressed data
  */
 async function decompressDeflateRaw(data) {
-    if (typeof DecompressionStream !== 'undefined') {
-        // Try deflate-raw first
+    if (typeof DecompressionStream === 'undefined') {
+        throw new Error('DecompressionStream not available in this browser');
+    }
+    const formats = looksLikeZlib(data) ? ['deflate', 'deflate-raw'] : ['deflate-raw', 'deflate'];
+    let lastError = null;
+    for (const format of formats) {
         try {
-            const ds = new DecompressionStream('deflate-raw');
-            const writer = ds.writable.getWriter();
-            writer.write(data);
-            writer.close();
-
-            const chunks = [];
-            const reader = ds.readable.getReader();
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                chunks.push(value);
-            }
-
-            const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-            const result = new Uint8Array(totalLength);
-            let offset = 0;
-            for (const chunk of chunks) {
-                result.set(chunk, offset);
-                offset += chunk.length;
-            }
-            return result;
+            return await streamThrough(new DecompressionStream(format), data, MAX_DECOMPRESSED_BYTES);
         } catch (e) {
-            // Try wrapping in zlib format for regular deflate decoder
-            console.warn('VectHare PNG: deflate-raw decompress failed, trying with zlib wrapper');
-        }
-
-        try {
-            // Wrap raw deflate in zlib format
-            // CMF = 0x78 (deflate, 32K window), FLG = 0x9C (default compression, checksum)
-            const zlibData = new Uint8Array(data.length + 6);
-            zlibData[0] = 0x78;
-            zlibData[1] = 0x9C;
-            zlibData.set(data, 2);
-            // Add dummy adler32 (will likely cause issues, but worth trying)
-            zlibData[zlibData.length - 4] = 0;
-            zlibData[zlibData.length - 3] = 0;
-            zlibData[zlibData.length - 2] = 0;
-            zlibData[zlibData.length - 1] = 1;
-
-            const ds = new DecompressionStream('deflate');
-            const writer = ds.writable.getWriter();
-            writer.write(zlibData);
-            writer.close();
-
-            const chunks = [];
-            const reader = ds.readable.getReader();
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                chunks.push(value);
-            }
-
-            const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-            const result = new Uint8Array(totalLength);
-            let offset = 0;
-            for (const chunk of chunks) {
-                result.set(chunk, offset);
-                offset += chunk.length;
-            }
-            return result;
-        } catch (e) {
-            console.error('VectHare PNG: All decompression methods failed', e);
-            throw new Error('Failed to decompress PNG data. Browser may not support required compression.');
+            if (/larger than an import can handle/.test(e?.message || '')) throw e;
+            lastError = e;
         }
     }
-    throw new Error('DecompressionStream not available in this browser');
+    throw new Error(`the compressed data could not be read (${lastError?.message || 'invalid data'})`);
 }
 
 // ============================================================================
@@ -278,12 +202,21 @@ function parseChunks(pngData) {
     let offset = 8; // Skip signature
 
     while (offset < pngData.length) {
+        if (offset + 8 > pngData.length) break; // VH-079: cut off inside a chunk header
         const view = new DataView(pngData.buffer, pngData.byteOffset + offset);
         const length = view.getUint32(0, false);
         const type = new TextDecoder().decode(pngData.slice(offset + 4, offset + 8));
         const data = pngData.slice(offset + 8, offset + 8 + length);
+        // VH-079: a chunk that runs past the end of the file is incomplete; a
+        // complete one gets its CRC checked (over type + data).
+        const incomplete = offset + 12 + length > pngData.length;
+        let crcOk = null;
+        if (!incomplete) {
+            const stored = new DataView(pngData.buffer, pngData.byteOffset + offset + 8 + length, 4).getUint32(0, false);
+            crcOk = crc32(pngData.slice(offset + 4, offset + 8 + length)) === stored;
+        }
 
-        chunks.push({ type, data, offset });
+        chunks.push({ type, data, offset, incomplete, crcOk });
 
         offset += 4 + 4 + length + 4; // length + type + data + crc
 
@@ -346,7 +279,7 @@ async function createZTXtChunk(keyword, text) {
         data[keywordBytes.length + 1] = 0; // Compression method 0 = deflate
         data.set(compressed, keywordBytes.length + 2);
 
-        console.log(`VectHare PNG: Compressed ${textBytes.length} bytes to ${compressed.length} bytes (${Math.round(compressed.length / textBytes.length * 100)}%)`);
+        vhLog(`VectHare PNG: Compressed ${textBytes.length} bytes to ${compressed.length} bytes (${Math.round(compressed.length / textBytes.length * 100)}%)`);
 
         return createChunk('zTXt', data);
     } else {
@@ -370,7 +303,7 @@ async function createZTXtChunk(keyword, text) {
  * @param {object} chunk - Parsed chunk {type, data}
  * @returns {Promise<{keyword: string, text: string} | null>}
  */
-async function readTextChunk(chunk) {
+async function readTextChunk(chunk, wantedKeyword = null) {
     if (chunk.type !== 'tEXt' && chunk.type !== 'zTXt') {
         return null;
     }
@@ -387,6 +320,8 @@ async function readTextChunk(chunk) {
     if (nullIndex === -1) return null;
 
     const keyword = new TextDecoder().decode(chunk.data.slice(0, nullIndex));
+    // VH-079: never decompress a chunk that is not the one being looked for.
+    if (wantedKeyword !== null && keyword !== wantedKeyword) return { keyword, text: null };
 
     if (chunk.type === 'tEXt') {
         // tEXt: keyword + null + text
@@ -541,7 +476,7 @@ export async function embedDataInPNG(exportData, pngData = null) {
     // Insert chunk into PNG
     const result = insertChunkBeforeIEND(pngData, textChunk);
 
-    console.log(`VectHare PNG: Created PNG export (${result.length} bytes, original JSON: ${jsonString.length} bytes)`);
+    vhLog(`VectHare PNG: Created PNG export (${result.length} bytes, original JSON: ${jsonString.length} bytes)`);
 
     return result;
 }
@@ -556,17 +491,28 @@ export async function extractDataFromPNG(pngData) {
 
     // Look for vecthare keyword in text chunks
     for (const chunk of chunks) {
-        if (chunk.type === 'tEXt' || chunk.type === 'zTXt') {
-            try {
-                const textData = await readTextChunk(chunk);
-                if (textData && textData.keyword === VECTHARE_KEYWORD) {
-                    const exportData = JSON.parse(textData.text);
-                    console.log('VectHare PNG: Successfully extracted data from PNG');
-                    return exportData;
-                }
-            } catch (e) {
-                console.warn('VectHare PNG: Failed to read text chunk:', e);
-            }
+        if (chunk.type !== 'tEXt' && chunk.type !== 'zTXt') continue;
+        // VH-079: a VectHare chunk that is cut off, fails its checksum or cannot
+        // be read means a damaged file - not "no VectHare data".
+        const keywordEnd = chunk.data.indexOf(0);
+        const keyword = keywordEnd > 0 ? new TextDecoder().decode(chunk.data.slice(0, keywordEnd)) : '';
+        if (keyword !== VECTHARE_KEYWORD) continue;
+        const damaged = reason => new Error(`This PNG holds VectHare data, but the file is damaged or incomplete (${reason}). ` +
+            'Export it again, or use the JSON export.');
+        if (chunk.incomplete) throw damaged('it was cut off');
+        if (chunk.crcOk === false) throw damaged('the checksum of its data does not match');
+        let textData;
+        try {
+            textData = await readTextChunk(chunk, VECTHARE_KEYWORD);
+        } catch (e) {
+            throw damaged(e?.message || 'it could not be read');
+        }
+        try {
+            const exportData = JSON.parse(textData.text);
+            vhLog('VectHare PNG: Successfully extracted data from PNG');
+            return exportData;
+        } catch (e) {
+            throw damaged('its text is not complete JSON');
         }
     }
 
@@ -590,7 +536,7 @@ export function downloadPNG(pngData, filename) {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
 
-    console.log(`VectHare PNG: Downloaded ${a.download}`);
+    vhLog(`VectHare PNG: Downloaded ${a.download}`);
 }
 
 /**

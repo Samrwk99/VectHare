@@ -1,3 +1,5 @@
+import { itemMetadata } from './item-metadata.js';
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * STANDARD BACKEND (Vectra - ST Native + Plugin)
@@ -17,6 +19,7 @@ import { VectorBackend } from './backend-interface.js';
 import { getModelField } from '../core/providers.js';
 import { getProviderSpecificParams } from './provider-params.js';
 import { VECTOR_LIST_LIMIT } from '../core/constants.js';
+import AsyncUtils from '../utils/async-utils.js';
 
 /**
  * Get the model value from settings based on provider
@@ -34,10 +37,10 @@ export class StandardBackend extends VectorBackend {
 
     async initialize(settings) {
         // Check if plugin is available
-        console.log('VectHare DEBUG: Checking plugin availability...');
+        vhLog('VectHare DEBUG: Checking plugin availability...');
         try {
             const response = await fetch('/api/plugins/similharity/health');
-            console.log('VectHare DEBUG: Plugin health check response:', response.status, response.ok);
+            vhLog('VectHare DEBUG: Plugin health check response:', response.status, response.ok);
             this.pluginAvailable = response.ok;
 
             if (this.pluginAvailable) {
@@ -45,31 +48,33 @@ export class StandardBackend extends VectorBackend {
                     method: 'POST',
                     headers: getRequestHeaders(),
                 });
-                console.log('VectHare: Standard backend initialized (plugin available)');
+                vhLog('VectHare: Standard backend initialized (plugin available)');
             } else {
-                console.log('VectHare: Standard backend initialized (native ST API only - health check failed)');
+                vhLog('VectHare: Standard backend initialized (native ST API only - health check failed)');
             }
         } catch (e) {
-            console.log('VectHare: Standard backend initialized (native ST API only - error:', e.message, ')');
+            vhLog('VectHare: Standard backend initialized (native ST API only - error:', e.message, ')');
             this.pluginAvailable = false;
         }
         
     }
 
     async healthCheck() {
-        // Native ST API is always available if ST is running
+        // Native ST API is always available if ST is running.
+        //
+        // This used to probe a collection named '__vecthare_health_check__'.
+        // Listing a Vectra collection that does not exist CREATES it, so every
+        // health check left an empty index folder behind under the active
+        // source, which then showed up as a collection. The endpoint is asked
+        // for nothing instead: a reachable route rejects the empty request
+        // (400), an absent one answers 404, and nothing is created either way.
         try {
-            // Quick test: try to list a non-existent collection (should return empty array or error)
             const response = await fetch('/api/vector/list', {
                 method: 'POST',
                 headers: getRequestHeaders(),
-                body: JSON.stringify({
-                    collectionId: '__vecthare_health_check__',
-                    source: 'transformers'
-                }),
+                body: JSON.stringify({}),
             });
-            // 200 = works (empty collection), 500 = syntax error (no collection), both are "working"
-            return response.status === 200 || response.status === 500;
+            return response.status !== 404;
         } catch (error) {
             console.error('[Standard] Health check failed:', error);
             return false;
@@ -129,12 +134,12 @@ export class StandardBackend extends VectorBackend {
         // Count how many chunks have keywords
         const chunksWithKeywords = items.filter(item => item.keywords && item.keywords.length > 0).length;
 
-        console.log(`VectHare: Embedding ${items.length} chunks (avg: ${avgLen} chars, max: ${maxLen} chars at index ${longestChunkIndex}) - ${chunksWithKeywords} chunks have keywords`);
+        vhLog(`VectHare: Embedding ${items.length} chunks (avg: ${avgLen} chars, max: ${maxLen} chars at index ${longestChunkIndex}) - ${chunksWithKeywords} chunks have keywords`);
 
         // Debug: Log first chunk's keywords if any
         if (chunksWithKeywords > 0) {
             const firstChunkWithKeywords = items.find(item => item.keywords && item.keywords.length > 0);
-            console.log(`VectHare DEBUG: First chunk keywords:`, firstChunkWithKeywords.keywords);
+            vhLog(`VectHare DEBUG: First chunk keywords:`, firstChunkWithKeywords.keywords);
         }
 
         // Warn if chunks are unusually large (potential OOM risk)
@@ -145,16 +150,21 @@ export class StandardBackend extends VectorBackend {
 
         try {
             // Try plugin API first (supports metadata) - fallback to native API if unavailable
-            console.log('VectHare DEBUG: this.pluginAvailable =', this.pluginAvailable);
+            vhLog('VectHare DEBUG: this.pluginAvailable =', this.pluginAvailable);
             let usePluginApi = this.pluginAvailable;
             let endpoint = usePluginApi ? '/api/plugins/similharity/chunks/insert' : '/api/vector/insert';
 
-            console.log(`VectHare DEBUG: Using ${usePluginApi ? 'PLUGIN' : 'NATIVE'} API for insertion (${endpoint})`);
+            vhLog(`VectHare DEBUG: Using ${usePluginApi ? 'PLUGIN' : 'NATIVE'} API for insertion (${endpoint})`);
             
             // Warn if keywords will be lost
             if (!usePluginApi && chunksWithKeywords > 0) {
                 console.warn(`⚠️ VectHare: ${chunksWithKeywords} chunks have keywords, but native ST API doesn't support metadata!`);
                 console.warn(`⚠️ VectHare: Install the Similharity plugin to save keywords: https://github.com/SillyTavern/SillyTavern-Extras-Similharity-plugin`);
+            }
+
+            if (!usePluginApi && !this._provenanceNativeWarned) {
+                console.warn('VectHare: Native Standard insert cannot persist vecthareProvenance; records written there remain unverified.');
+                this._provenanceNativeWarned = true;
             }
 
             const payload = usePluginApi ? {
@@ -166,27 +176,17 @@ export class StandardBackend extends VectorBackend {
                         text: item.text || '',
                         index: item.index ?? 0,
                         vector: item.vector,
-                        metadata: {
-                            ...item.metadata,
-                            keywords: item.keywords || [],
-                            importance: item.importance,
-                            customWeights: item.customWeights,
-                            disabledKeywords: item.disabledKeywords,
-                            chunkGroup: item.chunkGroup,
-                            conditions: item.conditions,
-                            summary: item.summary,
-                            isSummaryChunk: item.isSummaryChunk,
-                            parentHash: item.parentHash,
-                        },
+                        metadata: { ...itemMetadata(item), keywords: itemMetadata(item).keywords || [] },
                     };
                     // Debug: Log first item's metadata
                     if (item === items[0] && item.keywords?.length > 0) {
-                        console.log(`VectHare DEBUG: First item metadata being sent:`, mappedItem.metadata);
+                        vhLog(`VectHare DEBUG: First item metadata being sent:`, mappedItem.metadata);
                     }
                     return mappedItem;
                 }),
                 source: settings.source || 'transformers',
                 model: model,
+                ...providerParams,
             } : {
                 collectionId: collectionId,
                 items: items.map(item => ({
@@ -212,10 +212,12 @@ export class StandardBackend extends VectorBackend {
 
             if (!response.ok) {
                 const errorBody = await response.text().catch(() => 'No response body');
-                throw new Error(`Failed to insert vectors: ${response.status} - ${errorBody}`);
+                // #47: keep a forwarded Retry-After so the retry policy obeys it.
+                throw AsyncUtils.httpError(response,
+                    `Failed to insert vectors: ${response.status} - ${errorBody}`);
             }
 
-            console.log(`VectHare Standard: Inserted ${items.length} vectors into ${collectionId}`);
+            vhLog(`VectHare Standard: Inserted ${items.length} vectors into ${collectionId}`);
         } catch (error) {
             // Enhanced error logging for OOM debugging
             const isOOM = error.message?.includes('OrtRun') || error.message?.includes('error code = 6');
@@ -265,7 +267,11 @@ export class StandardBackend extends VectorBackend {
             collectionId: collectionId,
             searchText: searchText,
             topK: topK,
-            threshold: settings.score_threshold || 0.0,
+            // #10: the relevance threshold is applied by the RAG pipeline AFTER
+            // keyword boosting and BM25 fusion (Stage 6). Pre-filtering here
+            // dropped keyword-strong candidates before they could be promoted,
+            // and the other backends already send no threshold.
+            threshold: 0.0,
             source: settings.source || 'transformers',
             model: model,
             ...providerParams,
@@ -352,22 +358,30 @@ export class StandardBackend extends VectorBackend {
         return await response.json();
     }
 
-    /**
-     * Purge (delete) a collection
-     * Uses native ST API
+    /** Purge only this VectHare collection's source/model index.
+     * ST's native purge removes every embedding source for a collection ID.
      */
     async purgeVectorIndex(collectionId, settings) {
-        const response = await fetch('/api/vector/purge', {
+        const response = await fetch('/api/plugins/similharity/chunks/purge', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({
-                collectionId: collectionId,
+                backend: 'vectra',
+                collectionId,
+                source: settings.source || 'transformers',
+                model: getModelFromSettings(settings),
+                // Set only by a deletion the user explicitly confirmed for a
+                // collection VectHare cannot prove is its own.
+                ...(settings.__vecthareConfirmUnowned === true ? { confirmUnowned: true } : {}),
             }),
         });
 
         if (!response.ok) {
             const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`Failed to purge collection: ${response.status} ${response.statusText} - ${errorBody}`);
+            throw new Error(`Failed to purge scoped Vectra index: ${response.status} ${response.statusText} - ${errorBody}`);
+        }
+        if ((await response.json()).success !== true) {
+            throw new Error('Scoped Vectra purge was not confirmed');
         }
     }
 
@@ -379,16 +393,10 @@ export class StandardBackend extends VectorBackend {
      * Purge all vector indexes
      * Uses native ST API
      */
-    async purgeAllVectorIndexes(settings) {
-        const response = await fetch('/api/vector/purge-all', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-        });
-
-        if (!response.ok) {
-            const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`Failed to purge all: ${response.status} ${response.statusText} - ${errorBody}`);
-        }
+    async purgeAllVectorIndexes(_settings) {
+        // Never call a backend-wide purge: Standard shares ST's vector directory,
+        // and LanceDB/Milvus may share physical storage with other consumers.
+        throw new Error('Unsafe global purge is forbidden; delete verified VectHare collections individually');
     }
 
     // ========================================================================
@@ -413,16 +421,20 @@ export class StandardBackend extends VectorBackend {
                         offset: options.offset || 0,
                         limit: options.limit || 100,
                         includeVectors: options.includeVectors || false,
+                        strictRead: options.strictRead === true,
                     }),
                 });
 
                 if (response.ok) {
                     return await response.json();
                 }
+                if (options.strictRead) throw new Error(`Metadata listing failed (HTTP ${response.status})`);
             } catch (e) {
+                if (options.strictRead) throw e;
                 console.warn('VectHare: Plugin listChunks failed, using native fallback');
             }
         }
+        if (options.strictRead) throw new Error('Plugin metadata listing is unavailable');
 
         // Fallback: use native list (hashes only)
         const hashes = await this.getSavedHashes(collectionId, settings);
@@ -430,6 +442,32 @@ export class StandardBackend extends VectorBackend {
             items: hashes.map(hash => ({ hash, text: '', metadata: {} })),
             total: hashes.length,
         };
+    }
+
+    /**
+     * P5: stored records for the given hashes only (verification after writes).
+     * Returns null when the plugin cannot answer, so the caller reads in full.
+     */
+    async getChunksByHashes(collectionId, hashes, settings) {
+        if (!this.pluginAvailable) return null;
+        const response = await fetch('/api/plugins/similharity/chunks/get-by-hashes', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                backend: 'vectra',
+                collectionId: collectionId,
+                source: settings.source || 'transformers',
+                model: getModelFromSettings(settings),
+                hashes,
+            }),
+        });
+        if (response.status === 404) return null; // older plugin without this route
+        if (!response.ok) {
+            const errorBody = await response.text().catch(() => '');
+            throw new Error(`Reading chunks by hash failed: HTTP ${response.status} ${errorBody}`.trim());
+        }
+        const data = await response.json();
+        return data?.success === true && data.complete === true && Array.isArray(data.items) ? data : null;
     }
 
     /**

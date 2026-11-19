@@ -1,3 +1,5 @@
+import { escapeHtml } from '../utils/html.js';
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * VECTHARE UI MANAGER
@@ -11,6 +13,7 @@
  */
 
 import { saveSettingsDebounced, getCurrentChatId, eventSource, event_types } from '../../../../../script.js';
+import { vecthareState } from '../core/vecthare-store.js';
 import { extension_settings, openThirdPartyExtensionMenu } from '../../../../extensions.js';
 import { writeSecret, SECRET_KEYS, secret_state, readSecretState } from '../../../../secrets.js';
 import { getWebLlmProvider as getSharedWebLlmProvider } from '../providers/webllm.js';
@@ -22,9 +25,11 @@ import { openTextCleaningManager } from './text-cleaning-manager.js';
 import { resetBackendHealth } from '../backends/backend-manager.js';
 import { getHealthIndicatorHtml, getHealthModalHtml, initializeHealthDashboard, checkBackendHealth } from './health-dashboard.js';
 import { getChatCollectionId } from '../core/chat-vectorization.js';
-import { doesChatHaveVectors } from '../core/collection-loader.js';
+import { doesChatHaveVectors, getCollectionRegistry, invalidateCollectionInventory } from '../core/collection-loader.js';
+import { parseRegistryKey } from '../core/collection-ids.js';
 import { getModelField } from '../core/providers.js';
 import { getChunkingStrategies } from '../core/content-types.js';
+import { fetchSecretStatus, setSecret } from '../core/secret-store.js';
 
 /**
  * Applies the current settings snapshot without overwriting collection metadata
@@ -37,6 +42,92 @@ function applySettingsSnapshot(settingsSnapshot) {
 }
 
 /**
+ * Turns a password input into a key-store field: "Key set ✓ [Replace] [Remove]"
+ * when a key is stored, otherwise the input plus a Save button. The key itself
+ * is never read back into the page; it goes to the plugin's key store only.
+ * @param {string} inputSelector
+ * @param {string} name One of the key store names (qdrant_api_key, ...)
+ * @param {object} settings
+ */
+function bindSecretField(inputSelector, name, settings) {
+    const $input = $(inputSelector);
+    if (!$input.length) return;
+    const originalPlaceholder = $input.attr('placeholder') || '';
+    $input.val('');
+    const $row = $('<div class="vecthare-secret-row" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:4px;"></div>');
+    $input.after($row);
+
+    let state = { known: false, set: Boolean(settings[name]) };
+    let replacing = false;
+
+    const button = (label, handler) =>
+        $('<button type="button" class="vecthare-btn-secondary"></button>').text(label).on('click', handler);
+
+    const render = () => {
+        $row.empty();
+        if (!state.known && !settings[name]) {
+            // Plugin unreachable: the key cannot be stored, so do not pretend.
+            $input.hide();
+            $row.append($('<small></small>').text('Key store unavailable (Similharity plugin not reachable).'));
+            $row.append(button('Retry', refresh));
+            return;
+        }
+        if (state.set && !replacing) {
+            $input.hide();
+            $row.append($('<small></small>').text(
+                settings[name] ? 'Key set ✓ (moving to key store)' : 'Key set ✓'));
+            $row.append(button('Replace', () => { replacing = true; render(); $input.trigger('focus'); }));
+            $row.append(button('Remove', remove));
+            return;
+        }
+        $input.show().attr('placeholder', originalPlaceholder).val('');
+        $row.append(button('Save', save));
+        if (replacing) $row.append(button('Cancel', () => { replacing = false; render(); }));
+    };
+
+    const refresh = async () => {
+        const result = await fetchSecretStatus();
+        state = { known: result.ok, set: Boolean(result.status?.[name]) || Boolean(settings[name]) };
+        render();
+    };
+
+    const save = async () => {
+        const value = String($input.val()).trim();
+        if (!value) { toastr.warning('Enter a key first'); return; }
+        try {
+            await setSecret(name, value, settings);
+            $input.val('');
+            replacing = false;
+            state = { known: true, set: true };
+            resetBackendHealth();
+            invalidateCollectionInventory(); // K3
+            toastr.success('Key saved');
+        } catch (error) {
+            toastr.error(`Could not save the key: ${error.message}`);
+        }
+        render();
+    };
+
+    const remove = async () => {
+        try {
+            await setSecret(name, '', settings);
+            state = { known: true, set: false };
+            replacing = false;
+            resetBackendHealth();
+            invalidateCollectionInventory(); // K3
+            toastr.info('Key removed');
+        } catch (error) {
+            toastr.error(`Could not remove the key: ${error.message}`);
+        }
+        render();
+    };
+
+    $input.on('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); void save(); } });
+    render();
+    void refresh();
+}
+
+/**
  * Renders the VectHare settings UI
  * @param {string} containerId - The container element ID to render into
  * @param {object} settings - VectHare settings object
@@ -46,7 +137,7 @@ function applySettingsSnapshot(settingsSnapshot) {
  * @param {Function} callbacks.onRunDiagnostics - Called when "Run Diagnostics" is clicked
  */
 export function renderSettings(containerId, settings, callbacks) {
-    console.log('VectHare UI: Rendering settings...');
+    vhLog('VectHare UI: Rendering settings...');
 
     const html = `
         <div id="vecthare_settings">
@@ -126,8 +217,9 @@ export function renderSettings(containerId, settings, callbacks) {
                                         <span>Use Multitenancy (Single Collection)</span>
                                     </label>
                                     <small class="vecthare_hint" style="display: block; margin-top: 4px;">
-                                        <strong>Multitenancy ON:</strong> Single collection with filtering (saves resources)<br>
-                                        <strong>Multitenancy OFF:</strong> Separate collections per content type (better isolation)
+                                        <strong>Multitenancy ON:</strong> new collections share one Qdrant collection per vector size, kept separate from each other server-side<br>
+                                        <strong>Multitenancy OFF:</strong> each new collection gets its own Qdrant collection (better isolation)<br>
+                                        The switch decides where NEW collections go; existing ones stay where they are (see Database Browser &gt; Storage). Chats in the old shared store are read-only: Vectorize offers a rebuild that moves them.
                                     </small>
                                 </div>
                             </div>
@@ -165,6 +257,18 @@ export function renderSettings(containerId, settings, callbacks) {
                                 </label>
                                 <input type="password" id="vecthare_milvus_token" class="vecthare-input" placeholder="For cloud instances" />
 
+                                <div style="margin: 10px 0; padding: 8px; background: rgba(0,0,0,0.1); border-radius: 4px;">
+                                    <label class="checkbox_label" title="Where NEW Milvus collections go. Existing collections stay where they are.">
+                                        <input type="checkbox" id="vecthare_milvus_multitenancy" />
+                                        <span>Use Multitenancy (shared store per vector size)</span>
+                                    </label>
+                                    <small class="vecthare_hint" style="display: block; margin-top: 4px;">
+                                        <strong>ON (default):</strong> new collections share one Milvus collection per vector size, separated server-side (fits hosted Milvus collection limits)<br>
+                                        <strong>OFF:</strong> each new collection gets its own Milvus collection<br>
+                                        Needs the Similharity plugin that comes with this VectHare; existing collections stay where they are.
+                                    </small>
+                                </div>
+
                                 <label for="vecthare_milvus_dimensions">
                                     <small>Embedding Dimensions:</small>
                                 </label>
@@ -194,6 +298,7 @@ export function renderSettings(containerId, settings, callbacks) {
                             <option value="mistral">Mistral AI</option>
                             <option value="nomicai">Nomic AI</option>
                         </select>
+                            <small class="vecthare_hint">Changing the embedding provider, model or chunking settings applies to <b>new</b> collections only. Existing collections keep the settings they were created with.</small>
 
                         <!-- Provider-Specific Settings -->
                         <div id="vecthare_provider_settings">
@@ -401,14 +506,26 @@ export function renderSettings(containerId, settings, callbacks) {
                             <label for="vecthare_insert_batch_size">
                                 <small>Insert Batch Size: <span id="vecthare_insert_batch_size_value">50</span></small>
                             </label>
-                            <input type="range" id="vecthare_insert_batch_size" class="vecthare-slider" min="10" max="100" step="10" />
-                            <small class="vecthare_hint">Chunks per insert batch (50-100 recommended for faster bulk operations)</small>
+                            <input type="range" id="vecthare_insert_batch_size" class="vecthare-slider" min="1" max="100" step="1" />
+                            <small class="vecthare_hint">Chunks sent per embedding request (1-100). Once changed, chat Sync/Repair also take this many per pass (default 5, or 8 for local Transformers). Lower it if your embedding server rejects large requests.</small>
+
+                            <label class="checkbox_label" style="margin-top: 16px;">
+                                <input type="checkbox" id="vecthare_debug_logging" />
+                                <span>Debug logging</span>
+                            </label>
+                            <small class="vecthare_hint">Write VectHare's detailed progress lines to the browser console (off keeps the console quiet; warnings and errors are always shown)</small>
 
                             <label for="vecthare_min_chat_length" style="margin-top: 16px;">
                                 <small>Minimum Messages Before Injection</small>
                             </label>
                             <input type="number" id="vecthare_min_chat_length" class="vecthare-input" min="0" max="100" step="1" placeholder="0" />
                             <small class="vecthare_hint">Minimum number of messages in chat before RAG injection starts (0 = inject immediately)</small>
+
+                            <label for="vecthare_rag_timeout_seconds" style="margin-top: 16px;">
+                                <small>Retrieval time limit (seconds)</small>
+                            </label>
+                            <input type="number" id="vecthare_rag_timeout_seconds" class="vecthare-input" min="0" max="300" step="1" placeholder="15" />
+                            <small class="vecthare_hint">If the embedding or vector backend does not answer within this time, the message is sent without memories (0 = wait as long as it takes)</small>
 
                             <label for="vecthare_score_threshold">
                                 <small>Similarity Threshold: <span id="vecthare_threshold_value">0.25</span></small>
@@ -661,7 +778,7 @@ export function renderSettings(containerId, settings, callbacks) {
                                         <div style="display:flex; gap:8px; margin-top:8px;">
                                             <button id="vecthare_wi_test_btn" class="vecthare-btn-secondary">Test Semantic WI</button>
                                             <button id="vecthare_wi_dump_registry" class="vecthare-btn-secondary">Dump Registry</button>
-                                            <button id="vecthare_wi_apply_first" class="vecthare-btn-primary">Apply First Semantic Hit</button>
+                                            <button id="vecthare_wi_apply_first" class="vecthare-btn-primary" title="Copies the text of the first World Info entry found by meaning, so you can paste it into the World Info editor">Copy First Semantic Hit</button>
                                         </div>
                                     </div>
 
@@ -701,35 +818,19 @@ export function renderSettings(containerId, settings, callbacks) {
 
                             <!-- Collection lock moved to Database Browser (per-collection settings) -->
 
-                            <label for="vecthare_chunking_strategy" style="margin-top: 12px;">
-                                <small>Chunking Strategy</small>
-                            </label>
-                            <select id="vecthare_chunking_strategy" class="vecthare-select">
-                                <!-- Populated dynamically from content-types.js -->
-                            </select>
-
-                            <!-- Strategy description (populated dynamically) -->
-                            <div id="vecthare_strategy_info" class="vecthare_hint" style="margin-top: 4px; margin-bottom: 12px;">
-                                <span id="vecthare_strategy_description"></span>
-                            </div>
-
-                            <!-- Conversation Turns order (only shown for conversation_turns) -->
-                            <div id="vecthare_turn_order_settings" style="display: none; margin-bottom: 12px;">
-                                <label for="vecthare_turn_order"><small>Pairing Order</small></label>
-                                <select id="vecthare_turn_order" class="vecthare-select">
-                                    <option value="user_character">User → Character</option>
-                                    <option value="character_user">Character → User</option>
-                                </select>
-                                <small class="vecthare_hint">Consecutive messages from one speaker count as a single turn.</small>
-                            </div>
-
-                            <!-- Message Batch settings (only shown for message_batch strategy) -->
-                            <div id="vecthare_batch_settings" style="display: none;">
-                                <label for="vecthare_batch_size">
-                                    <small>Messages per Batch: <span id="vecthare_batch_size_value">4</span></small>
-                                </label>
-                                <input type="range" id="vecthare_batch_size" class="vecthare-slider" min="2" max="10" step="1" />
-                                <small class="vecthare_hint">How many messages to group together</small>
+                            <!-- Read-only. This chat collection's chunking and text cleaning are
+                                 whatever its original vectorization recorded, and auto-sync and
+                                 Repair reproduce them. They are changed by re-vectorizing
+                                 (Vectorize Content > Replace All), never from this card. -->
+                            <div id="vecthare_chat_config_readonly" style="margin-top: 12px;">
+                                <label><small>Chunking Strategy</small></label>
+                                <div id="vecthare_chat_config_strategy" class="vecthare_hint">Not Configured</div>
+                                <label style="margin-top: 8px;"><small>Text Cleaning</small></label>
+                                <div id="vecthare_chat_config_cleaning" class="vecthare_hint">Not Configured</div>
+                                <small class="vecthare_hint" style="margin-top: 4px; margin-bottom: 12px; display: block;">
+                                    This chat collection's original vectorization settings. To change them,
+                                    re-vectorize the chat from Vectorize Content.
+                                </small>
                             </div>
 
                         </div>
@@ -758,10 +859,8 @@ export function renderSettings(containerId, settings, callbacks) {
                                     <i class="fa-solid fa-gauge-high"></i>
                                     <span id="vecthare_vectorization_status_text">Status: checking…</span>
                                 </button>
-                                <!-- VectHare+ R7/R10: shown only when unfinished vectorization is detected.
-                                     R10 renamed: the operation IS the DB-diff repair (removes vectors of
-                                     edited/deleted messages, re-vectorizes edited content, continues pending
-                                     work) - "Repair Chunks" says what it does. -->
+                                <!-- Repair Chunks fixes previously indexed vectors; Sync Chat handles
+                                     unvectorized backlog. Keep Repair available for registered collections. -->
                                 <button id="vecthare_continue_vectorization" class="vecthare-action-btn vecthare-btn-primary" style="display: none;">
                                     <i class="fa-solid fa-screwdriver-wrench"></i>
                                     <span>Repair Chunks</span>
@@ -906,45 +1005,14 @@ export function renderSettings(containerId, settings, callbacks) {
             </div>
         </div>
 
-        <!-- Chunk Visualizer Modal -->
-        <div id="vecthare_visualizer_modal" class="vecthare-modal" style="display: none;">
-            <div class="vecthare-modal-overlay"></div>
-            <div class="vecthare-modal-content vecthare-visualizer-content">
-                <div class="vecthare-modal-header">
-                    <h3>
-                        <i class="fa-solid fa-cubes"></i>
-                        Chunk Visualizer
-                    </h3>
-                    <button class="vecthare-modal-close" id="vecthare_visualizer_close">
-                        <i class="fa-solid fa-times"></i>
-                    </button>
-                </div>
-                <div class="vecthare-visualizer-toolbar">
-                    <input type="text" id="vecthare_visualizer_search"
-                           class="vecthare-visualizer-search"
-                           placeholder="Search chunks by text, keywords, or name...">
-                    <div class="vecthare-visualizer-stats">
-                        <span id="vecthare_visualizer_count">0 chunks</span>
-                        <span id="vecthare_visualizer_tiers"></span>
-                    </div>
-                </div>
-                <div class="vecthare-modal-body">
-                    <div id="vecthare_visualizer_content"></div>
-                </div>
-                <div class="vecthare-modal-footer">
-                    <button class="vecthare-btn-secondary" id="vecthare_visualizer_done">Done</button>
-                </div>
-            </div>
-        </div>
-
         ${getHealthModalHtml()}
     `;
 
     // Sanity debug: confirm the generated HTML contains the lock button marker
     try {
-        console.log(`VectHare: renderSettings built HTML contains lock marker:`, String(html).indexOf('vecthare_lock_collection') >= 0);
+        vhLog(`VectHare: renderSettings built HTML contains lock marker:`, String(html).indexOf('vecthare_lock_collection') >= 0);
         const target = document.getElementById(containerId);
-        console.log(`VectHare: renderSettings target container exists:`, !!target, 'containerId=', containerId);
+        vhLog(`VectHare: renderSettings target container exists:`, !!target, 'containerId=', containerId);
     } catch (e) {
         console.warn('VectHare: renderSettings pre-append debug failed', e);
     }
@@ -953,13 +1021,13 @@ export function renderSettings(containerId, settings, callbacks) {
 
     // Debug: log presence of lock button after rendering and observe for later appearance
     try {
-        console.log(`VectHare: renderSettings appended to ${containerId}. lock button present:`, !!document.getElementById('vecthare_lock_collection'));
+        vhLog(`VectHare: renderSettings appended to ${containerId}. lock button present:`, !!document.getElementById('vecthare_lock_collection'));
         if (!document.getElementById('vecthare_lock_collection')) {
             const containerEl = document.getElementById(containerId);
             if (containerEl && window.MutationObserver) {
                 const mo = new MutationObserver((mutations, obs) => {
                     if (document.getElementById('vecthare_lock_collection')) {
-                        console.log('VectHare: lock button appeared in DOM');
+                        vhLog('VectHare: lock button appeared in DOM');
                         obs.disconnect();
                     }
                 });
@@ -982,7 +1050,7 @@ export function renderSettings(containerId, settings, callbacks) {
     // Initialize health dashboard
     initializeHealthDashboard();
 
-    console.log('VectHare UI: Settings rendered');
+    vhLog('VectHare UI: Settings rendered');
 }
 
 /**
@@ -1384,7 +1452,7 @@ export function updateContinueVectorizationButton(mode, pending = 0, total = 0) 
     // racy async check (user: button disappeared after actions, reappeared
     // after reload). 'hide' = no collection for this chat.
     if (mode === 'backlog') {
-        $btn.attr('title', `${pending} of ${total} message groups pending. Click to continue from where it stopped.`);
+        $btn.attr('title', `${pending} of ${total} message groups pending. Use Sync Chat to finish vectorizing them; Repair Chunks fixes previously indexed chunks.`);
         $btn.show();
     } else if (mode === 'available') {
         $btn.attr('title', 'No pending backlog right now. Click to run a repair pass anyway (removes stale/duplicate vectors of edited or deleted messages - reports "Nothing to repair" if all is clean).');
@@ -1399,17 +1467,150 @@ export function updateContinueVectorizationButton(mode, pending = 0, total = 0) 
  * Call this when chat changes to keep UI in sync
  * @param {object} settings - VectHare settings object (unused, kept for API compatibility)
  */
-export function refreshAutoSyncCheckbox(settings) {
+let autoSyncRefreshId = 0;
+let chatConfigDisplayId = 0;
+let chatConfigShown = { key: null, at: 0 };
+
+/**
+ * Read-only display of the chunking strategy and text cleaning this chat's
+ * collection was ACTUALLY vectorized with, read from its verified original
+ * vectorization configuration at its recorded destination.
+ *
+ * The current global settings are never shown here: auto-sync and Repair
+ * reproduce the collection's saved configuration, so showing today's settings
+ * would misreport what runs. Nothing is written and nothing is guessed - a
+ * chat with no collection reads "Not Configured", and a configuration that is
+ * missing, invalid or unverifiable reads "Unknown".
+ *
+ * @param {object} settings VectHare settings (used only to address the backend)
+ */
+export function refreshChatVectorizationConfig(settings) {
+    const requestId = ++chatConfigDisplayId;
+    const strategyEl = $('#vecthare_chat_config_strategy');
+    const cleaningEl = $('#vecthare_chat_config_cleaning');
+    if (!strategyEl.length || !cleaningEl.length) return;
+
+    const chatId = getCurrentChatId();
     const collectionId = getChatCollectionId();
+    const destinations = collectionId
+        ? getCollectionRegistry().filter(key => (parseRegistryKey(key).collectionId || key) === collectionId)
+        : [];
+    // This refresh shares its entry point with the auto-sync checkbox, which
+    // runs several times per chat switch. One read per chat is enough, and the
+    // key changes as soon as the chat gains (or loses) a recorded destination.
+    const key = `${chatId}|${collectionId || ''}|${destinations.join(',')}`;
+    if (chatConfigShown.key === key && Date.now() - chatConfigShown.at < 5000) return;
+
+    const settle = (strategyText, cleaningText, detail = '') => {
+        // A later chat switch always wins; a stale read never paints.
+        if (requestId !== chatConfigDisplayId || getCurrentChatId() !== chatId) return;
+        strategyEl.text(strategyText).attr('title', detail);
+        cleaningEl.text(cleaningText).attr('title', detail);
+        chatConfigShown = { key, at: Date.now() };
+    };
+
+    if (!collectionId) {
+        settle('Not Configured', 'Not Configured', 'This chat has no vector collection yet.');
+        return;
+    }
+    if (!destinations.length) {
+        settle('Not Configured', 'Not Configured',
+            'This chat has not been vectorized yet, so it has no recorded configuration.');
+        return;
+    }
+
+    strategyEl.text('Reading…').attr('title', '');
+    cleaningEl.text('Reading…').attr('title', '');
+
+    void (async () => {
+        try {
+            const { readInitialVectorizationConfig } = await import('../core/collection-metadata.js');
+            let last = null;
+            for (const registryKey of destinations) {
+                const destination = parseRegistryKey(registryKey);
+                const saved = await readInitialVectorizationConfig(collectionId, settings, {
+                    backend: destination.backend || undefined,
+                    source: destination.source || undefined,
+                });
+                last = saved;
+                if (saved.status === 'valid' && saved.config) {
+                    settle(describeOriginalChunking(saved.config),
+                        describeOriginalCleaning(saved.config),
+                        `Recorded ${saved.config.recordedAt || 'at vectorization'}.`);
+                    return;
+                }
+            }
+            settle('Unknown', 'Unknown',
+                `The original configuration is ${last?.status || 'unverified'}` +
+                `${last?.reason ? ` (${last.reason})` : ''}. Nothing is assumed about it.`);
+        } catch (error) {
+            console.warn('VectHare: Could not read this chat collection\'s original configuration:', error);
+            settle('Unknown', 'Unknown', `The original configuration could not be read (${error.message}).`);
+        }
+    })();
+}
+
+/**
+ * Formats a verified original configuration's chunking for display.
+ * @param {object} config Verified original vectorization configuration
+ * @returns {string}
+ */
+function describeOriginalChunking(config) {
+    const chunking = config.chunking;
+    if (!chunking || typeof chunking !== 'object' || typeof chunking.strategy !== 'string') {
+        return 'Unknown';
+    }
+    const known = getChunkingStrategies('chat').find(item => item.id === chunking.strategy);
+    const name = known?.name || chunking.strategy;
+    const extra = [];
+    if (chunking.strategy === 'message_batch' && chunking.batchSize != null) {
+        extra.push(`batches of ${chunking.batchSize}`);
+    }
+    if (chunking.strategy === 'conversation_turns' && chunking.conversationTurnOrder) {
+        extra.push(chunking.conversationTurnOrder === 'character_user'
+            ? 'Character → User' : 'User → Character');
+    }
+    if (chunking.pipeline && chunking.pipeline !== 'sync-chat') {
+        extra.push(`vectorized as ${chunking.pipeline}`);
+    }
+    return extra.length ? `${name} (${extra.join(', ')})` : name;
+}
+
+/**
+ * Formats a verified original configuration's text cleaning for display.
+ * @param {object} config Verified original vectorization configuration
+ * @returns {string}
+ */
+function describeOriginalCleaning(config) {
+    const cleaning = config.textCleaning;
+    if (!cleaning || typeof cleaning !== 'object' || typeof cleaning.applied !== 'boolean') {
+        return 'Unknown';
+    }
+    if (!cleaning.applied) return 'Not applied';
+    const patterns = Array.isArray(cleaning.activePatterns) ? cleaning.activePatterns.length : null;
+    const preset = cleaning.preset || 'none';
+    return patterns === null ? `Preset: ${preset}`
+        : `Preset: ${preset} · ${patterns} pattern${patterns === 1 ? '' : 's'}`;
+}
+
+export function refreshAutoSyncCheckbox(settings) {
+    const requestId = ++autoSyncRefreshId;
+    const chatId = getCurrentChatId();
+    const collectionId = getChatCollectionId();
+    // Same card, same chat: keep the read-only configuration display in step,
+    // including on chat switches (this already runs on CHAT_CHANGED).
+    refreshChatVectorizationConfig(settings);
     if (!collectionId) {
         $('#vecthare_autosync_enabled').prop('checked', false);
         return;
     }
     // Dynamically import to avoid circular dependency
     import('../core/collection-metadata.js').then(({ isCollectionAutoSyncEnabled }) => {
+        if (requestId !== autoSyncRefreshId || getCurrentChatId() !== chatId ||
+            getChatCollectionId() !== collectionId) return;
         const isEnabled = isCollectionAutoSyncEnabled(collectionId);
         $('#vecthare_autosync_enabled').prop('checked', isEnabled);
-    });
+    }).catch(error => console.warn('VectHare: Could not refresh auto-sync state:', error));
 }
 
 export function updateWebLlmStatus() {
@@ -1519,11 +1720,11 @@ async function showAutoSyncConfirmModal(allMatches, settings) {
                     <div style="display: flex; justify-content: space-between; align-items: start;">
                         <div style="flex: 1; min-width: 0;">
                             <div style="font-family: monospace; word-break: break-all; font-size: 0.85em; margin-bottom: 6px;">
-                                ${displayId}
+                                ${escapeHtml(displayId)}
                             </div>
                             <div style="font-size: 0.8em; color: var(--SmartThemeQuoteColor);">
                                 <i class="fa-solid fa-cube"></i> <strong>${match.chunkCount}</strong> chunks
-                                ${match.source ? `<span style="margin-left: 10px;"><i class="fa-solid fa-database"></i> ${match.source}</span>` : ''}
+                                ${match.source ? `<span style="margin-left: 10px;"><i class="fa-solid fa-database"></i> ${escapeHtml(match.source)}</span>` : ''}
                             </div>
                         </div>
                         ${isGhost ? `
@@ -1677,7 +1878,94 @@ async function showAutoSyncConfirmModal(allMatches, settings) {
  * @param {object} settings - VectHare settings object
  * @param {object} callbacks - Callback functions
  */
+/**
+ * Asks what a Full Purge should remove. Both choices delete VectHare's own
+ * vectors and its metadata; only one of them also resets VectHare's settings.
+ * Resolves to 'all', 'data', or null when the user cancels.
+ * @returns {Promise<'all'|'data'|null>}
+ */
+export function openPurgeOptionsDialog() {
+    return new Promise(resolve => {
+        if ($('#vecthare_purge_options_modal').length === 0) {
+            $('body').append(`
+            <div id="vecthare_purge_options_modal" class="vecthare-modal">
+                <div class="vecthare-modal-content vecthare-rename-dialog popup">
+                    <div class="vecthare-modal-header">
+                        <h3>Full Purge</h3>
+                        <button class="vecthare-btn-icon" id="vecthare_purge_options_close">✕</button>
+                    </div>
+                    <div class="vecthare-rename-body">
+                        <p>Both choices delete every VectHare-owned vector collection and all of
+                        VectHare's stored metadata for them: the collection registry, collection
+                        records and preferences, chunk annotations, chat bindings and identity
+                        ledgers.</p>
+                        <p><strong>Your chats, characters and SillyTavern's own data are not
+                        touched, and collections VectHare does not own are left alone.</strong></p>
+                        <p>Choose whether your VectHare settings go too:</p>
+                        <ul>
+                            <li><strong>Everything</strong> — also resets VectHare's settings
+                            (backend, embedding provider and model, chunking, RAG, decay and the
+                            rest) to their defaults.</li>
+                            <li><strong>Vectors &amp; metadata only</strong> — keeps your settings
+                            exactly as they are, so you can re-vectorize with the same
+                            configuration.</li>
+                        </ul>
+                        <p><small>Nothing is deleted until the vector purge has completed and been
+                        verified. This cannot be undone.</small></p>
+                    </div>
+                    <div class="vecthare-modal-footer">
+                        <button class="vecthare-btn" id="vecthare_purge_options_cancel">Cancel</button>
+                        <button class="vecthare-btn vecthare-btn-danger" id="vecthare_purge_options_data">
+                            Purge Vectors &amp; Metadata
+                        </button>
+                        <button class="vecthare-btn vecthare-btn-danger" id="vecthare_purge_options_all">
+                            Purge Everything
+                        </button>
+                    </div>
+                </div>
+            </div>
+            `);
+            $('#vecthare_purge_options_modal').on('mousedown touchstart', e => e.stopPropagation());
+        }
+
+        const modal = $('#vecthare_purge_options_modal');
+        const finish = choice => {
+            modal.off('.vecthareePurge');
+            $('#vecthare_purge_options_close, #vecthare_purge_options_cancel, ' +
+              '#vecthare_purge_options_data, #vecthare_purge_options_all').off('.vecthareePurge');
+            modal.removeClass('active').hide();
+            resolve(choice);
+        };
+        $('#vecthare_purge_options_close').on('click.vecthareePurge', () => finish(null));
+        $('#vecthare_purge_options_cancel').on('click.vecthareePurge', () => finish(null));
+        $('#vecthare_purge_options_data').on('click.vecthareePurge', () => finish('data'));
+        $('#vecthare_purge_options_all').on('click.vecthareePurge', () => finish('all'));
+        modal.on('click.vecthareePurge', function (event) {
+            if (event.target === this) finish(null);
+        });
+        modal.addClass('active').show();
+    });
+}
+
+let uiCallbacks = {};
+
+/**
+ * Refreshes what a committed chat collection rebuild invalidates: the
+ * Chat Auto-Sync card's read-only configuration display and the cached
+ * collection/vectorization status. The Database Browser re-reads collections
+ * when it is opened, so nothing is pushed into it here.
+ */
+export function refreshAfterChatCollectionRebuild() {
+    refreshChatVectorizationConfig(extension_settings.vecthare);
+    try {
+        uiCallbacks.onCollectionsChanged?.();
+    } catch (error) {
+        console.warn('VectHare: Collection status could not be refreshed:', error);
+    }
+}
+
 function bindSettingsEvents(settings, callbacks) {
+    uiCallbacks = callbacks || {};
     // Auto-sync enable/disable - now per-collection instead of global
     // Initial state is set by refreshAutoSyncCheckbox() after chat loads
     $('#vecthare_autosync_enabled')
@@ -1693,20 +1981,29 @@ function bindSettingsEvents(settings, callbacks) {
                 return;
             }
 
-            const collectionId = getChatCollectionId();
+            let collectionId = getChatCollectionId();
+            if (!collectionId && enabling) {
+                // A new/unvectorized chat is intentionally not bound on open.
+                // The vectorizer creates the binding only when it writes.
+                $checkbox.prop('checked', false);
+                openContentVectorizer('chat');
+                return;
+            }
             if (!collectionId) {
-                toastr.warning('Could not get collection ID for this chat');
                 $checkbox.prop('checked', false);
                 return;
             }
+            const stillCurrent = () => getCurrentChatId() === chatId && getChatCollectionId() === collectionId;
 
             // Import the metadata functions
             const { setCollectionAutoSync } = await import('../core/collection-metadata.js');
+            if (!stillCurrent()) { refreshAutoSyncCheckbox(settings); return; }
 
             // If enabling, check if we need to set up the collection first
             if (enabling) {
                 // SINGLE SOURCE OF TRUTH: Use doesChatHaveVectors which runs discovery
                 const { hasVectors, allMatches } = await doesChatHaveVectors(settings);
+                if (!stillCurrent()) { refreshAutoSyncCheckbox(settings); return; }
 
                 if (!hasVectors) {
                     // No vectors found anywhere - open vectorizer panel
@@ -1718,6 +2015,7 @@ function bindSettingsEvents(settings, callbacks) {
 
                 // Found existing vectors - show confirmation modal with all matches
                 const result = await showAutoSyncConfirmModal(allMatches, settings);
+                if (!stillCurrent()) { refreshAutoSyncCheckbox(settings); return; }
 
                 if (result.action === 'cancel') {
                     // User cancelled - don't enable
@@ -1729,7 +2027,7 @@ function bindSettingsEvents(settings, callbacks) {
                     // Connect to selected collection
                     const selected = result.selectedCollection;
                     toastr.success(`Connected to collection with ${selected.chunkCount} chunks`, 'Auto-Sync Enabled');
-                    console.log(`VectHare: Auto-sync enabled - connected to ${selected.collectionId} (${selected.chunkCount} chunks)`);
+                    vhLog(`VectHare: Auto-sync enabled - connected to ${selected.collectionId} (${selected.chunkCount} chunks)`);
                 } else if (result.action === 'revectorize') {
                     // User wants to start fresh - open vectorizer
                     $checkbox.prop('checked', false);
@@ -1746,63 +2044,19 @@ function bindSettingsEvents(settings, callbacks) {
             } else {
                 toastr.success('Auto-sync enabled for this chat');
             }
-            console.log(`VectHare: Chat auto-sync for ${collectionId}: ${enabling ? 'enabled' : 'disabled'}`);
-
-            // VectHare+: "Continue" = enable auto-sync, then run vectorization,
-            // which resumes from the first missing group (DB is the checkpoint)
-            if (enabling && result.action === 'continue' && callbacks.onVectorizeAll) {
-                toastr.info('Continuing vectorization from where it stopped...', 'VectHare');
-                callbacks.onVectorizeAll();
-            }
+            vhLog(`VectHare: Chat auto-sync for ${collectionId}: ${enabling ? 'enabled' : 'disabled'}`);
+            // VH-067: a "continue" branch here read `result` outside its scope (a
+            // ReferenceError every time auto-sync was enabled) and the confirm
+            // modal never answers "continue"; it was removed.
         });
 
         // Collection lock handled inside Database Browser per-collection settings
 
-    // Chunking strategy - populate from content-types.js (single source of truth)
-    const chatStrategies = getChunkingStrategies('chat');
-    const strategySelect = $('#vecthare_chunking_strategy');
-    strategySelect.empty();
-    for (const strategy of chatStrategies) {
-        const selected = strategy.id === (settings.chunking_strategy || 'per_message');
-        strategySelect.append(`<option value="${strategy.id}" ${selected ? 'selected' : ''}>${strategy.name}</option>`);
-    }
-
-    function updateStrategyUI(strategyId) {
-        // Update description from content-types.js
-        const strategy = chatStrategies.find(s => s.id === strategyId);
-        $('#vecthare_strategy_description').text(strategy?.description || '');
-        // Show/hide batch settings
-        $('#vecthare_batch_settings').toggle(strategyId === 'message_batch');
-        $('#vecthare_turn_order_settings').toggle(strategyId === 'conversation_turns');
-    }
-
-    strategySelect.on('change', function() {
-        settings.chunking_strategy = String($(this).val());
-        applySettingsSnapshot(settings);
-        saveSettingsDebounced();
-        updateStrategyUI(settings.chunking_strategy);
-    });
-    updateStrategyUI(settings.chunking_strategy || 'per_message');
-
-    $('#vecthare_turn_order')
-        .val(settings.conversation_turn_order || 'user_character')
-        .on('change', function() {
-            settings.conversation_turn_order = String($(this).val());
-            applySettingsSnapshot(settings);
-            saveSettingsDebounced();
-        });
-
-    // Batch size (for message_batch strategy)
-    $('#vecthare_batch_size')
-        .val(settings.batch_size || 4)
-        .on('input', function() {
-            const value = Number($(this).val());
-            $('#vecthare_batch_size_value').text(value);
-            settings.batch_size = value;
-            applySettingsSnapshot(settings);
-            saveSettingsDebounced();
-        });
-    $('#vecthare_batch_size_value').text(settings.batch_size || 4);
+    // Chat chunking and text cleaning are read-only here: they belong to the
+    // collection, not to the current global settings, and are set by
+    // vectorizing or rebuilding. Shown from the collection's verified original
+    // configuration only.
+    refreshChatVectorizationConfig(settings);
 
     // Chunk size (for adaptive strategy)
     $('#vecthare_chunk_size')
@@ -1821,6 +2075,10 @@ function bindSettingsEvents(settings, callbacks) {
             settings.vector_backend = String($(this).val());
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
+            // K3: drop the cached inventory so the Database Browser re-reads on next open
+            invalidateCollectionInventory();
+            // VH-052: say which collections will not be used now.
+            void import('../core/backend-elsewhere.js').then(m => m.warnAfterBackendChange(settings)).catch(() => {});
 
             // Show/hide Qdrant settings
             if (settings.vector_backend === 'qdrant') {
@@ -1834,7 +2092,7 @@ function bindSettingsEvents(settings, callbacks) {
                 $('#vecthare_milvus_settings').hide();
             }
 
-            console.log(`VectHare: Vector backend changed to ${settings.vector_backend}`);
+            vhLog(`VectHare: Vector backend changed to ${settings.vector_backend}`);
             // Preserve existing invalidation and check the newly selected backend.
             resetBackendHealth();
             void checkBackendHealth(settings);
@@ -1847,6 +2105,7 @@ function bindSettingsEvents(settings, callbacks) {
             settings.qdrant_use_cloud = $(this).prop('checked');
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
+            void import('../core/backend-elsewhere.js').then(m => m.warnAfterBackendChange(settings)).catch(() => {}); // VH-052
 
             // Toggle between local and cloud settings
             if (settings.qdrant_use_cloud) {
@@ -1858,7 +2117,7 @@ function bindSettingsEvents(settings, callbacks) {
             }
 
             // Reset backend health to force re-initialization with new config
-            console.log('VectHare: Qdrant mode changed, forcing re-initialization...');
+            vhLog('VectHare: Qdrant mode changed, forcing re-initialization...');
             resetBackendHealth('qdrant');
 
             // Only an actual mode change triggers reinitialization.
@@ -1889,6 +2148,7 @@ function bindSettingsEvents(settings, callbacks) {
             settings.qdrant_host = String($(this).val());
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
+            void import('../core/backend-elsewhere.js').then(m => m.warnAfterBackendChange(settings)).catch(() => {}); // VH-052
         });
 
     $('#vecthare_qdrant_port')
@@ -1898,6 +2158,7 @@ function bindSettingsEvents(settings, callbacks) {
             settings.qdrant_port = isNaN(value) ? 6333 : value;
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
+            void import('../core/backend-elsewhere.js').then(m => m.warnAfterBackendChange(settings)).catch(() => {}); // VH-052
         });
 
     $('#vecthare_qdrant_url')
@@ -1906,12 +2167,16 @@ function bindSettingsEvents(settings, callbacks) {
             settings.qdrant_url = String($(this).val());
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
+            void import('../core/backend-elsewhere.js').then(m => m.warnAfterBackendChange(settings)).catch(() => {}); // VH-052
         });
 
-    $('#vecthare_qdrant_api_key')
-        .val(settings.qdrant_api_key || '')
-        .on('input', function() {
-            settings.qdrant_api_key = String($(this).val());
+    bindSecretField('#vecthare_qdrant_api_key', 'qdrant_api_key', settings);
+
+    // 9c: Milvus multitenancy toggle (new collections only)
+    $('#vecthare_milvus_multitenancy')
+        .prop('checked', settings.milvus_multitenancy !== false)
+        .on('change', function() {
+            settings.milvus_multitenancy = $(this).prop('checked');
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
@@ -1937,6 +2202,7 @@ function bindSettingsEvents(settings, callbacks) {
             settings.milvus_host = String($(this).val());
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
+            void import('../core/backend-elsewhere.js').then(m => m.warnAfterBackendChange(settings)).catch(() => {}); // VH-052
         });
 
     $('#vecthare_milvus_port')
@@ -1946,6 +2212,7 @@ function bindSettingsEvents(settings, callbacks) {
             settings.milvus_port = isNaN(value) ? 19530 : value;
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
+            void import('../core/backend-elsewhere.js').then(m => m.warnAfterBackendChange(settings)).catch(() => {}); // VH-052
         });
 
     $('#vecthare_milvus_username')
@@ -1956,21 +2223,8 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
         });
 
-    $('#vecthare_milvus_password')
-        .val(settings.milvus_password || '')
-        .on('input', function() {
-            settings.milvus_password = String($(this).val());
-            applySettingsSnapshot(settings);
-            saveSettingsDebounced();
-        });
-
-    $('#vecthare_milvus_token')
-        .val(settings.milvus_token || '')
-        .on('input', function() {
-            settings.milvus_token = String($(this).val());
-            applySettingsSnapshot(settings);
-            saveSettingsDebounced();
-        });
+    bindSecretField('#vecthare_milvus_password', 'milvus_password', settings);
+    bindSecretField('#vecthare_milvus_token', 'milvus_token', settings);
 
     $('#vecthare_milvus_dimensions')
         .val(settings.milvus_dimensions || '')
@@ -1987,6 +2241,7 @@ function bindSettingsEvents(settings, callbacks) {
             settings.milvus_address = String($(this).val());
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
+            void import('../core/backend-elsewhere.js').then(m => m.warnAfterBackendChange(settings)).catch(() => {}); // VH-052
         });
 
     // Show Milvus settings if backend is milvus
@@ -2002,11 +2257,17 @@ function bindSettingsEvents(settings, callbacks) {
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
             toggleProviderSettings(settings.source, settings);
-            console.log(`VectHare: Embedding provider changed to ${settings.source}`);
+            vhLog(`VectHare: Embedding provider changed to ${settings.source}`);
             // Keep existing cache reset and refresh the displayed health.
             resetBackendHealth();
+            invalidateCollectionInventory(); // K3
             void checkBackendHealth(settings);
         });
+
+    // K3: any embedding-model change also makes the cached Browser inventory stale
+    $(document).off('change.vecthareStale').on('change.vecthareStale',
+        '#vecthare_settings select[id$="_model"], #vecthare_settings input[id$="_model"]',
+        () => invalidateCollectionInventory());
 
     // Score threshold
     $('#vecthare_score_threshold')
@@ -2048,7 +2309,7 @@ function bindSettingsEvents(settings, callbacks) {
             } else {
                 $('#vecthare_bm25_params').hide();
             }
-            console.log(`VectHare: Keyword scoring method changed to ${settings.keyword_scoring_method}`);
+            vhLog(`VectHare: Keyword scoring method changed to ${settings.keyword_scoring_method}`);
         });
 
     // Show/hide BM25 params based on initial setting
@@ -2093,7 +2354,7 @@ function bindSettingsEvents(settings, callbacks) {
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
             $('#vecthare_hybrid_params').toggle(enabled);
-            console.log(`VectHare: Hybrid search ${enabled ? 'enabled' : 'disabled'}`);
+            vhLog(`VectHare: Hybrid search ${enabled ? 'enabled' : 'disabled'}`);
         });
     // Initialize visibility
     $('#vecthare_hybrid_params').toggle(settings.hybrid_search_enabled || false);
@@ -2109,7 +2370,7 @@ function bindSettingsEvents(settings, callbacks) {
             const isWeighted = settings.hybrid_fusion_method === 'weighted';
             $('#vecthare_hybrid_weights').toggle(isWeighted);
             $('#vecthare_hybrid_rrf_settings').toggle(!isWeighted);
-            console.log(`VectHare: Hybrid fusion method changed to ${settings.hybrid_fusion_method}`);
+            vhLog(`VectHare: Hybrid fusion method changed to ${settings.hybrid_fusion_method}`);
         });
     // Initialize visibility based on current method
     const isWeightedMethod = (settings.hybrid_fusion_method || 'rrf') === 'weighted';
@@ -2267,20 +2528,20 @@ function bindSettingsEvents(settings, callbacks) {
             const activeEntries = [];
             const cfg = window.extension_settings?.vecthare || settings;
 
-            console.log('VectHare: Running semantic WI test with messages:', recentMessages);
+            vhLog('VectHare: Running semantic WI test with messages:', recentMessages);
 
             // Primary: use initialized hooks if available
             if (window.VectHare_WorldInfo && typeof window.VectHare_WorldInfo.getSemanticEntries === 'function') {
                 const entries = await window.VectHare_WorldInfo.getSemanticEntries(recentMessages, activeEntries, cfg);
-                console.log('VectHare: Semantic WI test results (via window hooks):', entries);
+                vhLog('VectHare: Semantic WI test results (via window hooks):', entries);
                 toastr.info(`Semantic WI test completed - ${entries.length} entries (see console)`);
 
                 // If no entries found, provide extended diagnostics to help debug
                 if (!entries || entries.length === 0) {
                     try {
-                        console.log('VectHare: No semantic entries — dumping registry and per-collection query info...');
-                        const registry = window.extension_settings?.vecthare?.vecthare_collection_registry || settings.vecthare_collection_registry || [];
-                        console.log('VectHare: Collection registry:', registry);
+                        vhLog('VectHare: No semantic entries — dumping registry and per-collection query info...');
+                        const registry = vecthareState().registry || [];
+                        vhLog('VectHare: Collection registry:', registry);
 
                         const coreApi = await import('../core/core-vector-api.js');
                         const metaMod = await import('../core/collection-metadata.js');
@@ -2289,13 +2550,13 @@ function bindSettingsEvents(settings, callbacks) {
                             try {
                                 if (!collKey.includes('lorebook')) continue; // focus on lorebooks
                                 const meta = metaMod.getCollectionMeta(collKey);
-                                console.log(`VectHare: Collection meta for ${collKey}:`, meta);
+                                vhLog(`VectHare: Collection meta for ${collKey}:`, meta);
 
                                 // Check saved hashes (true=include metadata)
                                 if (coreApi.getSavedHashes) {
                                     try {
                                         const saved = await coreApi.getSavedHashes(collKey, cfg, true);
-                                        console.log(`VectHare: getSavedHashes for ${collKey}:`, saved && saved.hashes ? saved.hashes.length + ' hashes' : saved);
+                                        vhLog(`VectHare: getSavedHashes for ${collKey}:`, saved && saved.hashes ? saved.hashes.length + ' hashes' : saved);
                                     } catch (hErr) {
                                         console.warn(`VectHare: getSavedHashes failed for ${collKey}:`, hErr.message);
                                     }
@@ -2304,7 +2565,7 @@ function bindSettingsEvents(settings, callbacks) {
                                 // Run a direct vector query against this collection
                                 try {
                                     const qres = await coreApi.queryCollection(collKey, recentMessages.join('\n'), cfg.world_info_top_k || 3, cfg);
-                                    console.log(`VectHare: queryCollection result for ${collKey}:`, qres);
+                                    vhLog(`VectHare: queryCollection result for ${collKey}:`, qres);
                                 } catch (qErr) {
                                     console.warn(`VectHare: queryCollection failed for ${collKey}:`, qErr.message);
                                 }
@@ -2331,7 +2592,7 @@ function bindSettingsEvents(settings, callbacks) {
                     throw new Error('WorldInfo module does not export a usable function');
                 }
                 const entries = await fn(recentMessages, activeEntries, cfg);
-                console.log('VectHare: Semantic WI test results (via dynamic import):', entries);
+                vhLog('VectHare: Semantic WI test results (via dynamic import):', entries);
                 toastr.info(`Semantic WI test completed - ${entries.length} entries (see console)`);
                 return;
             } catch (impErr) {
@@ -2348,8 +2609,8 @@ function bindSettingsEvents(settings, callbacks) {
 
     $('#vecthare_wi_dump_registry').on('click', function() {
         try {
-            const registry = window.extension_settings?.vecthare?.vecthare_collection_registry || settings.vecthare_collection_registry || [];
-            console.log('VectHare: Collection registry dump:', registry);
+            const registry = vecthareState().registry || [];
+            vhLog('VectHare: Collection registry dump:', registry);
             toastr.info(`Collection registry dumped to console (${registry.length} items)`);
         } catch (e) {
             console.error('VectHare: Failed to dump registry', e);
@@ -2376,66 +2637,21 @@ function bindSettingsEvents(settings, callbacks) {
             }
 
             const first = entries[0];
-            console.log('VectHare: Applying semantic WI entry:', first);
-
-            // Best-effort: try importing ST's world-info module and invoking common APIs
-            let applied = false;
-            try {
-                const worldInfo = await import('../../../../world-info.js');
-                // Try common function names
-                const candidates = ['applyWorldInfoEntries', 'activateEntries', 'setActiveEntries', 'activateWorldInfoEntries'];
-                for (const name of candidates) {
-                    if (worldInfo[name] && typeof worldInfo[name] === 'function') {
-                        await worldInfo[name]([first]);
-                        applied = true;
-                        console.log(`VectHare: Applied via world-info.${name}`);
-                        break;
-                    }
-                }
-            } catch (e) {
-                console.debug('VectHare: world-info import failed or method not found', e);
-            }
-
-            // Try global window API fallbacks
-            if (!applied) {
-                const fallbackCandidates = [
-                    window.applyWorldInfoEntries,
-                    window.activateWorldInfoEntries,
-                    window.setActiveWorldInfoEntries
-                ];
-                for (const fn of fallbackCandidates) {
-                    if (fn && typeof fn === 'function') {
-                        try {
-                            await fn([first]);
-                            applied = true;
-                            console.log('VectHare: Applied via global fallback function');
-                            break;
-                        } catch (e) {
-                            console.debug('VectHare: fallback apply failed', e);
-                        }
-                    }
-                }
-            }
-
-            if (applied) {
-                toastr.success('Semantic WI entry applied (best-effort)');
-                return;
-            }
-
-            // Final fallback: copy content to clipboard and instruct user
+            // VH-075 (user decision a): SillyTavern has no function to activate one
+            // entry from outside, so this test tool copies it (it only ever did).
             const text = first.content || (Array.isArray(first.key) ? first.key.join(', ') : String(first.key));
             try {
                 await navigator.clipboard.writeText(text);
-                toastr.info('Semantic entry copied to clipboard. Paste into World Info editor to activate.');
+                toastr.info('First semantic hit copied to the clipboard. Paste it into the World Info editor if you want to use it.');
             } catch (e) {
-                console.log('VectHare: Clipboard write failed, showing content in console');
-                console.log('Semantic entry content:', text);
+                vhLog('VectHare: Clipboard write failed, showing content in console');
+                vhLog('Semantic entry content:', text);
                 toastr.info('Semantic entry logged to console. Paste into World Info editor to activate.');
             }
 
         } catch (e) {
-            console.error('VectHare: Apply semantic WI failed', e);
-            toastr.error('Failed to apply semantic WI entry: ' + e.message);
+            console.error('VectHare: Copy semantic WI failed', e);
+            toastr.error('Failed to copy the semantic WI entry: ' + e.message);
         }
     });
 
@@ -2617,6 +2833,15 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
         });
 
+    // U3: VectHare's console.log output is off unless this is on.
+    $('#vecthare_debug_logging')
+        .prop('checked', settings.debug_logging === true)
+        .on('input', function() {
+            settings.debug_logging = $(this).prop('checked');
+            applySettingsSnapshot(settings);
+            saveSettingsDebounced();
+        });
+
     $('#vecthare_ollama_keep')
         .prop('checked', settings.ollama_keep)
         .on('input', function() {
@@ -2713,6 +2938,11 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
         });
 
+    // Nomic key lives in SillyTavern's own API settings (not stored by VectHare)
+    $('#vecthare_nomicai_api_key').on('click', function() {
+        toastr.info('Set the Nomic API key in SillyTavern: API Connections > Nomic AI (text embeddings). VectHare reads it from there.', 'VectHare', { timeOut: 8000 });
+    });
+
     // OpenRouter model
     $('#vecthare_openrouter_model')
         .val(settings.openrouter_model)
@@ -2773,6 +3003,7 @@ function bindSettingsEvents(settings, callbacks) {
             const value = parseInt($(this).val());
             $('#vecthare_insert_batch_size_value').text(value);
             settings.insert_batch_size = value;
+            settings.insert_batch_size_set = true; // see getSyncBatchSize
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
@@ -2788,9 +3019,22 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
         });
 
+    // VH-019: retrieval deadline
+    $('#vecthare_rag_timeout_seconds')
+        .val(settings.rag_timeout_seconds ?? 15)
+        .on('input', function() {
+            const value = parseInt($(this).val());
+            settings.rag_timeout_seconds = isNaN(value) ? 15 : Math.min(300, Math.max(0, value));
+            applySettingsSnapshot(settings);
+            saveSettingsDebounced();
+        });
+
     // Action buttons
     $('#vecthare_vectorize_content').on('click', () => {
-        openContentVectorizer();
+        // The caller decides whether this chat needs a re-vectorization
+        // confirmation first; without a handler, the plain setup opens.
+        if (callbacks.onVectorizeContent) callbacks.onVectorizeContent();
+        else openContentVectorizer();
     });
     $('#vecthare_vectorize_all').on('click', callbacks.onVectorizeAll);
     // VectHare+ R7/R10: Repair Chunks button (formerly "Continue Vectorization";
@@ -2825,181 +3069,13 @@ function bindSettingsEvents(settings, callbacks) {
     // Initialize provider-specific settings visibility
     toggleProviderSettings(settings.source, settings);
 
-    // =========================================================================
-    // COTTON-TALES EMOTION CLASSIFIER INTEGRATION
-    // =========================================================================
-    initializeCottonTalesIntegration(settings);
+    // VH-074: the Cotton-Tales emotion settings had handlers but no controls in
+    // any template, so they were removed. The classifier itself stays available
+    // to Cotton-Tales through window.VectHareEmotionClassifier
+    // (core/emotion-classifier.js); its settings are the emotion_* keys of
+    // VectHare's settings.
 }
 
-/**
- * Initialize Cotton-Tales emotion classifier integration
- * Shows the section only if Cotton-Tales is installed
- */
-async function initializeCottonTalesIntegration(settings) {
-    // Check if Cotton-Tales is installed
-    const cottonTalesInstalled = !!extension_settings?.cotton_tales;
-
-    if (cottonTalesInstalled) {
-        $('#vecthare_cottontales_section').show();
-        console.log('VectHare: Cotton-Tales detected, showing emotion classification options');
-    } else {
-        $('#vecthare_cottontales_section').hide();
-        return;
-    }
-
-    // Import emotion classifier module
-    let emotionClassifier;
-    try {
-        emotionClassifier = await import('../core/emotion-classifier.js');
-    } catch (error) {
-        console.error('VectHare: Failed to load emotion classifier module:', error);
-        return;
-    }
-
-    // Helper to update UI based on method selection
-    function updateMethodUI(method) {
-        $('#vecthare_classifier_settings').toggle(method === 'classifier');
-        $('#vecthare_similarity_settings').toggle(method === 'similarity');
-
-        // Update the display of current embedding source for similarity mode
-        if (method === 'similarity') {
-            $('#vecthare_similarity_source_display').text(settings.source || 'transformers');
-        }
-    }
-
-    // Determine initial method from settings
-    function getCurrentMethod() {
-        if (settings.emotion_classifier_enabled && !settings.emotion_use_similarity) {
-            return 'classifier';
-        } else if (settings.emotion_use_similarity) {
-            return 'similarity';
-        }
-        return 'disabled';
-    }
-
-    // Classification method dropdown
-    $('#vecthare_emotion_method')
-        .val(getCurrentMethod())
-        .on('change', function() {
-            const method = $(this).val();
-
-            // Update settings based on method
-            if (method === 'disabled') {
-                settings.emotion_classifier_enabled = false;
-                settings.emotion_use_similarity = false;
-                emotionClassifier.updateClassifierSetting('enabled', false);
-                emotionClassifier.updateClassifierSetting('useEmbeddingSimilarity', false);
-            } else if (method === 'classifier') {
-                settings.emotion_classifier_enabled = true;
-                settings.emotion_use_similarity = false;
-                emotionClassifier.updateClassifierSetting('enabled', true);
-                emotionClassifier.updateClassifierSetting('useEmbeddingSimilarity', false);
-            } else if (method === 'similarity') {
-                settings.emotion_classifier_enabled = true; // Still enabled, but uses similarity
-                settings.emotion_use_similarity = true;
-                emotionClassifier.updateClassifierSetting('enabled', true);
-                emotionClassifier.updateClassifierSetting('useEmbeddingSimilarity', true);
-            }
-
-            applySettingsSnapshot(settings);
-            saveSettingsDebounced();
-            updateMethodUI(method);
-        });
-
-    // Initialize UI for current method
-    updateMethodUI(getCurrentMethod());
-
-    // Classifier model selection
-    $('#vecthare_emotion_classifier_model')
-        .val(settings.emotion_classifier_model || 'SamLowe/roberta-base-go_emotions')
-        .on('change', function() {
-            const value = $(this).val();
-
-            if (value === 'custom') {
-                $('#vecthare_custom_classifier_model').show();
-            } else {
-                $('#vecthare_custom_classifier_model').hide();
-                settings.emotion_classifier_model = value;
-                applySettingsSnapshot(settings);
-                saveSettingsDebounced();
-                emotionClassifier.updateClassifierSetting('model', value);
-            }
-        });
-
-    // Show custom model input if currently set to custom
-    if (settings.emotion_classifier_model &&
-        !['SamLowe/roberta-base-go_emotions', 'j-hartmann/emotion-english-distilroberta-base', 'bhadresh-savani/distilbert-base-uncased-emotion'].includes(settings.emotion_classifier_model)) {
-        $('#vecthare_emotion_classifier_model').val('custom');
-        $('#vecthare_custom_classifier_model').show();
-    }
-
-    // Custom model input
-    $('#vecthare_emotion_classifier_custom')
-        .val(settings.emotion_classifier_custom || '')
-        .on('input', function() {
-            settings.emotion_classifier_custom = $(this).val();
-            settings.emotion_classifier_model = $(this).val();
-            applySettingsSnapshot(settings);
-            saveSettingsDebounced();
-            emotionClassifier.updateClassifierSetting('model', $(this).val());
-        });
-
-    // Test classifier button
-    $('#vecthare_test_classifier').on('click', async function() {
-        const $btn = $(this);
-        const $result = $('#vecthare_classifier_test_result');
-
-        $btn.addClass('disabled').find('i').removeClass('fa-flask').addClass('fa-spinner fa-spin');
-        $result.hide();
-
-        try {
-            const testResult = await emotionClassifier.testClassifierModel();
-
-            $result.show();
-
-            if (testResult.error) {
-                $result.css('background', 'rgba(239,68,68,0.2)').html(`
-                    <div style="color: #ef4444;">
-                        <i class="fa-solid fa-times-circle"></i>
-                        <b>Error:</b> ${testResult.error}
-                    </div>
-                `);
-            } else if (testResult.isEmotionClassifier) {
-                const confidenceColor = testResult.confidence === 'high' ? '#22c55e' : '#eab308';
-                $result.css('background', 'rgba(34,197,94,0.2)').html(`
-                    <div style="color: #22c55e;">
-                        <i class="fa-solid fa-check-circle"></i>
-                        <b>Looks like an emotion classifier!</b>
-                    </div>
-                    <div style="margin-top: 4px; font-size: 0.9em;">
-                        <b>Confidence:</b> <span style="color: ${confidenceColor}">${testResult.confidence}</span><br>
-                        <b>Sample labels:</b> ${testResult.sampleLabels.join(', ')}
-                    </div>
-                `);
-            } else {
-                $result.css('background', 'rgba(234,179,8,0.2)').html(`
-                    <div style="color: #eab308;">
-                        <i class="fa-solid fa-exclamation-triangle"></i>
-                        <b>May not be an emotion classifier</b>
-                    </div>
-                    <div style="margin-top: 4px; font-size: 0.9em;">
-                        Labels don't look like emotions: ${testResult.sampleLabels.join(', ')}<br>
-                        Consider using a different model.
-                    </div>
-                `);
-            }
-        } catch (error) {
-            $result.show().css('background', 'rgba(239,68,68,0.2)').html(`
-                <div style="color: #ef4444;">
-                    <i class="fa-solid fa-times-circle"></i>
-                    <b>Test failed:</b> ${error.message}
-                </div>
-            `);
-        } finally {
-            $btn.removeClass('disabled').find('i').removeClass('fa-spinner fa-spin').addClass('fa-flask');
-        }
-    });
-}
 
 // Store current diagnostic results for copy/filter functionality
 let currentDiagnosticResults = null;
@@ -3029,10 +3105,10 @@ function renderDiagnosticsContent(results, filter = 'all') {
     const output = $('#vecthare_diagnostics_content');
     output.empty();
 
-    console.log('VectHare UI: Rendering diagnostics with results:', results);
-    console.log('VectHare UI: Version data received:', results.version);
-    console.log('VectHare UI: Extension version:', results.version?.extension);
-    console.log('VectHare UI: Plugin version:', results.version?.plugin);
+    vhLog('VectHare UI: Rendering diagnostics with results:', results);
+    vhLog('VectHare UI: Version data received:', results.version);
+    vhLog('VectHare UI: Extension version:', results.version?.extension);
+    vhLog('VectHare UI: Plugin version:', results.version?.plugin);
 
     const statusIcons = {
         'pass': '<i class="fa-solid fa-circle-check" style="color: var(--vecthare-success);"></i>',
@@ -3053,7 +3129,9 @@ function renderDiagnosticsContent(results, filter = 'all') {
     const passCount = results.checks.filter(c => c.status === 'pass').length;
     const warnCount = results.checks.filter(c => c.status === 'warning').length;
     const failCount = results.checks.filter(c => c.status === 'fail').length;
-    const fixableCount = results.checks.filter(c => c.fixable && (c.status === 'fail' || c.status === 'warning')).length;
+    // VH-070: only actions that exist get a button; only real fixes count for Fix All.
+    const fixableCount = results.checks.filter(c => c.fixable && fixKind(c.fixAction) === 'fix' &&
+        (c.status === 'fail' || c.status === 'warning')).length;
 
     // Filter checks if needed
     const filterCheck = (check) => {
@@ -3067,16 +3145,16 @@ function renderDiagnosticsContent(results, filter = 'all') {
             return '<div class="diagnostic-item-empty">No items match current filter</div>';
         }
         return filteredChecks.map(check => `
-            <div class="diagnostic-item ${check.status}" data-fix-action="${check.fixAction || ''}" data-status="${check.status}">
+            <div class="diagnostic-item ${escapeHtml(check.status)}" data-fix-action="${escapeHtml(check.fixAction || '')}" data-status="${escapeHtml(check.status)}">
                 <div class="diagnostic-main">
-                    <span class="diagnostic-icon">${statusIcons[check.status]}</span>
-                    <span class="diagnostic-label">${check.name}</span>
+                    <span class="diagnostic-icon">${statusIcons[check.status] || ""}</span>
+                    <span class="diagnostic-label">${escapeHtml(check.name)}</span>
                     <span class="diagnostic-message">${check.message}</span>
                 </div>
-                ${check.fixable ? `
-                    <button class="diagnostic-fix-btn" data-fix-action="${check.fixAction}">
-                        <i class="fa-solid fa-wrench"></i>
-                        Fix
+                ${check.fixable && fixKind(check.fixAction) ? `
+                    <button class="diagnostic-fix-btn" data-fix-action="${escapeHtml(check.fixAction)}" data-check-name="${escapeHtml(check.name)}">
+                        <i class="fa-solid ${fixKind(check.fixAction) === 'fix' ? 'fa-wrench' : 'fa-arrow-right'}"></i>
+                        ${fixKind(check.fixAction) === 'fix' ? 'Fix' : 'Show me'}
                     </button>
                 ` : ''}
             </div>
@@ -3087,9 +3165,9 @@ function renderDiagnosticsContent(results, filter = 'all') {
         <!-- Version Info -->
         <div class="vecthare-diagnostics-version" style="padding: 10px 15px; background: var(--black30alpha); border-radius: 8px; margin-bottom: 15px; font-size: 0.9em; color: var(--grey70);">
             <i class="fa-solid fa-info-circle"></i>
-            <strong>Extension:</strong> v${results.version?.extension || 'Unknown'}
+            <strong>Extension:</strong> v${escapeHtml(results.version?.extension || 'Unknown')}
             <span style="margin: 0 10px;">•</span>
-            <strong>Plugin:</strong> v${results.version?.plugin || 'Not installed'}
+            <strong>Plugin:</strong> v${escapeHtml(results.version?.plugin || 'Not installed')}
         </div>
 
         <!-- Summary Stats Bar (Clickable Filters) -->
@@ -3113,7 +3191,7 @@ function renderDiagnosticsContent(results, filter = 'all') {
 
         ${filter !== 'all' ? `
             <div class="vecthare-diag-filter-notice">
-                <span>Showing only: <strong>${filter}</strong></span>
+                <span>Showing only: <strong>${escapeHtml(filter)}</strong></span>
                 <button class="vecthare-diag-clear-filter" data-filter="all">
                     <i class="fa-solid fa-times"></i> Show All
                 </button>
@@ -3134,18 +3212,18 @@ function renderDiagnosticsContent(results, filter = 'all') {
             if (filter !== 'all' && filteredCount === 0) return '';
 
             return `
-                <div class="diagnostic-category" data-category="${category}">
+                <div class="diagnostic-category" data-category="${escapeHtml(category)}">
                     <div class="diagnostic-category-header" data-collapsed="false">
                         <h4 class="diagnostic-category-title">
                             <span class="diagnostic-category-collapse-icon">
                                 <i class="fa-solid fa-chevron-down"></i>
                             </span>
-                            ${categoryTitles[category] || `<i class="fa-solid fa-folder"></i> ${category}`}
+                            ${categoryTitles[category] || `<i class="fa-solid fa-folder"></i> ${escapeHtml(category)}`}
                         </h4>
                         <div class="diagnostic-category-stats">
-                            <span class="diag-cat-stat pass" title="Passed">${catPass}</span>
-                            <span class="diag-cat-stat warning" title="Warnings">${catWarn}</span>
-                            <span class="diag-cat-stat fail" title="Failed">${catFail}</span>
+                            <span class="diag-cat-stat pass" title="Passed">${escapeHtml(catPass)}</span>
+                            <span class="diag-cat-stat warning" title="Warnings">${escapeHtml(catWarn)}</span>
+                            <span class="diag-cat-stat fail" title="Failed">${escapeHtml(catFail)}</span>
                         </div>
                     </div>
                     <div class="diagnostic-category-content">
@@ -3175,7 +3253,7 @@ function renderDiagnosticsContent(results, filter = 'all') {
             .html(`<i class="fa-solid fa-wand-magic-sparkles"></i> Fix All (${fixableCount})`)
             .off('click')
             .on('click', function() {
-                handleFixAll(results.checks);
+                void handleFixAll(results.checks);
             });
     } else {
         $('#vecthare_diag_fix_all').hide();
@@ -3217,16 +3295,18 @@ function renderDiagnosticsContent(results, filter = 'all') {
     });
 
     // Bind individual fix button click handlers
-    $('.diagnostic-fix-btn').off('click').on('click', function(e) {
+    // VH-070: a row turns green only when its fix succeeded and Diagnostics,
+    // run again, no longer reports it.
+    $('.diagnostic-fix-btn').off('click').on('click', async function(e) {
         e.stopPropagation();
-        const action = $(this).data('fix-action');
-        handleDiagnosticFix(action);
-        // Mark this item as fixed visually
-        $(this).closest('.diagnostic-item')
-            .removeClass('fail warning')
-            .addClass('pass')
-            .find('.diagnostic-icon').html(statusIcons.pass);
-        $(this).fadeOut(200);
+        const $button = $(this);
+        const action = $button.data('fix-action');
+        const check = (currentDiagnosticResults?.checks || []).find(c =>
+            c.fixAction === action && c.name === $button.data('check-name')) || { fixAction: action, fixable: true };
+        $button.prop('disabled', true);
+        const result = await handleDiagnosticFix(check);
+        $button.prop('disabled', false);
+        if (result.kind === 'fix' && result.success) await rerunDiagnosticsAfterFix();
     });
 
     // Bind copy button
@@ -3409,117 +3489,121 @@ export function openDiagnosticsModal() {
 }
 
 /**
- * Handles fixing all fixable issues
+ * VH-070: what a Diagnostics action does. 'fix' changes something and is
+ * confirmed by running Diagnostics again; 'guide' takes the user to the place
+ * (or dialog) where they fix it themselves. Anything else gets no button.
+ */
+const DIAGNOSTIC_FIXES = {
+    enable_chats: 'fix', fix_threshold: 'fix', fix_counts: 'fix',
+    cleanOrphanedMetadata: 'fix', cleanOrphanedGroupMembers: 'fix',
+    vectorize_all: 'guide', revectorize: 'guide', configure_provider: 'guide', configure_url: 'guide',
+    configure_api_key: 'guide', configure_qdrant: 'guide', install_lancedb: 'guide',
+    install_webllm: 'guide', update_webllm: 'guide', fix_qdrant_dimension: 'guide',
+};
+function fixKind(action) { return DIAGNOSTIC_FIXES[action] || null; }
+
+/** Runs Diagnostics again with the options of the last run and shows the result. */
+async function rerunDiagnosticsAfterFix() {
+    try { await executeDiagnostics(); } catch (error) { console.warn('VectHare: Diagnostics re-run failed:', error); }
+}
+
+/**
+ * Handles fixing all fixable issues (real fixes only, one after another),
+ * then runs Diagnostics again so the result shows what is really fixed.
  * @param {Array} checks - Array of diagnostic checks
  */
-function handleFixAll(checks) {
-    const fixableChecks = checks.filter(c => c.fixable && (c.status === 'fail' || c.status === 'warning'));
-
+async function handleFixAll(checks) {
+    const fixableChecks = checks.filter(c => c.fixable && fixKind(c.fixAction) === 'fix' &&
+        (c.status === 'fail' || c.status === 'warning'));
     if (fixableChecks.length === 0) {
         toastr.info('No fixable issues found');
         return;
     }
-
-    let fixedCount = 0;
-    const statusIcons = {
-        'pass': '<i class="fa-solid fa-circle-check" style="color: var(--vecthare-success);"></i>'
-    };
-
-    fixableChecks.forEach(check => {
-        try {
-            handleDiagnosticFix(check.fixAction, true); // silent mode
-            fixedCount++;
-
-            // Update UI for this item
-            $(`.diagnostic-item[data-fix-action="${check.fixAction}"]`)
-                .removeClass('fail warning')
-                .addClass('pass')
-                .find('.diagnostic-icon').html(statusIcons.pass);
-            $(`.diagnostic-item[data-fix-action="${check.fixAction}"] .diagnostic-fix-btn`).fadeOut(200);
-        } catch (e) {
-            console.warn(`Failed to fix: ${check.fixAction}`, e);
-        }
-    });
-
-    // Hide Fix All button after use
-    $('#vecthare_diag_fix_all').fadeOut(200);
-
-    toastr.success(`Fixed ${fixedCount} issue${fixedCount !== 1 ? 's' : ''}`);
+    $('#vecthare_diag_fix_all').prop('disabled', true);
+    let succeeded = 0;
+    const failed = [];
+    for (const check of fixableChecks) {
+        const result = await handleDiagnosticFix(check, true);
+        if (result.success) succeeded++;
+        else failed.push(`${check.name}: ${result.message || 'not fixed'}`);
+    }
+    $('#vecthare_diag_fix_all').prop('disabled', false);
+    if (failed.length) {
+        toastr.warning(`${succeeded} of ${fixableChecks.length} fix(es) ran; not fixed: ${failed.join('; ')}`, 'VectHare Diagnostics', { timeOut: 12000 });
+    } else {
+        toastr.success(`${succeeded} fix(es) ran; checking again…`, 'VectHare Diagnostics');
+    }
+    await rerunDiagnosticsAfterFix();
 }
 
 /**
- * Handles diagnostic fix actions
- * @param {string} action - The fix action to perform
- * @param {boolean} silent - If true, suppress toast notifications and don't close modal
+ * Handles one diagnostic action.
+ * @param {object} check - the check (fixAction, data)
+ * @param {boolean} silent - suppress toasts (Fix All)
+ * @returns {Promise<{success: boolean, kind: string|null, message?: string}>}
  */
-function handleDiagnosticFix(action, silent = false) {
+async function handleDiagnosticFix(check, silent = false) {
     const settings = extension_settings.vecthare;
-
-    switch (action) {
-        case 'enable_chats':
-            $('#vecthare_autosync_enabled').prop('checked', true).trigger('change');
-            if (!silent) toastr.success('Chat auto-sync enabled');
-            break;
-
-        case 'vectorize_all':
-            $('#vecthare_vectorize_all').click();
-            break;
-
-        case 'configure_provider':
-            // Scroll to provider settings
-            $('#vecthare_provider_settings')[0]?.scrollIntoView({ behavior: 'smooth' });
-            if (!silent) toastr.info('Please select an embedding provider');
-            break;
-
-        case 'configure_api_key':
-            if (!silent) toastr.info('Go to Settings > API Connections to add your API key');
-            break;
-
-        case 'configure_url':
-            // Scroll to provider settings
-            $('#vecthare_provider_settings')[0]?.scrollIntoView({ behavior: 'smooth' });
-            if (!silent) toastr.info('Please configure your API URL in the provider settings');
-            break;
-
-        case 'fix_threshold':
-            $('#vecthare_score_threshold').val(0.25).trigger('change');
-            if (!silent) toastr.success('Score threshold reset to 0.25');
-            break;
-
-        case 'fix_counts':
-            if (settings.insert < 1) {
-                $('#vecthare_insert').val(3).trigger('change');
+    const action = typeof check === 'string' ? check : check?.fixAction;
+    const kind = fixKind(action);
+    const done = (success, message, level = success ? 'success' : 'warning') => {
+        if (!silent && message) toastr[level](message, 'VectHare Diagnostics');
+        return { success, kind, message };
+    };
+    const showSetting = (selector, message) => {
+        closeDiagnosticsModal();
+        $(selector)[0]?.scrollIntoView?.({ behavior: 'smooth' });
+        return done(false, message, 'info');
+    };
+    try {
+        switch (action) {
+            case 'enable_chats':
+                $('#vecthare_autosync_enabled').prop('checked', true).trigger('change');
+                return done(true, 'Chat auto-sync enabled');
+            case 'fix_threshold':
+                $('#vecthare_score_threshold').val(0.25).trigger('change');
+                return done(true, 'Score threshold reset to 0.25');
+            case 'fix_counts':
+                // Only Top K has a control in the panel.
+                if ((settings.top_k ?? settings.insert) < 1) $('#vecthare_topk').val(3).trigger('change');
+                return done(true, 'Top K set to 3');
+            case 'cleanOrphanedMetadata':
+            case 'cleanOrphanedGroupMembers': {
+                const { executeFixAction } = await import('../diagnostics/index.js');
+                const result = await executeFixAction({ ...check, fixable: true });
+                return done(!!result?.success, result?.message || (result?.success ? 'Fixed' : 'Not fixed'));
             }
-            if ((settings.top_k ?? settings.insert) < 1) {
-                $('#vecthare_topk').val(3).trigger('change');
+            case 'install_webllm':
+            case 'update_webllm': {
+                const { executeFixAction } = await import('../diagnostics/index.js');
+                const result = await executeFixAction({ ...check, fixable: true });
+                return done(false, result?.message, 'info');
             }
-            if (settings.query < 1) {
-                $('#vecthare_query').val(2).trigger('change');
-            }
-            if (!silent) toastr.success('Insert/Query counts fixed');
-            break;
-
-        case 'fix_chunk_size':
-            $('#vecthare_chunk_size').val(500).trigger('input');
-            if (!silent) toastr.success('Chunk size reset to 500');
-            break;
-
-        case 'fix_qdrant_dimension':
-            // This needs a dialog - don't auto-fix, show options
-            if (!silent) {
-                showQdrantDimensionFixDialog();
-            }
-            return; // Don't close modal
-
-        default:
-            if (!silent) toastr.error(`Unknown fix action: ${action}`);
-    }
-
-    // Only close modal for individual fixes (not batch Fix All)
-    if (!silent) {
-        setTimeout(() => {
-            closeDiagnosticsModal();
-        }, 500);
+            case 'vectorize_all':
+            case 'revectorize':
+                closeDiagnosticsModal();
+                $('#vecthare_vectorize_all').trigger('click');
+                return done(false, null);
+            case 'configure_provider':
+                return showSetting('#vecthare_provider_settings', 'Select an embedding provider here');
+            case 'configure_url':
+                return showSetting('#vecthare_provider_settings', 'Set the API URL in the provider settings');
+            case 'configure_api_key':
+                return done(false, 'Add the API key in SillyTavern: Settings > API Connections', 'info');
+            case 'configure_qdrant':
+                return showSetting($('#vecthare_qdrant_settings').is(':visible') ? '#vecthare_qdrant_settings' : '#vecthare_vector_backend',
+                    'Set the Qdrant address here (local default: localhost:6333)');
+            case 'install_lancedb':
+                return done(false, 'LanceDB needs the Similharity plugin with its dependencies installed (npm install in its folder), then restart SillyTavern. Or choose another backend.', 'info');
+            case 'fix_qdrant_dimension':
+                if (!silent) showQdrantDimensionFixDialog();
+                return done(false, null);
+            default:
+                return done(false, `No fix is available for "${action}"`);
+        }
+    } catch (error) {
+        console.warn(`VectHare: fix ${action} failed:`, error);
+        return done(false, `Fix failed: ${error.message}`, 'error');
     }
 }
 
@@ -3547,8 +3631,8 @@ async function showQdrantDimensionFixDialog() {
                 <p style="margin: 0 0 8px 0;"><strong>Your Qdrant collection:</strong></p>
                 <ul style="margin: 0; padding-left: 20px;">
                     <li><strong>${collectionDim}</strong> dimensions</li>
-                    <li>Source: <strong>${sources}</strong></li>
-                    <li>Model: <strong>${models}</strong></li>
+                    <li>Source: <strong>${escapeHtml(sources)}</strong></li>
+                    <li>Model: <strong>${escapeHtml(models)}</strong></li>
                     <li><strong>${pointsCount.toLocaleString()}</strong> vectors stored</li>
                 </ul>
 
@@ -3563,14 +3647,14 @@ async function showQdrantDimensionFixDialog() {
             <div class="vecthare-dimension-options" style="display: flex; flex-direction: column; gap: 12px;">
                 <button id="vecthare_dim_fix_purge" class="vecthare-btn-danger" style="padding: 12px; text-align: left;">
                     <i class="fa-solid fa-trash"></i>
-                    <strong>Purge collection and start fresh</strong>
-                    <br><small style="opacity: 0.8;">Delete all ${pointsCount.toLocaleString()} vectors and re-vectorize with your current model</small>
+                    <strong>Start fresh</strong>
+                    <br><small style="opacity: 0.8;">How to remove the affected collections (${pointsCount.toLocaleString()} vectors) and re-vectorize with your current model</small>
                 </button>
 
                 <button id="vecthare_dim_fix_switch" class="vecthare-btn-secondary" style="padding: 12px; text-align: left;">
                     <i class="fa-solid fa-rotate-left"></i>
                     <strong>I'll switch my embedding model back</strong>
-                    <br><small style="opacity: 0.8;">Keep your vectors; change your embedding settings to match (${sources}${models !== '(not recorded)' ? ': ' + models : ''})</small>
+                    <br><small style="opacity: 0.8;">Keep your vectors; change your embedding settings to match (${escapeHtml(sources)}${escapeHtml(models !== '(not recorded)' ? ': ' + models : '')})</small>
                 </button>
 
                 <button id="vecthare_dim_fix_cancel" class="vecthare-btn-secondary" style="padding: 12px; text-align: left;">
@@ -3593,43 +3677,14 @@ async function showQdrantDimensionFixDialog() {
     });
 
     // Bind button handlers
-    $('#vecthare_dim_fix_purge').off('click').on('click', async () => {
-        // Close popup
+    $('#vecthare_dim_fix_purge').off('click').on('click', () => {
+        // H2: VectHare never drops a shared Qdrant store. This button used to
+        // call a plugin route that does not exist (so it always failed); it now
+        // says how to start fresh safely instead.
         $('.popup-button-close').click();
-
-        // Show confirmation
-        const confirmHtml = `
-            <p><strong>Are you sure you want to purge the Qdrant collection?</strong></p>
-            <p>This will delete all <strong>${pointsCount.toLocaleString()}</strong> vectors permanently.</p>
-            <p>You'll need to re-vectorize all your chats, lorebooks, and documents.</p>
-        `;
-
-        const confirmed = await callGenericPopup(confirmHtml, POPUP_TYPE.CONFIRM, '', {
-            okButton: 'Yes, purge it',
-            cancelButton: 'Cancel',
-        });
-
-        if (confirmed) {
-            toastr.info('Purging Qdrant collection...');
-            try {
-                const { getRequestHeaders } = await import('../../../../../script.js');
-                const response = await fetch('/api/plugins/similharity/backend/qdrant/purge-collection', {
-                    method: 'POST',
-                    headers: getRequestHeaders(),
-                    body: JSON.stringify({ collectionName: 'vecthare_main' })
-                });
-
-                if (response.ok) {
-                    toastr.success('Qdrant collection purged! You can now re-vectorize your content.');
-                    closeDiagnosticsModal();
-                } else {
-                    const error = await response.text();
-                    toastr.error(`Failed to purge: ${error}`);
-                }
-            } catch (e) {
-                toastr.error(`Purge failed: ${e.message}`);
-            }
-        }
+        toastr.info('To start fresh: delete the affected collections in the Database Browser (or use Purge All), then re-vectorize. VectHare never deletes a shared store directly.',
+            'VectHare', { timeOut: 12000 });
+        closeDiagnosticsModal();
     });
 
     $('#vecthare_dim_fix_switch').off('click').on('click', () => {

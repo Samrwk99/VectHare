@@ -414,39 +414,36 @@ describe('StandardBackend', () => {
     });
 
     describe('purgeVectorIndex', () => {
-        it('should purge collection successfully', async () => {
-            fetchMock.mockResolvedValueOnce(mockFetchResponse({}));
+        it('should purge only the requested Vectra source/model through the plugin', async () => {
+            fetchMock.mockResolvedValueOnce(mockFetchResponse({ success: true }));
 
             await backend.purgeVectorIndex('test-collection', defaultSettings);
 
             expect(fetchMock).toHaveBeenCalledWith(
-                '/api/vector/purge',
-                expect.objectContaining({
-                    method: 'POST',
-                })
+                '/api/plugins/similharity/chunks/purge',
+                expect.objectContaining({ method: 'POST' })
             );
+            expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
+                backend: 'vectra',
+                collectionId: 'test-collection',
+                source: defaultSettings.source,
+            });
         });
 
-        it('should throw on purge failure', async () => {
+        it('should throw on scoped purge failure without a native fallback', async () => {
             fetchMock.mockResolvedValueOnce(mockFetchError(500, 'Purge failed'));
 
             await expect(backend.purgeVectorIndex('test-collection', defaultSettings))
-                .rejects.toThrow('Failed to purge collection');
+                .rejects.toThrow('Failed to purge scoped Vectra index');
+            expect(fetchMock).toHaveBeenCalledTimes(1);
         });
     });
 
     describe('purgeAllVectorIndexes', () => {
-        it('should purge all collections successfully', async () => {
-            fetchMock.mockResolvedValueOnce(mockFetchResponse({}));
-
-            await backend.purgeAllVectorIndexes(defaultSettings);
-
-            expect(fetchMock).toHaveBeenCalledWith(
-                '/api/vector/purge-all',
-                expect.objectContaining({
-                    method: 'POST',
-                })
-            );
+        it('refuses unscoped deletion of the shared SillyTavern vector directory', async () => {
+            await expect(backend.purgeAllVectorIndexes(defaultSettings))
+                .rejects.toThrow('Unsafe global purge');
+            expect(fetchMock).not.toHaveBeenCalled();
         });
     });
 
@@ -1009,14 +1006,10 @@ describe('MilvusBackend', () => {
     });
 
     describe('purgeAllVectorIndexes', () => {
-        it('should purge without filters to clear everything', async () => {
-            fetchMock.mockResolvedValueOnce(mockFetchResponse({}));
-
-            await backend.purgeAllVectorIndexes(defaultSettings);
-
-            const callBody = JSON.parse(fetchMock.mock.calls[0][1].body);
-            expect(callBody.collectionId).toBe('vecthare_main');
-            expect(callBody.filters).toBeUndefined();
+        it('refuses unscoped deletion of the shared Milvus collection', async () => {
+            await expect(backend.purgeAllVectorIndexes(defaultSettings))
+                .rejects.toThrow('Unsafe global purge');
+            expect(fetchMock).not.toHaveBeenCalled();
         });
     });
 

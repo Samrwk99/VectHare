@@ -1,3 +1,5 @@
+import { acquireLease } from './leases.js';
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * VECTHARE SCENE MANAGEMENT
@@ -25,14 +27,25 @@ import { substituteParams, getCurrentChatId } from '../../../../../script.js';
 import { getStringHash } from '../../../../utils.js';
 import {
     insertVectorItems,
+    getSavedHashes,
     deleteVectorItems,
+    resolveEmbeddingSettingsForEdit,
 } from './core-vector-api.js';
 import { getChatCollectionId, getTextWithoutAttachments } from './chat-vectorization.js';
+import { ensureChatBinding, recordChatStore, beginChatCollectionWrite, endChatCollectionWrite } from './collection-ids.js';
 import {
     getChunkMetadata,
     saveChunkMetadata,
     deleteChunkMetadata,
+    canRecordInitialVectorizationConfig,
+    createInitialVectorizationConfig,
+    saveInitialVectorizationConfig,
+    resolveCollectionOperationSettings,
+    snapshotCollectionOperationSettings,
+    assertCollectionOperationSettingsStable,
+    getAnnotatedChunkHashes,
 } from './collection-metadata.js';
+import { vecthareState } from './vecthare-store.js';
 
 // ============================================================================
 // CONSTANTS
@@ -59,15 +72,8 @@ export const SCENE_MODES = {
  * @returns {string|null}
  */
 export function getCurrentCollectionId() {
-    // Try new format first
-    const newFormatId = getChatCollectionId();
-    if (newFormatId) {
-        return newFormatId;
-    }
-    // Fallback to legacy format
-    const chatId = getCurrentChatId();
-    if (!chatId) return null;
-    return `vecthare_chat_${chatId}`;
+    // Never build an unverified fallback ID for an unbound chat.
+    return getChatCollectionId();
 }
 
 /**
@@ -139,7 +145,10 @@ export function getContainedChunkHashes(messages, start, end) {
  * @returns {Promise<{success: boolean, hash?: number, error?: string}>}
  */
 export async function createSceneChunk(start, end, sceneData, settings) {
-    const collectionId = getCurrentCollectionId();
+    settings = snapshotCollectionOperationSettings(settings);
+    let initialConfig;
+    const binding = await ensureChatBinding();
+    const collectionId = binding.writable ? binding.collectionId : null;
     if (!collectionId) {
         return { success: false, error: 'No chat selected' };
     }
@@ -152,6 +161,24 @@ export async function createSceneChunk(start, end, sceneData, settings) {
 
     if (start < 0 || end < start || end >= messages.length) {
         return { success: false, error: 'Invalid scene boundaries' };
+    }
+
+    try {
+        const resolved = await resolveCollectionOperationSettings(collectionId, settings, 'scene-markers', {
+            pipeline: 'scene-markers', strategy: 'per_scene',
+        }, { allowNew: true });
+        if (resolved.status === 'new') {
+            // A scene must not be the first write into a chat's collection: it
+            // would record the collection's write-once settings as a scene
+            // collection and Sync could never use this chat's collection again.
+            return { success: false, error: 'This chat has no vectors yet. Run Sync Chat first (or let auto-sync run), then mark the scene again.' };
+        }
+        settings = resolved.settings;
+        initialConfig = resolved.config || createInitialVectorizationConfig(settings, {
+            pipeline: 'scene-markers', strategy: 'per_scene',
+        });
+    } catch (error) {
+        return { success: false, error: error.message };
     }
 
     // Build scene text and compute hash
@@ -183,20 +210,42 @@ export async function createSceneChunk(start, end, sceneData, settings) {
     };
 
     try {
-        // Insert scene chunk into vector DB
-        await insertVectorItems(collectionId, [sceneChunk], settings);
+        // Provenance belongs to the outgoing vector, not the SillyTavern chat.
+        sceneChunk.__vecthareProvenanceHint = {
+            writer: 'scene-markers', sourceType: 'scene', groupingStrategy: 'per_scene',
+        };
+        let initiallyEmpty = false;
+        if (canRecordInitialVectorizationConfig(collectionId)) {
+            try {
+                initiallyEmpty = (await getSavedHashes(collectionId, settings)).length === 0;
+            } catch (error) {
+                console.warn('VectHare Scenes: Could not verify first vectorization settings:', error);
+            }
+        }
+        // Insert scene chunk into vector DB (8C: under the chat's cross-tab lease)
+        const lease = await acquireLease(collectionId, { label: 'Scene' });
+        beginChatCollectionWrite(collectionId);
+        try {
+            assertCollectionOperationSettingsStable(initialConfig, settings, initialConfig?.chunking);
+            recordChatStore(collectionId, settings);
+            await insertVectorItems(collectionId, [sceneChunk], settings);
+            if (initiallyEmpty) await saveInitialVectorizationConfig(collectionId, initialConfig, settings);
+        } finally {
+            endChatCollectionWrite(collectionId);
+            await lease.release();
+        }
 
         // Disable contained chunks
         for (const hash of containedHashes) {
-            const existing = getChunkMetadata(hash) || {};
+            const existing = getChunkMetadata(hash, collectionId) || {};
             saveChunkMetadata(hash, {
                 ...existing,
                 disabledByScene: sceneHash,
                 disabledAt: Date.now(),
-            });
+            }, collectionId);
         }
 
-        console.log(`VectHare Scenes: Created scene chunk ${sceneHash} (${start}-${end}), disabled ${containedHashes.length} chunks`);
+        vhLog(`VectHare Scenes: Created scene chunk ${sceneHash} (${start}-${end}), disabled ${containedHashes.length} chunks`);
         return { success: true, hash: sceneHash };
 
     } catch (error) {
@@ -219,23 +268,45 @@ export async function deleteSceneChunk(sceneHash, containedHashes, settings) {
     }
 
     try {
-        // Delete scene chunk from vector DB
-        await deleteVectorItems(collectionId, [sceneHash], settings);
+        // Delete scene chunk from vector DB (8C: under the chat's cross-tab lease)
+        // VH-049: delete from the store the chat's collection really uses (its
+        // saved settings), not from today's provider/model.
+        const collectionSettings = await resolveEmbeddingSettingsForEdit(collectionId, settings);
+        const lease = await acquireLease(collectionId, { label: 'Scene' });
+        try {
+            await deleteVectorItems(collectionId, [sceneHash], collectionSettings);
+        } finally {
+            await lease.release();
+        }
 
         // Re-enable contained chunks
         for (const hash of containedHashes) {
-            const existing = getChunkMetadata(hash);
+            const existing = getChunkMetadata(hash, collectionId);
             if (existing && existing.disabledByScene === sceneHash) {
                 const { disabledByScene, disabledAt, ...rest } = existing;
                 if (Object.keys(rest).length > 0) {
-                    saveChunkMetadata(hash, rest);
+                    saveChunkMetadata(hash, rest, collectionId);
                 } else {
-                    deleteChunkMetadata(hash);
+                    deleteChunkMetadata(hash, collectionId);
                 }
             }
         }
 
-        console.log(`VectHare Scenes: Deleted scene chunk ${sceneHash}, re-enabled ${containedHashes.length} chunks`);
+        // VH-082: also clear the note on chunks this scene covered that the caller
+        // no longer lists (e.g. a message edited since the scene was made).
+        let swept = 0;
+        for (const key of Object.keys(vecthareState().chunkMetadata || {})) {
+            const existing = getChunkMetadata(key, collectionId);
+            if (existing && String(existing.disabledByScene) === String(sceneHash)) {
+                const { disabledByScene, disabledAt, ...rest } = existing;
+                if (Object.keys(rest).length > 0) saveChunkMetadata(key, rest, collectionId);
+                else deleteChunkMetadata(key, collectionId);
+                swept++;
+            }
+        }
+        if (swept) vhLog(`VectHare Scenes: cleared the scene note on ${swept} more chunk(s)`);
+
+        vhLog(`VectHare Scenes: Deleted scene chunk ${sceneHash}, re-enabled ${containedHashes.length} chunks`);
         return { success: true };
 
     } catch (error) {
@@ -252,9 +323,9 @@ export async function deleteSceneChunk(sceneHash, containedHashes, settings) {
  * @param {object} settings - VectHare settings
  * @returns {Promise<{success: boolean, error?: string}>}
  */
-export async function updateSceneChunkMetadata(sceneHash, updates, settings) {
+export async function updateSceneChunkMetadata(sceneHash, updates, settings, collectionId = null) {
     // Scene metadata is stored in chunk metadata, not vector DB
-    const existing = getChunkMetadata(sceneHash) || {};
+    const existing = getChunkMetadata(sceneHash, collectionId) || {};
 
     const updatedMeta = {
         ...existing,
@@ -264,8 +335,8 @@ export async function updateSceneChunkMetadata(sceneHash, updates, settings) {
         updatedAt: Date.now(),
     };
 
-    saveChunkMetadata(sceneHash, updatedMeta);
-    console.log(`VectHare Scenes: Updated metadata for scene ${sceneHash}`);
+    saveChunkMetadata(sceneHash, updatedMeta, collectionId);
+    vhLog(`VectHare Scenes: Updated metadata for scene ${sceneHash}`);
     return { success: true };
 }
 
@@ -278,8 +349,8 @@ export async function updateSceneChunkMetadata(sceneHash, updates, settings) {
  * @param {number} hash - Chunk hash
  * @returns {boolean}
  */
-export function isChunkDisabledByScene(hash) {
-    const meta = getChunkMetadata(hash);
+export function isChunkDisabledByScene(hash, collectionId = null) {
+    const meta = getChunkMetadata(hash, collectionId);
     return meta?.disabledByScene != null;
 }
 
@@ -288,8 +359,8 @@ export function isChunkDisabledByScene(hash) {
  * @param {number} hash - Chunk hash
  * @returns {number|null}
  */
-export function getDisablingSceneHash(hash) {
-    const meta = getChunkMetadata(hash);
+export function getDisablingSceneHash(hash, collectionId = null) {
+    const meta = getChunkMetadata(hash, collectionId);
     return meta?.disabledByScene ?? null;
 }
 
@@ -317,7 +388,7 @@ export function filterNonSceneChunks(chunks) {
  * @returns {object[]} Chunks not disabled by scenes
  */
 export function filterDisabledChunks(chunks) {
-    return chunks.filter(chunk => !isChunkDisabledByScene(chunk.hash));
+    return chunks.filter(chunk => !isChunkDisabledByScene(chunk.hash, chunk.collectionId));
 }
 
 // ============================================================================
@@ -381,4 +452,124 @@ export function setPendingSceneStart(messageId) {
 
 export function clearPendingScene() {
     pendingSceneStart = null;
+}
+
+// ============================================================================
+// F8: SCENE STALENESS
+// ============================================================================
+// A scene is a protected chunk: Sync and Repair never retire it. When one of
+// its messages is edited or deleted, the stored scene no longer describes the
+// chat. After Sync/Repair the scene is checked against the current messages;
+// a mismatch marks it "outdated" (a VectHare annotation, no vector write). An
+// outdated scene is not injected and is shown with a "Re-create scene" action.
+// Nothing is rewritten automatically.
+
+const messageHashOf = msg => (msg?.mes && !msg.is_system
+    ? String(getStringHash(getTextWithoutAttachments(msg))) : null);
+
+/**
+ * Finds where a scene's messages are now: the single contiguous run of chat
+ * messages whose hashes equal the scene's containedHashes in order. A missing
+ * member or more than one possible run -> null (cannot be located).
+ * @returns {{start: number, end: number}|null}
+ */
+export function locateSceneMembers(messages, containedHashes) {
+    const wanted = Array.isArray(containedHashes) ? containedHashes.map(String) : [];
+    if (!wanted.length || !Array.isArray(messages)) return null;
+    const items = [];
+    messages.forEach((msg, index) => {
+        const hash = messageHashOf(msg);
+        if (hash !== null) items.push({ index, hash });
+    });
+    const runs = [];
+    for (let k = 0; k + wanted.length <= items.length; k++) {
+        if (wanted.every((hash, j) => items[k + j].hash === hash)) {
+            runs.push({ start: items[k].index, end: items[k + wanted.length - 1].index });
+        }
+    }
+    return runs.length === 1 ? runs[0] : null;
+}
+
+/**
+ * True when the stored scene still matches the current chat.
+ * @param {object[]} messages Current chat
+ * @param {{hash: number|string, metadata: object}} scene Scene chunk
+ */
+export function isSceneCurrent(messages, scene) {
+    const range = locateSceneMembers(messages, scene?.metadata?.containedHashes);
+    if (!range) return false;
+    return String(computeSceneHash(messages, range.start, range.end)) === String(scene.hash);
+}
+
+/** Whether a scene was marked outdated by the last check. */
+export function isSceneOutdated(hash, collectionId = null) {
+    return getChunkMetadata(hash, collectionId)?.sceneOutdated === true;
+}
+
+/**
+ * Re-checks every scene of the current chat's collection and records which are
+ * outdated. Skipped (nothing read) when the collection has no scene.
+ * @param {object} settings Settings the run used (backend/source of the collection)
+ * @returns {Promise<{checked: number, outdated: number}>}
+ */
+export async function refreshSceneStaleness(settings, collectionId = getCurrentCollectionId(),
+    messages = getContext()?.chat) {
+    const none = { checked: 0, outdated: 0 };
+    if (!collectionId || !Array.isArray(messages)) return none;
+    // Contained messages carry disabledByScene; no such annotation -> no scene.
+    const hasScenes = getAnnotatedChunkHashes(collectionId).some(hash =>
+        getChunkMetadata(hash, collectionId)?.disabledByScene != null ||
+        getChunkMetadata(hash, collectionId)?.sceneOutdated != null);
+    if (!hasScenes) return none;
+    let resolvedSettings = settings;
+    try {
+        const resolved = await resolveCollectionOperationSettings(collectionId, settings, 'rag',
+            { pipeline: 'rag', strategy: 'query' }, { readOnly: true });
+        resolvedSettings = resolved.settings || settings;
+    } catch (error) {
+        console.debug(`VectHare Scenes: staleness check skipped: ${error.message}`);
+        return none;
+    }
+    const data = await getSavedHashes(collectionId, resolvedSettings, true);
+    if (!data || !Array.isArray(data.hashes) || !Array.isArray(data.metadata)) return none;
+    let checked = 0, outdated = 0;
+    data.hashes.forEach((hash, i) => {
+        const meta = data.metadata[i];
+        if (meta?.isScene !== true) return;
+        checked++;
+        const current = isSceneCurrent(messages, { hash, metadata: meta });
+        if (!current) outdated++;
+        const existing = getChunkMetadata(hash, collectionId) || {};
+        if ((existing.sceneOutdated === true) !== !current) {
+            saveChunkMetadata(hash, { ...existing, sceneOutdated: !current,
+                sceneCheckedAt: Date.now() }, collectionId);
+        }
+    });
+    if (outdated) vhLog(`VectHare Scenes: ${outdated} of ${checked} scene(s) are outdated (their messages changed)`);
+    return { checked, outdated };
+}
+
+/**
+ * User action: replaces an outdated scene with one built from its messages as
+ * they are now (same title/summary/keywords). Only when the messages can be
+ * located; otherwise the stored range is used if it is still inside the chat.
+ * @returns {Promise<{success: boolean, hash?: number, error?: string}>}
+ */
+export async function recreateScene(scene, settings, collectionId = getCurrentCollectionId()) {
+    const messages = getContext()?.chat;
+    if (!scene || !Array.isArray(messages)) return { success: false, error: 'No chat selected' };
+    const meta = { ...(scene.metadata || {}), ...(getChunkMetadata(scene.hash, collectionId) || {}) };
+    const located = locateSceneMembers(messages, meta.containedHashes);
+    const start = located ? located.start : meta.sceneStart;
+    const end = located ? located.end : meta.sceneEnd;
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end >= messages.length) {
+        return { success: false, error: 'The scene\'s messages could not be found in this chat' };
+    }
+    const removed = await deleteSceneChunk(scene.hash, meta.containedHashes || [], settings);
+    if (!removed.success) return removed;
+    // The old scene's own annotation (title, outdated flag) is carried in `meta`.
+    deleteChunkMetadata(scene.hash, collectionId);
+    return createSceneChunk(start, end, {
+        title: meta.title, summary: meta.summary, keywords: meta.keywords,
+    }, settings);
 }

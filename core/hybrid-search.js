@@ -1,3 +1,4 @@
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * HYBRID SEARCH MODULE
@@ -42,13 +43,14 @@ export async function hybridSearch(collectionId, searchText, topK, settings, opt
     // Check if backend supports native hybrid search and user prefers it
     const preferNative = settings.hybrid_native_prefer !== false;
     if (preferNative && backend.supportsHybridSearch && backend.supportsHybridSearch()) {
-        console.log(`[HybridSearch] Using native hybrid search (${backend.constructor.name})`);
+        vhLog(`[HybridSearch] Using native hybrid search (${backend.constructor.name})`);
         try {
             return await backend.hybridQuery(collectionId, searchText, topK, settings, {
                 vectorWeight,
                 textWeight,
                 fusionMethod,
-                rrfK
+                rrfK,
+                queryVector
             });
         } catch (error) {
             console.warn(`[HybridSearch] Native hybrid failed, falling back to client-side:`, error.message);
@@ -57,7 +59,7 @@ export async function hybridSearch(collectionId, searchText, topK, settings, opt
     }
 
     // Client-side fusion for backends without native support
-    console.log(`[HybridSearch] Using client-side ${fusionMethod.toUpperCase()} fusion`);
+    vhLog(`[HybridSearch] Using client-side ${fusionMethod.toUpperCase()} fusion`);
     return clientSideHybridSearch(
         backend,
         collectionId,
@@ -92,8 +94,8 @@ async function clientSideHybridSearch(backend, collectionId, searchText, topK, s
     const expandedTopK = Math.min(topK * 3, 100);
 
     // 1. Vector search
-    console.log(`[HybridSearch] Fetching ${expandedTopK} vector results from collection: ${collectionId}`);
-    console.log(`[HybridSearch] Backend: ${backend.constructor.name}, Source: ${settings.source}`);
+    vhLog(`[HybridSearch] Fetching ${expandedTopK} vector results from collection: ${collectionId}`);
+    vhLog(`[HybridSearch] Backend: ${backend.constructor.name}, Source: ${settings.source}`);
 
     let vectorResults;
     try {
@@ -104,15 +106,15 @@ async function clientSideHybridSearch(backend, collectionId, searchText, topK, s
             settings,
             queryVector
         );
-        console.log(`[HybridSearch] Raw vector results:`, vectorResults ? `hashes=${vectorResults.hashes?.length}, metadata=${vectorResults.metadata?.length}` : 'null');
+        vhLog(`[HybridSearch] Raw vector results:`, vectorResults ? `hashes=${vectorResults.hashes?.length}, metadata=${vectorResults.metadata?.length}` : 'null');
     } catch (error) {
         console.error(`[HybridSearch] Vector query failed:`, error);
         return { hashes: [], metadata: [] };
     }
 
     if (!vectorResults || !vectorResults.metadata || vectorResults.metadata.length === 0) {
-        console.log('[HybridSearch] No vector results found');
-        console.log(`[HybridSearch] Debug - vectorResults:`, JSON.stringify(vectorResults));
+        vhLog('[HybridSearch] No vector results found');
+        vhLog(`[HybridSearch] Debug - vectorResults:`, JSON.stringify(vectorResults));
         return { hashes: [], metadata: [] };
     }
 
@@ -127,7 +129,7 @@ async function clientSideHybridSearch(backend, collectionId, searchText, topK, s
     }));
 
     // 3. Perform BM25 full-text search over the result set with field boosting
-    console.log(`[HybridSearch] Computing BM25 scores for ${resultsWithText.length} results...`);
+    vhLog(`[HybridSearch] Computing BM25 scores for ${resultsWithText.length} results...`);
     const bm25Results = performBM25Search(resultsWithText, searchText, {
         k1: settings.bm25_k1 || 1.5,
         b: settings.bm25_b || 0.75,
@@ -137,13 +139,13 @@ async function clientSideHybridSearch(backend, collectionId, searchText, topK, s
     // 4. Fuse results
     let fusedResults;
     if (fusionMethod === 'rrf') {
-        console.log(`[HybridSearch] Applying RRF fusion (k=${rrfK})...`);
+        vhLog(`[HybridSearch] Applying RRF fusion (k=${rrfK})...`);
         fusedResults = reciprocalRankFusion(
             [vectorResultsToRanked(vectorResults), bm25Results],
             rrfK
         );
     } else {
-        console.log(`[HybridSearch] Applying weighted fusion (α=${vectorWeight}, β=${textWeight})...`);
+        vhLog(`[HybridSearch] Applying weighted fusion (α=${vectorWeight}, β=${textWeight})...`);
         fusedResults = weightedCombination(
             vectorResultsToScored(vectorResults),
             bm25Results,
@@ -155,19 +157,19 @@ async function clientSideHybridSearch(backend, collectionId, searchText, topK, s
     // 5. Return top K fused results
     const topResults = fusedResults.slice(0, topK);
 
-    console.log(`[HybridSearch] Returning ${topResults.length} fused results`);
+    vhLog(`[HybridSearch] Returning ${topResults.length} fused results`);
     if (topResults.length > 0) {
         // Log score distribution for debugging
         const scores = topResults.map(r => r.rrfScore || r.combinedScore || 0);
-        console.log(`[HybridSearch] Score distribution: min=${Math.min(...scores).toFixed(4)}, max=${Math.max(...scores).toFixed(4)}`);
-        console.log(`[HybridSearch] Top 3 results:`);
+        vhLog(`[HybridSearch] Score distribution: min=${Math.min(...scores).toFixed(4)}, max=${Math.max(...scores).toFixed(4)}`);
+        vhLog(`[HybridSearch] Top 3 results:`);
         topResults.slice(0, 3).forEach((r, i) => {
             const score = (r.rrfScore || r.combinedScore || 0).toFixed(4);
             const vRank = r.ranks?.vector || 'N/A';
             const tRank = r.ranks?.text || 'N/A';
             const vScore = (r.vectorScore || 0).toFixed(4);
             const tScore = (r.textScore || r.bm25Score || 0).toFixed(4);
-            console.log(`  [${i + 1}] finalScore=${score}, vectorRank=${vRank}, textRank=${tRank}, vectorScore=${vScore}, textScore=${tScore}`);
+            vhLog(`  [${i + 1}] finalScore=${score}, vectorRank=${vRank}, textRank=${tRank}, vectorScore=${vScore}, textScore=${tScore}`);
         });
     }
 

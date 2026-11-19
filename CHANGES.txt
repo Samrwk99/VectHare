@@ -1141,3 +1141,475 @@ AN1. R22 residue in scenes.js — FIXED (three-way inconsistency):
      rather than fixed at this stage.
 
 — Round 24 end. 24 rounds total.
+
+----------------------------------------------------------------------------
+BUILD 13.17 (master plan steps 1 and 2)
+----------------------------------------------------------------------------
+Step 1 (plugin + extension, Milvus/LanceDB scope and safety)
+  C1/C3/C5/C6/C7: Milvus requests carry the collection's tenant (type + sourceId);
+    the plugin derives the filter itself, escapes every value it puts in a filter,
+    validates hashes, and refuses unscoped delete/purge/count. A hash held by
+    another tenant is never deleted (HTTP 409 with the blocked hashes).
+  LanceDB: one instance per SillyTavern user directory; insert replaces by hash
+    and restores the previous rows if the write fails.
+  C14: Live-chat vectorization only offers strategies Sync Chat can track.
+  U2: manifest auto_update is false (README explains why).
+Step 2 (extension)
+  C8: a chat's own collection activates for that chat; another chat's collection
+    only when forced, selected or locked for this chat (Always Active ignored).
+  C9: chunks of the current chat's collection whose messages are all gone from the
+    chat are dropped before injection; the count is shown in Search Debug.
+  C10/U6: collections skipped or failing during retrieval are listed with the
+    reason in Search Debug ("Retrieval Problems"); one toast per chat per reason.
+  C11: a retrieval started for one chat is discarded if the chat changed before
+    injection.
+  C12: an older shared chunk annotation applies to a collection only when that
+    collection is the single one holding the hash; the first scoped read copies
+    it into the collection's own slot. Otherwise it is ignored.
+  C13: two different texts with the same hash in one insert: the first is stored,
+    the other skipped and counted in Status ("N chunk(s) not stored: hash collision").
+
+----------------------------------------------------------------------------
+BUILD 13.18 (master plan step 3: Sync / Repair / ledger / chat lifecycle)
+----------------------------------------------------------------------------
+  K1: Content Vectorizer "Replace All" on the live chat no longer purges first;
+    it runs the staged rebuild (new collection written + verified, chat switched,
+    old collection kept). Other content never had a Replace All: each run makes
+    a new timestamped collection (noted for a later step).
+  K2: after a verified rebuild, Status shows "Old collection kept - Delete now /
+    Keep". Delete uses the verified deleteCollection(); nothing is automatic.
+  K6/U8: "unresolved identity" messages say how to clear them
+    (Vectorize -> Re-vectorize this chat).
+  N2: deleting a chat no longer purges its collection. The binding is released
+    (not used by RAG) and kept for 7 days (core/deleted-chats.js; record stored in
+    the collection's metadata as `deletedChat`). Database Browser shows
+    "Deleted chat - kept N days" and an "Empty deleted" button; expired ones are
+    purged at startup through the same verified path (any doubt keeps them).
+    Before a chat without a binding gets a new collection (Vectorize / Sync Chat /
+    Content Vectorizer), a deleted chat of the same owner whose identity ledger
+    matches >= 60% (send dates or fingerprints, at least 2 messages, exactly one
+    candidate) is offered for re-use.
+  F8: after Sync and Repair, scenes are checked against the current messages;
+    a scene whose messages changed is marked outdated (annotation only), is not
+    injected, shows "Outdated" in the chunk browser with "Re-create scene".
+  U4: Database Browser filter "Not bound to a chat" (Collections and Bulk tabs);
+    Bulk "Delete Selected" deletes several at once (verified delete).
+  U5: chat collection policies are keyed by [ownerType, ownerId, chat]; the old
+    filename key is read as fallback and left in place; renames carry policies.
+
+----------------------------------------------------------------------------
+BUILD 13.19 (master plan step 4: performance)
+----------------------------------------------------------------------------
+  P1: a manual Sync run plans once (hash list, ledger, reconciliation, groups,
+    inventory) and reuses the plan for later batches; per batch only the batch's
+    hashes are read back. Re-plans on chat switch, chat array/length change, any
+    message edit/delete/swipe, a changed chat snapshot, a due reverse sync, a
+    failed or unconfirmed write, or a dirty ledger. Auto-sync is unchanged.
+    The ledger keeps its stage + finish saves per batch (crash safety).
+    Also fixed: in the first run of a NEW chat only the first batch was ledger-
+    tracked (the configuration captured before the first write lacked
+    identityLedger); the run now adopts the saved configuration.
+  P2: one batch size for Sync / Repair / auto-sync / Content Vectorizer:
+    embedding_batch_size, default 8 for transformers, 5 otherwise.
+  P3: RAG queries collections 4 at a time (the first alone, to fill the shared
+    query-vector cache); result order unchanged.
+  P4: Database Browser checks rows 4 at a time.
+  P5: plugin route /chunks/get-by-hashes; Repair's post-write checks read only
+    the written/deleted hashes (older plugin or Qdrant multitenancy -> full read).
+  P6: /collections/exists returns trusted counts for Qdrant (count, exact) and
+    LanceDB (countRows); deletion uses a trusted count for its emptiness check.
+  P7: not done (no measured lag).
+  U3: console.log output goes through vhLog(), shown only with the new
+    "Debug logging" setting (off). Warnings and errors unchanged.
+
+----------------------------------------------------------------------------
+BUILD 13.20 (master plan step 5: status window and progress)
+----------------------------------------------------------------------------
+  S1: Sync shows its phase on the status line: Checking collection… ->
+    Comparing with chat… -> Embedding · n/N -> Saving…; one log line per phase
+    (identical consecutive lines collapse). Automatic background sync stays silent.
+  S2: the Sync bar moves while a batch is embedding: (groups done + share of the
+    current batch) / total groups, never backwards within a run.
+  S3: Repair opens the panel when it starts (it used to open only when there was
+    work): Reading collection… -> Comparing with chat… -> Re-embedding · n/N ->
+    Verifying replacements… -> Removing stale · n/N -> Verifying…. Weighted bar:
+    read 10 / compare 5 / embed 60 / delete 15 / verify 10; a phase with no work
+    gives its share to the others. Stale vectors are removed in batches of 50,
+    each read back before the next. Every way out of Repair (including the early
+    "blocked" returns) now finishes the panel instead of leaving it running.
+    Reading shows no n/N pages: the collection is read in one request.
+  S4: chat speed and ETA use embedding time only (not planning, saving or paused
+    time); no ETA is shown before two batches have been embedded.
+  S5: a staged rebuild keeps going after the embedding: the embedding part fills
+    0-85% of the bar, then Verifying new collection · 1/3, Switching chat to new
+    collection · 2/3, Carrying annotations · 3/3; the final line names the kept
+    old collection (Delete now / Keep as before).
+  S6: Purge All, Empty deleted, deleting several collections, and Resync report in
+    the status panel (Purging collections · n/N, Deleting collections · n/N,
+    Checking collections · n/N); kept/failed entries are listed under Errors.
+    If another run owns the panel the operation keeps its toasts only. A clean
+    Resync closes its panel again after 1.5 s. The status panel now stacks above
+    the Database Browser.
+  S7: Content Vectorizer shows "Chunks 45 / 100" in the counter while embedding
+    (it stayed on "3 / 4 Steps"); the bar keeps its 75-100% mapping.
+
+BUILD 13.21 - Step 6: content sources and dead UI
+  F1: URL import uses ST's current /api/search/visit route (falls back to the old
+    /api/serpapi/visit on 404), sends ST's request headers, and turns the returned
+    HTML into readable text (scripts/styles/nav removed). 401/403 now say
+    "blocked by SillyTavern security"; 404 says the route is missing.
+  F2: YouTube transcript requests send ST's request headers; 401/403 reported as
+    blocked, not as a generic failure.
+  F3: Wiki plugin probe/scrape send ST's request headers. 404 = plugin not
+    installed; 401/403 = "SillyTavern blocked the check, reload", no longer shown
+    as "install the plugin".
+  F4: PNG character cards: UTF-8 safe decoding (non-ASCII names/text no longer
+    garbled), ccv3 (V3) preferred over chara, iTXt chunks read, chunk bounds checked.
+  F5: Lorebook "Include Disabled Entries" now works (default off: entries disabled
+    in World Info are skipped); the toggle keeps its state when the panel redraws.
+  F6: URL preview shows an estimated chunk (embedding call) count.
+  F7: Character source: new "Embedded Lorebook" field (card character_book,
+    disabled entries skipped, off by default). The Fields to Vectorize checkboxes
+    were never read; they now change what is vectorized.
+  F10: Per Scene strategy description says scenes must already be marked.
+  F11: Chunk detail "copy hash" works; dead duplicate Chunk Visualizer modal
+    template removed from the settings markup; Nomic key button explains that the
+    key is set in SillyTavern's API settings.
+
+BUILD 13.22 - Step 7: key store and other user-facing issues
+  U1: Qdrant API key and Milvus token/password move out of settings.json into a
+    VectHare key store in the Similharity plugin (per user, secrets.json beside
+    collections.json, atomic write, mode 0600 where supported). The plugin has no
+    route that returns a key. The three fields now show "Key set ✓ [Replace]
+    [Remove]" or an input + Save. On load, keys still in settings are moved
+    (store -> confirm -> blank setting); on any failure the key stays in settings
+    and one warning is shown. Stored keys are used when Qdrant/Milvus initialise
+    and win over a key sent by an older build.
+    Existing chats are unaffected: the storage-destination check keeps using the
+    same hash of the key (kept as a fingerprint in settings), so destinations
+    recorded before the migration still match.
+    Milvus: a stored/entered password is now actually used (as user:password when
+    no token is set); before, the plugin ignored it.
+    NEEDS the updated plugin: with an older plugin the keys cannot be moved and
+    stay in settings (with a warning).
+  U7: hint under the embedding provider: provider/model/chunking changes apply
+    to new collections only.
+  U9: the "Repair blocked: shared storage" message now says what to do instead.
+  U10: with more than one SillyTavern user, the plugin refuses loopback/private/
+    link-local/non-http targets for BananaBread, KoboldCpp and /rerank unless
+    SIMILHARITY_ALLOW_PRIVATE_URLS=1 is set on the server. Single-user installs
+    are unchanged.
+  K3: changing backend, embedding provider/model, or a stored key drops the cached
+    collection inventory, so the Database Browser re-reads on its next open.
+
+BUILD 13.23 - Pre-step fixes (before Step H)
+  Repair on Qdrant: Repair re-embedded edited messages but never removed the old
+    vectors ("0/2 deletion keys acknowledged ... identity ledger verification
+    incomplete"; Sync cleaned up afterwards). Its stored-text check compared the
+    exact text, but the Qdrant adapter stores chunk text with " [KEYWORDS: ...]"
+    appended. It now also accepts exactly that adapter-generated suffix built
+    from the chunk's own keywords (nothing looser). Reproduced on 13.22 with the
+    same message; fixed.
+  Swipes / deleted messages next to new ones: a message whose unique send_date
+    and text had both disappeared was only treated as deleted when its old
+    neighbours became adjacent. A swipe (new text + new send_date in place), or
+    a delete next to an insert, therefore left the old vector stored forever and
+    RAG could return abandoned swipes. Such a message is now retired wherever it
+    was; a hash still used by a current chunk is still never deleted.
+  Appended messages that re-open the last batch/turn: the superseded chunk was
+    only removed at a later Sync (reverse cleanup is throttled to 5 min), so
+    those messages were stored twice meanwhile. The collection is now marked for
+    immediate cleanup, and Sync Chat runs one cleanup pass before finishing.
+  New chat + browser closed within ~1 s of the first Sync: the chat's binding was
+    still waiting in the debounced metadata save, so the next load created a
+    second collection and orphaned the first. A new binding is now saved before
+    any vector is written (rolled back in memory if the save fails), and pending
+    metadata is also saved when the tab is hidden.
+  RAG: a one-message chunk of Conversation Turns / Message Batch (e.g. the lone
+    latest message) was never recognised as already in the recent context, so
+    the current message could be injected as a "memory". Both dedup stages now
+    check groups of any size.
+  ETA: the rate included the batch still running while its groups were not yet
+    counted, so the ETA rose during every batch (stuck around one batch time on
+    the last one). It now uses finished batches only and counts down through the
+    running batch; it shows "finishing..." if a batch runs longer than average.
+  Batch size: the "Insert Batch Size" slider sized requests, but a Sync/Repair
+    pass only ever handed over 5 (8 for Transformers), so setting 8 still sent 5.
+    Once the slider has been changed (or holds anything other than the factory
+    50), Sync, Repair and auto-sync use it per pass (max 100). Untouched installs
+    keep 5 / 8. Hint text updated.
+
+BUILD 13.24 - Step H: safety hotfix (needs the updated plugin)
+  H1 (plugin): Milvus never drops a collection. Before, vecthare_main (every Milvus
+    vector AND every Milvus collection's saved original settings) was dropped and
+    recreated when its vector size differed from the requested one - including at
+    page load with a guessed 768 when dimension auto-detect failed (e.g. embedding
+    server down), or after switching to a model of another size. Now:
+    - an existing vecthare_main is only loaded at init (no size decisions);
+    - a missing one is created at init only if Embedding Dimensions is set,
+      otherwise at the first insert with the real vector size;
+    - a size mismatch or a missing vector field stops the write with a clear
+      error (HTTP 409); nothing is changed.
+    BEHAVIOUR CHANGE: a model with different dimensions now errors on Milvus
+    instead of silently wiping the store.
+  H2 (plugin): shared stores (vecthare_main, vecthare_multitenancy, vecthare_mt_*)
+    can no longer be deleted through any purge route (409, nothing changed). The
+    diagnostics "Purge collection and start fresh" button called a plugin route
+    that never existed (always failed); it is now "Start fresh" and explains how
+    to remove the affected collections safely.
+  H3 (extension): with Qdrant multitenancy on, deleting/purging a single collection
+    is refused up front with a clear message. The plugin's Qdrant purge ignores
+    filters, so it targeted a collection name that does not exist in the shared
+    store and reported success while the vectors stayed.
+
+BUILD 13.25 - Scene-first saved settings
+  A scene marked before a chat's first Sync became the first write into the
+    chat's collection and recorded its write-once settings as a scene collection.
+    Sync then refused that chat for good ("cannot reproduce saved sync-chat
+    settings (chunking.pipeline)"). Reproduced and fixed:
+    - Prevention: marking a scene on a chat with no vectors yet now says "Run Sync
+      Chat first, then mark the scene again" and writes nothing.
+    - Recovery for chats already in that state: Vectorize now offers the staged
+      Rebuild (it said "vectorize" and failed again). The rebuild creates a proper
+      chat collection; the old one, with its scenes, is kept (Delete now / Keep).
+
+BUILD 13.26 - Step 8A: several tabs/devices - VectHare metadata (needs the updated plugin)
+  collections.json (registry, collection settings, chat bindings, annotations)
+  was written whole by whichever tab saved last, so a stale tab could erase
+  another tab's new collections, bindings or annotations.
+  Plugin: the file now carries a server-owned revision. Reads return a token
+    for the version read; a save that names its token is refused (409) if the
+    file changed since. A save without a token (older extension) works as before.
+    Saves are serialised per user. New route /owned-state/token (used by 8B).
+    /health advertises capabilities.ownedStateTokens.
+  Extension:
+    - Routine saves that hit a 409 merge: what this tab changed is applied on
+      top of the server's version, key by key (collection settings field by
+      field; same field changed in both tabs -> the other tab's value is kept;
+      something deleted here but changed elsewhere -> kept). Never drops this
+      tab's changes; after two failed merges it retries on the next save.
+    - Merges and reloads update the live document in place, so code holding a
+      reference keeps writing into the real data.
+    - Chat bindings are never merged. Creating a binding or switching it
+      (Rebuild) is a strict commit: written only on top of the latest version;
+      on a conflict it is re-checked on fresh data and retried. Two tabs opening
+      the same new chat now share one collection; a Rebuild that conflicts is
+      left uncommitted with the previous collection still in use.
+    - Purge All's metadata reset is never merged: if another tab changed
+      something, nothing is reset and it says so.
+    - With an older plugin (no tokens) everything behaves exactly as 13.25.
+  Tabs still running an older build save without a token and can still
+  overwrite: reload every tab after updating.
+
+BUILD 13.27 - Step 8B: several tabs/devices - identity ledgers and stale tabs (needs the updated plugin)
+  Plugin: identity ledger files carry a server-owned revision; reads return a
+    token and a save naming its token is refused (409) if another tab saved the
+    ledger in between. Saves are serialised per ledger file. Saves without a token
+    (older builds) and the post-purge invalidation work as before.
+    /health advertises capabilities.ledgerTokens.
+  Extension:
+    - Every ledger save says which version it replaces (the new client refuses
+      to save without one once the plugin supports tokens).
+    - If another tab staged the same chat first, this tab's Sync pass stops
+      BEFORE writing any vector (it retries a moment later); a conflict after
+      the writes leaves the ledger for the existing crash-recovery path on the
+      next pass. Repair says "another tab is updating this chat" and changes
+      nothing unconfirmed.
+    - Stale tabs: before a chat's collection is resolved (Sync, Repair, Rebuild,
+      scenes), before any delete, before a visualizer edit, and when a tab comes
+      back to the foreground, VectHare asks the plugin whether its metadata
+      changed (one tiny request, at most every 2 s) and re-reads it in place if
+      so. A tab left open therefore follows another tab's Rebuild instead of
+      writing into the old collection.
+
+BUILD 13.28 - Step 8C: several tabs/devices - leases (needs the updated plugin)
+  Plugin: /locks/acquire|renew|release - a short, in-memory lease per ST user and
+    collection (180 s after the last renewal; a server restart clears them).
+    `*` is an exclusive per-user lease for Purge All. /health advertises
+    capabilities.leases.
+  Extension (new core/leases.js): before writing to or deleting a collection a
+    tab takes its lease - Sync (auto and manual), Repair, Rebuild (old and new
+    collection), Delete / deleted-chat cleanup, Purge All (exclusive), scenes,
+    chunk edits in the visualizer, Content Vectorizer writes.
+    - If another tab/device holds it: auto-sync skips quietly and tries again on
+      the next chat event; manual actions say "Another tab or device is working
+      on this chat right now"; nothing is written or deleted.
+    - Renewed with every batch and by a timer; a run that loses its lease stops
+      cleanly between batches (completed work kept).
+    - A paused run gives the lease up after 30 s and takes it back on resume
+      (stops if another tab has it then).
+    - A closed tab releases its leases at once (keepalive request); a crashed tab
+      blocks nobody for more than 3 minutes.
+    - With an older plugin there are no lease calls and nothing changes.
+  The ledger versions (8B) remain the hard guarantee; the lease keeps two tabs
+  from even starting the same work.
+
+BUILD 13.29 - Step 9a: read-only storage report (needs the updated plugin for the report)
+  Plugin: POST /storage/report (read-only). For every collection VectHare's metadata
+    file knows about: its layout (own store / old Qdrant multitenancy / Milvus
+    vecthare_main / conflict / not found / unknown), physical store, vector count, and
+    where its saved original settings were found (found / missing / in more than one
+    place / invalid / could not be read); what today's settings-based rule would pick;
+    the shared stores (old Qdrant multitenancy: vectors per collection tag and without
+    one); VectHare-named physical stores no record points at; single-user or multi-user
+    server. On a multi-user server other users' names are shown to admins only.
+    It never connects a backend, and creates/changes/deletes nothing.
+    /health advertises capabilities.storageReport.
+  Extension: Database Browser -> new "Storage" tab: Run report, a "Needs attention"
+    filter, Copy as JSON (falls back to a download). Keep a copy as your baseline
+    before 9b.
+  FIX (plugin): with Qdrant multitenancy on, a delete by hash removed whichever
+    collection's point carried that hash in the shared store. Sync's ghost cleanup in
+    one chat (collections without an identity ledger) could therefore delete another
+    chat's vectors, and so could chunk deletes in the visualizer and scene removal.
+    The extension did send its collection scope, but as `filter`, which the plugin never
+    read. Deletes in vecthare_multitenancy are now limited to the caller's own points
+    (content_type); a delete there without a scope is refused (409, nothing deleted).
+    Reads in that store are unchanged (still unscoped) until 9c makes it read-only.
+
+BUILD 13.30 - Step 9b: storage locator + resolver (refactor-only; no new plugin feature needed)
+  Every collection used to be located from TODAY's settings: the Qdrant
+    multitenancy switch decided between vecthare_multitenancy and the collection's
+    own Qdrant collection; Milvus was always vecthare_main. Toggling the switch
+    therefore pointed every existing Qdrant collection at the wrong place and
+    blocked it ("original configuration missing").
+  New: a locator per collection in VectHare's metadata file,
+    collections[id].storage = { backend, layout, physical, locatorVersion: 1 }.
+    It is only a pointer to where the collection's vectors and saved original
+    settings already are, recorded (routine metadata write):
+    - for a new collection, at its first write;
+    - for an existing Qdrant/Milvus collection, after a read-only check of its
+      possible locations (today's rule first, then the other one), when exactly
+      one holds a valid saved configuration: in the background ~20 s after start,
+      before its first write, or via Database Browser > Storage > Record locations.
+    Found nowhere: nothing recorded, the collection behaves exactly as before.
+    Found in more than one place: nothing recorded, writes (Sync, Repair, scenes,
+    Content Vectorizer, chunk edits, deletes) are blocked with a message; reads
+    continue as before; the Storage report shows it.
+  New core/storage-resolver.js: resolveStorage() is synchronous and local. With a
+    locator it returns that; without one, exactly today's settings-based rule. The
+    Qdrant and Milvus adapters take the physical name and layout only from it; with
+    a locator the switch is not read at all. Also routed through it: saved-settings
+    reads/writes, existence checks, the Repair and delete gates (H3), deleted-chat
+    cleanup, Purge All, and the chat's recorded store destination (R13).
+  Effect: toggling Qdrant multitenancy no longer blocks collections whose location
+    is recorded; the switch only decides where NEW collections go (still the legacy
+    layout when on; multitenancy v2 comes in 9c).
+  FLAGGED verification change: for an existing Qdrant collection the multitenancy
+    flag compared against its saved settings now comes from where those settings
+    were read (its locator, or today's rule), like the embedding source already
+    did. A saved record whose flag disagrees with its location is still refused;
+    backend and address are still compared as before.
+  A verified delete/purge clears the collection's locator (a fresh start follows
+    today's switch).
+  Storage report: shows each collection's recorded location and flags one that
+    does not match what was found (needs the 13.30 plugin; older plugin: no column).
+  FIX (plugin): Milvus hybrid search embedded the query and then failed with a
+    server error on every RAG query (the Milvus backend has no hybrid query). It
+    now answers 400 at once; the extension falls back to vector search as before.
+  FIX (extension): that Milvus fallback dropped the prepared query vector, so the
+    query was embedded a second time.
+
+BUILD 13.31 - Step 9c: multitenancy v2 for Qdrant and Milvus (needs the updated plugin)
+  The multitenancy switch now means the same for Qdrant and Milvus, for NEW
+    collections only (existing collections stay where they are):
+    - OFF: one physical store per collection (Qdrant: as before; Milvus: new
+      "vh_<hash>" collection each).
+    - ON: one shared store per vector size, "vecthare_mt_<size>", with every
+      collection separated server-side by a tenant key the PLUGIN computes from
+      the SillyTavern user and the collection id (never sent by the browser).
+    Defaults keep today's behaviour: Qdrant OFF, Milvus ON (new setting
+    "Use Multitenancy" under the Milvus settings).
+  Plugin (capabilities.scopedTenancy = 2):
+    - Qdrant v2: point id = UUIDv5(tenantKey:hash) (node:crypto, no new packages),
+      so identical text in two chats is two points and re-inserting is idempotent;
+      tenantKey (tenant index) + hash indexes; every list/get/edit/delete/count/
+      query/hybrid/purge is filtered by the tenant; client filters are dropped.
+    - Milvus v2: auto-id key, hash INT64 (scalar index), tenantKey VarChar(512)
+      (partition key in the shared store), text, metadata, vector. Inserts skip
+      hashes the collection already has. Deletes look up the rows' ids first.
+      Per-collection stores are loaded on use and released after 10 idle minutes.
+      Needs Milvus >= 2.2.9: refused with a clear message when the server reports
+      an older version.
+    - Saved original settings of a v2 collection live in its store, keyed by
+      sha256(tenantKey). Purge: the collection's rows are removed, it is checked
+      that none remain, and its settings slot is emptied (a marker, so a later
+      first write can record new ones). A shared store is never dropped; a Milvus
+      per-collection store is dropped (it is the collection's own).
+    - The vector size is taken from the first insert and returned to the
+      extension, which records it in the collection's locator.
+    - Storage report: shows v2 collections and stores.
+  Extension:
+    - New collections get the layout above when the plugin advertises
+      scopedTenancy 2; otherwise everything behaves exactly as 13.30.
+    - P7 gates: Repair, Purge All and deletion are allowed for the new layouts;
+      the legacy layouts keep their gates.
+    - Legacy Qdrant multitenancy (vecthare_multitenancy) is READ-ONLY with the new
+      plugin (decision D1): Sync/edits/inserts there are refused with "re-vectorize
+      to move"; Vectorize on such a chat offers the staged rebuild (the old copy is
+      kept until you delete it). RAG still reads it - now limited to the chat's
+      own vectors (it returned every chat's vectors before).
+    - A v2 collection is never written through an older plugin (it would misplace
+      the vectors); it says to update the plugin.
+  FIXES found on the way:
+    - (13.30) After toggling the switch, Vectorize offered a Rebuild for collections
+      whose location was recorded: its comparison used today's switch.
+    - Exporting, viewing chunks in the Database Browser, the Browser's keyword scan
+      and importing with existing vectors called the plugin directly with the
+      collection's name: empty under Qdrant multitenancy, refused by Milvus. They
+      now go through the backend adapters (location + scope). (Missed in 9b.)
+    - Start-up discovery removed registry entries of non-chat collections kept in a
+      shared store (Milvus, Qdrant multitenancy), because the plugin's scan only
+      lists physical stores: such lorebook/document/character collections dropped
+      out of the registry at every start.
+    - Milvus without a configured vector size: the store is created at the first
+      insert (since H1), but reading saved settings from the not-yet-existing store
+      failed (503), so the first Sync could never start.
+
+BUILD 13.32 - Step 9d: Move storage + multi-user ownership (needs the updated plugin)
+  Move storage (P6), Database Browser -> a Qdrant/Milvus collection card ->
+  "Move storage...". Moves ONE collection to the layout the multitenancy switch
+  selects for new collections, on the SAME server and backend (no cross-backend
+  moves). The logical id is kept, so chat bindings, records and annotations stay.
+    1. the plugin reads every source vector and writes it to the target as is
+       (no re-embedding; Qdrant batches of 100, Milvus 500), then checks the
+       count and 5 random vectors (identical within 1e-6);
+    2. the target's saved settings = the source's, with the storage replaced and a
+       "movedFrom" note (written once, owner-stamped);
+    3. strict switch-over of VectHare's metadata file: only if the recorded
+       location is still the source and the source count is unchanged; on a
+       conflict it re-checks on fresh state (up to 3 tries); the chat's recorded
+       store destination follows (only entries naming the old place);
+    4. the identity ledger is written under the new binding (old one kept);
+    5. the old copy is kept and listed in the Storage tab as "old copy (moved)"
+       with a "Delete old copy" button (vectors + saved settings + its old
+       identity ledger; shared stores are never dropped).
+    Before step 3 any failure removes the partial target and changes nothing. If
+    the switch-over's answer is lost, the file is read back to decide; if it
+    cannot be read either, BOTH copies are kept and the move says so.
+    The whole move holds the chat's cross-tab lease.
+  Refused (nothing written): legacy Qdrant multitenancy as a source (incomplete
+    contents - Vectorize offers the rebuild), moving into either old shared store,
+    a target that already holds a copy (delete the old copy first), a collection
+    without readable saved settings, an unfinished Sync (dirty identity ledger),
+    an empty source, Milvus collections over 16000 vectors, an
+    older plugin.
+  Plugin:
+    - POST /storage/move {action: copy | delete-copy}. delete-copy refuses the
+      location VectHare's metadata file records as current (checked server-side,
+      fail closed when the file cannot be read).
+    - Milvus legacy saved settings can be emptied with a tombstone (old-copy delete).
+    - Storage report: old copies per collection (count, "nothing left there"),
+      owner stamps of other users.
+  Multi-user (P8):
+    - Saved original settings on Qdrant/Milvus now record the ST user who wrote
+      them (set by the plugin, not the browser; not part of the snapshot, so ledger
+      bindings are unchanged).
+    - On a server with several ST users, a non-admin user is refused any operation
+      on a per-collection Qdrant store whose stamp names another user, and the
+      collection list shows them only their own stamped stores (unstamped older
+      ones: admins only). v2 layouts were already separated by tenant.
+  FIXES found on the way:
+    - (plugin) the owner lookup cached "no stamp" for a minute, so a brand-new
+      collection was unprotected for up to 60 s after its first write; "no stamp"
+      is now cached for 5 s and a save refreshes it.

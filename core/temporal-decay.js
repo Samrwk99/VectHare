@@ -1,3 +1,4 @@
+import { vhLog } from '../utils/log.js';
 // =============================================================================
 // TEMPORAL WEIGHTING SYSTEM
 // Adjusts relevance of chunks based on age (optional, OFF by default)
@@ -156,7 +157,8 @@ export function applyNostalgiaToResults(chunks, currentMessageId, nostalgiaSetti
 
         // Check if chunk is temporally blind (immune to weighting)
         const chunkHash = chunk.hash ?? chunk.metadata?.hash;
-        if (chunkHash !== undefined && chunkHash !== null && isChunkTemporallyBlind(chunkHash)) {
+        if (chunkHash !== undefined && chunkHash !== null &&
+            isChunkTemporallyBlind(chunkHash, chunk.collectionId)) {
             blindCount++;
             return {
                 ...chunk,
@@ -182,7 +184,7 @@ export function applyNostalgiaToResults(chunks, currentMessageId, nostalgiaSetti
     });
 
     const affectedCount = boosted.filter(c => c.nostalgiaApplied).length;
-    console.log(`🕰️ [Nostalgia] Applied nostalgia boost to ${affectedCount} chat chunks (${blindCount} temporally blind, skipped)`);
+    vhLog(`🕰️ [Nostalgia] Applied nostalgia boost to ${affectedCount} chat chunks (${blindCount} temporally blind, skipped)`);
 
     return boosted;
 }
@@ -210,7 +212,8 @@ export function applyDecayToResults(chunks, currentMessageId, decaySettings) {
 
         // Check if chunk is temporally blind (immune to decay)
         const chunkHash = chunk.hash ?? chunk.metadata?.hash;
-        if (chunkHash !== undefined && chunkHash !== null && isChunkTemporallyBlind(chunkHash)) {
+        if (chunkHash !== undefined && chunkHash !== null &&
+            isChunkTemporallyBlind(chunkHash, chunk.collectionId)) {
             blindCount++;
             return {
                 ...chunk,
@@ -236,7 +239,7 @@ export function applyDecayToResults(chunks, currentMessageId, decaySettings) {
     });
 
     const affectedCount = decayed.filter(c => c.decayApplied).length;
-    console.log(`⏳ [Decay] Applied temporal decay to ${affectedCount} chat chunks (${blindCount} temporally blind, skipped)`);
+    vhLog(`⏳ [Decay] Applied temporal decay to ${affectedCount} chat chunks (${blindCount} temporally blind, skipped)`);
 
     return decayed;
 }
@@ -284,7 +287,8 @@ export function applySceneAwareDecay(chunks, currentMessageId, scenes, decaySett
 
         // Check if chunk is temporally blind (immune to decay)
         const chunkHash = chunk.hash ?? chunk.metadata?.hash;
-        if (chunkHash !== undefined && chunkHash !== null && isChunkTemporallyBlind(chunkHash)) {
+        if (chunkHash !== undefined && chunkHash !== null &&
+            isChunkTemporallyBlind(chunkHash, chunk.collectionId)) {
             blindCount++;
             return {
                 ...chunk,
@@ -325,7 +329,7 @@ export function applySceneAwareDecay(chunks, currentMessageId, scenes, decaySett
     });
 
     const affectedCount = decayed.filter(c => c.sceneAwareDecay).length;
-    console.log(`⏳ [Decay] Applied scene-aware decay to ${affectedCount} chunks (${blindCount} temporally blind, skipped)`);
+    vhLog(`⏳ [Decay] Applied scene-aware decay to ${affectedCount} chunks (${blindCount} temporally blind, skipped)`);
 
     return decayed;
 }

@@ -1339,3 +1339,49 @@
     align-items: flex-start;
     gap: 12px;
 }
+
+/* Step 9a: Storage tab (read-only storage report) */
+.vecthare-storage-panel {
+    overflow-y: auto;
+}
+
+.vecthare-storage-intro {
+    font-size: 0.9em;
+    color: color-mix(in srgb, var(--SmartThemeBodyColor) 75%, transparent);
+    flex: 1;
+}
+
+.vecthare-storage-output h4 {
+    margin: 16px 0 8px;
+}
+
+.vecthare-storage-table-wrap {
+    overflow-x: auto;
+}
+
+.vecthare-storage-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85em;
+}
+
+.vecthare-storage-table th,
+.vecthare-storage-table td {
+    text-align: left;
+    padding: 6px 8px;
+    border-bottom: 1px solid color-mix(in srgb, var(--SmartThemeBodyColor) 10%, transparent);
+    vertical-align: top;
+    word-break: break-word;
+}
+
+.vecthare-storage-table tr.vecthare-storage-attention td {
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor) 10%, transparent);
+}
+
+.vecthare-storage-store {
+    margin-bottom: 8px;
+}
+
+/* 9d: old copies left behind by "Move storage…" */
+.vecthare-storage-oldcopy td { opacity: 0.85; font-style: italic; }
+.vecthare-storage-oldcopy .vecthare-storage-delete-old { margin-left: 6px; font-style: normal; }

@@ -1,3 +1,4 @@
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * VECTHARE WORLD INFO INTEGRATION
@@ -11,6 +12,7 @@
  */
 
 import { extension_settings, getContext } from '../../../../extensions.js';
+import { vecthareState } from './vecthare-store.js';
 import { queryCollection } from './core-vector-api.js';
 import {
     getCollectionMeta,
@@ -48,7 +50,7 @@ export async function getSemanticWorldInfoEntries(recentMessages, activeEntries,
         return [];
     }
 
-    console.log(`VectHare: Querying vectorized lorebooks for semantic WI activation...`);
+    vhLog(`VectHare: Querying vectorized lorebooks for semantic WI activation...`);
 
     const semanticEntries = [];
     // Lower threshold for hybrid search since RRF fusion produces lower absolute scores
@@ -109,7 +111,7 @@ export async function getSemanticWorldInfoEntries(recentMessages, activeEntries,
                         const keyDisplay = Array.isArray(entry.key)
                             ? entry.key.map(k => typeof k === 'object' ? (k.text || k.keyword || JSON.stringify(k)) : k).join(', ')
                             : (entry.key || 'unknown');
-                        console.log(`VectHare: Semantic WI activation: "${keyDisplay}" (score: ${score.toFixed(3)})`);
+                        vhLog(`VectHare: Semantic WI activation: "${keyDisplay}" (score: ${score.toFixed(3)})`);
                     }
                 }
             }
@@ -130,7 +132,7 @@ export async function getSemanticWorldInfoEntries(recentMessages, activeEntries,
     const maxEntries = settings.world_info_max_entries ?? 10;
     const limitedEntries = deduplicatedEntries.slice(0, maxEntries);
 
-    console.log(`VectHare: Found ${limitedEntries.length} semantic WI entries to activate` +
+    vhLog(`VectHare: Found ${limitedEntries.length} semantic WI entries to activate` +
         (deduplicatedEntries.length > limitedEntries.length ? ` (capped from ${deduplicatedEntries.length} by Max Entries)` : ''));
     return limitedEntries;
 }
@@ -144,7 +146,7 @@ export async function getSemanticWorldInfoEntries(recentMessages, activeEntries,
 async function getEnabledLorebookCollections(settings, searchContext) {
     const collections = [];
     const collectionRegistry = applyChatCollectionPolicy(
-        settings.vecthare_collection_registry || [],
+        vecthareState().registry || [],
         searchContext?.currentChatId || getCurrentChatId(),
         { lorebooksOnly: true }
     );
@@ -163,7 +165,7 @@ async function getEnabledLorebookCollections(settings, searchContext) {
         // Check if collection passes activation filters
         const passesActivation = await shouldCollectionActivate(collectionId, searchContext);
         if (!passesActivation) {
-            console.log(`VectHare WI: Lorebook collection ${collectionId} did not pass activation filters, skipping`);
+            vhLog(`VectHare WI: Lorebook collection ${collectionId} did not pass activation filters, skipping`);
             continue;
         }
 
@@ -182,11 +184,11 @@ async function getEnabledLorebookCollections(settings, searchContext) {
     if (exclusiveCollections.length > 0) {
         const exclusiveIds = new Set(exclusiveCollections.map(collection => collection.id));
         const filteredCollections = collections.filter(collection => exclusiveIds.has(collection.id));
-        console.log(`VectHare WI: Exclusive lorebook collection active, suppressing ${collections.length - filteredCollections.length} other lorebook collection(s)`);
+        vhLog(`VectHare WI: Exclusive lorebook collection active, suppressing ${collections.length - filteredCollections.length} other lorebook collection(s)`);
         return filteredCollections;
     }
 
-    console.log(`VectHare WI: ${collections.length} lorebook collection(s) passed activation filters`);
+    vhLog(`VectHare WI: ${collections.length} lorebook collection(s) passed activation filters`);
     return collections;
 }
 
@@ -228,8 +230,9 @@ function deduplicateWithActiveEntries(semanticEntries, activeEntries) {
  */
 export function isLorebookVectorized(lorebookName, settings) {
     const collectionId = buildLorebookCollectionId(lorebookName, 'global');
-    const collectionRegistry = settings.vecthare_collection_registry || [];
-    return collectionRegistry.includes(collectionId);
+    const collectionRegistry = vecthareState().registry || [];
+    // VH-028: registry keys are backend:source:id
+    return collectionRegistry.some(key => key === collectionId || parseRegistryKey(key).collectionId === collectionId);
 }
 
 /**
@@ -323,7 +326,7 @@ export function initializeWorldInfoIntegration() {
         enhanceEntriesUI: enhanceWorldInfoEntriesUI
     };
 
-    console.log('VectHare: World Info integration hooks initialized');
+    vhLog('VectHare: World Info integration hooks initialized');
 }
 
 /**
@@ -356,7 +359,7 @@ export async function applySemanticEntriesToPrompt(chat, settings) {
 
         // Inject into ST extension prompt tag so generation will include it
         setExtensionPrompt(EXTENSION_PROMPT_TAG, fullText, settings.position || 0, settings.depth || 2, false);
-        console.log(`VectHare: Injected ${entries.length} semantic WI entries into prompt`);
+        vhLog(`VectHare: Injected ${entries.length} semantic WI entries into prompt`);
     } catch (err) {
         console.warn('VectHare: Failed to apply semantic WI to prompt', err.message || err);
     }

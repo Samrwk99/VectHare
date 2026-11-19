@@ -1,3 +1,4 @@
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * BM25+ KEYWORD SCORING (ENHANCED)
@@ -216,6 +217,9 @@ function tokenize(text, options = {}) {
     // Normalize and split
     let tokens = text
         .toLowerCase()
+        // #15: `\w` keeps underscores, so BM25 used to treat "multi_word" as one
+        // token while keyword extraction split it. Same boundaries in both now.
+        .replace(/_+/g, ' ')
         .replace(/[^\w\s]/g, ' ')
         .replace(/\s+/g, ' ')
         .trim()
@@ -248,6 +252,7 @@ function tokenizeSimple(text) {
     if (!text || typeof text !== 'string') return [];
     return text
         .toLowerCase()
+        .replace(/_+/g, ' ')   // #15: consistent token boundaries
         .replace(/[^\w\s]/g, ' ')
         .split(/\s+/)
         .filter(token => token.length > 0);
@@ -365,7 +370,11 @@ export class BM25Scorer {
                 }
                 // Tag tokens (4x weight) - high weight since tags are curated keywords
                 if (doc.tags && Array.isArray(doc.tags)) {
-                    const tagTokens = doc.tags.flatMap(tag => tokenize(tag));
+                    // #15: VectHare stores keywords as { text, weight } objects.
+                    // tokenize() ignores non-strings, so curated keywords were
+                    // silently contributing nothing to BM25 field boosting.
+                    const tagTokens = doc.tags.flatMap(tag => tokenize(
+                        typeof tag === 'string' ? tag : String(tag?.text ?? '')));
                     for (let i = 0; i < 4; i++) {
                         allTokens.push(...tagTokens);
                     }
@@ -391,7 +400,7 @@ export class BM25Scorer {
         // Calculate IDF for all terms in corpus
         this.idf = calculateIDF(this.documentTermFreqs, this.totalDocs, this.delta);
 
-        console.log(`[BM25+] Indexed ${this.totalDocs} documents, avg length: ${this.avgDocLength.toFixed(1)} tokens, sublinearTf=${this.sublinearTf}, fieldBoosting=${this.fieldBoosting}`);
+        vhLog(`[BM25+] Indexed ${this.totalDocs} documents, avg length: ${this.avgDocLength.toFixed(1)} tokens, sublinearTf=${this.sublinearTf}, fieldBoosting=${this.fieldBoosting}`);
     }
 
     /**
@@ -543,7 +552,7 @@ export function applyBM25Scoring(results, query, options = {}) {
         beta = 0.5    // Weight for BM25 score
     } = options;
 
-    console.log(`[BM25] Applying BM25 scoring to ${results.length} results (k1=${k1}, b=${b}, α=${alpha}, β=${beta})`);
+    vhLog(`[BM25] Applying BM25 scoring to ${results.length} results (k1=${k1}, b=${b}, α=${alpha}, β=${beta})`);
 
     // Create BM25 scorer
     const scorer = createBM25Scorer(results, { k1, b });
@@ -582,7 +591,7 @@ export function applyBM25Scoring(results, query, options = {}) {
     // Sort by combined score
     scoredResults.sort((a, b) => b.score - a.score);
 
-    console.log(`[BM25] Top result: vector=${scoredResults[0].vectorScore.toFixed(4)}, bm25=${scoredResults[0].bm25Score.toFixed(4)}, combined=${scoredResults[0].score.toFixed(4)}`);
+    vhLog(`[BM25] Top result: vector=${scoredResults[0].vectorScore.toFixed(4)}, bm25=${scoredResults[0].bm25Score.toFixed(4)}, combined=${scoredResults[0].score.toFixed(4)}`);
 
     return scoredResults;
 }

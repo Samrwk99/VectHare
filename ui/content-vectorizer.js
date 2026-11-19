@@ -10,6 +10,7 @@
  * ============================================================================
  */
 
+import { escapeHtml } from '../utils/html.js';
 import {
     CONTENT_TYPES,
     CHUNKING_STRATEGIES,
@@ -23,9 +24,10 @@ import {
     hasFeature,
     SCOPE_OPTIONS,
     CHARACTER_FIELDS,
+    LIVE_CHAT_STRATEGIES,
 } from '../core/content-types.js';
 import { extension_settings, getContext } from '../../../../extensions.js';
-import { saveSettingsDebounced } from '../../../../../script.js';
+import { saveSettingsDebounced, getRequestHeaders, chat_metadata } from '../../../../../script.js';
 import { getChatUUID } from '../core/chat-vectorization.js';
 import { callGenericPopup, POPUP_TYPE } from '../../../../popup.js';
 import { openTextCleaningManager } from './text-cleaning-manager.js';
@@ -46,7 +48,22 @@ let sourceData = null;
  * Opens the content vectorizer modal
  * @param {string} initialType - Optional initial content type to select
  */
-export function openContentVectorizer(initialType = null) {
+let rebuildChatRequested = false;
+
+/**
+ * Whether this session of the Content Vectorizer was opened to rebuild the
+ * current chat's existing collection.
+ * @returns {boolean}
+ */
+export function isChatRebuildRequested() {
+    return rebuildChatRequested;
+}
+
+export function openContentVectorizer(initialType = null, options = {}) {
+    // A rebuild is only ever requested by the Vectorize entry point, after the
+    // user confirmed it for a chat that already has a collection. It is never
+    // inferred here, and it never survives into the next time this opens.
+    rebuildChatRequested = options.rebuild === true && initialType === 'chat';
     currentContentType = initialType;
     currentSettings = initialType ? { ...getContentTypeDefaults(initialType) } : {};
     if (initialType === 'chat') {
@@ -76,7 +93,24 @@ export function openContentVectorizer(initialType = null) {
 /**
  * Closes the modal
  */
+/**
+ * Hands the screen over to the status window while a run is in progress: the
+ * setup is put away WITHOUT losing the user's selections, so a failed run can
+ * bring it straight back. Used instead of closing, because closing discards
+ * the rebuild confirmation and the chosen settings.
+ */
+function hideContentVectorizer() {
+    $('#vecthare_content_vectorizer_modal').hide();
+}
+
+/** Brings the setup back, selections intact, after a failed run. */
+function revealContentVectorizer() {
+    $('#vecthare_content_vectorizer_modal').show();
+}
+
 export function closeContentVectorizer() {
+    // A confirmed rebuild never outlives the window it was confirmed for.
+    rebuildChatRequested = false;
     $('#vecthare_content_vectorizer_modal').fadeOut(200, function() {
         $(this).remove();
     });
@@ -113,8 +147,8 @@ function createModal() {
                             <select id="vecthare_cv_type_select" class="vecthare-cv-type-dropdown">
                                 <option value="">-- Choose content type --</option>
                                 ${contentTypes.map(type => `
-                                    <option value="${type.id}" ${type.id === currentContentType ? 'selected' : ''}>
-                                        ${type.name}
+                                    <option value="${escapeHtml(type.id)}" ${type.id === currentContentType ? 'selected' : ''}>
+                                        ${escapeHtml(type.name)}
                                     </option>
                                 `).join('')}
                             </select>
@@ -307,7 +341,7 @@ function renderUrlSource(type) {
             <div class="vecthare-cv-url-input-row">
                 <input type="text" id="vecthare_cv_url_input"
                        class="vecthare-input"
-                       placeholder="${options.placeholder || 'https://example.com'}">
+                       placeholder="${escapeHtml(options.placeholder || 'https://example.com')}">
                 <button id="vecthare_cv_fetch_url" class="vecthare-btn-primary">
                     <i class="fa-solid fa-download"></i> Fetch
                 </button>
@@ -320,6 +354,7 @@ function renderUrlSource(type) {
                 </div>
                 <div class="vecthare-cv-url-preview-stats">
                     <span><strong id="vecthare_cv_url_chars">0</strong> characters</span>
+                    <span>~<strong id="vecthare_cv_url_chunks">0</strong> chunks (est.)</span>
                 </div>
             </div>
         </div>
@@ -356,12 +391,12 @@ function renderChatSource(type) {
                                 <span class="vecthare-cv-stat-label">Messages</span>
                             </div>
                             <div class="vecthare-cv-stat">
-                                <span class="vecthare-cv-stat-value">${context?.name2 || 'Unknown'}</span>
+                                <span class="vecthare-cv-stat-value">${escapeHtml(context?.name2 || 'Unknown')}</span>
                                 <span class="vecthare-cv-stat-label">Character</span>
                             </div>
                         </div>
                         <div class="vecthare-cv-chat-uuid" style="text-align: center; margin-top: 8px;">
-                            <code style="font-size: 0.7em; opacity: 0.6; user-select: all;">${getChatUUID() || 'unknown'}</code>
+                            <code style="font-size: 0.7em; opacity: 0.6; user-select: all;">${escapeHtml(getChatUUID() || 'unknown')}</code>
                         </div>
                         <div class="vecthare-cv-chat-note">
                             <i class="fa-solid fa-info-circle"></i>
@@ -434,12 +469,12 @@ function renderCurrentChatSource(type) {
                     <span class="vecthare-cv-stat-label">Messages</span>
                 </div>
                 <div class="vecthare-cv-stat">
-                    <span class="vecthare-cv-stat-value">${context?.name2 || 'Unknown'}</span>
+                    <span class="vecthare-cv-stat-value">${escapeHtml(context?.name2 || 'Unknown')}</span>
                     <span class="vecthare-cv-stat-label">Character</span>
                 </div>
             </div>
             <div class="vecthare-cv-chat-uuid" style="text-align: center; margin-top: 8px;">
-                <code style="font-size: 0.7em; opacity: 0.6; user-select: all;">${getChatUUID() || 'unknown'}</code>
+                <code style="font-size: 0.7em; opacity: 0.6; user-select: all;">${escapeHtml(getChatUUID() || 'unknown')}</code>
             </div>
             <div class="vecthare-cv-chat-note">
                 <i class="fa-solid fa-info-circle"></i>
@@ -469,7 +504,7 @@ function renderSelectSource(type) {
             </div>
 
             <div class="vecthare-cv-source-panel" data-panel="existing">
-                <label>${options.selectLabel || 'Select'}</label>
+                <label>${escapeHtml(options.selectLabel || 'Select')}</label>
                 <select id="vecthare_cv_source_select" class="vecthare-select">
                     <option value="">-- Select --</option>
                     <!-- Populated dynamically -->
@@ -516,9 +551,9 @@ function renderInputSource(type) {
         <div class="vecthare-cv-input-source">
             <div class="vecthare-cv-input-tabs">
                 ${methods.map((m, i) => `
-                    <button class="vecthare-cv-input-tab ${i === 0 ? 'active' : ''}" data-method="${m.id}">
+                    <button class="vecthare-cv-input-tab ${i === 0 ? 'active' : ''}" data-method="${escapeHtml(m.id)}">
                         <i class="fa-solid ${m.icon}"></i>
-                        <span>${m.name}</span>
+                        <span>${escapeHtml(m.name)}</span>
                     </button>
                 `).join('')}
             </div>
@@ -536,10 +571,10 @@ function renderInputSource(type) {
                     <i class="fa-solid fa-cloud-arrow-up"></i>
                     <span>Drop file here or click to browse</span>
                     <span class="vecthare-cv-upload-formats">
-                        Formats: ${methods.find(m => m.id === 'upload')?.formats?.join(', ') || '.txt, .md'}
+                        Formats: ${escapeHtml(methods.find(m => m.id === 'upload')?.formats?.join(', ') || '.txt, .md')}
                     </span>
                     <input type="file" id="vecthare_cv_doc_file_input"
-                           accept="${methods.find(m => m.id === 'upload')?.formats?.join(',') || '.txt,.md'}" hidden>
+                           accept="${escapeHtml(methods.find(m => m.id === 'upload')?.formats?.join(',') || '.txt,.md')}" hidden>
                 </div>
             </div>
 
@@ -583,7 +618,7 @@ function renderWikiSource(type) {
                 <label>Wiki Type</label>
                 <select id="vecthare_cv_wiki_type" class="vecthare-select">
                     ${options.types.map(t => `
-                        <option value="${t.id}">${t.name}</option>
+                        <option value="${escapeHtml(t.id)}">${escapeHtml(t.name)}</option>
                     `).join('')}
                 </select>
             </div>
@@ -593,7 +628,7 @@ function renderWikiSource(type) {
                 <label>Wiki URL or ID</label>
                 <input type="text" id="vecthare_cv_wiki_url"
                        class="vecthare-input"
-                       placeholder="${options.types[0].placeholder}">
+                       placeholder="${escapeHtml(options.types[0].placeholder)}">
             </div>
 
             <!-- Page Filter (for bulk scraping) -->
@@ -604,7 +639,7 @@ function renderWikiSource(type) {
                 </label>
                 <input type="text" id="vecthare_cv_wiki_filter"
                        class="vecthare-input"
-                       placeholder="${options.filterPlaceholder}">
+                       placeholder="${escapeHtml(options.filterPlaceholder)}">
                 <div class="vecthare-cv-hint">
                     Leave empty to scrape single page, or enter comma-separated page names for bulk scrape
                 </div>
@@ -647,7 +682,7 @@ function renderYouTubeSource(type) {
                 <div class="vecthare-cv-youtube-input-row">
                     <input type="text" id="vecthare_cv_youtube_url"
                            class="vecthare-input"
-                           placeholder="${options.placeholder}">
+                           placeholder="${escapeHtml(options.placeholder)}">
                     <button id="vecthare_cv_fetch_youtube" class="vecthare-btn-primary">
                         <i class="fa-brands fa-youtube"></i> Fetch
                     </button>
@@ -662,7 +697,7 @@ function renderYouTubeSource(type) {
                 </label>
                 <input type="text" id="vecthare_cv_youtube_lang"
                        class="vecthare-input vecthare-input-sm"
-                       placeholder="${options.langPlaceholder}"
+                       placeholder="${escapeHtml(options.langPlaceholder)}"
                        maxlength="5"
                        style="width: 100px;">
                 <div class="vecthare-cv-hint">
@@ -689,9 +724,21 @@ function renderYouTubeSource(type) {
 /**
  * Updates chunking strategy section
  */
+/** True while the Content Vectorizer is pointed at the live chat (C14). */
+function isLiveChatSelected(typeId = currentContentType) {
+    return typeId === 'chat' &&
+        $('.vecthare-cv-chat-source .vecthare-cv-source-tab.active').data('source') === 'current';
+}
+
 function updateChunkingSection(type) {
-    const strategies = getChunkingStrategies(type.id);
+    // C14: the live chat can only use the strategies Sync Chat tracks; the
+    // others stay available for uploaded transcripts.
+    const strategies = getChunkingStrategies(type.id)
+        .filter(s => !isLiveChatSelected(type.id) || LIVE_CHAT_STRATEGIES.includes(s.id));
     const defaults = getContentTypeDefaults(type.id);
+    if (isLiveChatSelected(type.id) && !LIVE_CHAT_STRATEGIES.includes(currentSettings.strategy || type.defaultStrategy)) {
+        currentSettings.strategy = type.defaultStrategy;
+    }
     const selectedStrategyId = currentSettings.strategy || type.defaultStrategy;
 
     const strategySelect = $('#vecthare_cv_strategy');
@@ -699,7 +746,7 @@ function updateChunkingSection(type) {
 
     strategies.forEach(s => {
         const selected = s.id === selectedStrategyId;
-        strategySelect.append(`<option value="${s.id}" ${selected ? 'selected' : ''}>${s.name}</option>`);
+        strategySelect.append(`<option value="${escapeHtml(s.id)}" ${selected ? 'selected' : ''}>${escapeHtml(s.name)}</option>`);
     });
 
     // Update description
@@ -745,7 +792,9 @@ function updateSizeControlsVisibility() {
     $('#vecthare_cv_overlap_row').toggle(needsOverlap);
 
     // Update description when strategy changes
-    $('#vecthare_cv_strategy_desc').text(strategy?.description || '');
+    $('#vecthare_cv_strategy_desc').text(
+        (strategy?.description || '') +
+        (strategyId === 'per_scene' ? ' Needs scenes already marked in the chat; with none marked, nothing is vectorized.' : ''));
 }
 
 /**
@@ -823,7 +872,7 @@ function updateOptionsSection(type) {
                 <label class="vecthare-cv-toggle-label">
                     <span>Include Disabled Entries</span>
                     <label class="vecthare-toggle-switch">
-                        <input type="checkbox" id="vecthare_cv_include_disabled">
+                        <input type="checkbox" id="vecthare_cv_include_disabled" ${currentSettings.includeDisabled ? 'checked' : ''}>
                         <span class="vecthare-toggle-slider"></span>
                     </label>
                 </label>
@@ -853,7 +902,7 @@ function renderScopeOptions(type) {
     let chatName = 'No chat';
     if (hasChat) {
         // Try to get a meaningful chat name
-        if (typeof chat_metadata !== 'undefined' && chat_metadata?.chat_name) {
+        if (chat_metadata?.chat_name) {
             chatName = chat_metadata.chat_name;
         } else {
             chatName = `Chat #${context.chatId}`;
@@ -890,13 +939,13 @@ function renderScopeOptions(type) {
             <div class="vecthare-cv-scope-options">
                 ${scopeData.map(scope => `
                     <label class="vecthare-cv-scope-option ${scope.id === defaultScope ? 'selected' : ''} ${!scope.enabled ? 'disabled' : ''}">
-                        <input type="radio" name="vecthare_cv_scope" value="${scope.id}"
+                        <input type="radio" name="vecthare_cv_scope" value="${escapeHtml(scope.id)}"
                                ${scope.id === defaultScope ? 'checked' : ''}
                                ${!scope.enabled ? 'disabled' : ''}>
                         <div class="vecthare-cv-scope-card">
                             <i class="fa-solid ${scope.icon}"></i>
-                            <span class="vecthare-cv-scope-name">${scope.name}</span>
-                            <span class="vecthare-cv-scope-desc">${scope.desc}</span>
+                            <span class="vecthare-cv-scope-name">${escapeHtml(scope.name)}</span>
+                            <span class="vecthare-cv-scope-desc">${escapeHtml(scope.desc)}</span>
                         </div>
                     </label>
                 `).join('')}
@@ -918,9 +967,9 @@ function renderFieldSelection() {
                 ${CHARACTER_FIELDS.map(field => `
                     <label class="vecthare-cv-field-option">
                         <input type="checkbox" name="vecthare_cv_field"
-                               value="${field.id}"
-                               ${defaults.fields?.[field.id] ? 'checked' : ''}>
-                        <span class="vecthare-cv-field-name">${field.name}</span>
+                               value="${escapeHtml(field.id)}"
+                               ${(currentSettings.fields ?? defaults.fields)?.[field.id] ? 'checked' : ''}>
+                        <span class="vecthare-cv-field-name">${escapeHtml(field.name)}</span>
                     </label>
                 `).join('')}
             </div>
@@ -1009,7 +1058,7 @@ function renderTemporalDecayOptions() {
                 <div class="vecthare-cv-decay-exponential" style="display: ${decayMode === 'exponential' ? 'block' : 'none'};">
                     <div class="vecthare-cv-inline-setting">
                         <label>Half-life:</label>
-                        <input type="number" id="vecthare_cv_decay_halflife" min="1" max="500" value="${halfLife}" class="vecthare-input-number">
+                        <input type="number" id="vecthare_cv_decay_halflife" min="1" max="500" value="${escapeHtml(halfLife)}" class="vecthare-input-number">
                         <small>messages until 50% effect</small>
                     </div>
                 </div>
@@ -1018,7 +1067,7 @@ function renderTemporalDecayOptions() {
                 <div class="vecthare-cv-decay-linear" style="display: ${decayMode === 'linear' ? 'block' : 'none'};">
                     <div class="vecthare-cv-inline-setting">
                         <label>Rate:</label>
-                        <input type="number" id="vecthare_cv_decay_rate" min="0.001" max="0.5" step="0.001" value="${linearRate}" class="vecthare-input-number">
+                        <input type="number" id="vecthare_cv_decay_rate" min="0.001" max="0.5" step="0.001" value="${escapeHtml(linearRate)}" class="vecthare-input-number">
                         <small>per message (0.01 = 1%)</small>
                     </div>
                 </div>
@@ -1027,7 +1076,7 @@ function renderTemporalDecayOptions() {
                 <div class="vecthare-cv-decay-floor" style="display: ${decayType === 'decay' ? 'block' : 'none'};">
                     <div class="vecthare-cv-inline-setting">
                         <label>Min relevance:</label>
-                        <input type="number" id="vecthare_cv_decay_min" min="0" max="1" step="0.05" value="${minRelevance}" class="vecthare-input-number">
+                        <input type="number" id="vecthare_cv_decay_min" min="0" max="1" step="0.05" value="${escapeHtml(minRelevance)}" class="vecthare-input-number">
                         <small>floor (0-1)</small>
                     </div>
                 </div>
@@ -1075,15 +1124,15 @@ function renderTextCleaningOptions() {
                     <label for="vecthare_cv_cleaning_preset">Preset:</label>
                     <select id="vecthare_cv_cleaning_preset" class="vecthare-select">
                         ${presets.map(p => `
-                            <option value="${p.id}" ${p.id === currentPreset ? 'selected' : ''}>
-                                ${p.name}
+                            <option value="${escapeHtml(p.id)}" ${p.id === currentPreset ? 'selected' : ''}>
+                                ${escapeHtml(p.name)}
                             </option>
                         `).join('')}
                     </select>
                 </div>
             </div>
             <span class="vecthare-cv-option-hint" id="vecthare_cv_cleaning_hint">
-                ${presets.find(p => p.id === currentPreset)?.desc || ''}
+                ${escapeHtml(presets.find(p => p.id === currentPreset)?.desc || '')}
             </span>
         </div>
     `;
@@ -1149,10 +1198,12 @@ function bindEvents() {
         $('#vecthare_cv_strategy_desc').text(selected?.description || '');
         currentSettings.strategy = strategy;
         updateSizeControlsVisibility();
+        refreshPreviewIfOpen();
     });
 
     $('#vecthare_cv_turn_order').on('change', function() {
         currentSettings.conversation_turn_order = String($(this).val());
+        refreshPreviewIfOpen();
     });
 
     // Size sliders
@@ -1160,12 +1211,14 @@ function bindEvents() {
         const val = $(this).val();
         $('#vecthare_cv_chunk_size_val').text(val);
         currentSettings.chunkSize = parseInt(val);
+        refreshPreviewIfOpen();
     });
 
     $('#vecthare_cv_overlap').on('input', function() {
         const val = parseInt($(this).val());
         $('#vecthare_cv_overlap_val').text(val === 0 ? 'Off' : val);
         currentSettings.chunkOverlap = val;
+        refreshPreviewIfOpen();
     });
 
     // Scope selection
@@ -1173,6 +1226,20 @@ function bindEvents() {
         currentSettings.scope = $(this).val();
         $('.vecthare-cv-scope-option').removeClass('selected');
         $(this).closest('.vecthare-cv-scope-option').addClass('selected');
+    });
+
+    // Character: field checkboxes (were rendered but never read)
+    $(document).on('change', 'input[name="vecthare_cv_field"]', function() {
+        const fields = {};
+        $('input[name="vecthare_cv_field"]').each(function() {
+            fields[String($(this).val())] = $(this).is(':checked');
+        });
+        currentSettings.fields = fields;
+    });
+
+    // Lorebook: include entries disabled in World Info (default off)
+    $(document).on('change', '#vecthare_cv_include_disabled', function() {
+        currentSettings.includeDisabled = $(this).is(':checked');
     });
 
     // Keyword level dropdown
@@ -1297,6 +1364,12 @@ function bindSourceEvents(type) {
 
         // Clear sourceData when switching tabs
         sourceData = null;
+
+        // C14: the strategy list depends on live chat vs uploaded transcript.
+        if (currentContentType === 'chat') {
+            const chatType = getContentType('chat');
+            if (chatType) updateChunkingSection(chatType);
+        }
     });
 
     // Input method tabs (for document type)
@@ -1482,7 +1555,7 @@ async function populateSourceSelect(type) {
 
                 if (worldNames && worldNames.length > 0) {
                     worldNames.forEach(name => {
-                        select.append(`<option value="${name}">${name}</option>`);
+                        select.append(`<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`);
                     });
                 } else {
                     select.append('<option value="" disabled>No lorebooks found</option>');
@@ -1502,7 +1575,7 @@ async function populateSourceSelect(type) {
                 if (context?.characterId) {
                     const currentChar = characters.find(c => c.avatar === context.characterId);
                     if (currentChar) {
-                        select.append(`<option value="${currentChar.avatar}" selected>📌 ${currentChar.name} (current)</option>`);
+                        select.append(`<option value="${escapeHtml(currentChar.avatar)}" selected>📌 ${escapeHtml(currentChar.name)} (current)</option>`);
                     }
                 }
 
@@ -1510,7 +1583,7 @@ async function populateSourceSelect(type) {
                 characters.forEach(char => {
                     // Skip if already added as current
                     if (char.avatar === context?.characterId) return;
-                    select.append(`<option value="${char.avatar}">${char.name}</option>`);
+                    select.append(`<option value="${escapeHtml(char.avatar)}">${escapeHtml(char.name)}</option>`);
                 });
             } else {
                 select.append('<option value="" disabled>No characters found</option>');
@@ -1683,63 +1756,68 @@ function extractCharaFromPng(bytes) {
         }
     }
 
-    // Read chunks
-    let offset = 8; // Skip signature
+    const found = {}; // keyword -> text payload (base64 string)
+    let offset = 8;
 
-    while (offset < bytes.length) {
-        // Read chunk length (4 bytes, big endian)
-        const length = (bytes[offset] << 24) | (bytes[offset + 1] << 16) |
-                       (bytes[offset + 2] << 8) | bytes[offset + 3];
+    while (offset + 8 <= bytes.length) {
+        const length = ((bytes[offset] << 24) | (bytes[offset + 1] << 16) |
+                        (bytes[offset + 2] << 8) | bytes[offset + 3]) >>> 0;
+        offset += 4;
+        const type = String.fromCharCode(bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]);
         offset += 4;
 
-        // Read chunk type (4 bytes ASCII)
-        const type = String.fromCharCode(bytes[offset], bytes[offset + 1],
-                                         bytes[offset + 2], bytes[offset + 3]);
-        offset += 4;
+        const dataStart = offset;
+        const dataEnd = Math.min(offset + length, bytes.length);
 
-        if (type === 'tEXt') {
-            // tEXt chunk: keyword (null-terminated) + text data
-            const dataStart = offset;
-            const dataEnd = offset + length;
-
-            // Find null terminator for keyword
+        if (type === 'tEXt' || type === 'iTXt') {
             let nullPos = dataStart;
-            while (nullPos < dataEnd && bytes[nullPos] !== 0) {
-                nullPos++;
-            }
+            while (nullPos < dataEnd && bytes[nullPos] !== 0) nullPos++;
+            const keyword = new TextDecoder('latin1').decode(bytes.subarray(dataStart, nullPos));
 
-            const keyword = new TextDecoder().decode(bytes.slice(dataStart, nullPos));
-
-            if (keyword === 'chara') {
-                // Get the base64 data after the null terminator
-                const base64Data = new TextDecoder().decode(bytes.slice(nullPos + 1, dataEnd));
-
-                // Decode base64 to JSON
-                try {
-                    const jsonStr = atob(base64Data);
-                    const charData = JSON.parse(jsonStr);
-
-                    // Handle V2 format (data wrapped in 'data' object)
-                    if (charData.spec === 'chara_card_v2' && charData.data) {
-                        return charData.data;
+            if (keyword === 'chara' || keyword === 'ccv3') {
+                let textStart = nullPos + 1;
+                if (type === 'iTXt') {
+                    // keyword\0 compFlag compMethod lang\0 translatedKeyword\0 text
+                    const compFlag = bytes[textStart];
+                    if (compFlag === 1) {
+                        throw new Error('Compressed iTXt character data is not supported');
                     }
-
-                    return charData;
-                } catch (e) {
-                    console.error('VectHare: Failed to decode character data:', e);
-                    throw new Error('Invalid character data in PNG');
+                    textStart += 2;
+                    while (textStart < dataEnd && bytes[textStart] !== 0) textStart++;
+                    textStart++;
+                    while (textStart < dataEnd && bytes[textStart] !== 0) textStart++;
+                    textStart++;
+                }
+                if (!(keyword in found)) {
+                    found[keyword] = new TextDecoder('latin1').decode(bytes.subarray(textStart, dataEnd)).trim();
                 }
             }
         }
 
-        // Skip chunk data and CRC (4 bytes)
-        offset += length + 4;
-
-        // Safety check for IEND
+        offset = dataEnd + 4; // skip data + CRC
         if (type === 'IEND') break;
     }
 
-    return null;
+    // Prefer V3 (ccv3) over V2 (chara)
+    const keyword = ('ccv3' in found) ? 'ccv3' : (('chara' in found) ? 'chara' : null);
+    if (!keyword) return null;
+
+    try {
+        // base64 -> bytes -> UTF-8 (atob alone yields latin1 and mangles non-ASCII text)
+        const bin = atob(found[keyword]);
+        const raw = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) raw[i] = bin.charCodeAt(i);
+        const charData = JSON.parse(new TextDecoder('utf-8').decode(raw));
+
+        // V2 / V3 wrap the fields in a 'data' object
+        if ((charData.spec === 'chara_card_v2' || charData.spec === 'chara_card_v3') && charData.data) {
+            return charData.data;
+        }
+        return charData;
+    } catch (e) {
+        console.error('VectHare: Failed to decode character data:', e);
+        throw new Error('Invalid character data in PNG');
+    }
 }
 
 /**
@@ -1750,6 +1828,32 @@ function clearUpload() {
     $('#vecthare_cv_upload_zone').show();
     $('#vecthare_cv_upload_info').hide();
     $('#vecthare_cv_file_input, #vecthare_cv_doc_file_input').val('');
+}
+
+/**
+ * Rough chunk (= embedding call) estimate from text length and the current chunk size.
+ * Only an estimate: the real count depends on the chosen strategy.
+ */
+function estimateChunkCount(charCount) {
+    const type = getContentType(currentContentType);
+    const size = Number(currentSettings.chunkSize || type?.defaults?.chunkSize) || 500;
+    return Math.max(1, Math.ceil(charCount / Math.max(50, size)));
+}
+
+/**
+ * Converts an HTML page to readable plain text (scripts/styles/nav removed).
+ * Uses DOMParser, which never executes scripts or loads resources.
+ * @param {string} html
+ * @returns {{text: string, title: string}}
+ */
+export function htmlToText(html) {
+    const doc = new DOMParser().parseFromString(String(html), 'text/html');
+    const title = (doc.querySelector('title')?.textContent || '').trim();
+    doc.querySelectorAll('script, style, noscript, template, iframe, svg, nav, footer, header, form').forEach(el => el.remove());
+    const root = doc.querySelector('article, main') || doc.body || doc.documentElement;
+    let text = (root?.innerText ?? root?.textContent ?? '');
+    text = text.replace(/\u00a0/g, ' ').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+    return { text, title };
 }
 
 /**
@@ -1776,19 +1880,46 @@ async function fetchUrl() {
     preview.hide();
 
     try {
-        // Use ST's readability endpoint if available
-        const response = await fetch('/api/serpapi/visit', {
+        // Current ST route is /api/search/visit (returns raw HTML); older builds used /api/serpapi/visit.
+        // Both need ST's CSRF headers (getRequestHeaders).
+        let response = await fetch('/api/search/visit', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url }),
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ url, html: true }),
         });
+        if (response.status === 404) {
+            response = await fetch('/api/serpapi/visit', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                body: JSON.stringify({ url }),
+            });
+        }
 
         if (!response.ok) {
+            if (response.status === 404) {
+                throw new Error('This SillyTavern has no web-visit route (enable the Web Search / server plugins)');
+            }
+            if (response.status === 401 || response.status === 403) {
+                throw new Error(`Blocked by SillyTavern security (HTTP ${response.status}) - reload the page and try again`);
+            }
             throw new Error(`HTTP ${response.status}`);
         }
 
-        const data = await response.json();
-        const content = data.content || data.text || '';
+        const rawBody = await response.text();
+        let data = null;
+        try { data = JSON.parse(rawBody); } catch { /* raw HTML/text body */ }
+        let content = '';
+        let pageTitle = '';
+        if (data && typeof data === 'object') {
+            content = data.content || data.text || '';
+        } else {
+            content = rawBody;
+        }
+        if (/<\s*(html|body|head|div|p|article|section|script)[\s>]/i.test(content)) {
+            const parsed = htmlToText(content);
+            content = parsed.text;
+            pageTitle = parsed.title;
+        }
 
         if (!content || content.length < 50) {
             throw new Error('No meaningful content found on page');
@@ -1798,7 +1929,7 @@ async function fetchUrl() {
             type: 'url',
             url: url,
             content: content,
-            title: data.title || url,
+            title: (data && data.title) || pageTitle || url,
         };
 
         status.html('');
@@ -1806,6 +1937,7 @@ async function fetchUrl() {
         // Show preview
         $('#vecthare_cv_url_title').text(sourceData.title);
         $('#vecthare_cv_url_chars').text(content.length.toLocaleString());
+        $('#vecthare_cv_url_chunks').text(estimateChunkCount(content.length).toLocaleString());
         preview.show();
 
         toastr.success(`Fetched ${content.length.toLocaleString()} characters`, 'VectHare');
@@ -1839,13 +1971,21 @@ async function checkWikiPluginStatus() {
             <span>${wikiType === 'fandom' ? 'Fandom' : 'MediaWiki'} scraper ready</span>
         `);
         scrapeBtn.prop('disabled', false);
+    } else if (wikiProbeBlocked) {
+        statusEl.html(`
+            <div class="vecthare-cv-wiki-plugin-warning">
+                <i class="fa-solid fa-exclamation-triangle" style="color: var(--vecthare-warning);"></i>
+                <span>SillyTavern blocked the plugin check - reload the page and try again</span>
+            </div>
+        `);
+        scrapeBtn.prop('disabled', true);
     } else {
         const type = getContentType('wiki');
         statusEl.html(`
             <div class="vecthare-cv-wiki-plugin-warning">
                 <i class="fa-solid fa-exclamation-triangle" style="color: var(--vecthare-warning);"></i>
                 <span>Wiki scraping requires the Fandom Scraper plugin</span>
-                <a href="${type.sourceOptions.pluginUrl}" target="_blank" rel="noopener" class="vecthare-cv-plugin-link">
+                <a href="${escapeHtml(type.sourceOptions.pluginUrl)}" target="_blank" rel="noopener" class="vecthare-cv-plugin-link">
                     <i class="fa-solid fa-external-link"></i> Install Plugin
                 </a>
             </div>
@@ -1857,6 +1997,7 @@ async function checkWikiPluginStatus() {
 /**
  * Checks if the wiki plugin is available via probe endpoint
  */
+let wikiProbeBlocked = false;
 async function isWikiPluginAvailable(wikiType) {
     try {
         const endpoint = wikiType === 'fandom'
@@ -1865,9 +2006,16 @@ async function isWikiPluginAvailable(wikiType) {
 
         const response = await fetch(endpoint, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getRequestHeaders(),
+            body: JSON.stringify({}),
         });
 
+        // 404 = plugin not installed; 401/403 = ST blocked the request (CSRF/auth), not "missing"
+        if (response.status === 401 || response.status === 403) {
+            wikiProbeBlocked = true;
+        } else {
+            wikiProbeBlocked = false;
+        }
         return response.ok;
     } catch (error) {
         console.debug('VectHare: Wiki plugin probe failed:', error);
@@ -1913,11 +2061,17 @@ async function scrapeWiki() {
 
         const response = await fetch(endpoint, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getRequestHeaders(),
             body: JSON.stringify(requestBody),
         });
 
         if (!response.ok) {
+            if (response.status === 404) {
+                throw new Error('Wiki scraper plugin is not installed on this SillyTavern');
+            }
+            if (response.status === 401 || response.status === 403) {
+                throw new Error(`Blocked by SillyTavern security (HTTP ${response.status}) - reload the page and try again`);
+            }
             const error = await response.text();
             throw new Error(error || `HTTP ${response.status}`);
         }
@@ -2024,11 +2178,14 @@ async function fetchYouTubeTranscript() {
     try {
         const response = await fetch('/api/search/transcript', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getRequestHeaders(),
             body: JSON.stringify({ id: videoId, lang: lang || undefined }),
         });
 
         if (!response.ok) {
+            if (response.status === 401 || response.status === 403) {
+                throw new Error(`Blocked by SillyTavern security (HTTP ${response.status}) - reload the page and try again`);
+            }
             const error = await response.text();
             throw new Error(error || `HTTP ${response.status}`);
         }
@@ -2226,7 +2383,7 @@ function handleChatFileUpload(e) {
                     <span class="vecthare-cv-stat-label">Messages</span>
                 </div>
                 <div class="vecthare-cv-stat">
-                    <span class="vecthare-cv-stat-value">${characterName}</span>
+                    <span class="vecthare-cv-stat-value">${escapeHtml(characterName)}</span>
                     <span class="vecthare-cv-stat-label">Character</span>
                 </div>
                 <div class="vecthare-cv-stat">
@@ -2260,7 +2417,19 @@ function clearChatUpload() {
 /**
  * Previews how content will be chunked
  */
+// An open preview follows the chunking controls. Slider drags are coalesced,
+// and only the newest request may draw, so a slow earlier preview can never
+// overwrite the result for the strategy now selected.
+let previewGeneration = 0;
+let previewRefreshTimer = null;
+function refreshPreviewIfOpen() {
+    if (!$('.vecthare-cv-preview-section').is(':visible')) return;
+    clearTimeout(previewRefreshTimer);
+    previewRefreshTimer = setTimeout(() => { void previewChunks(); }, 250);
+}
+
 async function previewChunks() {
+    const generation = ++previewGeneration;
     const type = getContentType(currentContentType);
     const source = getSourceData();
 
@@ -2279,22 +2448,41 @@ async function previewChunks() {
         const { chunkText } = await import('../core/chunking.js');
         const { resolveAndPrepareContent } = await import('../core/content-vectorization.js');
 
-        // Resolve and prepare content (handles 'select' type sources like lorebooks)
-        const prepared = await resolveAndPrepareContent(currentContentType, source, currentSettings);
-        const contentText = prepared.text;
-
-        if (!contentText || (Array.isArray(contentText) && contentText.length === 0)) {
-            container.html('<div class="vecthare-cv-error">Could not load content. Please check your selection.</div>');
-            return;
+        let chunks, totalChars;
+        if (currentContentType === 'chat' && source.type === 'current' &&
+            LIVE_CHAT_STRATEGIES.includes(currentSettings.strategy || type.defaultStrategy)) {
+            if (source.content !== getContext()?.chat) throw new Error('Selected chat changed during preview');
+            const { previewSyncChatGroups } = await import('../core/chat-vectorization.js');
+            const liveSettings = {
+                ...extension_settings.vecthare,
+                chunking_strategy: currentSettings.strategy || type.defaultStrategy,
+                conversation_turn_order: currentSettings.conversation_turn_order || 'user_character',
+                keyword_extraction_level: currentSettings.keywordLevel || extension_settings.vecthare?.keyword_extraction_level,
+                batch_size: currentSettings.batchSize || extension_settings.vecthare?.batch_size || 4,
+            };
+            chunks = await previewSyncChatGroups(source.content, liveSettings);
+            totalChars = chunks.reduce((sum, chunk) => sum + chunk.text.length, 0);
+        } else {
+            // Uploaded transcripts and non-Sync strategies keep their original preview.
+            const prepared = await resolveAndPrepareContent(currentContentType, source, currentSettings);
+            const contentText = prepared.text;
+            if (!contentText || (Array.isArray(contentText) && contentText.length === 0)) {
+                if (generation !== previewGeneration) return;
+                container.html('<div class="vecthare-cv-error">Could not load content. Please check your selection.</div>');
+                return;
+            }
+            chunks = await chunkText(contentText, {
+                strategy: currentSettings.strategy || type.defaultStrategy,
+                chunkSize: currentSettings.chunkSize || type.defaults.chunkSize,
+                chunkOverlap: currentSettings.chunkOverlap || type.defaults.chunkOverlap,
+                conversationTurnOrder: currentSettings.conversation_turn_order || 'user_character',
+            });
+            totalChars = Array.isArray(contentText)
+                ? contentText.reduce((sum, t) => sum + (t?.length || 0), 0)
+                : contentText.length;
         }
 
-        const chunks = await chunkText(contentText, {
-            strategy: currentSettings.strategy || type.defaultStrategy,
-            chunkSize: currentSettings.chunkSize || type.defaults.chunkSize,
-            chunkOverlap: currentSettings.chunkOverlap || type.defaults.chunkOverlap,
-            conversationTurnOrder: currentSettings.conversation_turn_order || 'user_character',
-        });
-
+        if (generation !== previewGeneration) return;
         // Handle empty or undefined chunks
         if (!chunks || chunks.length === 0) {
             container.html('<div class="vecthare-cv-error">No chunks generated. Content may be too short or empty.</div>');
@@ -2302,15 +2490,12 @@ async function previewChunks() {
         }
 
         // Calculate total chars for average
-        const totalChars = Array.isArray(contentText)
-            ? contentText.reduce((sum, t) => sum + (t?.length || 0), 0)
-            : contentText.length;
         const avgChars = Math.round(totalChars / chunks.length);
 
         container.html(`
             <div class="vecthare-cv-preview-stats">
                 <span><strong>${chunks.length}</strong> chunks</span>
-                <span>~<strong>${avgChars}</strong> chars avg</span>
+                <span>~<strong>${escapeHtml(avgChars)}</strong> chars avg</span>
             </div>
             <div class="vecthare-cv-preview-list">
                 ${chunks.slice(0, 10).map((chunk, i) => {
@@ -2327,6 +2512,7 @@ async function previewChunks() {
         `);
 
     } catch (e) {
+        if (generation !== previewGeneration) return;
         console.error('VectHare: Preview failed:', e);
         container.html(`<div class="vecthare-cv-error">Preview failed: ${e.message}</div>`);
     }
@@ -2437,11 +2623,49 @@ function getSourceData() {
 }
 
 /**
+ * K2: shows "Old collection kept - Delete now / Keep" in the Status panel after
+ * a verified rebuild. Deletion uses the verified deleteCollection() at the
+ * collection's own registered destination; a doubt keeps the collection.
+ * @param {string} previousCollectionId Collection the chat no longer uses
+ */
+async function offerKeptCollectionDelete(previousCollectionId) {
+    if (!previousCollectionId) return;
+    const { progressTracker } = await import('./progress-tracker.js');
+    const { getCollectionRegistry, deleteCollection } = await import('../core/collection-loader.js');
+    const { parseRegistryKey, getBoundChatDetails, peekChatCollectionId } = await import('../core/collection-ids.js');
+    const { getCollectionMeta } = await import('../core/collection-metadata.js');
+    const target = parseRegistryKey(previousCollectionId).collectionId || previousCollectionId;
+    const keys = getCollectionRegistry().filter(key => (parseRegistryKey(key).collectionId || key) === target);
+    const meta = getCollectionMeta(target);
+    const label = meta.displayName || meta.sourceName || target;
+    progressTracker.offerOldCollection(label, async () => {
+        // Never delete what a chat still uses.
+        if (getBoundChatDetails(target) || peekChatCollectionId() === target) {
+            return { success: false, errors: ['a chat is bound to this collection again'] };
+        }
+        if (keys.length > 1) {
+            return { success: false, errors: ['it is registered in more than one destination; delete it in Database Browser'] };
+        }
+        const parsed = keys.length ? parseRegistryKey(keys[0]) : { backend: null, source: null };
+        const deleteSettings = {
+            ...extension_settings.vecthare,
+            ...(parsed.backend ? { vector_backend: parsed.backend } : {}),
+            ...(parsed.source ? { source: parsed.source } : {}),
+        };
+        return deleteCollection(target, deleteSettings, keys[0] || null);
+    });
+}
+
+/**
  * Starts the vectorization process
  */
 async function startVectorization() {
     const type = getContentType(currentContentType);
     const source = getSourceData();
+    // #19: a confirmed Replace All keeps a verified copy of the purged vectors
+    // until the replacement has actually been written.
+    let replaceRollback = null;
+    let replaceRollbackSettings = null;
 
     if (!source) {
         toastr.warning('Please select or enter content first');
@@ -2453,10 +2677,21 @@ async function startVectorization() {
     // { type: 'current' } - the property mismatch made this whole flow DEAD
     // CODE: the confirm dialog never appeared and re-vectorizing silently
     // stacked vectors on top of existing ones.
-    if (currentContentType === 'chat' && source.type === 'current') {
+    // A confirmed rebuild uses the staged replacement path instead: a new
+    // collection is written and verified before the chat is switched to it,
+    // and nothing is purged first. The old Replace All purge is skipped.
+    let rebuildingThisChat = rebuildChatRequested &&
+        currentContentType === 'chat' && source.type === 'current';
+
+    if (!rebuildingThisChat && currentContentType === 'chat' && source.type === 'current') {
         try {
+            // Resolve legacy or copied-branch ownership before checking for
+            // existing vectors; otherwise Replace All can miss the collection.
+            const { ensureChatBinding } = await import('../core/collection-ids.js');
+            const binding = await ensureChatBinding();
+            if (!binding.writable) throw new Error('Chat collection identity is not verified');
             const { doesChatHaveVectors } = await import('../core/collection-loader.js');
-            const existing = await doesChatHaveVectors(currentSettings);
+            const existing = await doesChatHaveVectors(extension_settings.vecthare);
 
             if (existing.hasVectors && existing.chunkCount > 0) {
                 const confirmed = await callGenericPopup(
@@ -2476,32 +2711,26 @@ async function startVectorization() {
                     return;
                 }
 
-                // User wants to replace - purge existing first
-                const { purgeVectorIndex } = await import('../core/core-vector-api.js');
-                const { unregisterCollection } = await import('../core/collection-loader.js');
-                await purgeVectorIndex(existing.collectionId, currentSettings);
-                // R8 FIX: unregister with the registry key (backend:source:id)
-                // when available - the bare collectionId never matched a registry
-                // entry, leaving a stale key behind.
-                unregisterCollection(existing.registryKey || existing.collectionId);
-                // R8 FIX: clear the stored vectorization config fingerprint.
-                // Without this, Replace All with changed settings would leave the
-                // old fingerprint behind and the NEXT Sync Chat would be blocked
-                // by the mismatch check - making the prescribed escape hatch from
-                // the blocked-run toast a dead end. Fresh start = no fingerprint;
-                // the next chat sync adopts the current settings.
-                const { setCollectionMeta } = await import('../core/collection-metadata.js');
-                setCollectionMeta(existing.collectionId, { vectorizationConfigFingerprint: null });
-                toastr.info('Cleared existing vectors', 'VectHare');
+                // K1: Replace All no longer purges first. It runs the staged
+                // rebuild: a NEW collection is written and verified, the chat is
+                // switched to it, and the old collection is kept until the user
+                // deletes it (K2). A failure at any point leaves the old one in use.
+                rebuildingThisChat = true;
             }
         } catch (e) {
-            console.warn('VectHare: Could not check for existing vectors:', e);
-            // Continue anyway
+            console.warn('VectHare: Could not safely check/replace existing vectors:', e);
+            toastr.error('Replacement cancelled: ' + e.message, 'VectHare');
+            return;
         }
     }
 
     const btn = $('#vecthare_cv_vectorize');
     btn.prop('disabled', true).html('<i class="fa-solid fa-spinner fa-spin"></i> Vectorizing...');
+
+    // Every vectorization path drives the status window, and that window owns
+    // the progress, the settings in use, the run log and the Pause/Stop
+    // controls. Put the setup away so the status window has the screen.
+    hideContentVectorizer();
 
     try {
         // Import the appropriate handler
@@ -2510,14 +2739,69 @@ async function startVectorization() {
         const result = await vectorizeContent({
             contentType: currentContentType,
             source: source,
-            settings: currentSettings,
+            settings: rebuildingThisChat
+                ? { ...currentSettings, rebuildChatCollection: true }
+                : currentSettings,
         });
 
-        toastr.success(`Vectorized ${result.chunkCount} chunks`, 'VectHare');
+        if (result.rebuilt) {
+            // The confirmation covered this one replacement; a further rebuild
+            // is confirmed again from Vectorize.
+            rebuildChatRequested = false;
+            const notes = [];
+            if (result.carriedFields?.length) notes.push('your collection settings were kept');
+            if (result.annotationsTransferred) {
+                notes.push(`${result.annotationsTransferred} chunk annotation(s) carried over`);
+            }
+            if (result.annotationsNotTransferred) {
+                notes.push(`${result.annotationsNotTransferred} could not be matched to a rebuilt chunk`);
+            }
+            toastr.success(
+                `Rebuilt this chat's vectors (${result.chunkCount} chunks)` +
+                `${notes.length ? ` - ${notes.join('; ')}` : ''}. ` +
+                'The previous collection was kept in Database Browser.',
+                'VectHare', { timeOut: 12000 });
+            // K2: offer Delete now / Keep for the kept collection in Status.
+            try {
+                await offerKeptCollectionDelete(result.previousCollectionId);
+            } catch (error) {
+                console.warn('VectHare: Could not offer deletion of the previous collection:', error);
+            }
+            // The chat is now bound to a different collection: refresh the
+            // read-only configuration display and the cached status.
+            try {
+                const { refreshAfterChatCollectionRebuild } = await import('./ui-manager.js');
+                refreshAfterChatCollectionRebuild();
+            } catch (error) {
+                console.warn('VectHare: Post-rebuild UI refresh failed:', error);
+            }
+        } else if (!result.handledBySyncChat) {
+            toastr.success(`Vectorized ${result.chunkCount} chunks`, 'VectHare');
+        }
+        replaceRollback = null;
         closeContentVectorizer();
 
     } catch (e) {
         console.error('VectHare: Vectorization failed:', e);
+
+        // #19: the replacement failed after the purge - put the previous
+        // vectors back rather than leaving the collection empty.
+        if (replaceRollback) {
+            const { restoreCollectionSnapshot } = await import('../core/collection-export.js');
+            const restored = await restoreCollectionSnapshot(replaceRollbackSettings.collectionId,
+                replaceRollback, replaceRollbackSettings.settings);
+            replaceRollback = null;
+            if (restored) {
+                // The collection is not empty any more: revoke the first-write
+                // authorization recorded for the confirmed purge.
+                const { setCollectionMeta } = await import('../core/collection-metadata.js');
+                setCollectionMeta(replaceRollbackSettings.collectionId, { verifiedPurgeDestination: null });
+            }
+            toastr[restored ? 'info' : 'error'](restored
+                ? 'Replacement failed; your previous vectors were restored.'
+                : 'Replacement failed and the previous vectors could NOT be restored.',
+                'VectHare', { timeOut: restored ? 8000 : 0 });
+        }
 
         // Check for dimension mismatch error and provide helpful guidance
         if (e.message.includes('dimension mismatch') || e.message.includes('Vector dimension error')) {
@@ -2531,18 +2815,13 @@ async function startVectorization() {
             toastr.error('Vectorization failed: ' + e.message, 'VectHare');
         }
 
+        // Bring the setup back with the selections intact so the run can be
+        // retried or adjusted.
+        revealContentVectorizer();
         btn.prop('disabled', false).html('<i class="fa-solid fa-bolt"></i> Vectorize');
     }
 }
 
-/**
- * Escapes HTML entities
- */
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
 
 // ============================================================================
 // TEXT CLEANING MANAGEMENT

@@ -16,6 +16,7 @@
  * ============================================================================
  */
 
+import { escapeHtml } from '../utils/html.js';
 import { getBackendMetrics, initializeBackend, resetBackendHealth } from '../backends/backend-manager.js';
 import { extension_settings } from '../../../../extensions.js';
 
@@ -59,7 +60,9 @@ export function checkBackendHealth(settings) {
     const configKey = JSON.stringify([
         backendName, settings.source, settings.qdrant_use_cloud,
         settings.qdrant_host, settings.qdrant_port, settings.qdrant_url,
-        settings.qdrant_api_key, settings.milvus_address, settings.milvus_host,
+        settings.qdrant_api_key, settings.qdrant_key_fingerprint,
+        settings.milvus_token_fingerprint, settings.milvus_password_fingerprint,
+        settings.milvus_address, settings.milvus_host,
         settings.milvus_port,
     ]);
     if (pendingCheck?.key === configKey) return pendingCheck.promise;
@@ -167,33 +170,33 @@ function renderDashboard() {
         <div class="vecthare-health-dashboard">
             <!-- Summary Section -->
             <div class="vecthare-health-summary">
-                <div class="vecthare-health-status ${healthClass}">
+                <div class="vecthare-health-status ${escapeHtml(healthClass)}">
                     <span class="vecthare-health-icon">${healthIcon}</span>
-                    <span class="vecthare-health-label">${display.label}</span>
+                    <span class="vecthare-health-label">${escapeHtml(display.label)}</span>
                 </div>
                 <div class="vecthare-health-uptime">
-                    <small>Uptime: ${metrics.uptimeFormatted}</small>
+                    <small>Uptime: ${escapeHtml(metrics.uptimeFormatted)}</small>
                 </div>
             </div>
 
             <!-- Current Backend Section -->
             <div class="vecthare-health-section">
-                <h4>Current Backend: ${currentBackend}</h4>
+                <h4>Current Backend: ${escapeHtml(currentBackend)}</h4>
                 <div class="vecthare-health-grid">
                     <div class="vecthare-health-stat">
-                        <span class="vecthare-stat-value">${currentMetrics.queries}</span>
+                        <span class="vecthare-stat-value">${escapeHtml(currentMetrics.queries)}</span>
                         <span class="vecthare-stat-label">Queries</span>
                     </div>
                     <div class="vecthare-health-stat">
-                        <span class="vecthare-stat-value">${currentMetrics.inserts}</span>
+                        <span class="vecthare-stat-value">${escapeHtml(currentMetrics.inserts)}</span>
                         <span class="vecthare-stat-label">Inserts</span>
                     </div>
                     <div class="vecthare-health-stat">
-                        <span class="vecthare-stat-value">${currentMetrics.deletes}</span>
+                        <span class="vecthare-stat-value">${escapeHtml(currentMetrics.deletes)}</span>
                         <span class="vecthare-stat-label">Deletes</span>
                     </div>
                     <div class="vecthare-health-stat ${currentMetrics.errors > 0 ? 'vecthare-stat-error' : ''}">
-                        <span class="vecthare-stat-value">${currentMetrics.errors}</span>
+                        <span class="vecthare-stat-value">${escapeHtml(currentMetrics.errors)}</span>
                         <span class="vecthare-stat-label">Errors</span>
                     </div>
                 </div>
@@ -204,15 +207,15 @@ function renderDashboard() {
                 <h4>Query Latency</h4>
                 <div class="vecthare-health-grid">
                     <div class="vecthare-health-stat">
-                        <span class="vecthare-stat-value">${currentMetrics.avgLatency || 0}ms</span>
+                        <span class="vecthare-stat-value">${escapeHtml(currentMetrics.avgLatency || 0)}ms</span>
                         <span class="vecthare-stat-label">Average</span>
                     </div>
                     <div class="vecthare-health-stat">
-                        <span class="vecthare-stat-value">${currentMetrics.minLatency !== null ? currentMetrics.minLatency + 'ms' : '-'}</span>
+                        <span class="vecthare-stat-value">${escapeHtml(currentMetrics.minLatency !== null ? currentMetrics.minLatency + 'ms' : '-')}</span>
                         <span class="vecthare-stat-label">Min</span>
                     </div>
                     <div class="vecthare-health-stat">
-                        <span class="vecthare-stat-value">${currentMetrics.maxLatency !== null ? currentMetrics.maxLatency + 'ms' : '-'}</span>
+                        <span class="vecthare-stat-value">${escapeHtml(currentMetrics.maxLatency !== null ? currentMetrics.maxLatency + 'ms' : '-')}</span>
                         <span class="vecthare-stat-label">Max</span>
                     </div>
                 </div>
@@ -223,15 +226,15 @@ function renderDashboard() {
                 <h4>Health Checks</h4>
                 <div class="vecthare-health-grid">
                     <div class="vecthare-health-stat">
-                        <span class="vecthare-stat-value">${currentMetrics.healthChecksPassed || 0}</span>
+                        <span class="vecthare-stat-value">${escapeHtml(currentMetrics.healthChecksPassed || 0)}</span>
                         <span class="vecthare-stat-label">Passed</span>
                     </div>
                     <div class="vecthare-health-stat ${currentMetrics.healthChecksFailed > 0 ? 'vecthare-stat-error' : ''}">
-                        <span class="vecthare-stat-value">${currentMetrics.healthChecksFailed || 0}</span>
+                        <span class="vecthare-stat-value">${escapeHtml(currentMetrics.healthChecksFailed || 0)}</span>
                         <span class="vecthare-stat-label">Failed</span>
                     </div>
                     <div class="vecthare-health-stat">
-                        <span class="vecthare-stat-value">${formatRelativeTime(currentMetrics.lastHealthCheck)}</span>
+                        <span class="vecthare-stat-value">${escapeHtml(formatRelativeTime(currentMetrics.lastHealthCheck))}</span>
                         <span class="vecthare-stat-label">Last Check</span>
                     </div>
                 </div>
@@ -242,7 +245,7 @@ function renderDashboard() {
             <div class="vecthare-health-section vecthare-health-error-section">
                 <h4>Last Error</h4>
                 <div class="vecthare-health-error-box">
-                    <span class="vecthare-error-time">${formatRelativeTime(currentMetrics.lastError.timestamp)}</span>
+                    <span class="vecthare-error-time">${escapeHtml(formatRelativeTime(currentMetrics.lastError.timestamp))}</span>
                     <span class="vecthare-error-message">${currentMetrics.lastError.message}</span>
                 </div>
             </div>
@@ -253,15 +256,15 @@ function renderDashboard() {
                 <h4>Global Statistics</h4>
                 <div class="vecthare-health-grid">
                     <div class="vecthare-health-stat">
-                        <span class="vecthare-stat-value">${metrics.totalQueries}</span>
+                        <span class="vecthare-stat-value">${escapeHtml(metrics.totalQueries)}</span>
                         <span class="vecthare-stat-label">Total Queries</span>
                     </div>
                     <div class="vecthare-health-stat">
-                        <span class="vecthare-stat-value">${metrics.totalInserts}</span>
+                        <span class="vecthare-stat-value">${escapeHtml(metrics.totalInserts)}</span>
                         <span class="vecthare-stat-label">Total Inserts</span>
                     </div>
                     <div class="vecthare-health-stat ${metrics.totalErrors > 0 ? 'vecthare-stat-error' : ''}">
-                        <span class="vecthare-stat-value">${metrics.totalErrors}</span>
+                        <span class="vecthare-stat-value">${escapeHtml(metrics.totalErrors)}</span>
                         <span class="vecthare-stat-label">Total Errors</span>
                     </div>
                 </div>
@@ -272,7 +275,7 @@ function renderDashboard() {
             <div class="vecthare-health-section">
                 <h4>Active Backends</h4>
                 <div class="vecthare-active-backends">
-                    ${metrics.activeBackends.map(name => `<span class="vecthare-backend-badge">${name}</span>`).join('')}
+                    ${metrics.activeBackends.map(name => `<span class="vecthare-backend-badge">${escapeHtml(name)}</span>`).join('')}
                 </div>
             </div>
             ` : ''}
@@ -346,7 +349,7 @@ export function getHealthIndicatorHtml() {
     const display = getHealthDisplay(currentBackend, currentMetrics);
 
     return `
-        <button id="vecthare_health_indicator" class="vecthare-health-indicator ${display.css}" title="Backend Health: ${display.label}">
+        <button id="vecthare_health_indicator" class="vecthare-health-indicator ${escapeHtml(display.css)}" title="Backend Health: ${escapeHtml(display.label)}">
             <span class="vecthare-health-dot"></span>
         </button>
     `;

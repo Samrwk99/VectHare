@@ -2211,3 +2211,83 @@
         font-size: 1.1em;
     }
 }
+
+/* ============================================================================
+ * METADATA WINDOW
+ * Long reports must scroll inside the window, and the footer (Delete Metadata,
+ * Delete Collection, Close) must stay reachable instead of being pushed off
+ * the bottom of the screen.
+ * ========================================================================= */
+
+#vecthare_metadata_modal .vecthare-modal-content {
+    display: flex;
+    flex-direction: column;
+    max-width: 640px !important;
+    max-height: 85vh;
+}
+
+#vecthare_metadata_modal .vecthare-modal-header,
+#vecthare_metadata_modal .vecthare-modal-footer {
+    flex: 0 0 auto;
+}
+
+#vecthare_metadata_modal .vecthare-rename-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+}
+
+/* Four buttons must wrap on a narrow window rather than overflow it. */
+#vecthare_metadata_modal .vecthare-modal-footer {
+    flex-wrap: wrap;
+    row-gap: 10px;
+}
+
+/* ============================================================================
+ * FULL PURGE OPTIONS
+ * Same scrolling and reachable-footer treatment as the Metadata window: the
+ * choice buttons must never be pushed off the bottom of the screen.
+ * ========================================================================= */
+
+#vecthare_purge_options_modal .vecthare-modal-content {
+    display: flex;
+    flex-direction: column;
+    max-width: 560px !important;
+    max-height: 85vh;
+}
+
+#vecthare_purge_options_modal .vecthare-modal-header,
+#vecthare_purge_options_modal .vecthare-modal-footer {
+    flex: 0 0 auto;
+}
+
+#vecthare_purge_options_modal .vecthare-rename-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+}
+
+#vecthare_purge_options_modal .vecthare-modal-footer {
+    flex-wrap: wrap;
+    row-gap: 10px;
+}
+
+#vecthare_purge_options_modal .vecthare-rename-body ul {
+    margin: 10px 0 10px 20px;
+    padding: 0;
+}
+
+#vecthare_purge_options_modal .vecthare-rename-body li {
+    margin-bottom: 8px;
+}
+
+/* A resolved filesystem path is long; let it wrap instead of stretching the
+   Metadata window. */
+#vecthare_metadata_modal .vecthare-collection-meta span:last-child {
+    word-break: break-word;
+    text-align: right;
+}

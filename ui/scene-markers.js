@@ -1,3 +1,4 @@
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * VECTHARE SCENE MARKERS
@@ -20,7 +21,7 @@ import {
     getCurrentCollectionId,
     filterSceneChunks,
 } from '../core/scenes.js';
-import { getSavedHashes } from '../core/core-vector-api.js';
+import { getSavedHashes, resolveEmbeddingSettingsForEdit } from '../core/core-vector-api.js';
 import { eventSource, event_types } from '../../../../../script.js';
 import { getContext } from '../../../../extensions.js';
 
@@ -58,7 +59,9 @@ export async function refreshSceneCache(settings) {
     }
 
     try {
-        const result = await getSavedHashes(collectionId, currentSettings, true);
+        // VH-049: list the scenes from the collection's own store.
+        const listSettings = await resolveEmbeddingSettingsForEdit(collectionId, currentSettings);
+        const result = await getSavedHashes(collectionId, listSettings, true);
         if (result.metadata) {
             cachedSceneChunks = result.metadata
                 .filter(m => m.isScene === true)
@@ -72,7 +75,7 @@ export async function refreshSceneCache(settings) {
         } else {
             cachedSceneChunks = [];
         }
-        console.log(`VectHare Scenes: Cached ${cachedSceneChunks.length} scenes`);
+        vhLog(`VectHare Scenes: Cached ${cachedSceneChunks.length} scenes`);
     } catch (error) {
         console.error('VectHare Scenes: Failed to refresh cache', error);
         cachedSceneChunks = [];
@@ -477,7 +480,7 @@ export function initializeSceneMarkers() {
             chatObserver.observe(chat, { childList: true, subtree: true });
             // Attach to any existing messages
             attachAllMarkers();
-            console.log('VectHare Scenes: Chat observer started');
+            vhLog('VectHare Scenes: Chat observer started');
         }
     };
 
@@ -505,5 +508,5 @@ export function initializeSceneMarkers() {
         }, 200);
     });
 
-    console.log('VectHare Scenes: Markers initialized');
+    vhLog('VectHare Scenes: Markers initialized');
 }

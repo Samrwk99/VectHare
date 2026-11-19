@@ -129,7 +129,7 @@ Built-in diagnostic tool that checks everything and offers auto-fixes for common
 |---------|----------|------|------|
 | **Standard (Vectra)** | Getting started, small datasets | No dependencies, works out of box | Slower with large datasets |
 | **LanceDB** | Medium to large datasets | Handles millions of vectors, very fast | Requires Similharity plugin |
-| **Qdrant** | Production, cloud deployments | Enterprise-grade, advanced filtering | Requires running Qdrant server |
+| **Qdrant** | Production, cloud deployments | Enterprise-grade, advanced filtering | Requires a running Qdrant server, version 1.15 or newer |
 
 > 💡 **Need help choosing?** Start with Standard. Upgrade to LanceDB when you have 10k+ vectors.
 
@@ -224,9 +224,7 @@ Restart SillyTavern.
 
 ## 🔄 Auto-Updates
 
-VectHare has `auto_update: true` in its manifest. If you installed via `git clone`, SillyTavern will automatically check for and apply updates!
-
-Look for the update notification in the Extensions panel, or manually check with the "Check for Updates" button.
+This fork ships with `auto_update: false` in its manifest, so SillyTavern will not replace it with the upstream VectHare on an extension update (which would silently remove this fork's fixes). Update it by replacing the extension folder yourself.
 
 ---
 

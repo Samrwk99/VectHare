@@ -1,3 +1,5 @@
+import { escapeHtml } from '../utils/html.js';
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * VECTHARE CHUNK VISUALIZER
@@ -24,15 +26,23 @@ import {
     deleteVectorItems,
     insertVectorItems,
     updateChunkText,
+    resolveEmbeddingSettingsForEdit,
     updateChunkMetadata,
+    primeChunkHashClaims,
 } from '../core/core-vector-api.js';
 import { getStringHash } from '../../../../utils.js';
+import { noteManualVectorChange } from '../core/chat-vectorization.js';
+import { withLease } from '../core/leases.js';
+import { parseRegistryKey } from '../core/collection-ids.js';
+// 8C: edits here take the collection's cross-tab lease, like Sync and Repair.
+const leaseIdOf = id => parseRegistryKey(id).collectionId || id;
 import {
     filterSceneChunks,
     filterNonSceneChunks,
     deleteSceneChunk,
     updateSceneChunkMetadata,
     getPendingScene,
+    recreateScene,
 } from '../core/scenes.js';
 import {
     createGroup,
@@ -49,6 +59,9 @@ import { eventSource } from '../../../../../script.js';
 let currentResults = null;
 let currentCollectionId = null;
 let currentSettings = null;
+// VH-045: the collection's own saved provider/model, resolved when the visualizer opens
+let settingsReady = Promise.resolve();
+const settingsFor = async () => { await settingsReady.catch(() => {}); return currentSettings; };
 let allChunks = [];
 let filteredChunks = [];
 // PERF: Lookup maps for O(1) chunk access instead of O(n) find() operations
@@ -115,7 +128,7 @@ function normalizeKeywords(keywords) {
 }
 
 function getChunkData(chunk) {
-    const stored = getChunkMetadata(chunk.hash) || {};
+    const stored = getChunkMetadata(chunk.hash, currentCollectionId) || {};
 
     // User overrides take priority, then fall back to DB-stored keywords
     const dbKeywords = chunk.metadata?.keywords || chunk.keywords || [];
@@ -152,7 +165,7 @@ function updateChunkData(hash, updates) {
         allChunks.forEach(chunk => {
             if (chunk.hash === hash) {
                 // merge pending changes into the chunk for fresh data if chunks end up with same hash somehow.
-                const stored = getChunkMetadata(hash) || {};
+                const stored = getChunkMetadata(hash, currentCollectionId) || {};
                 const pending = pendingChanges.get(hash) || {};
                 chunk.data = { ...chunk.data, ...pending };
             }
@@ -167,11 +180,24 @@ async function saveAllChanges() {
     }
 
     try {
-        for (const [hash, updates] of pendingChanges) {
+      await withLease(leaseIdOf(currentCollectionId), async () => {
+        for (const [originalHash, updates] of pendingChanges) {
+            // VH-034: after a text change the chunk lives under its new hash;
+            // everything else in this save (keywords, conditions, notes) goes there.
+            let hash = originalHash;
             // Check what kind of update is needed
             if (updates.text) {
+                if (isChatCollection()) {
+                    // VH-039 (option C): chat chunks follow the chat.
+                    throw new Error('Chat chunks follow the chat; edit the message instead.');
+                }
                 // Text changed - requires re-embedding
-                await updateChunkText(currentCollectionId, hash, updates.text, currentSettings);
+                await noteManualVectorChange(currentCollectionId, (await settingsFor()), [hash]);
+                const result = await updateChunkText(currentCollectionId, hash, updates.text, (await settingsFor()));
+                if (result?.newHash !== undefined && result.newHash !== null && String(result.newHash) !== String(hash)) {
+                    rehashChunkReferences(hash, result.newHash);
+                    hash = result.newHash;
+                }
             }
 
             // Handle new summaries - vectorize them
@@ -188,15 +214,16 @@ async function saveAllChanges() {
                             parentHash: hash,
                             contentType: 'summary',
                         },
+                        __vecthareProvenanceHint: { writer: 'chunk-visualizer', sourceType: 'summary' },
                     };
-                    await insertVectorItems(currentCollectionId, [summaryItem], currentSettings);
+                    await insertVectorItems(currentCollectionId, [summaryItem], (await settingsFor()));
                 }
             }
 
             // Handle deleted summaries - remove vectors
             if (updates._deletedSummaries?.length > 0) {
                 const hashesToDelete = updates._deletedSummaries.map(text => getStringHash(text));
-                await deleteVectorItems(currentCollectionId, hashesToDelete, currentSettings);
+                await deleteVectorItems(currentCollectionId, hashesToDelete, (await settingsFor()));
             }
 
             // Save to local settings FIRST (without temp tracking fields)
@@ -204,8 +231,8 @@ async function saveAllChanges() {
             delete toSave._newSummaries;
             delete toSave._deletedSummaries;
             delete toSave.text; // Don't save text to metadata here
-            const existing = getChunkMetadata(hash) || {};
-            saveChunkMetadata(hash, { ...existing, ...toSave });
+            const existing = getChunkMetadata(hash, currentCollectionId) || {};
+            saveChunkMetadata(hash, { ...existing, ...toSave }, currentCollectionId);
 
             // Only call updateChunkMetadata if there are non-metadata changes
             // (metadata-only updates should skip the API call)
@@ -217,7 +244,7 @@ async function saveAllChanges() {
             if (Object.keys(metadataUpdates).length > 0 ) {
                 // Send metadata updates (keywords, conditions, etc.) to backend
                 try {
-                    await updateChunkMetadata(currentCollectionId, hash, metadataUpdates, currentSettings);
+                    await updateChunkMetadata(currentCollectionId, hash, metadataUpdates, (await settingsFor()));
                 } catch (e) {
                     console.warn('VectHare: Failed to update metadata in backend:', e);
                     // Don't fail - local metadata was already saved
@@ -225,6 +252,7 @@ async function saveAllChanges() {
             }
         }
 
+      }, { label: 'Chunk edits' });
         pendingChanges.clear();
         hasUnsavedChanges = false;
         toastr.success(`Saved changes to ${count} chunk(s)`, 'VectHare');
@@ -256,6 +284,11 @@ export function openVisualizer(results, collectionId, settings) {
     currentResults = results;
     currentCollectionId = collectionId;
     currentSettings = settings;
+    // VH-045: writes (delete, summaries, metadata, scenes) use the collection's saved
+    // embedding settings, not today's global provider/model.
+    settingsReady = resolveEmbeddingSettingsForEdit(collectionId, settings)
+        .then(resolved => { if (currentCollectionId === collectionId && resolved) currentSettings = resolved; })
+        .catch(error => console.warn('VectHare: could not read the collection\'s saved settings; using the Browser\'s', error?.message));
     selectedChunkId = null;
     displayLimit = 50;
     searchQuery = '';
@@ -281,6 +314,18 @@ export function openVisualizer(results, collectionId, settings) {
     bindEvents();
 
     $('#vecthare_visualizer_modal').fadeIn(200);
+
+    // C12: older shared annotations are only shown for the one collection that
+    // holds the chunk; learn which collections hold what, then refresh the list.
+    if (settings) {
+        primeChunkHashClaims(settings).then(newlyRead => {
+            if (!newlyRead || currentCollectionId !== collectionId || hasUnsavedChanges) return;
+            allChunks = allChunks.map(chunk => ({ ...chunk, data: getChunkData(chunk) }));
+            allChunksMap = new Map(allChunks.map(c => [c.uniqueId, c]));
+            renderChunkList();
+            renderDetailPanel();
+        }).catch(error => console.debug('VectHare: annotation ownership check skipped:', error.message));
+    }
 }
 
 export function closeVisualizer() {
@@ -574,15 +619,17 @@ function renderSceneList() {
         }
 
         html += `
-            <div class="vecthare-scene-item ${isSelected ? 'selected' : ''}" data-scene-hash="${scene.hash}">
+            <div class="vecthare-scene-item ${isSelected ? 'selected' : ''}" data-scene-hash="${escapeHtml(scene.hash)}">
                 <div class="vecthare-scene-item-header">
                     <span class="vecthare-scene-item-num">${index + 1}.</span>
                     <span class="vecthare-scene-item-title">${escapeHtml(title)}</span>
                 </div>
                 <div class="vecthare-scene-item-meta">
-                    <span class="vecthare-scene-item-range">#${start} - #${end}</span>
+                    <span class="vecthare-scene-item-range">#${escapeHtml(start)} - #${escapeHtml(end)}</span>
                     <span class="vecthare-scene-item-badge closed">${msgCount} msgs</span>
                     <span class="vecthare-scene-item-badge vectorized">${containedCount} chunks</span>
+                    ${getChunkMetadata(scene.hash, currentCollectionId)?.sceneOutdated === true
+                        ? '<span class="vecthare-scene-item-badge" title="Its messages changed since the scene was made. It is not used until re-created.">Outdated</span>' : ''}
                 </div>
                 ${preview ? `<div class="vecthare-scene-item-preview">${escapeHtml(preview)}</div>` : ''}
             </div>
@@ -614,8 +661,8 @@ function renderSceneDetailPanel() {
     }
 
     // Read fresh metadata from persistent storage, not from scene object
-    const stored = getChunkMetadata(scene.hash) || {};
-    const meta = { ...scene.metadata, ...stored } || {};
+    const stored = getChunkMetadata(scene.hash, currentCollectionId) || {};
+    const meta = { ...scene.metadata, ...stored };
     const start = meta.sceneStart ?? 0;
     const end = meta.sceneEnd ?? start;
     const msgCount = end - start + 1;
@@ -646,7 +693,7 @@ function renderSceneDetailPanel() {
         <div class="vecthare-detail-info-bar">
             <span class="vecthare-info-item">
                 <span class="vecthare-info-label">Messages</span>
-                <span class="vecthare-info-value">#${start} - #${end}</span>
+                <span class="vecthare-info-value">#${escapeHtml(start)} - #${escapeHtml(end)}</span>
             </span>
             <span class="vecthare-info-divider">•</span>
             <span class="vecthare-info-item">
@@ -664,7 +711,7 @@ function renderSceneDetailPanel() {
             <div class="vecthare-detail-section">
                 <div class="vecthare-detail-section-title">Scene Hash</div>
                 <div class="vecthare-scene-vector-row">
-                    <span class="vecthare-scene-vector-value vecthare-hash-display" title="Click to copy">${scene.hash}</span>
+                    <span class="vecthare-scene-vector-value vecthare-hash-display" title="Click to copy">${escapeHtml(scene.hash)}</span>
                 </div>
             </div>
 
@@ -701,6 +748,11 @@ function renderSceneDetailPanel() {
                     <button class="vecthare-scene-action-btn" id="vecthare_scene_jump">
                         <i class="fa-solid fa-arrow-up-right-from-square"></i> Jump to Scene
                     </button>
+                    ${stored.sceneOutdated === true ? `
+                    <button class="vecthare-scene-action-btn" id="vecthare_scene_recreate"
+                            title="Its messages changed since the scene was made. Re-create it from the messages as they are now (title, summary and keywords are kept).">
+                        <i class="fa-solid fa-rotate"></i> Re-create scene
+                    </button>` : ''}
                 </div>
             </div>
         </div>
@@ -719,7 +771,7 @@ function bindScenesTabEvents() {
         e.preventDefault();
         e.stopPropagation();
         const hash = $(this).data('scene-hash');
-        console.log('VectHare: Clicked scene with hash:', hash);
+        vhLog('VectHare: Clicked scene with hash:', hash);
         if (!hash) {
             console.error('VectHare: No scene-hash found on clicked element');
             return;
@@ -734,20 +786,34 @@ function bindSceneDetailEvents() {
     const scene = getSelectedScene();
     if (!scene) return;
 
+    // F8: replace an outdated scene with one built from the current messages.
+    $('#vecthare_scene_recreate').off('click').on('click', async function() {
+        if (!confirm('Re-create this scene from its messages as they are now?\n\nThe old scene vector is replaced; title, summary and keywords are kept.')) return;
+        $(this).prop('disabled', true);
+        try {
+            const result = await recreateScene(scene, (await settingsFor()), currentCollectionId);
+            if (!result.success) throw new Error(result.error || 'not completed');
+            toastr.success('Scene re-created. Reopen the chunk browser to see it.', 'VectHare');
+        } catch (error) {
+            toastr.error(`Could not re-create the scene: ${error.message}`, 'VectHare');
+            $(this).prop('disabled', false);
+        }
+    });
+
     const meta = scene.metadata || {};
 
     // Title input - saves to chunk metadata
     $('#vecthare_scene_title').off('blur').on('blur', async function() {
         const title = $(this).val().trim();
         try {
-            await updateSceneChunkMetadata(scene.hash, { title }, currentSettings);
+            await updateSceneChunkMetadata(scene.hash, { title }, (await settingsFor()), currentCollectionId);
             // Update local chunk data
             if (scene.metadata) scene.metadata.title = title;
             renderSceneList();
             toastr.success('Title saved', 'VectHare');
         } catch (error) {
             console.error('VectHare: Failed to save scene title', error);
-            toastr.error('Failed to save title', 'VectHare');
+            toastr.error(`Failed to save title: ${error?.message || error}`, 'VectHare'); // VH-058
         }
     });
 
@@ -755,12 +821,12 @@ function bindSceneDetailEvents() {
     $('#vecthare_scene_summary').off('blur').on('blur', async function() {
         const summary = $(this).val().trim();
         try {
-            await updateSceneChunkMetadata(scene.hash, { summary }, currentSettings);
+            await updateSceneChunkMetadata(scene.hash, { summary }, (await settingsFor()), currentCollectionId);
             if (scene.metadata) scene.metadata.summary = summary;
             toastr.success('Summary saved', 'VectHare');
         } catch (error) {
             console.error('VectHare: Failed to save scene summary', error);
-            toastr.error('Failed to save summary', 'VectHare');
+            toastr.error(`Failed to save summary: ${error?.message || error}`, 'VectHare'); // VH-058
         }
     });
 
@@ -769,7 +835,7 @@ function bindSceneDetailEvents() {
         const keywordsStr = $(this).val().trim();
         const keywords = keywordsStr ? keywordsStr.split(',').map(k => k.trim()).filter(Boolean) : [];
         try {
-            await updateSceneChunkMetadata(scene.hash, { keywords }, currentSettings);
+            await updateSceneChunkMetadata(scene.hash, { keywords }, (await settingsFor()), currentCollectionId);
             // Update local metadata to reflect saved changes
             if (scene.metadata) {
                 scene.metadata.keywords = keywords;
@@ -777,7 +843,7 @@ function bindSceneDetailEvents() {
             toastr.success('Keywords saved', 'VectHare');
         } catch (error) {
             console.error('VectHare: Failed to save scene keywords', error);
-            toastr.error('Failed to save keywords', 'VectHare');
+            toastr.error(`Failed to save keywords: ${error?.message || error}`, 'VectHare'); // VH-058
         }
     });
 
@@ -812,7 +878,7 @@ function bindSceneDetailEvents() {
 
         if (!confirm(warningText)) return;
 
-        const result = await deleteSceneChunk(scene.hash, containedHashes, currentSettings);
+        const result = await deleteSceneChunk(scene.hash, containedHashes, (await settingsFor()));
         if (result.success) {
             // Remove from local allChunks array
             const idx = allChunks.findIndex(c => c.hash === scene.hash);
@@ -866,11 +932,11 @@ function renderGroupsTab() {
     // Update stats display
     $('#vecthare_groups_stats').html(
         groups.length > 0
-            ? `<span>${stats.totalGroups} group${stats.totalGroups !== 1 ? 's' : ''}</span>
+            ? `<span>${escapeHtml(stats.totalGroups)} group${stats.totalGroups !== 1 ? 's' : ''}</span>
                <span class="vecthare-stat-divider">|</span>
-               <span>${stats.inclusiveGroups} inclusive</span>
+               <span>${escapeHtml(stats.inclusiveGroups)} inclusive</span>
                <span class="vecthare-stat-divider">|</span>
-               <span>${stats.exclusiveGroups} exclusive</span>`
+               <span>${escapeHtml(stats.exclusiveGroups)} exclusive</span>`
             : ''
     );
     bindGroupsTabEvents();
@@ -913,13 +979,13 @@ function renderGroupList() {
             : (group.mandatory ? 'Exclusive (Mandatory)' : 'Exclusive');
 
         return `
-            <div class="vecthare-group-item ${isSelected ? 'selected' : ''}" data-group-id="${group.id}">
+            <div class="vecthare-group-item ${isSelected ? 'selected' : ''}" data-group-id="${escapeHtml(group.id)}">
                 <div class="vecthare-group-item-header">
                     <i class="fa-solid ${modeIcon}"></i>
                     <span class="vecthare-group-name">${escapeHtml(group.name)}</span>
                 </div>
                 <div class="vecthare-group-item-meta">
-                    <span class="vecthare-group-mode">${modeLabel}</span>
+                    <span class="vecthare-group-mode">${escapeHtml(modeLabel)}</span>
                     <span class="vecthare-group-count">${memberCount} chunk${memberCount !== 1 ? 's' : ''}</span>
                 </div>
             </div>
@@ -1007,16 +1073,16 @@ function renderGroupDetailPanel() {
                 <div class="vecthare-group-members-list" id="vecthare_group_members">
                     ${memberChunks.length === 0 ? '<div class="vecthare-empty-hint">No members yet. Click "Add" to add chunks.</div>' : ''}
                     ${memberChunks.map(({ hash, chunk }) => `
-                        <div class="vecthare-group-member" data-hash="${hash}">
+                        <div class="vecthare-group-member" data-hash="${escapeHtml(hash)}">
                             <div class="vecthare-group-member-info">
                                 ${chunk
                                     ? `<span class="vecthare-member-preview">${escapeHtml((chunk.data?.text || '').substring(0, 60))}...</span>
-                                       <span class="vecthare-member-hash">#${String(hash).substring(0, 8)}</span>`
+                                       <span class="vecthare-member-hash">#${escapeHtml(String(hash).substring(0, 8))}</span>`
                                     : `<span class="vecthare-member-missing">Chunk not found</span>
-                                       <span class="vecthare-member-hash">#${String(hash).substring(0, 8)}</span>`
+                                       <span class="vecthare-member-hash">#${escapeHtml(String(hash).substring(0, 8))}</span>`
                                 }
                             </div>
-                            <button class="vecthare-member-remove" data-hash="${hash}" title="Remove from group">
+                            <button class="vecthare-member-remove" data-hash="${escapeHtml(hash)}" title="Remove from group">
                                 <i class="fa-solid fa-times"></i>
                             </button>
                         </div>
@@ -1060,9 +1126,9 @@ function openAddMemberDialog() {
                     </div>
                     <div class="vecthare-member-list" id="vecthare_available_members">
                         ${availableChunks.slice(0, 50).map(c => `
-                            <div class="vecthare-member-option" data-hash="${c.hash}">
+                            <div class="vecthare-member-option" data-hash="${escapeHtml(c.hash)}">
                                 <span class="vecthare-member-preview">${escapeHtml((c.data?.text || '').substring(0, 80))}...</span>
-                                <span class="vecthare-member-hash">#${String(c.hash).substring(0, 8)}</span>
+                                <span class="vecthare-member-hash">#${escapeHtml(String(c.hash).substring(0, 8))}</span>
                             </div>
                         `).join('')}
                         ${availableChunks.length > 50 ? `<div class="vecthare-member-more">${availableChunks.length - 50} more chunks (use search)</div>` : ''}
@@ -1092,9 +1158,9 @@ function openAddMemberDialog() {
 
         $('#vecthare_available_members').html(
             filtered.slice(0, 50).map(c => `
-                <div class="vecthare-member-option" data-hash="${c.hash}">
+                <div class="vecthare-member-option" data-hash="${escapeHtml(c.hash)}">
                     <span class="vecthare-member-preview">${escapeHtml((c.data?.text || '').substring(0, 80))}...</span>
-                    <span class="vecthare-member-hash">#${String(c.hash).substring(0, 8)}</span>
+                    <span class="vecthare-member-hash">#${escapeHtml(String(c.hash).substring(0, 8))}</span>
                 </div>
             `).join('') +
             (filtered.length > 50 ? `<div class="vecthare-member-more">${filtered.length - 50} more results</div>` : '') +
@@ -1302,11 +1368,11 @@ function renderChunkItem(chunk, listIndex) {
 
     // Build info badges
     const infoBadges = [];
-    infoBadges.push(`<span class="vecthare-chunk-item-badge msg">Msg ${msgId}</span>`);
+    infoBadges.push(`<span class="vecthare-chunk-item-badge msg">Msg ${escapeHtml(msgId)}</span>`);
     if (totalChunks > 1) {
-        infoBadges.push(`<span class="vecthare-chunk-item-badge chunk-part">${chunkIdx + 1}/${totalChunks}</span>`);
+        infoBadges.push(`<span class="vecthare-chunk-item-badge chunk-part">${chunkIdx + 1}/${escapeHtml(totalChunks)}</span>`);
     }
-    infoBadges.push(`<span class="vecthare-chunk-item-badge chars">${textLengthDisplay} chars</span>`);
+    infoBadges.push(`<span class="vecthare-chunk-item-badge chars">${escapeHtml(textLengthDisplay)} chars</span>`);
 
     // Build feature badges
     const featureBadges = [];
@@ -1316,10 +1382,10 @@ function renderChunkItem(chunk, listIndex) {
 
     return `
         <div class="vecthare-chunk-item ${isSelected ? 'selected' : ''} ${!data.enabled ? 'disabled' : ''}"
-             data-uid="${chunk.uniqueId}" data-list-index="${listIndex}">
+             data-uid="${escapeHtml(chunk.uniqueId)}" data-list-index="${listIndex}">
             <div class="vecthare-chunk-item-content">
                 <div class="vecthare-chunk-item-header">
-                    <span class="vecthare-chunk-item-index">${displayNumber}.</span>
+                    <span class="vecthare-chunk-item-index">${escapeHtml(displayNumber)}.</span>
                     <span class="vecthare-chunk-item-name">${escapeHtml(displayName)}</span>
                 </div>
                 <div class="vecthare-chunk-item-stats">
@@ -1344,10 +1410,10 @@ function updateStatusBar() {
     }
 
     $('#vecthare_list_status').html(`
-        <span>${shown} chunks</span>
-        ${withKeywords > 0 ? `<span>• 🏷️${withKeywords}</span>` : ''}
-        ${withConditions > 0 ? `<span>• ⚡${withConditions}</span>` : ''}
-        ${blind > 0 ? `<span>• 🛡️${blind}</span>` : ''}
+        <span>${escapeHtml(shown)} chunks</span>
+        ${withKeywords > 0 ? `<span>• 🏷️${escapeHtml(withKeywords)}</span>` : ''}
+        ${withConditions > 0 ? `<span>• ⚡${escapeHtml(withConditions)}</span>` : ''}
+        ${blind > 0 ? `<span>• 🛡️${escapeHtml(blind)}</span>` : ''}
     `);
 }
 
@@ -1391,16 +1457,21 @@ function renderDetailPanel() {
                        placeholder="Name this chunk..."
                        value="${escapeHtml(data.name || '')}">
             </div>
+            ${isChatCollection() ? `
+            <button class="vecthare-detail-delete" id="vecthare_disable_chat_chunk"
+                    title="Chat chunks follow the chat; delete or hide the message instead. Disabled chunks are never retrieved and stay disabled after Sync.">
+                <i class="fa-solid ${data.enabled ? 'fa-eye-slash' : 'fa-eye'}"></i> ${data.enabled ? 'Disable' : 'Enable'}
+            </button>` : `
             <button class="vecthare-detail-delete" id="vecthare_delete_chunk">
                 <i class="fa-solid fa-trash"></i> Delete
-            </button>
+            </button>`}
         </div>
 
         <!-- Chunk Info Bar - Secondary -->
         <div class="vecthare-detail-info-bar">
             <span class="vecthare-info-item">
                 <span class="vecthare-info-label">Chunk</span>
-                <span class="vecthare-info-value">#${displayNumber}</span>
+                <span class="vecthare-info-value">#${escapeHtml(displayNumber)}</span>
             </span>
             <span class="vecthare-info-divider">•</span>
             <span class="vecthare-info-item">
@@ -1409,7 +1480,7 @@ function renderDetailPanel() {
             </span>
             <span class="vecthare-info-divider">•</span>
             <span class="vecthare-info-item vecthare-info-hash" title="Click to copy hash" id="vecthare_copy_hash">
-                <span class="vecthare-info-value">${chunk.hash}</span>
+                <span class="vecthare-info-value">${escapeHtml(chunk.hash)}</span>
             </span>
         </div>
 
@@ -1417,12 +1488,16 @@ function renderDetailPanel() {
         <div class="vecthare-detail-content">
             <!-- Text Block - Inline Editable -->
             <div class="vecthare-detail-text-block">
-                <div class="vecthare-detail-text" id="vecthare_chunk_text" contenteditable="true">${escapeHtml(data.text)}</div>
+                <div class="vecthare-detail-text" id="vecthare_chunk_text" contenteditable="${isChatCollection() ? 'false' : 'true'}">${escapeHtml(data.text)}</div>
                 <div class="vecthare-detail-text-meta">
-                    <span>${wordCount} words • ~${tokenEstimate} tokens</span>
+                    <span>${wordCount} words • ~${escapeHtml(tokenEstimate)} tokens</span>
+                    ${isChatCollection() ? `
+                    <span class="vecthare-detail-note" id="vecthare_chat_text_note" title="The next Sync would store the message's own text again next to an edited chunk.">
+                        <i class="fa-solid fa-circle-info"></i> Chat chunks follow the chat; edit the message instead
+                    </span>` : `
                     <button class="vecthare-detail-save-btn vecthare-hidden" id="vecthare_save_text">
                         <i class="fa-solid fa-save"></i> Save & Re-embed
-                    </button>
+                    </button>`}
                 </div>
             </div>
 
@@ -1490,7 +1565,7 @@ function renderDetailPanel() {
                 </div>
                 <div class="vecthare-detail-keywords" id="vecthare_keywords_container">
                     ${plaintextKeywordMode ? `
-                        <textarea class="vecthare-keyword-plaintext" id="vecthare_keywords_plaintext" placeholder="keyword:1.5x, another:2x, plain">${data.keywords.map(k => k.weight !== 1.0 ? `${k.text}:${k.weight}x` : k.text).join(', ')}</textarea>
+                        <textarea class="vecthare-keyword-plaintext" id="vecthare_keywords_plaintext" placeholder="keyword:1.5x, another:2x, plain">${escapeHtml(data.keywords.map(k => k.weight !== 1.0 ? `${k.text}:${k.weight}x` : k.text).join(', '))}</textarea>
                         <div class="vecthare-keyword-plaintext-hint">Format: keyword:2x for boost, or just keyword (defaults to 1.5x)</div>
                     ` : `
                         <div class="vecthare-keywords-list">
@@ -1543,9 +1618,9 @@ function renderDetailPanel() {
                 <div class="vecthare-detail-links">
                     <div class="vecthare-links-list" id="vecthare_links_list">
                         ${(data.chunkLinks || []).map((link, i) => `
-                            <div class="vecthare-link-item ${link.mode}" data-index="${i}">
-                                <span class="vecthare-link-mode-badge ${link.mode}">${link.mode === 'force' ? '🔗 Force' : '〰️ Soft'}</span>
-                                <span class="vecthare-link-target" title="Target hash: ${link.targetHash}">${link.targetHash.toString().substring(0, 12)}...</span>
+                            <div class="vecthare-link-item ${escapeHtml(link.mode)}" data-index="${i}">
+                                <span class="vecthare-link-mode-badge ${escapeHtml(link.mode)}">${link.mode === 'force' ? '🔗 Force' : '〰️ Soft'}</span>
+                                <span class="vecthare-link-target" title="Target hash: ${escapeHtml(link.targetHash)}">${escapeHtml(link.targetHash.toString().substring(0, 12))}...</span>
                                 <i class="fa-solid fa-xmark vecthare-link-item-remove"></i>
                             </div>
                         `).join('')}
@@ -1572,7 +1647,7 @@ function renderDetailPanel() {
                             <div class="vecthare-summary-item" data-index="${i}">
                                 <div class="vecthare-summary-item-content">
                                     <span class="vecthare-summary-item-text">${escapeHtml(summary)}</span>
-                                    <span class="vecthare-summary-item-hash" title="Summary vector hash">#${summaryHash}</span>
+                                    <span class="vecthare-summary-item-hash" title="Summary vector hash">#${escapeHtml(summaryHash)}</span>
                                 </div>
                                 <i class="fa-solid fa-xmark vecthare-summary-item-remove"></i>
                             </div>
@@ -1692,7 +1767,7 @@ function bindEvents() {
         e.preventDefault();
         e.stopPropagation();
         const uid = $(this).attr('data-uid');
-        console.log('VectHare: Clicked chunk with uniqueId:', uid);
+        vhLog('VectHare: Clicked chunk with uniqueId:', uid);
         if (!uid) {
             console.error('VectHare: No uniqueId found on clicked element');
             return;
@@ -1725,12 +1800,88 @@ function bindEvents() {
     $('#vecthare_bulk_disable').on('click', () => bulkSetEnabled(false));
 }
 
+/**
+ * Replace a chunk's text: write the replacement first (keeping the original
+ * vector's source metadata and flags), only then remove the original, and tell
+ * the identity ledger beforehand that the original association is obsolete.
+ * @returns {Promise<number>} The replacement hash
+ */
+/**
+ * VH-051: a chunk whose text changed has a new hash. Everything that names it
+ * by hash in this collection's settings follows: its notes, group membership,
+ * and scenes that list it. (Summary links stored with the vectors are not
+ * rewritten; re-create a summary after editing its parent.)
+ * Passing newHash = null removes the old hash (chunk deleted).
+ */
+function rehashChunkReferences(oldHash, newHash) {
+    if (!currentCollectionId) return;
+    const from = String(oldHash);
+    const to = newHash === null || newHash === undefined ? null : String(newHash);
+    if (to !== null) {
+        const oldMeta = getChunkMetadata(from, currentCollectionId);
+        if (oldMeta) {
+            deleteChunkMetadata(from, currentCollectionId);
+            saveChunkMetadata(to, { ...oldMeta }, currentCollectionId);
+        }
+    }
+    const groups = getGroups();
+    let groupsChanged = false;
+    for (const group of groups) {
+        if (!Array.isArray(group.members) || !group.members.some(h => String(h) === from)) continue;
+        const members = group.members.map(h => (String(h) === from ? to : h)).filter(h => h !== null);
+        group.members = [...new Set(members.map(String))];
+        groupsChanged = true;
+    }
+    if (groupsChanged) saveGroups(groups);
+    for (const item of allChunks || []) {
+        const meta = getChunkMetadata(String(item.hash), currentCollectionId);
+        if (!Array.isArray(meta?.containedHashes) || !meta.containedHashes.some(h => String(h) === from)) continue;
+        const containedHashes = meta.containedHashes.map(h => (String(h) === from ? to : h)).filter(h => h !== null);
+        saveChunkMetadata(String(item.hash), { ...meta, containedHashes }, currentCollectionId);
+    }
+}
+
+async function replaceChunkText(chunk, newText) {
+    if (isChatCollection()) {
+        // VH-039 (option C): the next Sync would store the message's own text again.
+        throw new Error('Chat chunks follow the chat; edit the message instead.');
+    }
+    const newHash = getStringHash(newText);
+    if (String(newHash) === String(chunk.hash)) return newHash;
+    const { text, hash, vecthareProvenance, vecthareImportedProvenance, ...carried } = chunk.metadata || {};
+    const editSettings = await resolveEmbeddingSettingsForEdit(currentCollectionId, (await settingsFor()));
+    await withLease(leaseIdOf(currentCollectionId), async () => {
+        await noteManualVectorChange(currentCollectionId, (await settingsFor()), [chunk.hash]);
+        await insertVectorItems(currentCollectionId, [{
+            hash: newHash, // keep as number for Qdrant compatibility
+            text: newText,
+            index: chunk.index,
+            metadata: carried,
+            __vecthareProvenanceHint: { writer: 'chunk-visualizer', sourceType: 'manual-edit' },
+        }], editSettings);
+        await deleteVectorItems(currentCollectionId, [chunk.hash], editSettings);
+    }, { label: 'Chunk edit' });
+    return newHash;
+}
+
 function bindDetailEvents() {
     // PERF: Use Map for O(1) lookup instead of O(n) find()
     const chunk = allChunksMap.get(selectedChunkId);
     if (!chunk) return;
 
     const originalText = chunk.data.text;
+
+    // Copy hash to clipboard
+    $('#vecthare_copy_hash').off('click').on('click', function() {
+        const hash = String(chunk.hash);
+        const done = () => toastr.info('Hash copied to clipboard');
+        const fail = () => toastr.warning(`Could not copy automatically. Hash: ${hash}`);
+        try {
+            navigator.clipboard.writeText(hash).then(done, fail);
+        } catch {
+            fail();
+        }
+    });
 
     // Chunk name input
     $('#vecthare_chunk_name').on('input', debounce(function() {
@@ -1760,23 +1911,10 @@ function bindDetailEvents() {
         $(this).prop('disabled', true).html('<i class="fa-solid fa-spinner fa-spin"></i> Saving...');
 
         try {
-            // Delete old
-            await deleteVectorItems(currentCollectionId, [chunk.hash], currentSettings);
+            const newHash = await replaceChunkText(chunk, newText);
 
-            // Insert new with new hash (keep as number for Qdrant compatibility)
-            const newHash = getStringHash(newText);
-            await insertVectorItems(currentCollectionId, [{
-                hash: newHash,
-                text: newText,
-                index: chunk.index
-            }], currentSettings);
-
-            // Update metadata (use string keys for metadata storage)
-            const oldMeta = getChunkMetadata(String(chunk.hash));
-            if (oldMeta) {
-                deleteChunkMetadata(String(chunk.hash));
-                saveChunkMetadata(String(newHash), { ...oldMeta });
-            }
+            // VH-051: notes, groups and scenes follow the new hash
+            rehashChunkReferences(chunk.hash, newHash);
 
             // Update local state
             chunk.hash = newHash;
@@ -1789,7 +1927,7 @@ function bindDetailEvents() {
             toastr.success('Chunk updated successfully', 'VectHare');
         } catch (error) {
             console.error('Failed to update chunk:', error);
-            toastr.error('Failed to update chunk', 'VectHare');
+            toastr.error(`Failed to update chunk: ${error?.message || error}`, 'VectHare'); // VH-058
             $(this).prop('disabled', false).html('<i class="fa-solid fa-save"></i> Save & Re-embed');
         }
     });
@@ -1797,8 +1935,8 @@ function bindDetailEvents() {
     // Enabled toggle - save immediately (no pending changes, direct write)
     $('#vecthare_detail_enabled').on('change', function() {
         const enabled = $(this).is(':checked');
-        const existing = getChunkMetadata(chunk.hash) || {};
-        saveChunkMetadata(chunk.hash, { ...existing, disabled: !enabled, enabled });
+        const existing = getChunkMetadata(chunk.hash, currentCollectionId) || {};
+        saveChunkMetadata(chunk.hash, { ...existing, disabled: !enabled, enabled }, currentCollectionId);
         chunk.data.enabled = enabled;
         renderChunkList();
     });
@@ -1806,7 +1944,7 @@ function bindDetailEvents() {
     // Blind toggle
     $('#vecthare_detail_blind').on('change', function() {
         const blind = $(this).is(':checked');
-        setChunkTemporallyBlind(chunk.hash, blind);
+        setChunkTemporallyBlind(chunk.hash, blind, currentCollectionId);
         chunk.data.temporallyBlind = blind;
         renderChunkList();
     });
@@ -1846,6 +1984,17 @@ function bindDetailEvents() {
 
     // Delete chunk
     $('#vecthare_delete_chunk').on('click', () => deleteChunk(chunk));
+    // VH-055 (option A): a chat chunk is disabled instead of deleted, because
+    // the next Sync would store it again from its message.
+    $('#vecthare_disable_chat_chunk').on('click', () => {
+        const enabled = !chunk.data.enabled;
+        const existing = getChunkMetadata(chunk.hash, currentCollectionId) || {};
+        saveChunkMetadata(chunk.hash, { ...existing, disabled: !enabled, enabled }, currentCollectionId);
+        chunk.data.enabled = enabled;
+        renderChunkList();
+        renderDetailPanel();
+        toastr.success(enabled ? 'Chunk enabled' : 'Chunk disabled: it will not be retrieved', 'VectHare');
+    });
 
     // Keyword mode toggle (plaintext vs badge)
     $('#vecthare_keyword_mode').on('click', function() {
@@ -2020,23 +2169,10 @@ function openTextEditor(chunk) {
         $(this).prop('disabled', true).text('Saving...');
 
         try {
-            // Delete old
-            await deleteVectorItems(currentCollectionId, [chunk.hash], currentSettings);
+            const newHash = await replaceChunkText(chunk, newText);
 
-            // Insert new with new hash (keep as number for Qdrant compatibility)
-            const newHash = getStringHash(newText);
-            await insertVectorItems(currentCollectionId, [{
-                hash: newHash,
-                text: newText,
-                index: chunk.index
-            }], currentSettings);
-
-            // Update metadata (use string keys for metadata storage)
-            const oldMeta = getChunkMetadata(String(chunk.hash));
-            if (oldMeta) {
-                deleteChunkMetadata(String(chunk.hash));
-                saveChunkMetadata(String(newHash), { ...oldMeta });
-            }
+            // VH-051: notes, groups and scenes follow the new hash
+            rehashChunkReferences(chunk.hash, newHash);
 
             // Update local state - update hash but keep same uniqueId for selection
             chunk.hash = newHash;
@@ -2050,7 +2186,7 @@ function openTextEditor(chunk) {
             toastr.success('Chunk updated successfully', 'VectHare');
         } catch (error) {
             console.error('Failed to update chunk:', error);
-            toastr.error('Failed to update chunk', 'VectHare');
+            toastr.error(`Failed to update chunk: ${error?.message || error}`, 'VectHare'); // VH-058
             $(this).prop('disabled', false).text('Save & Re-embed');
         }
     });
@@ -2082,7 +2218,7 @@ function openConditionEditor(chunk) {
                     <div class="vecthare-editor-field">
                         <label>Condition Type</label>
                         <select id="vecthare_condition_type" class="vecthare-editor-select">
-                            ${CONDITION_TYPES.map(t => `<option value="${t.value}">${t.icon} ${t.label}</option>`).join('')}
+                            ${CONDITION_TYPES.map(t => `<option value="${escapeHtml(t.value)}">${t.icon} ${escapeHtml(t.label)}</option>`).join('')}
                         </select>
                     </div>
                     <div class="vecthare-editor-field" id="vecthare_condition_settings">
@@ -2183,7 +2319,7 @@ function openLinkEditor(chunk) {
                             ${availableChunks.map(c => {
                                 const preview = c.data.text.substring(0, 40).replace(/\s+/g, ' ') + '...';
                                 const name = c.data.name || preview;
-                                return `<option value="${c.hash}">[Msg #${c.index}] ${escapeHtml(name)}</option>`;
+                                return `<option value="${escapeHtml(c.hash)}">[Msg #${c.index}] ${escapeHtml(name)}</option>`;
                             }).join('')}
                         </select>
                     </div>
@@ -2232,11 +2368,20 @@ function openLinkEditor(chunk) {
 // ============================================================================
 
 async function deleteChunk(chunk) {
+    if (isChatCollection()) {
+        // VH-055: the next Sync would put it back; disable it instead.
+        toastr.info('Chat chunks follow the chat; delete or hide the message instead, or disable the chunk.', 'VectHare');
+        return;
+    }
     if (!confirm(`Delete chunk #${chunk.index}?`)) return;
 
     try {
-        await deleteVectorItems(currentCollectionId, [chunk.hash], currentSettings);
-        deleteChunkMetadata(chunk.hash);
+        await withLease(leaseIdOf(currentCollectionId), async () => {
+            await noteManualVectorChange(currentCollectionId, (await settingsFor()), [chunk.hash]);
+            await deleteVectorItems(currentCollectionId, [chunk.hash], (await settingsFor()));
+        }, { label: 'Chunk delete' });
+        deleteChunkMetadata(chunk.hash, currentCollectionId);
+        rehashChunkReferences(chunk.hash, null); // VH-051: and leaves its groups and scenes
 
         // Remove from local state by uniqueId
         const idx = allChunks.findIndex(c => c.uniqueId === chunk.uniqueId);
@@ -2249,7 +2394,7 @@ async function deleteChunk(chunk) {
         toastr.success('Chunk deleted', 'VectHare');
     } catch (error) {
         console.error('Failed to delete chunk:', error);
-        toastr.error('Failed to delete chunk', 'VectHare');
+        toastr.error(`Failed to delete chunk: ${error?.message || error}`, 'VectHare'); // VH-058
     }
 }
 
@@ -2271,12 +2416,6 @@ function bulkSetEnabled(enabled) {
 // UTILITIES
 // ============================================================================
 
-function escapeHtml(text) {
-    if (!text) return '';
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
 
 function debounce(func, wait) {
     let timeout;
@@ -2295,7 +2434,7 @@ function debounce(func, wait) {
  * Called from index.js on extension load
  */
 export function initializeVisualizer() {
-    console.log('VectHare: Chunk visualizer initialized');
+    vhLog('VectHare: Chunk visualizer initialized');
     // No DOM setup needed - modal is created dynamically when opened
 }
 

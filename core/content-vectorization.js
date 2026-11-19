@@ -1,3 +1,5 @@
+import { acquireLease } from './leases.js';
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * VECTHARE CONTENT VECTORIZATION
@@ -10,15 +12,28 @@
  * ============================================================================
  */
 
-import { getContentType, getContentTypeDefaults, hasFeature } from './content-types.js';
+import { getContentType, getContentTypeDefaults, hasFeature, LIVE_CHAT_STRATEGIES } from './content-types.js';
 import { chunkText } from './chunking.js';
-import { insertVectorItems, purgeVectorIndex } from './core-vector-api.js';
-import { setCollectionMeta, getDefaultDecayForType } from './collection-metadata.js';
+import { DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP } from './constants.js';
+import { insertVectorItems, getSavedHashes, purgeVectorIndex } from './core-vector-api.js';
+import {
+    setCollectionMeta, getCollectionMeta, getDefaultDecayForType,
+    canRecordInitialVectorizationConfig, createInitialVectorizationConfig,
+    saveInitialVectorizationConfig,
+    requireCollectionOperationSettings, resolveCollectionOperationSettings,
+    snapshotCollectionOperationSettings,
+    assertCollectionOperationSettingsStable,
+} from './collection-metadata.js';
 import { registerCollection } from './collection-loader.js';
 import { getBackend } from '../backends/backend-manager.js';
 // Import from collection-ids.js - single source of truth for collection ID operations
 import {
     buildChatCollectionId,
+    ensureChatBinding,
+    recordChatStore,
+    beginChatCollectionWrite,
+    endChatCollectionWrite,
+    withChatCollectionPurgeGuard,
     buildLorebookCollectionId,
     buildCharacterCollectionId,
     buildDocumentCollectionId,
@@ -26,9 +41,32 @@ import {
 } from './collection-ids.js';
 import { extractLorebookKeywords, extractTextKeywords, extractChatKeywords, extractBM25Keywords, EXTRACTION_LEVELS, DEFAULT_EXTRACTION_LEVEL, DEFAULT_BASE_WEIGHT } from './keyword-boost.js';
 import { cleanText, cleanMessages } from './text-cleaning.js';
-import { progressTracker } from '../ui/progress-tracker.js';
+import { progressTracker, describeEffectiveSettings } from '../ui/progress-tracker.js';
 import { extension_settings, getContext } from '../../../../extensions.js';
 import { getStringHash } from '../../../../utils.js';
+
+/** The same effective Content Vectorizer options are used by insertion and pre-purge checks. */
+export function getContentVectorizerChunkingConfig(contentType, settings) {
+    const type = getContentType(contentType);
+    if (!type) throw new Error(`Unknown content type: ${contentType}`);
+    const chunkOptions = {
+        strategy: settings.strategy || type.defaultStrategy,
+        chunkSize: settings.chunkSize || type.defaults.chunkSize,
+        chunkOverlap: settings.chunkOverlap || type.defaults.chunkOverlap,
+        conversationTurnOrder: settings.conversation_turn_order || 'user_character',
+    };
+    return {
+        pipeline: 'content-vectorizer', contentType, ...chunkOptions,
+        chunkSize: chunkOptions.chunkSize === undefined ? DEFAULT_CHUNK_SIZE : chunkOptions.chunkSize,
+        chunkOverlap: chunkOptions.chunkOverlap === undefined ? DEFAULT_CHUNK_OVERLAP : chunkOptions.chunkOverlap,
+        batchSize: 4,
+        ...(contentType === 'character' ? {
+            fields: settings.fields || getContentTypeDefaults('character').fields,
+        } : {}),
+        keywordLevel: settings.keywordLevel || 'balanced',
+        keywordBaseWeight: settings.keywordBaseWeight || 1.5,
+    };
+}
 
 /**
  * Main entry point for content vectorization
@@ -39,29 +77,169 @@ import { getStringHash } from '../../../../utils.js';
  * @returns {Promise<{success: boolean, chunkCount: number, collectionId: string}>}
  */
 export async function vectorizeContent({ contentType, source, settings }) {
+    settings = snapshotCollectionOperationSettings(settings);
+    let vecthareSettings = snapshotCollectionOperationSettings(extension_settings.vecthare);
     const type = getContentType(contentType);
     if (!type) {
         throw new Error(`Unknown content type: ${contentType}`);
     }
 
+    // C14: the live chat may only be written by the Sync pipeline, whose ledger
+    // tracks every record. 'adaptive' and 'per_scene' bypass it and used to put
+    // un-ledgered records into the chat's own collection (or create it with a
+    // saved config Sync cannot use), so they are refused for the live chat.
+    // Uploaded transcripts keep every strategy.
+    if (contentType === 'chat' && source?.type === 'current' &&
+        !LIVE_CHAT_STRATEGIES.includes(settings.strategy || type.defaultStrategy)) {
+        throw new Error(`The "${settings.strategy || type.defaultStrategy}" strategy cannot be used on the ` +
+            'live chat because Sync Chat could not track those records. Choose Per Message, ' +
+            'Conversation Turns or Message Batch, or upload the chat as a transcript to use this strategy.');
+    }
+
+    // A live chat must use precisely the same text/hash/group/UID pipeline as
+    // Sync Chat and Repair. Uploaded chat transcripts are NOT the live chat;
+    // they keep their independent Content Vectorizer pipeline and provenance.
+    if (contentType === 'chat' && source.type === 'current' &&
+        LIVE_CHAT_STRATEGIES.includes(settings.strategy || type.defaultStrategy)) {
+        if (source.content !== getContext()?.chat) {
+            throw new Error('The selected chat changed; live chat vectorization cancelled');
+        }
+        const liveSettings = snapshotCollectionOperationSettings(vecthareSettings);
+        liveSettings.chunking_strategy = settings.strategy || type.defaultStrategy;
+        liveSettings.conversation_turn_order = settings.conversation_turn_order || 'user_character';
+        liveSettings.keyword_extraction_level = settings.keywordLevel || liveSettings.keyword_extraction_level;
+        if (liveSettings.chunking_strategy === 'message_batch') {
+            liveSettings.batch_size = settings.batchSize || liveSettings.batch_size || 4;
+        }
+        // N2: before a new collection is created, offer a deleted copy's memories.
+        if (settings.rebuildChatCollection !== true) {
+            const { offerDeletedChatReattach } = await import('./chat-vectorization.js');
+            await offerDeletedChatReattach(vecthareSettings);
+        }
+        const binding = await ensureChatBinding();
+        if (!binding?.writable || !binding.collectionId || source.content !== getContext()?.chat) {
+            throw new Error('The selected chat identity changed; live chat vectorization cancelled');
+        }
+        // A confirmed rebuild writes and verifies a REPLACEMENT collection and
+        // only then switches this chat to it. Nothing is purged first, and a
+        // failure leaves the existing collection in use.
+        if (settings.rebuildChatCollection === true) {
+            const { rebuildChatCollection } = await import('./chat-vectorization.js');
+            const { getSyncBatchSize } = await import('./chat-vectorization.js');
+            const rebuild = await rebuildChatCollection(liveSettings, getSyncBatchSize(liveSettings));
+            if (!rebuild.success) throw new Error(rebuild.reason || 'The rebuild did not complete.');
+            if (source.content !== getContext()?.chat || String(source.id) !== String(getContext()?.chatId)) {
+                // The vectors and the binding are already committed and
+                // verified; only the Content Vectorizer's own notes are skipped.
+                return { ...rebuild, handledBySyncChat: true, rebuilt: true,
+                    chunkCount: rebuild.chunkCount };
+            }
+            const carried = new Set(rebuild.carriedFields || []);
+            setCollectionMeta(rebuild.collectionId, {
+                contentType,
+                sourceName: source.name || source.filename || source.id || contentType,
+                scope: contentType === 'chat' ? 'chat' : (settings.scope || 'global'), // a chat's own collection is used only in that chat
+                ...(Number.isSafeInteger(rebuild.chunkCount) ? { chunkCount: rebuild.chunkCount } : {}),
+                createdAt: new Date().toISOString(),
+                settings: {
+                    strategy: settings.strategy,
+                    conversation_turn_order: settings.conversation_turn_order,
+                    chunkSize: settings.chunkSize,
+                },
+                // A carried-over decay preference is the user's; don't reset it.
+                ...(carried.has('temporalDecay') ? {} : {
+                    temporalDecay: settings.temporalDecay || getDefaultDecayForType(contentType),
+                }),
+            });
+            return { ...rebuild, handledBySyncChat: true, rebuilt: true,
+                chunkCount: rebuild.chunkCount };
+        }
+
+        const { vectorizeAll, getSyncBatchSize } = await import('./chat-vectorization.js');
+        const result = await vectorizeAll(liveSettings, getSyncBatchSize(liveSettings), true);
+        if (!result?.success) throw new Error('Live chat Sync was stopped or could not complete');
+        if (source.content !== getContext()?.chat || String(source.id) !== String(getContext()?.chatId)) {
+            throw new Error('The selected chat changed; collection metadata was not updated');
+        }
+        // Sync owns vectors and the ledger. Preserve Content Vectorizer's
+        // existing VectHare-only collection metadata for this selected chat.
+        const previousMeta = getCollectionMeta(binding.collectionId);
+        setCollectionMeta(binding.collectionId, {
+            contentType,
+            sourceName: source.name || source.filename || source.id || contentType,
+            scope: contentType === 'chat' ? 'chat' : (settings.scope || 'global'), // a chat's own collection is used only in that chat
+            ...(Number.isSafeInteger(result.indexedChunkCount) ? { chunkCount: result.indexedChunkCount } : {}),
+            createdAt: previousMeta.createdAt || new Date().toISOString(),
+            settings: {
+                strategy: settings.strategy,
+                conversation_turn_order: settings.conversation_turn_order,
+                chunkSize: settings.chunkSize,
+            },
+            temporalDecay: settings.temporalDecay || getDefaultDecayForType(contentType),
+        });
+        return { ...result, collectionId: binding.collectionId, handledBySyncChat: true };
+    }
+
     const sourceName = source.name || source.filename || source.id || contentType;
-    progressTracker.show(`Vectorizing ${type.label || contentType}`, 4, 'Steps');
+    let initialConfig;
+    const panelRunId = progressTracker.show(`Vectorizing ${type.label || contentType}`, 4, 'Steps');
+    // VH-056: a collection this run created (new id, verified empty before the
+    // first write) is removed again if the run fails part-way.
+    let createdByThisRun = null;
+    let createdSettings = null;
+    progressTracker.setRunSettings(
+        describeEffectiveSettings(vecthareSettings, { 'Content': type.label || contentType }),
+        'as selected for this run');
     progressTracker.updateCurrentItem(sourceName);
 
     try {
+        // #8: only the LIVE chat belongs in this chat's own collection, where
+        // Content Vectorizer shares Sync Chat's identity. An uploaded or pasted
+        // transcript is separate content and gets its own collection, so it can
+        // never be mistaken for this chat's vectors by Sync, Repair or RAG.
+        const liveChatSource = contentType === 'chat' && source.type === 'current';
+        const chatBinding = liveChatSource ? await ensureChatBinding() : null;
+        if (liveChatSource && !chatBinding?.writable) {
+            throw new Error('Chat collection identity could not be verified; vectorization cancelled');
+        }
+        const collectionId = liveChatSource
+            ? chatBinding.collectionId
+            : generateCollectionId(contentType, source, settings);
+        // The collection's own saved preparation settings take precedence over
+        // the current Content Vectorizer controls. They are operation-local.
+        const resolved = await resolveCollectionOperationSettings(collectionId, vecthareSettings,
+            'content-vectorizer', getContentVectorizerChunkingConfig(contentType, settings), { allowNew: true });
+        vecthareSettings = resolved.settings;
+        if (vecthareSettings.__collectionCleaningPatterns) {
+            settings.__collectionCleaningPatterns = vecthareSettings.__collectionCleaningPatterns;
+        }
+        if (resolved.status === 'compatible') {
+            for (const key of ['strategy', 'chunkSize', 'chunkOverlap', 'fields', 'keywordLevel', 'keywordBaseWeight']) {
+                if (resolved.chunking[key] !== undefined) settings[key] = resolved.chunking[key];
+            }
+            if (resolved.chunking.conversationTurnOrder !== undefined) {
+                settings.conversation_turn_order = resolved.chunking.conversationTurnOrder;
+            }
+        }
+        initialConfig = createInitialVectorizationConfig(vecthareSettings,
+            getContentVectorizerChunkingConfig(contentType, settings));
+
         // Step 1: Resolve source
         progressTracker.updateProgress(1, 'Loading content...');
         const rawContent = await resolveSource(contentType, source);
 
-        // Step 2: Prepare and chunk
-        progressTracker.updateProgress(2, 'Chunking content...');
-        const preparedContent = await prepareContent(contentType, rawContent, settings);
-        const chunks = await chunkText(preparedContent.text || preparedContent, {
+        // Keep the original chunkText options unchanged; record effective
+        // defaults separately so this metadata change cannot change chunks.
+        const chunkOptions = {
             strategy: settings.strategy || type.defaultStrategy,
             chunkSize: settings.chunkSize || type.defaults.chunkSize,
             chunkOverlap: settings.chunkOverlap || type.defaults.chunkOverlap,
             conversationTurnOrder: settings.conversation_turn_order || 'user_character',
-        });
+        };
+        // Step 2: Prepare and chunk
+        progressTracker.updateProgress(2, 'Chunking content...');
+        const preparedContent = await prepareContent(contentType, rawContent, settings);
+        const chunks = await chunkText(preparedContent.text || preparedContent, chunkOptions);
 
         if (chunks.length === 0) {
             throw new Error('No chunks generated from content');
@@ -71,25 +249,39 @@ export async function vectorizeContent({ contentType, source, settings }) {
         const chunkLengths = chunks.map(c => (typeof c === 'string' ? c : c.text || '').length);
         const maxChunkLen = Math.max(...chunkLengths);
         const avgChunkLen = Math.round(chunkLengths.reduce((a, b) => a + b, 0) / chunkLengths.length);
-        console.log(`VectHare: Chunked "${sourceName}" into ${chunks.length} chunks (avg: ${avgChunkLen} chars, max: ${maxChunkLen} chars)`);
+        vhLog(`VectHare: Chunked "${sourceName}" into ${chunks.length} chunks (avg: ${avgChunkLen} chars, max: ${maxChunkLen} chars)`);
 
         progressTracker.updateChunks(chunks.length);
 
         // Step 3: Enrich and hash
         progressTracker.updateProgress(3, 'Processing chunks...');
-        const collectionId = generateCollectionId(contentType, source, settings);
-        
         // Get full extension settings for keyword extraction (includes custom_stopwords)
-        const vecthareSettings = extension_settings.vecthare;
-        
         const enrichedChunks = enrichChunks(chunks, contentType, source, settings, preparedContent, vecthareSettings);
         const hashedChunks = enrichedChunks.map(chunk => ({
             ...chunk,
             hash: getStringHash(chunk.text),
         }));
 
+        assertCollectionOperationSettingsStable(initialConfig, vecthareSettings, initialConfig?.chunking);
+        // Validate the original collection configuration before any embedding
+        // or database write; first-time collections are allowed when empty.
+        await requireCollectionOperationSettings(collectionId, vecthareSettings, 'content-vectorizer', {
+            ...initialConfig?.chunking,
+            pipeline: 'content-vectorizer',
+        }, { allowNew: true });
+
+        // Record the existing Content Vectorizer source/strategy only in the
+        // outgoing chunk. Never modify SillyTavern source messages or chat files.
+        for (const chunk of hashedChunks) {
+            chunk.__vecthareProvenanceHint = {
+                writer: 'content-vectorizer', sourceType: contentType,
+                groupingStrategy: chunk.metadata?.strategy || chunkOptions.strategy,
+            };
+        }
+
         // Step 4: Insert into vector store (streaming: embed + write together)
-        progressTracker.updateProgress(4, 'Processing chunks...');
+        progressTracker.stats.embeddingBasePercent = Math.round(3 / progressTracker.stats.totalItems * 100);
+        progressTracker.updateProgress(3, 'Embedding and saving chunks...');
 
         // Ensure backend is initialized and healthy before attempting inserts.
         // Some backends (LanceDB/Qdrant) require initialization which may fail
@@ -106,16 +298,67 @@ export async function vectorizeContent({ contentType, source, settings }) {
             } catch (_) {}
         }
 
+        // An existing collection without a snapshot is legacy/unknown, not new.
+        // A failed read must not block vectorization or imply an empty collection.
+        let initiallyEmpty = false;
+        if (canRecordInitialVectorizationConfig(collectionId, vecthareSettings)) {
+            try {
+                initiallyEmpty = (await getSavedHashes(collectionId, vecthareSettings)).length === 0;
+            } catch (error) {
+                console.warn('VectHare: Could not verify first vectorization settings:', error);
+            }
+        }
+
+        if (!liveChatSource && initiallyEmpty) {
+            createdByThisRun = collectionId;
+            createdSettings = vecthareSettings;
+        }
+
+        // The callback runs after each successfully-written batch. Keep its
+        // persistence promise so partial success also records first settings.
+        let initialConfigSave = null;
+        const recordFirstWrite = () => {
+            if (initiallyEmpty && !initialConfigSave) {
+                initialConfigSave = saveInitialVectorizationConfig(collectionId, initialConfig, vecthareSettings)
+                    .then(success => {
+                        if (success) setCollectionMeta(collectionId, { verifiedPurgeDestination: null });
+                        return success;
+                    });
+            }
+        };
+
+        // 8C: one tab/device at a time writes into this collection.
+        const contentLease = await acquireLease(collectionId, { label: 'Content Vectorizer' });
         try {
-            await insertVectorItems(collectionId, hashedChunks, vecthareSettings, (embedded, total) => {
+            if (liveChatSource) {
+                // #9: the chat can change while content is prepared and embedded.
+                // Re-verify the live chat's identity immediately before the write
+                // rather than trusting the binding resolved minutes earlier.
+                const current = await ensureChatBinding();
+                if (!current?.writable || current.collectionId !== collectionId ||
+                    source.content !== getContext()?.chat) {
+                    throw new Error('The selected chat changed; nothing was written');
+                }
+                beginChatCollectionWrite(collectionId);
+            }
+            try {
+                if (liveChatSource) recordChatStore(collectionId, vecthareSettings);
+                await insertVectorItems(collectionId, hashedChunks, vecthareSettings, (embedded, total) => {
+            // Insert progress is reported after a successful backend write. Record
+            // the original settings even if a later batch fails or is stopped.
+            if (embedded > 0) recordFirstWrite();
             // Update progress with streaming count
-            console.log(`[Content Vectorization] Processing progress callback: ${embedded}/${total}`);
+            vhLog(`[Content Vectorization] Processing progress callback: ${embedded}/${total}`);
             progressTracker.updateEmbeddingProgress(embedded, total);
 
             // Streaming approach: embedding and writing happen together
             progressTracker.updateCurrentItem(`Processing: ${embedded}/${total} chunks (${total - embedded} remaining)`);
-            });
+                });
+            } finally {
+                if (liveChatSource) endChatCollectionWrite(collectionId);
+            }
         } catch (error) {
+            if (initialConfigSave) await initialConfigSave;
             // Surface insert errors to the UI so users see why vectorization may have failed
             console.error('VectHare: insertVectorItems failed', error);
             try {
@@ -126,6 +369,14 @@ export async function vectorizeContent({ contentType, source, settings }) {
             } catch (_) {}
             // Re-throw so outer handler records completion state and any callers can react
             throw error;
+        } finally {
+            await contentLease.release();
+        }
+
+        // Also cover backends that return success without a progress callback.
+        if (initiallyEmpty) {
+            recordFirstWrite();
+            await initialConfigSave;
         }
 
         // Save collection metadata
@@ -146,10 +397,14 @@ export async function vectorizeContent({ contentType, source, settings }) {
         });
 
         // Register collection in the registry so it's discoverable
-        registerCollection(collectionId);
-        console.log(`VectHare: Registered collection ${collectionId}`);
+        // The registry must match the saved backend/source for later Repair.
+        // VH-028: every collection gets the backend:source:id form.
+        const registryKey = `${vecthareSettings.vector_backend || 'standard'}:${vecthareSettings.source || 'transformers'}:${collectionId}`;
+        registerCollection(registryKey);
+        vhLog(`VectHare: Registered collection ${registryKey}`);
 
-        progressTracker.complete(true, `Vectorized ${hashedChunks.length} chunks`);
+        progressTracker.updateProgress(4, 'Finalizing...');
+        progressTracker.complete(true, `Vectorized ${hashedChunks.length} chunks`, panelRunId);
 
         return {
             success: true,
@@ -157,9 +412,44 @@ export async function vectorizeContent({ contentType, source, settings }) {
             collectionId,
         };
     } catch (error) {
+        if (createdByThisRun) await removeIncompleteCollection(createdByThisRun, createdSettings, error);
         progressTracker.addError(error.message);
-        progressTracker.complete(false, 'Vectorization failed');
+        progressTracker.complete(false, 'Vectorization failed', panelRunId);
         throw error;
+    }
+}
+
+/**
+ * VH-056: a Content Vectorizer run that created a collection and then failed
+ * part-way removes what it wrote (the collection is new and holds nothing
+ * else), so a retry does not leave a second, partial copy that RAG searches
+ * too. If the removal cannot be confirmed, the leftover is switched off and
+ * marked incomplete instead.
+ * @param {string} collectionId
+ * @param {object} settings The settings the run wrote with
+ * @param {Error} cause
+ */
+async function removeIncompleteCollection(collectionId, settings, cause) {
+    try {
+        const { deleteCollection } = await import('./collection-loader.js');
+        const registryKey = `${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}`;
+        const result = await deleteCollection(collectionId, settings, registryKey, {});
+        if (result?.success) {
+            vhLog(`VectHare: Removed the incomplete collection ${collectionId} after a failed run`);
+            try {
+                toastr.info('The partly written collection was removed. Fix the problem and vectorize again.', 'VectHare');
+            } catch { /* no toast */ }
+            return;
+        }
+        throw new Error((result?.errors || []).join('; ') || 'deletion not confirmed');
+    } catch (error) {
+        console.warn(`VectHare: Could not remove the incomplete collection ${collectionId}:`, error?.message || error);
+        try {
+            setCollectionMeta(collectionId, { enabled: false,
+                incompleteRun: { at: new Date().toISOString(), reason: String(cause?.message || cause).slice(0, 300) } });
+            toastr.warning('The partly written collection could not be removed, so it was switched off. ' +
+                'Delete it in the Database Browser, then vectorize again.', 'VectHare', { timeOut: 12000 });
+        } catch { /* best effort */ }
     }
 }
 
@@ -294,7 +584,7 @@ async function loadLorebookContent(lorebookName, context) {
 
         const entries = Object.values(data.entries).filter(e => e.content);
 
-        console.log(`VectHare: Loaded lorebook "${lorebookName}" with ${entries.length} entries`);
+        vhLog(`VectHare: Loaded lorebook "${lorebookName}" with ${entries.length} entries`);
 
         return {
             content: entries,
@@ -376,9 +666,10 @@ function prepareLorebookContent(rawContent, settings) {
     }
 
     // Filter to entries that have content, and apply text cleaning
+    // World Info marks turned-off entries with disable: true; skip them unless asked
     const validEntries = entries
-        .filter(e => e && e.content)
-        .map(e => ({ ...e, content: cleanText(e.content) }));
+        .filter(e => e && e.content && (settings.includeDisabled || !e.disable))
+        .map(e => ({ ...e, content: cleanText(e.content, settings.__collectionCleaningPatterns) }));
 
     if (settings.strategy === 'per_entry') {
         // Each entry becomes its own chunk - return array of content strings
@@ -418,12 +709,30 @@ function prepareCharacterContent(rawContent, settings) {
         creator_notes: { key: 'creator_notes', label: 'Creator Notes' },
     };
 
+    // Embedded lorebook (card V2/V3 data.character_book): entries as text; disabled entries skipped
+    const embeddedBookText = () => {
+        const entries = character?.data?.character_book?.entries;
+        const list = Array.isArray(entries) ? entries : (entries && typeof entries === 'object' ? Object.values(entries) : []);
+        return list
+            .filter(e => e && e.content && (settings.includeDisabled || (e.enabled !== false && !e.disable)))
+            .map(e => {
+                const header = e.comment || e.name || (Array.isArray(e.keys) ? e.keys[0] : '') || '';
+                const body = cleanText(e.content, settings.__collectionCleaningPatterns);
+                return header ? `${header}: ${body}` : body;
+            })
+            .join('\n\n');
+    };
+
     // For per_field strategy
     if (settings.strategy === 'per_field') {
         const fields = {};
         for (const [fieldId, enabled] of Object.entries(selectedFields)) {
             if (enabled && FIELD_MAP[fieldId] && character[FIELD_MAP[fieldId].key]) {
-                fields[FIELD_MAP[fieldId].label] = cleanText(character[FIELD_MAP[fieldId].key]);
+                fields[FIELD_MAP[fieldId].label] = cleanText(character[FIELD_MAP[fieldId].key], settings.__collectionCleaningPatterns);
+            }
+            if (enabled && fieldId === 'character_book') {
+                const book = embeddedBookText();
+                if (book) fields['Embedded Lorebook'] = book;
             }
         }
         return { text: fields, type: 'fields', character: character };
@@ -435,7 +744,11 @@ function prepareCharacterContent(rawContent, settings) {
         .map(([fieldId]) => {
             const field = FIELD_MAP[fieldId];
             if (field && character[field.key]) {
-                return `## ${field.label}\n${cleanText(character[field.key])}`;
+                return `## ${field.label}\n${cleanText(character[field.key], settings.__collectionCleaningPatterns)}`;
+            }
+            if (fieldId === 'character_book') {
+                const book = embeddedBookText();
+                return book ? `## Embedded Lorebook\n${book}` : null;
             }
             return null;
         })
@@ -453,14 +766,17 @@ function prepareChatContent(rawContent, settings) {
     const messages = rawContent.messages || rawContent.content;
 
     if (!Array.isArray(messages)) {
-        return { text: cleanText(String(messages)), type: 'text' };
+        return { text: cleanText(String(messages), settings.__collectionCleaningPatterns), type: 'text' };
     }
 
-    // Filter out system messages and empty messages
-    const validMessages = messages.filter(m => m.mes && !m.is_system);
+    // Keep original source positions when filtering messages: chunk metadata
+    // must not refer to the compacted array indices (issue #65).
+    const indexedMessages = messages.map((message, sourceIndex) => ({ message, sourceIndex }))
+        .filter(({ message }) => message.mes && !message.is_system);
+    const validMessages = indexedMessages.map(({ message }) => message);
 
-    // Apply text cleaning to messages
-    const cleanedMessages = cleanMessages(validMessages);
+    // Apply text cleaning without changing source message objects or positions.
+    const cleanedMessages = cleanMessages(validMessages, settings.__collectionCleaningPatterns);
 
     // Normalize messages to have consistent properties for chunking.js
     const normalizedMessages = cleanedMessages.map((m, idx) => ({
@@ -468,8 +784,8 @@ function prepareChatContent(rawContent, settings) {
         mes: m.mes,
         is_user: m.is_user,
         name: m.name,
-        index: idx,
-        id: m.send_date || m.id || idx,
+        index: indexedMessages[idx].sourceIndex,
+        id: m.send_date || m.id || indexedMessages[idx].sourceIndex,
     }));
 
     // For per_message strategy - return array of messages for chunking.js
@@ -501,7 +817,7 @@ function prepareChatContent(rawContent, settings) {
 
     // For adaptive or other text strategies - combine into single text
     const combined = cleanedMessages.map(m => {
-        const speaker = m.is_user ? 'User' : (m.name || 'Character');
+        const speaker = (typeof m.name === 'string' && m.name.trim()) || (m.is_user ? 'User' : 'Character');
         return `[${speaker}]: ${m.mes}`;
     }).join('\n\n');
 
@@ -517,7 +833,7 @@ function prepareUrlContent(rawContent, settings) {
     // Basic text cleaning for web content
     if (typeof text === 'string') {
         // Apply user's cleaning patterns first
-        text = cleanText(text);
+        text = cleanText(text, settings.__collectionCleaningPatterns);
         // Remove excessive whitespace
         text = text.replace(/\n{3,}/g, '\n\n');
         // Remove common web artifacts
@@ -539,7 +855,7 @@ function prepareDocumentContent(rawContent, settings) {
     // Basic text cleaning
     if (typeof text === 'string') {
         // Apply user's cleaning patterns first
-        text = cleanText(text);
+        text = cleanText(text, settings.__collectionCleaningPatterns);
         // Remove excessive whitespace
         text = text.replace(/\n{3,}/g, '\n\n');
         // Trim
@@ -558,7 +874,7 @@ function prepareWikiContent(rawContent, settings) {
     // Wiki content is already formatted with headers from scraper
     if (typeof text === 'string') {
         // Apply user's cleaning patterns first
-        text = cleanText(text);
+        text = cleanText(text, settings.__collectionCleaningPatterns);
         // Remove excessive whitespace
         text = text.replace(/\n{3,}/g, '\n\n');
         // Trim
@@ -569,7 +885,7 @@ function prepareWikiContent(rawContent, settings) {
     if (settings.strategy === 'per_page' && rawContent.pages) {
         return {
             text: rawContent.pages.map(p => ({
-                text: cleanText(`# ${p.title}\n\n${p.content}`),
+                text: cleanText(`# ${p.title}\n\n${p.content}`, settings.__collectionCleaningPatterns),
                 metadata: {
                     pageTitle: p.title,
                 },
@@ -598,7 +914,7 @@ function prepareYouTubeContent(rawContent, settings) {
     // Clean up transcript text
     if (typeof text === 'string') {
         // Apply user's cleaning patterns first
-        text = cleanText(text);
+        text = cleanText(text, settings.__collectionCleaningPatterns);
         // Remove excessive whitespace
         text = text.replace(/\n{3,}/g, '\n\n');
         // Trim
@@ -624,14 +940,12 @@ function generateCollectionId(contentType, source, settings) {
 
     switch (contentType) {
         case 'chat':
-            // Use UUID-based ID (single source of truth)
-            const chatCollectionId = buildChatCollectionId();
-            if (chatCollectionId) {
-                return chatCollectionId;
-            }
-            // Fall through to legacy generation if UUID not available
-            console.warn('VectHare: Chat UUID not available, using legacy ID generation');
-            break;
+            // Only the verified resolver may provide a chat ID, and only for the
+            // live chat. Never invent a name-based or UUID-based fallback when the
+            // binding is absent. An uploaded/pasted transcript (#8) is its own
+            // document collection, never the active chat's.
+            if (source.type === 'current') return buildChatCollectionId();
+            return buildDocumentCollectionId(sourceName, timestamp);
 
         case 'lorebook':
             return buildLorebookCollectionId(sourceName, timestamp);
@@ -789,6 +1103,10 @@ function enrichChunks(chunks, contentType, source, settings, preparedContent, ve
  */
 export async function deleteContentCollection(collectionId) {
     const vecthareSettings = extension_settings.vecthare;
-    await purgeVectorIndex(collectionId, vecthareSettings);
-    console.log(`VectHare: Deleted collection: ${collectionId}`);
+    await withChatCollectionPurgeGuard(collectionId, async () => {
+        if (!await purgeVectorIndex(collectionId, vecthareSettings)) {
+            throw new Error('Backend did not confirm collection purge');
+        }
+    });
+    vhLog(`VectHare: Deleted collection: ${collectionId}`);
 }

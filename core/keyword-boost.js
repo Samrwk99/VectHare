@@ -1,3 +1,4 @@
+import { vhLog } from '../utils/log.js';
 import { porterStemmer } from './bm25-scorer.js';
 import { substituteParams } from '../../../../../script.js';
 
@@ -931,9 +932,16 @@ function normalizeKeyword(kw, defaultWeight = DEFAULT_BASE_WEIGHT) {
  * @param {string} keyword - Keyword to check (lowercased)
  * @returns {boolean}
  */
-function queryHasKeyword(query, keyword) {
+function queryHasKeyword(query, keyword, normalizedQuery = null) {
     if (!query || !keyword) return false;
-    return query.includes(keyword);
+    if (query.includes(keyword)) return true;
+    // #15: keywords are extracted from boundary-normalized text ("state of the
+    // art", "multi word"), so a query that keeps the original punctuation
+    // ("state-of-the-art", "multi_word") has to match them too. Capitalization
+    // is already handled by lowercasing both sides.
+    const haystack = normalizedQuery ?? normalizeTokenBoundaries(query);
+    const needle = normalizeTokenBoundaries(keyword);
+    return Boolean(needle) && haystack.includes(needle);
 }
 
 /**
@@ -983,9 +991,10 @@ export function applyKeywordBoost(results, query, options = {}) {
     } = options;
 
     const queryLower = query.toLowerCase();
+    const queryNormalized = normalizeTokenBoundaries(queryLower);
     const queryTokens = extractQueryTokens(query);
 
-    console.log(`[VectHare Keyword Boost] Starting keyword boost for query: "${query}" (diminishing=${diminishingReturns}, cap=${perKeywordCap})`);
+    vhLog(`[VectHare Keyword Boost] Starting keyword boost for query: "${query}" (diminishing=${diminishingReturns}, cap=${perKeywordCap})`);
 
     const boosted = results.map(result => {
         const rawKeywords = result.keywords || result.metadata?.keywords || [];
@@ -996,7 +1005,7 @@ export function applyKeywordBoost(results, query, options = {}) {
             const normalized = normalizeKeyword(kw);
             if (!normalized) continue;
 
-            if (queryHasKeyword(queryLower, normalized.text)) {
+            if (queryHasKeyword(queryLower, normalized.text, queryNormalized)) {
                 matchedKeywords.push(normalized);
 
                 // Calculate contribution with optional per-keyword cap
@@ -1033,7 +1042,7 @@ export function applyKeywordBoost(results, query, options = {}) {
             const scaleInfo = diminishingReturns
                 ? ` (raw=${rawBoost.toFixed(2)}x, scale=${(MATCH_SCALING_FACTORS[Math.min(matchedKeywords.length, 3)] * 100).toFixed(0)}%)`
                 : '';
-            console.log(`[VectHare Keyword Boost] Result matched ${matchedKeywords.length} keyword(s): [${matchedKeywords.map(k => `${k.text}(${k.weight.toFixed(2)}x)`).join(', ')}] → boost: ${finalBoost.toFixed(2)}x${scaleInfo}, score: ${result.score.toFixed(4)} → ${(result.score * finalBoost).toFixed(4)}`);
+            vhLog(`[VectHare Keyword Boost] Result matched ${matchedKeywords.length} keyword(s): [${matchedKeywords.map(k => `${k.text}(${k.weight.toFixed(2)}x)`).join(', ')}] → boost: ${finalBoost.toFixed(2)}x${scaleInfo}, score: ${result.score.toFixed(4)} → ${(result.score * finalBoost).toFixed(4)}`);
         }
 
         return {
@@ -1055,7 +1064,7 @@ export function applyKeywordBoost(results, query, options = {}) {
     boosted.sort((a, b) => b.score - a.score);
 
     const boostedCount = boosted.filter(r => r.keywordBoosted).length;
-    console.log(`[VectHare Keyword Boost] Applied keyword boosts to ${boostedCount}/${boosted.length} results (diminishing=${diminishingReturns})`);
+    vhLog(`[VectHare Keyword Boost] Applied keyword boosts to ${boostedCount}/${boosted.length} results (diminishing=${diminishingReturns})`);
 
     return boosted;
 }

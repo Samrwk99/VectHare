@@ -1,3 +1,4 @@
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * VECTHARE EMOTION CLASSIFIER
@@ -12,7 +13,7 @@
  * ============================================================================
  */
 
-import { getRequestHeaders } from '../../../../../script.js';
+import { getRequestHeaders, saveSettingsDebounced } from '../../../../../script.js';
 import { extension_settings } from '../../../../extensions.js';
 
 // =============================================================================
@@ -103,7 +104,7 @@ const CACHE_MAX_SIZE = 100;
  */
 export function clearClassifierCache() {
     classifierCache.clear();
-    console.log(`[${MODULE_NAME}] Classifier cache cleared`);
+    vhLog(`[${MODULE_NAME}] Classifier cache cleared`);
 }
 
 /**
@@ -168,7 +169,7 @@ export async function classifyEmotion(text, options = {}) {
         }
         classifierCache.set(cacheKey, result);
 
-        console.log(`[${MODULE_NAME}] Classified as "${result.label}" (${(result.score * 100).toFixed(1)}%)`);
+        vhLog(`[${MODULE_NAME}] Classified as "${result.label}" (${(result.score * 100).toFixed(1)}%)`);
         return result;
     } catch (error) {
         console.error(`[${MODULE_NAME}] Classification error:`, error);
@@ -303,7 +304,57 @@ export function updateClassifierSetting(key, value) {
         clearClassifierCache();
     }
 
-    console.log(`[${MODULE_NAME}] Setting ${settingKey} = ${value}`);
+    vhLog(`[${MODULE_NAME}] Setting ${settingKey} = ${value}`);
+}
+
+// VH-074 follow-up: VectHare keeps an in-memory copy of its settings and writes
+// it back on every save. index.js registers here so a change made through the
+// public API reaches that copy too (otherwise the next save would undo it).
+let settingsMirror = null;
+
+/**
+ * Called by index.js with VectHare's live settings object.
+ * @param {object|null} liveSettings
+ */
+export function registerClassifierSettingsMirror(liveSettings) {
+    settingsMirror = liveSettings && typeof liveSettings === 'object' ? liveSettings : null;
+}
+
+/**
+ * Public setter for Cotton-Tales: changes the classifier settings and saves them.
+ * Only the known keys are accepted, each with its type checked; anything else is
+ * refused and nothing is changed.
+ * @param {{enabled?: boolean, model?: string, useEmbeddingSimilarity?: boolean, customLabels?: string[]}} changes
+ * @returns {{success: boolean, settings?: object, error?: string}}
+ */
+export function setClassifierSettings(changes) {
+    if (!changes || typeof changes !== 'object' || Array.isArray(changes)) {
+        return { success: false, error: 'Expected an object such as { enabled: true, model: "..." }' };
+    }
+    const checks = {
+        enabled: v => typeof v === 'boolean',
+        useEmbeddingSimilarity: v => typeof v === 'boolean',
+        model: v => typeof v === 'string' && v.trim().length > 0 && v.length <= 300,
+        customLabels: v => v === null || (Array.isArray(v) && v.length <= 200 &&
+            v.every(label => typeof label === 'string' && label.length <= 100)),
+    };
+    for (const [key, value] of Object.entries(changes)) {
+        if (!checks[key]) return { success: false, error: `Unknown setting "${key}"` };
+        if (!checks[key](value)) return { success: false, error: `Invalid value for "${key}"` };
+    }
+    const keyMap = {
+        enabled: 'emotion_classifier_enabled',
+        model: 'emotion_classifier_model',
+        useEmbeddingSimilarity: 'emotion_use_similarity',
+        customLabels: 'emotion_custom_labels',
+    };
+    for (const [key, raw] of Object.entries(changes)) {
+        const value = key === 'model' ? raw.trim() : raw;
+        updateClassifierSetting(key, value);
+        if (settingsMirror) settingsMirror[keyMap[key]] = value;
+    }
+    saveSettingsDebounced();
+    return { success: true, settings: getClassifierSettings() };
 }
 
 // =============================================================================
@@ -318,6 +369,7 @@ export const CottonTalesAPI = {
     classifyEmotion,
     testClassifierModel,
     getClassifierSettings,
+    setClassifierSettings,
     clearClassifierCache,
     isCottonTalesInstalled,
     RECOMMENDED_CLASSIFIER_MODELS,
