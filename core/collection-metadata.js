@@ -11,8 +11,12 @@
 
 import { extension_settings } from '../../../../extensions.js';
 import { isQuarantinedChatCollection } from './collection-ids.js';
-import { saveSettingsDebounced } from '../../../../../script.js';
+import { getRequestHeaders, saveSettingsDebounced } from '../../../../../script.js';
 import { parseRegistryKey } from './collection-ids.js';
+import { getModelField } from './providers.js';
+import { getCleaningSettings, getActivePatterns } from './text-cleaning.js';
+import { textgen_types, textgenerationwebui_settings } from '../../../../textgen-settings.js';
+import { oai_settings } from '../../../../openai.js';
 
 // ============================================================================
 // COLLECTION METADATA CRUD
@@ -293,6 +297,178 @@ export function setCollectionMeta(collectionId, data) {
 
     saveSettingsDebounced();
     console.log(`VectHare: Updated metadata for collection ${key}`);
+}
+
+/**
+ * A collection's initial configuration is only known for a verified first
+ * write. An empty backend response alone does not make an old collection new:
+ * its vectors may have been removed, or its storage backend may have changed.
+ */
+export function canRecordInitialVectorizationConfig(collectionId) {
+    if (!collectionId || !ensureCollectionsObject()) return false;
+    const collections = extension_settings.vecthare.collections;
+    const key = resolveStoredCollectionKey(collectionId);
+    const previous = key ? collections[key] : null;
+    if (previous?.initialVectorizationConfig || previous?.createdAt ||
+        (Number(previous?.chunkCount) > 0)) return false;
+
+    const bareId = parseRegistryKey(collectionId).collectionId || collectionId;
+    const registry = extension_settings.vecthare.vecthare_collection_registry || [];
+    return !registry.some(id => (parseRegistryKey(id).collectionId || id) === bareId);
+}
+
+/**
+ * Record the settings used to build the first vectors. This is historical
+ * provenance only; no existing Sync/Repair/RAG behavior is changed.
+ * Do not save credentials, access tokens or operational rate limits.
+ */
+function buildInitialVectorizationConfig(settings, chunking) {
+    const provider = settings.source || 'transformers';
+    const modelField = getModelField(provider);
+    const cleaningApplied = chunking.pipeline !== 'scene-markers';
+    const cleaning = cleaningApplied ? getCleaningSettings() : null;
+    const safeUrl = (value) => {
+        if (!value) return null;
+        try {
+            const text = String(value);
+            const url = new URL(text.includes('://') ? text : `http://${text}`);
+            if (!url.host) return null;
+            url.username = '';
+            url.password = '';
+            url.search = '';
+            url.hash = '';
+            return url.toString();
+        } catch {
+            return null;
+        }
+    };
+
+    const hashInput = chunking.pipeline === 'content-vectorizer'
+        ? 'prepared chunk text'
+        : chunking.pipeline === 'scene-markers'
+            ? 'raw scene text with speaker names'
+            : 'raw chat message text/group text';
+
+    const endpointType = {
+        ollama: textgen_types.OLLAMA,
+        llamacpp: textgen_types.LLAMACPP,
+        vllm: textgen_types.VLLM,
+        koboldcpp: textgen_types.KOBOLDCPP,
+    }[provider];
+    const endpointProvider = ['ollama', 'llamacpp', 'vllm', 'koboldcpp', 'bananabread'].includes(provider);
+    const useAlternateEndpoint = endpointProvider && !!settings.use_alt_endpoint;
+    const effectiveEndpoint = useAlternateEndpoint ? settings.alt_endpoint_url
+        : provider === 'bananabread' ? 'http://localhost:8008'
+        : provider === 'extras' ? extension_settings.apiUrl
+        : endpointType ? textgenerationwebui_settings.server_urls?.[endpointType]
+        : null;
+
+    return {
+        schemaVersion: 1,
+        recordedAt: new Date().toISOString(),
+        embedding: {
+            provider,
+            model: modelField ? (settings[modelField] || null) :
+                (provider === 'koboldcpp' ? (settings.koboldcpp_model || 'koboldcpp') :
+                provider === 'bananabread' ? (settings.bananabread_model || 'bananabread') : null),
+            useAlternateEndpoint,
+            endpoint: safeUrl(effectiveEndpoint),
+            configuredDimensions: settings.vector_backend === 'milvus'
+                ? (settings.milvus_dimensions ?? null) : null,
+            preprocessing: ['webllm', 'koboldcpp', 'bananabread'].includes(provider)
+                ? 'stripHtmlAndMarkdown' : null,
+            ...(provider === 'vertexai' ? {
+                region: oai_settings.vertexai_region || null,
+                authMode: oai_settings.vertexai_auth_mode || null,
+            } : {}),
+        },
+        storage: {
+            backend: settings.vector_backend || 'standard',
+            ...(settings.vector_backend === 'qdrant' ? {
+                multitenancy: !!settings.qdrant_multitenancy,
+                address: safeUrl(settings.qdrant_use_cloud ? settings.qdrant_url
+                    : `${settings.qdrant_host || 'localhost'}:${settings.qdrant_port || 6333}`),
+            } : {}),
+            ...(settings.vector_backend === 'milvus' ? {
+                address: safeUrl(settings.milvus_address ||
+                    `${settings.milvus_host || 'localhost'}:${settings.milvus_port || 19530}`),
+            } : {}),
+        },
+        chunking: JSON.parse(JSON.stringify(chunking)),
+        hashing: { algorithm: 'getStringHash', input: hashInput },
+        textCleaning: {
+            applied: cleaningApplied,
+            preset: cleaning?.selectedPreset || 'none',
+            activePatterns: cleaningApplied
+                ? getActivePatterns().map(({ pattern, flags, replacement }) => ({
+                    pattern, flags: flags || 'g', replacement: replacement || '',
+                })) : [],
+        },
+        keywordExtraction: chunking.pipeline === 'scene-markers' ? null : {
+            level: chunking.keywordLevel ?? settings.keyword_extraction_level ?? 'balanced',
+            baseWeight: chunking.keywordBaseWeight ?? null,
+            customStopwords: settings.custom_stopwords || '',
+        },
+    };
+}
+
+/** A snapshot failure must not block the vectorization it describes. */
+export function createInitialVectorizationConfig(settings, chunking) {
+    try {
+        return buildInitialVectorizationConfig(settings, chunking);
+    } catch (error) {
+        console.warn('VectHare: Could not build initial collection configuration:', error);
+        return null;
+    }
+}
+
+/**
+ * Write a first-vectorization record into the vector backend itself.
+ * Never put this record into extension_settings (a settings-only backup must
+ * not be mistaken for a database collection backup).
+ * The server performs the write-once check against existing backend metadata.
+ */
+export async function saveInitialVectorizationConfig(collectionId, snapshot, settings) {
+    if (!collectionId || !snapshot || !settings) return false;
+    const logicalId = parseRegistryKey(collectionId).collectionId || collectionId;
+    const backend = snapshot.storage?.backend || settings.vector_backend || 'standard';
+    const source = snapshot.embedding?.provider || settings.source || 'transformers';
+    // Use the same model folder identifier as the actual insert adapters.
+    // A descriptive provider fallback (e.g. KoboldCpp) is not a folder name.
+    const modelField = getModelField(source);
+    const model = modelField ? (settings[modelField] || '') : '';
+    const physicalCollectionId = backend === 'qdrant' && snapshot.storage?.multitenancy
+        ? 'vecthare_multitenancy' : backend === 'milvus' ? 'vecthare_main' : logicalId;
+
+    try {
+        // Recording is best-effort; a stalled metadata request must not hang Sync.
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30000);
+        try {
+            const response = await fetch('/api/plugins/similharity/collections/initial-config', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                signal: controller.signal,
+                body: JSON.stringify({
+                    backend, collectionId: logicalId, physicalCollectionId,
+                    source, model, snapshot,
+                }),
+            });
+            if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+            const result = await response.json();
+            if (!result.success || typeof result.saved !== 'boolean') {
+                throw new Error('Backend did not confirm configuration storage');
+            }
+        } finally {
+            clearTimeout(timeout);
+        }
+        // Both a new write and a verified existing record mean provenance is present.
+        return true;
+    } catch (error) {
+        // Metadata storage must not alter the result of a successful vector write.
+        console.error(`VectHare: Initial collection configuration was NOT saved for ${logicalId}:`, error);
+        return false;
+    }
 }
 
 /**

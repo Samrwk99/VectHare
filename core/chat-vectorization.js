@@ -32,6 +32,9 @@ import {
     filterActiveCollections,
     getChatCollectionPolicy,
     applyChatCollectionPolicy,
+    canRecordInitialVectorizationConfig,
+    createInitialVectorizationConfig,
+    saveInitialVectorizationConfig,
 } from './collection-metadata.js';
 import { progressTracker } from '../ui/progress-tracker.js';
 // VectHare+: run control (pause / resume / stop) for vectorization jobs
@@ -740,10 +743,20 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
         // Snapshot groups while the original chat is still active; never read a
         // different chat's messages after a backend await.
         const strategy = settings.chunking_strategy || 'per_message';
+        const wasUnregistered = canRecordInitialVectorizationConfig(collectionId);
+        const initialConfig = wasUnregistered ? createInitialVectorizationConfig(settings, {
+            pipeline: 'sync-chat',
+            strategy,
+            batchSize: settings.batch_size || 4,
+            conversationTurnOrder: settings.conversation_turn_order || 'user_character',
+            keywordLevel: settings.keyword_extraction_level || 'balanced',
+        }) : null;
         const groupedItems = collectGroupedItems(target.messages, settings);
 
-        // NOTE: Registration happens AFTER first successful insert to prevent ghosts
+        // NOTE: Registration happens AFTER first successful insert to prevent ghosts.
+        // A deleted/empty legacy collection must not receive today's settings.
         let isRegistered = false;
+        let initialConfigRecorded = false;
 
         // Step 1: What's already vectorized? (source of truth = DB)
         const existingHashes = new Set(
@@ -946,6 +959,11 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                         progressTracker.updateCurrentItem(`${label} ${itemsProcessed}/${batchSize} - ${phase}: ${embedded}/${total} chunks`);
                     }, getStopSignal());
                     chunksCreated += chunks.length;
+                    // Only an empty collection can receive a first-vectorization record.
+                    // Existing/legacy collections must not be assigned today's settings.
+                    if (existingHashes.size === 0 && wasUnregistered && !initialConfigRecorded) {
+                        initialConfigRecorded = await saveInitialVectorizationConfig(collectionId, initialConfig, settings);
+                    }
 
                     // Register on first successful insert (prevents ghost collections)
                     if (!isRegistered) {

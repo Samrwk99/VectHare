@@ -12,8 +12,13 @@
 
 import { getContentType, getContentTypeDefaults, hasFeature } from './content-types.js';
 import { chunkText } from './chunking.js';
-import { insertVectorItems, purgeVectorIndex } from './core-vector-api.js';
-import { setCollectionMeta, getDefaultDecayForType } from './collection-metadata.js';
+import { DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP } from './constants.js';
+import { insertVectorItems, getSavedHashes, purgeVectorIndex } from './core-vector-api.js';
+import {
+    setCollectionMeta, getDefaultDecayForType,
+    canRecordInitialVectorizationConfig, createInitialVectorizationConfig,
+    saveInitialVectorizationConfig,
+} from './collection-metadata.js';
 import { registerCollection } from './collection-loader.js';
 import { getBackend } from '../backends/backend-manager.js';
 // Import from collection-ids.js - single source of truth for collection ID operations
@@ -64,15 +69,33 @@ export async function vectorizeContent({ contentType, source, settings }) {
         progressTracker.updateProgress(1, 'Loading content...');
         const rawContent = await resolveSource(contentType, source);
 
-        // Step 2: Prepare and chunk
-        progressTracker.updateProgress(2, 'Chunking content...');
-        const preparedContent = await prepareContent(contentType, rawContent, settings);
-        const chunks = await chunkText(preparedContent.text || preparedContent, {
+        // Keep the original chunkText options unchanged; record effective
+        // defaults separately so this metadata change cannot change chunks.
+        const vecthareSettings = extension_settings.vecthare;
+        const chunkOptions = {
             strategy: settings.strategy || type.defaultStrategy,
             chunkSize: settings.chunkSize || type.defaults.chunkSize,
             chunkOverlap: settings.chunkOverlap || type.defaults.chunkOverlap,
             conversationTurnOrder: settings.conversation_turn_order || 'user_character',
+        };
+        const initialConfig = createInitialVectorizationConfig(vecthareSettings, {
+            pipeline: 'content-vectorizer',
+            contentType,
+            ...chunkOptions,
+            chunkSize: chunkOptions.chunkSize === undefined ? DEFAULT_CHUNK_SIZE : chunkOptions.chunkSize,
+            chunkOverlap: chunkOptions.chunkOverlap === undefined ? DEFAULT_CHUNK_OVERLAP : chunkOptions.chunkOverlap,
+            batchSize: 4, // chunkText's default; not passed as an extra option.
+            ...(contentType === 'character' ? {
+                fields: settings.fields || getContentTypeDefaults('character').fields,
+            } : {}),
+            keywordLevel: settings.keywordLevel || 'balanced',
+            keywordBaseWeight: settings.keywordBaseWeight || 1.5,
         });
+
+        // Step 2: Prepare and chunk
+        progressTracker.updateProgress(2, 'Chunking content...');
+        const preparedContent = await prepareContent(contentType, rawContent, settings);
+        const chunks = await chunkText(preparedContent.text || preparedContent, chunkOptions);
 
         if (chunks.length === 0) {
             throw new Error('No chunks generated from content');
@@ -93,8 +116,6 @@ export async function vectorizeContent({ contentType, source, settings }) {
             : generateCollectionId(contentType, source, settings);
         
         // Get full extension settings for keyword extraction (includes custom_stopwords)
-        const vecthareSettings = extension_settings.vecthare;
-        
         const enrichedChunks = enrichChunks(chunks, contentType, source, settings, preparedContent, vecthareSettings);
         const hashedChunks = enrichedChunks.map(chunk => ({
             ...chunk,
@@ -120,6 +141,26 @@ export async function vectorizeContent({ contentType, source, settings }) {
             } catch (_) {}
         }
 
+        // An existing collection without a snapshot is legacy/unknown, not new.
+        // A failed read must not block vectorization or imply an empty collection.
+        let initiallyEmpty = false;
+        if (canRecordInitialVectorizationConfig(collectionId)) {
+            try {
+                initiallyEmpty = (await getSavedHashes(collectionId, vecthareSettings)).length === 0;
+            } catch (error) {
+                console.warn('VectHare: Could not verify first vectorization settings:', error);
+            }
+        }
+
+        // The callback runs after each successfully-written batch. Keep its
+        // persistence promise so partial success also records first settings.
+        let initialConfigSave = null;
+        const recordFirstWrite = () => {
+            if (initiallyEmpty && !initialConfigSave) {
+                initialConfigSave = saveInitialVectorizationConfig(collectionId, initialConfig, vecthareSettings);
+            }
+        };
+
         try {
             if (contentType === 'chat') {
                 beginChatCollectionWrite(collectionId);
@@ -127,6 +168,9 @@ export async function vectorizeContent({ contentType, source, settings }) {
             try {
                 if (contentType === 'chat') recordChatStore(collectionId, vecthareSettings);
                 await insertVectorItems(collectionId, hashedChunks, vecthareSettings, (embedded, total) => {
+            // Insert progress is reported after a successful backend write. Record
+            // the original settings even if a later batch fails or is stopped.
+            if (embedded > 0) recordFirstWrite();
             // Update progress with streaming count
             console.log(`[Content Vectorization] Processing progress callback: ${embedded}/${total}`);
             progressTracker.updateEmbeddingProgress(embedded, total);
@@ -138,6 +182,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
                 if (contentType === 'chat') endChatCollectionWrite(collectionId);
             }
         } catch (error) {
+            if (initialConfigSave) await initialConfigSave;
             // Surface insert errors to the UI so users see why vectorization may have failed
             console.error('VectHare: insertVectorItems failed', error);
             try {
@@ -148,6 +193,12 @@ export async function vectorizeContent({ contentType, source, settings }) {
             } catch (_) {}
             // Re-throw so outer handler records completion state and any callers can react
             throw error;
+        }
+
+        // Also cover backends that return success without a progress callback.
+        if (initiallyEmpty) {
+            recordFirstWrite();
+            await initialConfigSave;
         }
 
         // Save collection metadata

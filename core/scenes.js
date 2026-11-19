@@ -25,6 +25,7 @@ import { substituteParams, getCurrentChatId } from '../../../../../script.js';
 import { getStringHash } from '../../../../utils.js';
 import {
     insertVectorItems,
+    getSavedHashes,
     deleteVectorItems,
 } from './core-vector-api.js';
 import { getChatCollectionId, getTextWithoutAttachments } from './chat-vectorization.js';
@@ -33,6 +34,9 @@ import {
     getChunkMetadata,
     saveChunkMetadata,
     deleteChunkMetadata,
+    canRecordInitialVectorizationConfig,
+    createInitialVectorizationConfig,
+    saveInitialVectorizationConfig,
 } from './collection-metadata.js';
 
 // ============================================================================
@@ -149,6 +153,11 @@ export async function createSceneChunk(start, end, sceneData, settings) {
         return { success: false, error: 'Invalid scene boundaries' };
     }
 
+    const initialConfig = createInitialVectorizationConfig(settings, {
+        pipeline: 'scene-markers',
+        strategy: 'per_scene',
+    });
+
     // Build scene text and compute hash
     // R24: display/embed text stays substituted; the HASH comes from RAW text
     // (reload-stable identity, matches computeSceneHash)
@@ -178,11 +187,20 @@ export async function createSceneChunk(start, end, sceneData, settings) {
     };
 
     try {
+        let initiallyEmpty = false;
+        if (canRecordInitialVectorizationConfig(collectionId)) {
+            try {
+                initiallyEmpty = (await getSavedHashes(collectionId, settings)).length === 0;
+            } catch (error) {
+                console.warn('VectHare Scenes: Could not verify first vectorization settings:', error);
+            }
+        }
         // Insert scene chunk into vector DB
         beginChatCollectionWrite(collectionId);
         try {
             recordChatStore(collectionId, settings);
             await insertVectorItems(collectionId, [sceneChunk], settings);
+            if (initiallyEmpty) await saveInitialVectorizationConfig(collectionId, initialConfig, settings);
         } finally {
             endChatCollectionWrite(collectionId);
         }
