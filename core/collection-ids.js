@@ -13,6 +13,7 @@
 
 import { getContext, extension_settings } from '../../../../extensions.js';
 import { getValidProviderIds } from './providers.js';
+import { vecthareState, persistVectHareStore } from './vecthare-store.js';
 import { getCurrentChatId, chat_metadata, getRequestHeaders, saveSettingsDebounced } from '../../../../../script.js';
 import { getStringHash } from '../../../../utils.js';
 
@@ -124,8 +125,8 @@ const claimMatchesRecord = (claim, id, record) => Boolean(
 
 const sameChat = (a, b) => sameOwner(a.owner, b.owner) && a.chat === b.chat;
 const emptyBindingStore = { version: 1, byCollection: {} };
-const readBindingStore = () => extension_settings.vecthare?.chatCollectionBindings || emptyBindingStore;
-const bindingStore = () => (extension_settings.vecthare.chatCollectionBindings ??= {
+const readBindingStore = () => vecthareState().chatCollectionBindings || emptyBindingStore;
+const bindingStore = () => (vecthareState().chatCollectionBindings ??= {
     version: 1, byCollection: {},
 });
 const entries = () => Object.entries(readBindingStore().byCollection);
@@ -168,6 +169,10 @@ const findBound = (owner, chat) => entries().filter(([, rec]) =>
 export function peekChatCollectionId(ctx = getContext()) {
     const snap = currentSnapshot(ctx);
     if (!snap.owner || !snap.chat) return null;
+    // Phase 3: read-only callers see the staged replacement too, so status
+    // reads and provenance checks describe the collection being written.
+    const staged = activeChatRebuildTarget(ctx);
+    if (staged) return staged;
     const hits = findBound(snap.owner, snap.chat);
     if (hits.length !== 1) return null;
     const [id] = hits[0];
@@ -211,7 +216,7 @@ function quarantine(id, registryKeys = []) {
         status: 'quarantined', stores: old?.stores || storeHints(id, registryKeys),
         createdAt: old?.createdAt || Date.now(),
     };
-    saveSettingsDebounced();
+    persistVectHareStore();
     return true;
 }
 
@@ -222,12 +227,12 @@ export function releaseToQuarantine(id) {
     bindingStore().byCollection[id] = {
         ...rec, owner: null, chat: null, status: 'quarantined',
     };
-    saveSettingsDebounced();
+    persistVectHareStore();
 }
 
 function storeHints(id, keys = []) {
     const relevant = [...new Set([
-        ...(extension_settings.vecthare.vecthare_collection_registry || []),
+        ...(vecthareState().registry || []),
         ...discoveredLegacyKeys, ...keys,
     ])]
         .filter(key => parseRegistryKey(key).collectionId === id)
@@ -398,9 +403,92 @@ function legacyIdBelongsToOtherOwner(id, snap, ctx = getContext()) {
 }
 
 const inflight = new Map();
+// Phase 3: while a confirmed rebuild is staging, this chat's writes go to the
+// replacement collection, but the stored binding still points at the old one.
+// A crash or a failed rebuild therefore leaves the chat on its previous,
+// complete collection; the staged collection is left as an inspectable record.
+let rebuildTarget = null;
+
+/**
+ * Routes this chat's writes to a staged replacement collection.
+ * @param {string} collectionId Staged replacement collection
+ * @param {object} ctx SillyTavern context
+ * @returns {boolean} Whether the redirect was established
+ */
+export function beginChatCollectionRebuild(collectionId, ctx = getContext()) {
+    const snap = currentSnapshot(ctx);
+    if (!snap.owner || !snap.chat || !isVectHareChatCollection(collectionId)) return false;
+    rebuildTarget = { ownerKey: ownerKey(snap.owner), chat: snap.chat, collectionId };
+    return true;
+}
+
+/** Ends the redirect. Always call this, including on failure. */
+export function endChatCollectionRebuild() {
+    rebuildTarget = null;
+}
+
+/** @returns {string|null} The staged collection for the live chat, if any */
+export function activeChatRebuildTarget(ctx = getContext()) {
+    if (!rebuildTarget) return null;
+    const snap = currentSnapshot(ctx);
+    if (!snap.owner || !snap.chat) return null;
+    return ownerKey(snap.owner) === rebuildTarget.ownerKey && snap.chat === rebuildTarget.chat
+        ? rebuildTarget.collectionId : null;
+}
+
+/**
+ * Mints an unused VectHare chat collection identity without binding any chat
+ * to it. Used to stage a replacement collection (Phase 3).
+ * @returns {string} A fresh collection id
+ */
+export function mintChatCollectionId() {
+    return freshId();
+}
+
+/**
+ * Phase 3: binds the live chat to an existing VectHare chat collection that it
+ * verified itself, retiring the collection it replaces. The live chat must
+ * still be the one the caller started from, and the destination must not
+ * already belong to another chat.
+ * @param {string} collectionId Verified replacement collection
+ * @param {string|null} retireId Collection being replaced, quarantined on success
+ * @param {object} ctx SillyTavern context
+ * @returns {Promise<{state: string, collectionId?: string, writable: boolean}>}
+ */
+export async function adoptChatCollection(collectionId, retireId = null, ctx = getContext()) {
+    const snap = currentSnapshot(ctx);
+    if (!snap.owner || !snap.chat || !isVectHareChatCollection(collectionId)) {
+        return { state: 'unbound', writable: false };
+    }
+    const existing = bindingStore().byCollection[collectionId];
+    if (existing?.status === 'active') return { state: 'conflict', writable: false };
+    // Any other active binding for this chat must be the one being retired.
+    const others = findBound(snap.owner, snap.chat).filter(([id]) => id !== collectionId);
+    if (others.some(([id]) => id !== retireId)) return { state: 'conflict', writable: false };
+    // A user-confirmed rebuild deliberately gives this chat a new collection,
+    // so an old read-only claim naming the previous one is recorded as
+    // evidence rather than treated as a copied-file conflict.
+    return await commit(snap, collectionId, {
+        owner: snap.owner,
+        chat: snap.chat,
+        origin: 'rebuild',
+        status: 'active',
+        createdAt: existing?.createdAt || Date.now(),
+        stores: existing?.stores || [],
+    }, retireId, true);
+}
+
+const isVectHareChatCollection = id =>
+    typeof id === 'string' && id.startsWith(COLLECTION_PREFIXES.VECTHARE_CHAT);
+
 export function ensureChatBinding(ctx = getContext(), opts = {}) {
     const snap = currentSnapshot(ctx);
     if (!snap.owner || !snap.chat) return Promise.resolve({ state: 'unbound', writable: false });
+    // Phase 3: a staging rebuild owns this chat's writes until it commits.
+    const staged = activeChatRebuildTarget(ctx);
+    if (staged) {
+        return Promise.resolve({ state: 'active', collectionId: staged, writable: true, staged: true });
+    }
     const create = opts.create !== false;
     const key = JSON.stringify([snap.owner.type, snap.owner.id, snap.chat]);
     if (inflight.has(key)) {
@@ -441,7 +529,7 @@ async function commit(snap, id, rec, retireId = null, allowCopiedClaim = false) 
                 sourceClaimChat: normChat(snap.claim.chat),
             } : {}),
         };
-        saveSettingsDebounced();
+        persistVectHareStore();
         return { state: 'active', collectionId: id, writable: true };
     } catch (error) {
         console.warn('VectHare: Could not persist its own chat binding:', error);
@@ -573,8 +661,8 @@ async function resolveChatBinding(snap, opts = { create: true }) {
     // Legacy collection discovery is limited to old UUID/filename formats.
     const known = new Set([
         ...discoveredLegacyKeys,
-        ...(extension_settings.vecthare.vecthare_collection_registry || []),
-        ...Object.keys(extension_settings.vecthare.collections || {}),
+        ...(vecthareState().registry || []),
+        ...Object.keys(vecthareState().collections || {}),
     ].map(key => parseRegistryKey(key).collectionId));
     const oldNamedId = oldNamedChatCollectionId(snap);
     const oldNamedFilenameId = oldNamedChatCollectionId(snap, snap.chat);
@@ -598,11 +686,10 @@ async function resolveChatBinding(snap, opts = { create: true }) {
         // deterministic old IDs before assuming there is no legacy data.
         // Unknown old renamed-character IDs still require manual recovery.
         const legacyIds = [...new Set(preferredIds)];
-        const { getSavedHashes } = await import('./core-vector-api.js');
         const s = extension_settings.vecthare;
         try {
             for (const legacyId of legacyIds) {
-                const hashes = await getSavedHashes(legacyId, s);
+                const hashes = await hashesIfPresent(legacyId, s);
                 if (!Array.isArray(hashes)) return { state: 'provisional', writable: false };
                 if (hashes.length) return { state: 'provisional', writable: false };
             }
@@ -630,11 +717,11 @@ async function resolveChatBinding(snap, opts = { create: true }) {
         if (!probe.some(store => store.backend === currentStore.backend && store.source === currentStore.source)) {
             probe.push(currentStore);
         }
-        const { getSavedHashes } = await import('./core-vector-api.js');
         const stores = [];
         for (const store of probe) {
             try {
-                const hashes = await getSavedHashes(id, { ...cur, vector_backend: store.backend, source: store.source });
+                const hashes = await hashesIfPresent(id,
+                    { ...cur, vector_backend: store.backend, source: store.source });
                 if (!Array.isArray(hashes)) return { state: 'provisional', writable: false };
                 if (hashes.length) stores.push({ backend: store.backend, source: store.source });
             } catch (error) {
@@ -725,7 +812,7 @@ export function recordChatStore(id, settings) {
     rec.stores ??= [];
     if (!rec.stores.some(s => s.backend === backend && s.source === source && s.destination === destination)) {
         rec.stores.push({ backend, source, destination });
-        saveSettingsDebounced();
+        persistVectHareStore();
     }
 }
 
@@ -754,7 +841,7 @@ export function onChatBindingRenamed({ avatarId, groupId, oldFileName, newFileNa
     if (findBound(owner, newName).length) return;
     rec.renamedChats = [...new Set([...(rec.renamedChats || []), oldName])];
     rec.chat = newName;
-    saveSettingsDebounced();
+    persistVectHareStore();
 }
 export function onCharacterBindingRenamed(oldAvatar, newAvatar) {
     if (!oldAvatar || !newAvatar || oldAvatar === newAvatar) return;
@@ -764,7 +851,7 @@ export function onCharacterBindingRenamed(oldAvatar, newAvatar) {
         rec.renamedOwners = [...new Set([...(rec.renamedOwners || []), ownerKey(rec.owner)])];
         rec.owner = { type: 'character', id: String(newAvatar) };
     }
-    saveSettingsDebounced();
+    persistVectHareStore();
 }
 
 export async function anotherChatClaimsCollection(rec, id, ctx = getContext()) {
@@ -793,7 +880,7 @@ export function deletionCandidates(filename, type) {
 }
 export function removeChatBinding(id) {
     delete bindingStore().byCollection[id];
-    saveSettingsDebounced();
+    persistVectHareStore();
 }
 
 
@@ -1055,6 +1142,28 @@ export function matchesPatterns(collectionId, patterns) {
         idLower === pattern ||
         idLower.includes(pattern)
     );
+}
+
+/**
+ * Hashes for a collection, but only once the backend confirms the collection
+ * is actually there. Probing with getSavedHashes() alone goes through ST's
+ * native list endpoint, which CREATES a Vectra index that does not exist - so
+ * probing for a collection produced an empty collection as a side effect.
+ * @param {string} id Collection identifier
+ * @param {object} settings Settings addressing the destination to check
+ * @returns {Promise<string[]|null>} Hashes, [] when confirmed absent, or null
+ *   when existence could not be verified (callers fail closed on null)
+ */
+async function hashesIfPresent(id, settings) {
+    const { verifyPhysicalCollectionExistence } = await import('./collection-metadata.js');
+    const verified = await verifyPhysicalCollectionExistence(id, settings, {
+        backend: settings?.vector_backend,
+        source: settings?.source,
+    });
+    if (verified.existence === 'absent') return [];
+    if (verified.existence !== 'present') return null;
+    const { getSavedHashes } = await import('./core-vector-api.js');
+    return await getSavedHashes(id, settings);
 }
 
 /**

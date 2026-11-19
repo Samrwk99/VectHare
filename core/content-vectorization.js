@@ -101,6 +101,41 @@ export async function vectorizeContent({ contentType, source, settings }) {
         if (!binding?.writable || !binding.collectionId || source.content !== getContext()?.chat) {
             throw new Error('The selected chat identity changed; live chat vectorization cancelled');
         }
+        // A confirmed rebuild writes and verifies a REPLACEMENT collection and
+        // only then switches this chat to it. Nothing is purged first, and a
+        // failure leaves the existing collection in use.
+        if (settings.rebuildChatCollection === true) {
+            const { rebuildChatCollection } = await import('./chat-vectorization.js');
+            const rebuild = await rebuildChatCollection(liveSettings,
+                liveSettings.embedding_batch_size || 5);
+            if (!rebuild.success) throw new Error(rebuild.reason || 'The rebuild did not complete.');
+            if (source.content !== getContext()?.chat || String(source.id) !== String(getContext()?.chatId)) {
+                // The vectors and the binding are already committed and
+                // verified; only the Content Vectorizer's own notes are skipped.
+                return { ...rebuild, handledBySyncChat: true, rebuilt: true,
+                    chunkCount: rebuild.chunkCount };
+            }
+            const carried = new Set(rebuild.carriedFields || []);
+            setCollectionMeta(rebuild.collectionId, {
+                contentType,
+                sourceName: source.name || source.filename || source.id || contentType,
+                scope: settings.scope || 'global',
+                ...(Number.isSafeInteger(rebuild.chunkCount) ? { chunkCount: rebuild.chunkCount } : {}),
+                createdAt: new Date().toISOString(),
+                settings: {
+                    strategy: settings.strategy,
+                    conversation_turn_order: settings.conversation_turn_order,
+                    chunkSize: settings.chunkSize,
+                },
+                // A carried-over decay preference is the user's; don't reset it.
+                ...(carried.has('temporalDecay') ? {} : {
+                    temporalDecay: settings.temporalDecay || getDefaultDecayForType(contentType),
+                }),
+            });
+            return { ...rebuild, handledBySyncChat: true, rebuilt: true,
+                chunkCount: rebuild.chunkCount };
+        }
+
         const { vectorizeAll } = await import('./chat-vectorization.js');
         const result = await vectorizeAll(liveSettings, liveSettings.embedding_batch_size || 5, true);
         if (!result?.success) throw new Error('Live chat Sync was stopped or could not complete');

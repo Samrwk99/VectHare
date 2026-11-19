@@ -25,7 +25,7 @@ import { debounce } from '../../../utils.js';
 import { debounce_timeout } from '../../../constants.js';
 
 // VectHare modules - Core
-import { synchronizeChat, rearrangeChat, vectorizeAll, repairChatVectors, checkUnfinishedVectorization, isVectorizationActive, isChatSynchronizationActive, consumeWasLastRunStoppedByUser, flagImmediateReverseSync, parseRegistryKey, noteChatSwitch } from './core/chat-vectorization.js';
+import { synchronizeChat, rearrangeChat, vectorizeAll, repairChatVectors, checkUnfinishedVectorization, isVectorizationActive, isChatSynchronizationActive, consumeWasLastRunStoppedByUser, flagImmediateReverseSync, parseRegistryKey, noteChatSwitch, planChatVectorizationRebuild } from './core/chat-vectorization.js';
 import {
     ensureChatBinding, chatFileExists, deletionCandidates, anotherChatClaimsCollection,
     removeChatBinding, releaseToQuarantine, onChatBindingRenamed, onCharacterBindingRenamed,
@@ -35,12 +35,13 @@ import {
 import { purgeAllVectorIndexes, purgeVectorIndex } from './core/core-vector-api.js';
 import { getChatCollectionId } from './core/chat-vectorization.js';
 import { getDefaultDecaySettings } from './core/temporal-decay.js';
-import { migrateOldEnabledKeys, deleteCollectionMeta } from './core/collection-metadata.js';
-import { clearCollectionRegistry, discoverExistingCollections, getCollectionRegistry, unregisterCollection } from './core/collection-loader.js';
+import { migrateOldEnabledKeys, deleteCollectionMeta, forgetAllLegacyCollectionKeys } from './core/collection-metadata.js';
+import { loadVectHareStore, vecthareState, storeStatus, flushVectHareStore, resetVectHareStore } from './core/vecthare-store.js';
+import { clearCollectionRegistry, discoverExistingCollections, getCollectionRegistry, unregisterCollection, doesChatHaveVectors } from './core/collection-loader.js';
 import AsyncUtils from './utils/async-utils.js';
 
 // VectHare modules - UI
-import { renderSettings, openDiagnosticsModal, loadWebLlmModels, updateWebLlmStatus, refreshAutoSyncCheckbox, updateContinueVectorizationButton, updateVectorizationStatus } from './ui/ui-manager.js';
+import { renderSettings, openDiagnosticsModal, loadWebLlmModels, updateWebLlmStatus, refreshAutoSyncCheckbox, updateContinueVectorizationButton, updateVectorizationStatus, openPurgeOptionsDialog } from './ui/ui-manager.js';
 import { progressTracker } from './ui/progress-tracker.js';
 import { initializeVisualizer } from './ui/chunk-visualizer.js';
 import { initializeDatabaseBrowser } from './ui/database-browser.js';
@@ -144,7 +145,9 @@ const defaultSettings = {
     // Collection-level metadata (managed by collection-metadata.js)
     collections: {},
 
-    // Collection registry (list of known collection IDs)
+    // Collection registry and collection metadata are stored in VectHare's own
+    // collections.json (see core/vecthare-store.js); these defaults remain only
+    // so a fresh install has the expected shape before the store loads.
     vecthare_collection_registry: [],
 
     // World Info Integration
@@ -200,11 +203,103 @@ async function onRepairClick() {
 }
 
 /**
+ * Action: Vectorize. For a chat that already has a vector collection this is a
+ * REBUILD, so it asks first and only then opens the normal vectorization setup;
+ * pressing Vectorize there runs the staged, verify-before-switch replacement.
+ * A genuinely unvectorized chat keeps the normal first-vectorization flow.
+ */
+async function onVectorizeContentClick() {
+    const { openContentVectorizer } = await import('./ui/content-vectorizer.js');
+
+    let existing = null;
+    try {
+        existing = await doesChatHaveVectors(settings);
+    } catch (error) {
+        // An unreadable collection is not evidence that there is none: ask
+        // rather than silently starting a first vectorization over the top.
+        console.warn('VectHare: Could not check this chat for existing vectors:', error);
+        existing = { hasVectors: true, chunkCount: 0, collectionId: null };
+    }
+
+    if (!existing?.hasVectors) {
+        openContentVectorizer();
+        return;
+    }
+
+    let annotationCount = 0;
+    try {
+        if (existing.collectionId) {
+            const { getAnnotatedChunkHashes } = await import('./core/collection-metadata.js');
+            annotationCount = getAnnotatedChunkHashes(existing.collectionId).length;
+        }
+    } catch (error) {
+        console.warn('VectHare: Could not count this collection\'s annotations:', error);
+    }
+
+    const { callGenericPopup, POPUP_TYPE } = await import('../../../popup.js');
+    const chunks = existing.chunkCount
+        ? `<p>This chat already has an existing vector collection (<strong>${existing.chunkCount}</strong> chunks).</p>`
+        : '<p>This chat already has an existing vector collection.</p>';
+    const disclosure = annotationCount
+        ? `<p style="margin-top:10px;"><small>Your collection settings carry over. ` +
+          `${annotationCount} per-chunk annotation(s) carry over only for chunks the rebuild ` +
+          `reproduces; any that cannot be matched stay with the old collection.</small></p>`
+        : '<p style="margin-top:10px;"><small>Your collection settings carry over.</small></p>';
+    const confirmed = await callGenericPopup(
+        `<div style="text-align:left;">
+            <h3>Re-vectorize This Chat?</h3>
+            ${chunks}
+            <p style="margin-top:10px;">Would you like to rebuild its vectors using newly selected
+            vectorization settings?</p>
+            <p style="margin-top:10px;">Rebuilding will replace the existing embeddings and update
+            the collection's saved configuration and metadata after the replacement succeeds.</p>
+            <p style="margin-top:10px;"><strong>Your original chat messages will not be modified.</strong></p>
+            ${disclosure}
+        </div>`,
+        POPUP_TYPE.CONFIRM, '',
+        { okButton: 'Yes, Configure Rebuild', cancelButton: 'No, Cancel' });
+
+    if (!confirmed) return;
+    openContentVectorizer('chat', { rebuild: true });
+}
+
+/**
  * Action: Vectorize all messages in current chat (full sync: repair + backlog)
  */
 async function onVectorizeAllClick() {
     invalidateSavedVectorizationStatus();
     try {
+        // Phase 3: if the selected settings cannot be used on this chat's
+        // existing collection, offer a confirmed rebuild instead of silently
+        // reusing the old settings or writing into an incompatible collection.
+        let plan;
+        try {
+            plan = await planChatVectorizationRebuild(settings);
+        } catch (error) {
+            console.error('VectHare: Rebuild preflight failed:', error);
+            plan = { action: 'vectorize' }; // never block the normal path on a preflight bug
+        }
+
+        if (plan.action === 'blocked') {
+            toastr.error(plan.reason, 'VectHare');
+            return;
+        }
+
+        // Sync is incremental only. Settings that cannot be used on this
+        // chat's existing collection are a rebuild decision, which belongs to
+        // Vectorize and its confirmation - never to a Sync press.
+        if (plan.action === 'rebuild') {
+            const differences = (plan.differences || [])
+                .map(difference => `${difference.field}: was "${difference.saved}", now "${difference.intended}"`)
+                .join('; ');
+            toastr.error(
+                `${plan.reason}${differences ? ` (${differences})` : ''} ` +
+                'Sync only adds missing messages with the collection\'s own saved settings. ' +
+                'To use the newly selected settings, press Vectorize and confirm the rebuild.',
+                'VectHare: Sync not possible', { timeOut: 0, extendedTimeOut: 0 });
+            return;
+        }
+
         await vectorizeAll(settings, getBatchSize());
     } finally {
         // Re-read after the run, including Stop, failure and partial completion.
@@ -566,12 +661,10 @@ async function offerResumeOfUnfinishedVectorization() {
  * Action: Full purge - removes VectHare-owned collections and resets VectHare settings.
  */
 async function onPurgeClick() {
-    const confirmed = confirm(
-        'WARNING: This will delete all registered VectHare-owned vectors and reset VectHare settings.\n\n' +
-        'This cannot be undone. Continue?'
-    );
-
-    if (!confirmed) {
+    // Two choices, both of which delete VectHare's own vectors and metadata;
+    // only one of them also resets VectHare's settings.
+    const choice = await openPurgeOptionsDialog();
+    if (!choice) {
         toastr.info('Purge cancelled');
         return;
     }
@@ -580,25 +673,46 @@ async function onPurgeClick() {
         // Delete only VectHare-owned collections, never ST's shared folder.
         const result = await purgeAllVectorIndexes(settings);
         if (!result.success) {
-            throw new Error(`Some collections could not be safely purged (${result.skipped.length} unverified/failed). VectHare settings were retained so this can be retried.`);
+            throw new Error(`Some collections could not be safely purged (${result.skipped.length} unverified/failed). ` +
+                'Nothing was removed from VectHare\'s metadata or settings, so this can be retried.');
         }
 
-        // Clear extension_settings.vecthare only after confirmed cleanup.
-        for (const key in extension_settings.vecthare) {
-            if (key !== 'enabled') {
-                delete extension_settings.vecthare[key];
+        // Only now, with the purge confirmed complete, clear VectHare's own
+        // metadata document: registry, collection records, chunk annotations,
+        // chat bindings and policies. Without this a purge left ghost rows.
+        const reset = await resetVectHareStore();
+        if (!reset.success) {
+            throw new Error(`Vectors were purged, but VectHare's metadata could not be cleared: ${reset.reason}`);
+        }
+
+        // Obsolete pre-migration keys must go too, or the startup migration
+        // rebuilds collection records from them.
+        const legacy = forgetAllLegacyCollectionKeys();
+
+        if (choice === 'all') {
+            // Reset VectHare's own settings namespace, keeping only whether the
+            // extension is enabled. Nothing outside extension_settings.vecthare
+            // is touched.
+            for (const key in extension_settings.vecthare) {
+                if (key !== 'enabled') delete extension_settings.vecthare[key];
             }
         }
 
-        // 3. Save settings
         const { saveSettingsDebounced } = await import('../../../../script.js');
         saveSettingsDebounced();
 
-        toastr.success('VectHare-owned vector data purged', 'Purge Complete');
+        const detail = [
+            `${result.removed} collection(s) purged`,
+            reset.verified ? 'metadata cleared and verified empty' : `metadata cleared (${reset.reason})`,
+            legacy.length ? `${legacy.length} obsolete key(s) removed` : '',
+            choice === 'all' ? 'settings reset to defaults' : 'settings kept',
+        ].filter(Boolean).join(' · ');
+        toastr.success(detail, 'Purge Complete', { timeOut: 12000 });
 
     } catch (error) {
         console.error('VectHare: Purge failed:', error);
-        toastr.error('Purge failed: ' + error.message);
+        toastr.error('Purge failed: ' + error.message, 'VectHare',
+            { timeOut: 0, extendedTimeOut: 0 });
     }
 }
 
@@ -612,12 +726,28 @@ function onRunDiagnosticsClick() {
 /**
  * Initialize VectHare extension
  */
+// Phase 1: a debounced metadata write must not be lost when the tab closes.
+// Best effort only - the store is also flushed after runs and before commits.
+window.addEventListener('beforeunload', () => { void flushVectHareStore(); });
+
 jQuery(async () => {
     console.log('VectHare: Initializing...');
 
     // Load saved settings
     if (!extension_settings.vecthare) {
         extension_settings.vecthare = defaultSettings;
+    }
+
+    // Phase 1: VectHare's own collection state (registry, collection metadata,
+    // chat bindings, chunk annotations) lives in its own per-user file. Load or
+    // migrate it BEFORE anything reads collection metadata, and report rather
+    // than silently continuing on an empty store.
+    const storeState = await loadVectHareStore();
+    if (storeState.status !== 'ready') {
+        console.error(`VectHare: Collection metadata storage is unavailable - ${storeState.detail}`);
+        toastr.error(`VectHare could not load its collection metadata: ${storeState.detail}. ` +
+            'Operations that change collections are blocked until this is resolved.',
+            'VectHare', { timeOut: 0, extendedTimeOut: 0 });
     }
 
     // Merge saved settings with defaults
@@ -630,7 +760,7 @@ jQuery(async () => {
         },
         collections: {
             ...defaultSettings.collections,
-            ...extension_settings.vecthare.collections
+            ...vecthareState().collections
         }
     };
 
@@ -643,6 +773,13 @@ jQuery(async () => {
     // Render UI
     renderSettings('extensions_settings2', settings, {
         onVectorizeAll: onVectorizeAllClick,
+        onVectorizeContent: () => { void onVectorizeContentClick(); },
+        // Called after a committed rebuild: the cached status refers to a
+        // collection the chat is no longer bound to.
+        onCollectionsChanged: () => {
+            invalidateSavedVectorizationStatus();
+            void offerResumeOfUnfinishedVectorization();
+        },
         // R12: Repair Chunks is now a DISTINCT operation - repairs existing
         // vectors only, never continues the backlog (use Sync Chat for that)
         onContinueVectorization: onRepairClick,

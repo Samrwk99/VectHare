@@ -58,19 +58,21 @@ export class StandardBackend extends VectorBackend {
     }
 
     async healthCheck() {
-        // Native ST API is always available if ST is running
+        // Native ST API is always available if ST is running.
+        //
+        // This used to probe a collection named '__vecthare_health_check__'.
+        // Listing a Vectra collection that does not exist CREATES it, so every
+        // health check left an empty index folder behind under the active
+        // source, which then showed up as a collection. The endpoint is asked
+        // for nothing instead: a reachable route rejects the empty request
+        // (400), an absent one answers 404, and nothing is created either way.
         try {
-            // Quick test: try to list a non-existent collection (should return empty array or error)
             const response = await fetch('/api/vector/list', {
                 method: 'POST',
                 headers: getRequestHeaders(),
-                body: JSON.stringify({
-                    collectionId: '__vecthare_health_check__',
-                    source: 'transformers'
-                }),
+                body: JSON.stringify({}),
             });
-            // 200 = works (empty collection), 500 = syntax error (no collection), both are "working"
-            return response.status === 200 || response.status === 500;
+            return response.status !== 404;
         } catch (error) {
             console.error('[Standard] Health check failed:', error);
             return false;
@@ -377,6 +379,9 @@ export class StandardBackend extends VectorBackend {
                 collectionId,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
+                // Set only by a deletion the user explicitly confirmed for a
+                // collection VectHare cannot prove is its own.
+                ...(settings.__vecthareConfirmUnowned === true ? { confirmUnowned: true } : {}),
             }),
         });
 

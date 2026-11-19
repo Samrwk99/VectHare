@@ -11,6 +11,7 @@
  */
 
 import { extension_settings, getContext } from '../../../../extensions.js';
+import { vecthareState } from './vecthare-store.js';
 import { queryCollection } from './core-vector-api.js';
 import {
     getCollectionMeta,
@@ -144,7 +145,7 @@ export async function getSemanticWorldInfoEntries(recentMessages, activeEntries,
 async function getEnabledLorebookCollections(settings, searchContext) {
     const collections = [];
     const collectionRegistry = applyChatCollectionPolicy(
-        settings.vecthare_collection_registry || [],
+        vecthareState().registry || [],
         searchContext?.currentChatId || getCurrentChatId(),
         { lorebooksOnly: true }
     );
@@ -228,7 +229,7 @@ function deduplicateWithActiveEntries(semanticEntries, activeEntries) {
  */
 export function isLorebookVectorized(lorebookName, settings) {
     const collectionId = buildLorebookCollectionId(lorebookName, 'global');
-    const collectionRegistry = settings.vecthare_collection_registry || [];
+    const collectionRegistry = vecthareState().registry || [];
     return collectionRegistry.includes(collectionId);
 }
 

@@ -46,7 +46,22 @@ let sourceData = null;
  * Opens the content vectorizer modal
  * @param {string} initialType - Optional initial content type to select
  */
-export function openContentVectorizer(initialType = null) {
+let rebuildChatRequested = false;
+
+/**
+ * Whether this session of the Content Vectorizer was opened to rebuild the
+ * current chat's existing collection.
+ * @returns {boolean}
+ */
+export function isChatRebuildRequested() {
+    return rebuildChatRequested;
+}
+
+export function openContentVectorizer(initialType = null, options = {}) {
+    // A rebuild is only ever requested by the Vectorize entry point, after the
+    // user confirmed it for a chat that already has a collection. It is never
+    // inferred here, and it never survives into the next time this opens.
+    rebuildChatRequested = options.rebuild === true && initialType === 'chat';
     currentContentType = initialType;
     currentSettings = initialType ? { ...getContentTypeDefaults(initialType) } : {};
     if (initialType === 'chat') {
@@ -77,6 +92,8 @@ export function openContentVectorizer(initialType = null) {
  * Closes the modal
  */
 export function closeContentVectorizer() {
+    // A confirmed rebuild never outlives the window it was confirmed for.
+    rebuildChatRequested = false;
     $('#vecthare_content_vectorizer_modal').fadeOut(200, function() {
         $(this).remove();
     });
@@ -2471,7 +2488,13 @@ async function startVectorization() {
     // { type: 'current' } - the property mismatch made this whole flow DEAD
     // CODE: the confirm dialog never appeared and re-vectorizing silently
     // stacked vectors on top of existing ones.
-    if (currentContentType === 'chat' && source.type === 'current') {
+    // A confirmed rebuild uses the staged replacement path instead: a new
+    // collection is written and verified before the chat is switched to it,
+    // and nothing is purged first. The old Replace All purge is skipped.
+    const rebuildingThisChat = rebuildChatRequested &&
+        currentContentType === 'chat' && source.type === 'current';
+
+    if (!rebuildingThisChat && currentContentType === 'chat' && source.type === 'current') {
         try {
             // Resolve legacy or copied-branch ownership before checking for
             // existing vectors; otherwise Replace All can miss the collection.
@@ -2592,10 +2615,37 @@ async function startVectorization() {
         const result = await vectorizeContent({
             contentType: currentContentType,
             source: source,
-            settings: currentSettings,
+            settings: rebuildingThisChat
+                ? { ...currentSettings, rebuildChatCollection: true }
+                : currentSettings,
         });
 
-        if (!result.handledBySyncChat) {
+        if (result.rebuilt) {
+            // The confirmation covered this one replacement; a further rebuild
+            // is confirmed again from Vectorize.
+            rebuildChatRequested = false;
+            const notes = [];
+            if (result.carriedFields?.length) notes.push('your collection settings were kept');
+            if (result.annotationsTransferred) {
+                notes.push(`${result.annotationsTransferred} chunk annotation(s) carried over`);
+            }
+            if (result.annotationsNotTransferred) {
+                notes.push(`${result.annotationsNotTransferred} could not be matched to a rebuilt chunk`);
+            }
+            toastr.success(
+                `Rebuilt this chat's vectors (${result.chunkCount} chunks)` +
+                `${notes.length ? ` - ${notes.join('; ')}` : ''}. ` +
+                'The previous collection was kept in Database Browser.',
+                'VectHare', { timeOut: 12000 });
+            // The chat is now bound to a different collection: refresh the
+            // read-only configuration display and the cached status.
+            try {
+                const { refreshAfterChatCollectionRebuild } = await import('./ui-manager.js');
+                refreshAfterChatCollectionRebuild();
+            } catch (error) {
+                console.warn('VectHare: Post-rebuild UI refresh failed:', error);
+            }
+        } else if (!result.handledBySyncChat) {
             toastr.success(`Vectorized ${result.chunkCount} chunks`, 'VectHare');
         }
         replaceRollback = null;

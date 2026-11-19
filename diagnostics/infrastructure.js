@@ -68,13 +68,16 @@ function getPluginProviderParams(settings) {
  */
 export async function checkVectorsExtension() {
     try {
+        // Reachability only. This used to list a collection named 'test':
+        // listing a Vectra collection that does not exist CREATES it, so
+        // running Diagnostics left an empty 'test' index folder behind under
+        // the active source. Asking for nothing answers the same question -
+        // a reachable route rejects the empty request, an absent one 404s -
+        // and creates nothing.
         const response = await fetch('/api/vector/list', {
             method: 'POST',
             headers: getRequestHeaders(),
-            body: JSON.stringify({
-                collectionId: 'test',
-                source: 'transformers'
-            })
+            body: JSON.stringify({})
         });
 
         if (response.status === 404) {
@@ -117,12 +120,17 @@ export async function checkBackendEndpoints(settings) {
     // This check tests "do endpoints respond?" not "does my provider work?"
     const source = 'transformers';
 
+    // No collectionId in any of these: this check asks whether each endpoint
+    // responds, and naming a collection made the storage-backed ones create an
+    // index folder ('vecthare_diag') as a side effect. The check only
+    // distinguishes 404 from any other answer, so an incomplete request
+    // reports exactly the same thing without writing anything.
     const endpoints = [
-        { name: 'list', method: 'POST', url: '/api/vector/list', body: { collectionId: 'vecthare_diag', source } },
-        { name: 'query', method: 'POST', url: '/api/vector/query', body: { collectionId: 'vecthare_diag', searchText: 'test', topK: 1, source } },
-        { name: 'insert', method: 'POST', url: '/api/vector/insert', body: { collectionId: 'vecthare_diag', items: [], source } },
-        { name: 'delete', method: 'POST', url: '/api/vector/delete', body: { collectionId: 'vecthare_diag', hashes: [], source } },
-        { name: 'purge', method: 'POST', url: '/api/vector/purge', body: { collectionId: 'vecthare_diag_nonexistent' } },
+        { name: 'list', method: 'POST', url: '/api/vector/list', body: { source } },
+        { name: 'query', method: 'POST', url: '/api/vector/query', body: { searchText: 'test', topK: 1, source } },
+        { name: 'insert', method: 'POST', url: '/api/vector/insert', body: { items: [], source } },
+        { name: 'delete', method: 'POST', url: '/api/vector/delete', body: { hashes: [], source } },
+        { name: 'purge', method: 'POST', url: '/api/vector/purge', body: {} },
     ];
 
     for (const endpoint of endpoints) {
@@ -260,10 +268,13 @@ export async function checkPluginEndpoints() {
     const pluginEndpoints = [
         { name: 'collections', method: 'GET', url: `/api/plugins/similharity/collections` },
         { name: 'sources', method: 'GET', url: '/api/plugins/similharity/sources' },
+        // No collectionId: the plugin's Vectra handlers open the index for the
+        // id they are given, and opening one that does not exist creates it.
+        // This check only distinguishes 404 from any other answer.
         { name: 'chunks/list', method: 'POST', url: '/api/plugins/similharity/chunks/list',
-          body: { backend: 'vectra', collectionId: 'vecthare_diag', source: testSource, limit: 1 } },
+          body: { backend: 'vectra', source: testSource, limit: 1 } },
         { name: 'chunks/query', method: 'POST', url: '/api/plugins/similharity/chunks/query',
-          body: { backend: 'vectra', collectionId: 'vecthare_diag', searchText: 'test', topK: 1, source: testSource } },
+          body: { backend: 'vectra', searchText: 'test', topK: 1, source: testSource } },
         { name: 'backend/health', method: 'GET', url: '/api/plugins/similharity/backend/health/vectra' },
     ];
 

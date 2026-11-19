@@ -16,16 +16,20 @@ import {
   setCollectionEnabled,
   registerCollection,
   unregisterCollection,
-  clearCollectionRegistry,
   deleteCollection,
+  deleteCollectionMetadataOnly,
+  regenerateCollectionMetadata,
+  getCollectionRegistry,
+  invalidateCollectionInventory,
 } from "../core/collection-loader.js";
+import { parseRegistryKey } from "../core/collection-ids.js";
+import { storeStatus, reloadVectHareStore } from "../core/vecthare-store.js";
 import {
   purgeVectorIndex,
   queryMultipleCollections,
 } from "../core/core-vector-api.js";
 import { getRequestHeaders, getCurrentChatId, eventSource, event_types } from "../../../../../script.js";
 import {
-  cleanupOrphanedMeta,
   deleteCollectionMeta,
   getCollectionConditions,
   setCollectionConditions,
@@ -60,6 +64,9 @@ import {
   addCollectionToChatPolicy,
   removeCollectionFromChatPolicy,
   isCollectionSelectedForChat,
+  getAllChunkMetadata,
+  getAnnotatedChunkHashes,
+  readInitialVectorizationConfig,
 } from "../core/collection-metadata.js";
 import { getContext } from "../../../../extensions.js";
 import {
@@ -113,6 +120,9 @@ let browserState = {
   availableKeywords: [],
   // PNG export state
   pendingPngExport: null,
+  // Key of the collection whose Metadata window is open, so a refresh can
+  // bring it up to date instead of leaving stale values on screen.
+  openMetadataKey: null,
 };
 
 // Event binding flags (module-level for proper reset on modal close)
@@ -500,30 +510,53 @@ function bindBrowserEvents() {
     renderCollections();
   });
 
-  // Resync button - clears registry and rescans from disk
+  // Resync - a READ-ONLY refresh of the whole Browser state. It re-reads
+  // VectHare's authoritative metadata document, drops the cached backend
+  // inventory, re-checks physical existence at each entry's own recorded
+  // destination, and rebuilds the list, the labels, the buttons, the open
+  // Metadata window and the footer counts. It deletes nothing, regenerates
+  // nothing, vectorizes nothing and never touches a chat binding - so it needs
+  // no confirmation. It used to clear the registry first, which was a
+  // destructive step a display refresh has no business taking.
   $("#vecthare_reset_registry").on("click", async function (e) {
     e.stopPropagation();
     e.preventDefault();
 
-    const confirmed = confirm(
-      "This will clear the collection registry and rescan from disk.\n\n" +
-        "Any ghost entries (collections that no longer exist on disk) will be removed.\n\n" +
-        "Continue?",
-    );
-
-    if (!confirmed) return;
+    const button = $(this);
+    if (button.prop("disabled")) return;
+    const original = button.html();
+    button.prop("disabled", true).html('<i class="fa-solid fa-arrows-rotate fa-spin"></i> Resyncing');
 
     try {
-      // Clear the registry
-      clearCollectionRegistry();
+      await refreshCollections({ reloadStore: true, invalidateInventory: true });
 
-      // Refresh collections (will rediscover from disk)
-      await refreshCollections();
+      const rows = browserState.collections || [];
+      const physical = rows.filter((c) => c.existence === "present").length;
+      const metadataOnly = rows.filter((c) => c.presence === "metadata-only").length;
+      const unresolved = rows.length - physical - metadataOnly;
+      // Same buckets as the footer, so the message and the counts agree.
+      const reload = browserState.lastStoreReload;
 
-      toastr.success("Registry cleared and resynced from disk", "VectHare");
+      if (reload && reload.reloaded === false && reload.reason) {
+        // The list is still rebuilt from the working copy, but say plainly
+        // that the stored document itself was not re-read.
+        toastr.warning(
+          `Resynced backends, but VectHare's metadata file was not re-read: ${reload.reason}`,
+          "VectHare",
+          { timeOut: 0, extendedTimeOut: 0 },
+        );
+      } else {
+        toastr.success(
+          `Resynced: ${physical} collection(s), ${metadataOnly} metadata-only` +
+            `${unresolved ? `, ${unresolved} unresolved` : ""}`,
+          "VectHare",
+        );
+      }
     } catch (error) {
       console.error("VectHare: Failed to resync", error);
       toastr.error(`Failed to resync: ${error.message}`, "VectHare");
+    } finally {
+      button.prop("disabled", false).html(original);
     }
   });
 
@@ -664,20 +697,35 @@ function switchTab(tabName) {
 /**
  * Refreshes collections from storage
  */
-async function refreshCollections() {
+async function refreshCollections(options = {}) {
   try {
-    browserState.collections = await loadAllCollections(browserState.settings);
-
-    // Clean up orphaned metadata entries (collections that no longer exist)
-    const actualIds = browserState.collections.map((c) => c.id);
-    const cleanupResult = cleanupOrphanedMeta(actualIds);
-    if (cleanupResult.removed > 0) {
-      console.log(
-        `VectHare: Cleaned up ${cleanupResult.removed} orphaned metadata entries`,
-      );
+    // Resync asks for the authoritative metadata document to be re-read and
+    // the cached backend inventory to be dropped, so the rebuilt list comes
+    // from what is actually persisted and actually present - never from the
+    // in-memory working copy or from counts gathered before a change. Both
+    // are read-only with respect to stored state.
+    if (options.invalidateInventory) invalidateCollectionInventory();
+    if (options.reloadStore) {
+      const reload = await reloadVectHareStore();
+      browserState.lastStoreReload = reload;
+      if (!reload.reloaded && reload.reason) {
+        console.warn(`VectHare: Metadata was not re-read (${reload.reason})`);
+      }
     }
 
+    // Read-only: a Browser refresh (and Resync) reports what the backends
+    // hold and what VectHare has stored, and writes nothing - no registry
+    // pruning, no re-registration, no metadata cleanup.
+    browserState.collections = await loadAllCollections(browserState.settings, true,
+        { readOnly: true });
+
+    // Phase 2: refreshing the Browser no longer deletes "orphaned" metadata.
+    // A backend error or an incomplete listing must never be read as absence,
+    // and metadata-only records have to stay visible so they can be inspected
+    // and removed deliberately (View Metadata / Delete Metadata).
+
     renderCollections();
+    await refreshOpenMetadataDialog();
   } catch (error) {
     console.error("VectHare: Failed to load collections", error);
     $("#vecthare_collections_list").html(`
@@ -751,7 +799,7 @@ function renderCollections() {
                 <small>Vectorize some chat messages to create collections!</small>
             </div>
         `);
-    updateStats(0, 0);
+    updateStats([]);
     return;
   }
 
@@ -763,8 +811,7 @@ function renderCollections() {
   bindCollectionCardEvents();
 
   // Update stats
-  const totalChunks = filtered.reduce((sum, c) => sum + c.chunkCount, 0);
-  updateStats(filtered.length, totalChunks);
+  updateStats(filtered);
 }
 
 /**
@@ -803,6 +850,55 @@ function renderCollectionCard(collection) {
   const statusBadge = collection.enabled
     ? '<span class="vecthare-badge vecthare-badge-success">Active</span>'
     : '<span class="vecthare-badge vecthare-badge-muted">Paused</span>';
+
+  // What an explicit existence check at the recorded destination established.
+  const presence = collection.presence || "unverified";
+  // A row with no VectHare marker at all is reported as what it is rather than
+  // as ambiguous ownership.
+  const notVectHare = collection.metadataRecord?.foreign === true;
+  const presenceBadge =
+    {
+      empty:
+        '<span class="vecthare-badge vecthare-badge-muted" title="The physical collection exists at its recorded destination and has a verified count of zero chunks.">Empty Collection</span>',
+      "count-unverified":
+        '<span class="vecthare-badge vecthare-badge-muted" title="The physical collection exists, but its chunk count could not be trusted.">Exists — Count Unverified</span>',
+      "metadata-only":
+        '<span class="vecthare-badge vecthare-badge-muted" title="The physical collection was confirmed absent at its recorded destination, and VectHare\'s metadata file holds a validated record for it.">Metadata Only</span>',
+      "invalid-metadata":
+        '<span class="vecthare-badge vecthare-badge-muted" title="This entry is not a usable VectHare metadata record: the record is unreadable, records no backend-qualified destination, or exists only as a discovered name. It is listed for inspection; its actions are withheld.">Invalid Metadata</span>',
+      unverified:
+        '<span class="vecthare-badge vecthare-badge-muted" title="The recorded destination could not be checked. Nothing is assumed, and no destructive action is offered.">Unverified</span>',
+      "ownership-unverified":
+        '<span class="vecthare-badge vecthare-badge-muted" title="A record exists, but nothing establishes it as VectHare\'s own, or its binding is ambiguous. Destructive actions are withheld.">Ownership Unverified</span>',
+      "not-vecthare": '<span class="vecthare-badge vecthare-badge-muted" title="This collection is not VectHare\'s: it carries no VectHare marker, VectHare recorded no vectorization configuration for it and no chat is bound to it. It was most likely created by SillyTavern itself or another extension. VectHare lists it for information and will not modify or delete it.">Not VectHare-Owned</span>',
+    }[notVectHare && presence === "ownership-unverified" ? "not-vecthare" : presence] || "";
+
+  // Which actions this state may offer. A record is never treated as a real
+  // collection without a confirmed existence answer.
+  const physicallyPresent = ["present", "empty", "count-unverified"].includes(presence);
+  // Only a confirmed absence with a validated VectHare metadata record is
+  // metadata-only; an invalid or unowned record is visible but acts on nothing.
+  const metadataOnly = presence === "metadata-only";
+  // An unowned record whose collection is CONFIRMED ABSENT can still have
+  // VectHare's own local record removed: that touches no vectors and no other
+  // extension's data, so ownership is not what is at stake - confirmed absence
+  // is, and it is re-checked before anything is removed.
+  // Delete Metadata also clears an unreadable or stale VectHare entry once the
+  // collection is confirmed absent - otherwise such a row can be neither
+  // regenerated (nothing to rebuild from) nor removed, and sits there forever.
+  const localRecordOnly =
+    (presence === "ownership-unverified" || presence === "invalid-metadata") &&
+    collection.existence === "absent";
+  const blocked = ["unverified", "ownership-unverified", "invalid-metadata"].includes(presence);
+  const canUseCollectionActions = physicallyPresent;
+  // A collection whose ownership VectHare cannot prove is still the user's to
+  // delete when the destination itself is proven: it exists at the exact
+  // recorded destination and that destination is recorded for this identity.
+  // It takes its own, explicit confirmation - see the delete handler.
+  const deletableOnUserAuthority = presence === "ownership-unverified" &&
+    collection.existence === "present" && collection.destinationQualified === true;
+  const canDeleteCollection =
+    (physicallyPresent && presence !== "ownership-unverified") || deletableOnUserAuthority;
 
   // Activation badge (shows triggers or conditions)
   const activationSummary = getCollectionActivationSummary(collection.id);
@@ -870,6 +966,7 @@ function renderCollectionCard(collection) {
                     ${typeIcon} ${collection.name}
                 </span>
                 <div class="vecthare-collection-badges">
+                    ${presenceBadge}
                     ${scopeBadge}
                     ${backendBadge}
                     ${sourceBadge}
@@ -884,8 +981,19 @@ function renderCollectionCard(collection) {
                 <span>${collection.chunkCount} chunks</span>
                 <span>ID: ${collection.id}</span>
             </div>
+            ${
+              collection.presenceDetail && presence !== "present"
+                ? `<div class="vecthare-collection-meta"><small>${escapeHtml(collection.presenceDetail)}</small></div>`
+                : ""
+            }
 
             <div class="vecthare-collection-actions">
+                ${
+                  // Collection actions require a CONFIRMED physical
+                  // collection. Metadata-only and unverified rows get
+                  // metadata actions only.
+                  canUseCollectionActions
+                    ? `
                 <button class="vecthare-btn-sm vecthare-action-toggle"
                         data-collection-key="${uniqueKey}"
                         data-enabled="${collection.enabled}">
@@ -953,13 +1061,455 @@ function renderCollectionCard(collection) {
                         </button>
                     </div>
                 </div>
+                `
+                    : ""
+                }
+                <button class="vecthare-btn-sm vecthare-action-view-metadata"
+                        data-collection-key="${uniqueKey}"
+                        title="Inspect VectHare's stored metadata for this collection">
+                    ${icons.eye(16)} View Metadata
+                </button>
+                <button class="vecthare-btn-sm vecthare-action-regenerate-metadata"
+                        data-collection-key="${uniqueKey}"
+                        ${blocked ? "disabled" : ""}
+                        title="${blocked
+                          ? presence === "invalid-metadata"
+                            ? "This entry is not a usable VectHare metadata record, so there is nothing to recover from."
+                            : "The recorded destination could not be verified, so nothing can be recovered safely."
+                          : "Refresh local metadata that can be independently verified. Never vectorizes."}">
+                    ${icons.rotateCcw ? icons.rotateCcw(16) : ""} Regenerate Metadata
+                </button>
+                ${
+                  metadataOnly || localRecordOnly
+                    ? `
+                <button class="vecthare-btn-sm vecthare-btn-danger vecthare-action-delete-metadata"
+                        data-collection-key="${uniqueKey}"
+                        title="${localRecordOnly
+                          ? "Remove only VectHare's own local record for this confirmed-absent collection. No vectors are touched."
+                          : "Remove VectHare's leftover metadata for this confirmed-absent collection"}">
+                    ${icons.trash(16)} Delete Metadata
+                </button>
+                `
+                    : canDeleteCollection
+                      ? `
                 <button class="vecthare-btn-sm vecthare-btn-danger vecthare-action-delete"
                         data-collection-key="${uniqueKey}">
+                    ${icons.trash(16)} Delete Collection
+                </button>
+                `
+                      : `
+                <button class="vecthare-btn-sm vecthare-btn-danger" disabled
+                        title="${presence === "ownership-unverified"
+                          ? notVectHare
+                            ? "This is not a VectHare collection, so VectHare will not delete it. Remove it with whatever created it."
+                            : "Nothing establishes this record as VectHare's own; resolve that before deleting anything."
+                          : presence === "invalid-metadata"
+                            ? "This entry is not a usable VectHare metadata record, and its destination could not be verified, so VectHare will not act on it. Open View Metadata to see what it holds."
+                            : "The recorded destination could not be verified; deletion is withheld."}">
                     ${icons.trash(16)} Delete
                 </button>
+                `
+                }
             </div>
         </div>
     `;
+}
+
+/**
+ * Phase 2: gathers everything VectHare has stored about one collection, plus
+ * what the backend can confirm, for the View Metadata window. Read-only: this
+ * never writes, and never presents a local record as backend-verified.
+ * @param {object} collection Collection entry from loadAllCollections()
+ * @returns {Promise<object>} Inspection report
+ */
+async function collectMetadataReport(collection) {
+  const registryKey = collection.registryKey || collection.id;
+  const destinationSettings = {
+    ...browserState.settings,
+    vector_backend: collection.backend,
+    source: collection.source,
+  };
+
+  const report = {
+    collectionId: collection.id,
+    registryKey,
+    displayName: collection.name,
+    registered: getCollectionRegistry().some(
+      (key) => (parseRegistryKey(key).collectionId || key) === collection.id,
+    ),
+    presence: collection.presence || "unverified",
+    presenceDetail: collection.presenceDetail || "",
+    existence: collection.existence || "unverified",
+    chunkCount: collection.chunkCount,
+    chunkCountTrusted: collection.countTrusted === true,
+    // Source-of-truth facts: what VectHare's own metadata file actually holds
+    // for this identity, and where the destination below came from.
+    metadataRecord: collection.metadataRecord || {
+      present: false, key: null, source: "none", fieldCount: 0,
+      malformed: false, ownershipValidated: false,
+    },
+    destinationQualified: collection.destinationQualified === true,
+    destinationOrigin: collection.destinationOrigin || "assumed",
+    // The destination that was actually checked, as recorded for this entry.
+    destinationChecked: {
+      backend: collection.backend || "unknown",
+      source: collection.source || "unknown",
+      model: collection.model || "(none recorded)",
+    },
+    destination: {
+      backend: collection.backend || "unknown",
+      source: collection.source || "unknown",
+      model: collection.model || "(default)",
+    },
+    binding: collection.boundChat
+      ? {
+          ownerType: collection.boundChat.owner?.type || "unknown",
+          ownerId: collection.boundChat.owner?.id || "unknown",
+          chatFile: collection.boundChat.chat || "unknown",
+        }
+      : null,
+    quarantined: Boolean(collection.quarantined),
+    localMetadata: getCollectionMeta(registryKey) || getCollectionMeta(collection.id) || {},
+    // Only annotations actually scoped to THIS entry. getAllChunkMetadata()
+    // falls back to shared (legacy, unscoped) records, which made every entry
+    // claim annotations that do not belong to it and that deleting its
+    // metadata would not remove.
+    annotationCount: getAnnotatedChunkHashes(collection.id).length,
+    originalConfiguration: null,
+    originalConfigurationStatus: "unknown",
+    ledger: "unknown",
+    storeStatus: storeStatus(),
+  };
+
+  // The authoritative original vectorization configuration is backend-resident;
+  // it is read here, never reconstructed or edited.
+  try {
+    const saved = await readInitialVectorizationConfig(collection.id, destinationSettings, {
+      backend: collection.backend,
+      source: collection.source,
+    });
+    report.originalConfigurationStatus = saved.status;
+    if (saved.status === "valid" && saved.config) {
+      report.originalConfiguration = {
+        provider: saved.config.embedding?.provider,
+        model: saved.config.embedding?.model,
+        dimensions: saved.config.embedding?.dimensions,
+        grouping: saved.config.chunking?.strategy,
+        groupSize: saved.config.chunking?.batchSize,
+        cleaning: saved.config.chunking?.cleaning ?? saved.config.cleaning,
+        identityLedger: saved.config.identityLedger === 1,
+        recordedAt: saved.config.recordedAt,
+      };
+      report.ledger = saved.config.identityLedger === 1 ? "enabled" : "not used";
+    }
+  } catch (error) {
+    report.originalConfigurationStatus = `unreadable (${error.message})`;
+  }
+
+  return report;
+}
+
+/**
+ * Sets the Metadata window's Delete button to whichever operation this entry's
+ * state actually allows - the same decision the card makes, so the window can
+ * never offer a deletion the card withholds.
+ * @param {object} collection Collection entry from loadAllCollections()
+ */
+function updateMetadataDeleteButton(collection) {
+  const button = $("#vecthare_metadata_delete");
+  if (!button.length) return;
+
+  // Local-only reset: available whenever VectHare holds a readable record for
+  // this entry, whether or not the collection still exists.
+  const record = collection.metadataRecord;
+  const metaButton = $("#vecthare_metadata_delete_meta");
+  const hasReadableRecord = record?.present === true && record.malformed !== true;
+  // An unreadable entry can be cleared once the collection is confirmed
+  // absent: it is matched by its key, not by its contents, and nothing but
+  // VectHare's own state is removed.
+  const absenceKnown = collection.existence === "present" || collection.existence === "absent";
+  // An unreadable entry is matched by its key, not its contents, so it can be
+  // cleared whenever the destination is known - absent (clearing a ghost) or
+  // present (clearing a broken record so Regenerate can rebuild it).
+  const clearableUnreadable = record?.malformed === true && absenceKnown;
+  if ((hasReadableRecord && absenceKnown) || clearableUnreadable) {
+    metaButton.prop("disabled", false).text("Delete Metadata").attr("title",
+      collection.existence === "present"
+        ? "Remove only VectHare's own records for this entry. The collection and its vectors are not touched."
+        : clearableUnreadable
+          ? "Clear this unreadable VectHare entry. The collection is confirmed absent and no vectors are deleted."
+          : "Remove VectHare's own records for this confirmed-absent collection. No vectors are deleted.");
+  } else {
+    metaButton.prop("disabled", true).text("Delete Metadata").attr("title",
+      record?.present !== true
+        ? "VectHare holds no record of its own for this entry, so there is nothing to remove."
+        : "The recorded destination could not be checked, so VectHare's records are kept.");
+  }
+
+  const presence = collection.presence || "unverified";
+  const physicallyPresent = ["present", "empty", "count-unverified"].includes(presence);
+  const notVectHare = collection.metadataRecord?.foreign === true;
+  // Mirrors the card exactly, including the user-authority case for a
+  // collection too old to carry VectHare's ownership markers.
+  const canDeleteCollection =
+    (physicallyPresent && presence !== "ownership-unverified") ||
+    (presence === "ownership-unverified" && collection.existence === "present" &&
+      collection.destinationQualified === true);
+  const canDeleteMetadata = presence === "metadata-only" ||
+    (presence === "ownership-unverified" && collection.existence === "absent");
+
+  if (canDeleteCollection) {
+    button.prop("disabled", false).removeAttr("title")
+      .data("action", "vecthare-action-delete")
+      .text("Delete Collection");
+  } else if (canDeleteMetadata) {
+    // The local-only button beside it already covers this case; keep the
+    // collection button disabled rather than offering the same thing twice.
+    button.prop("disabled", true).data("action", null)
+      .attr("title", "There is no physical collection to delete - use Delete Metadata.")
+      .text("Delete Collection");
+  } else {
+    button.prop("disabled", true).data("action", null)
+      .attr("title", notVectHare
+        ? "This is not a VectHare collection, so VectHare will not delete it."
+        : presence === "invalid-metadata"
+          ? "This entry is not a usable VectHare metadata record, so VectHare will not act on it."
+          : "The recorded destination could not be verified, so deletion is withheld.")
+      .text("Delete");
+  }
+}
+
+/**
+ * Opens the View Metadata window for one collection.
+ * @param {object} collection Collection entry from loadAllCollections()
+ */
+async function openMetadataDialog(collection) {
+  if ($("#vecthare_metadata_modal").length === 0) {
+    $("body").append(`
+            <div id="vecthare_metadata_modal" class="vecthare-modal">
+                <div class="vecthare-modal-content vecthare-rename-dialog popup">
+                    <div class="vecthare-modal-header">
+                        <h3>Collection Metadata</h3>
+                        <button class="vecthare-btn-icon" id="vecthare_metadata_close">✕</button>
+                    </div>
+                    <div class="vecthare-rename-body" id="vecthare_metadata_body"></div>
+                    <div class="vecthare-modal-footer">
+                        <button class="vecthare-btn" id="vecthare_metadata_json">Show raw JSON</button>
+                        <button class="vecthare-btn vecthare-btn-danger" id="vecthare_metadata_delete_meta"></button>
+                        <button class="vecthare-btn vecthare-btn-danger" id="vecthare_metadata_delete"></button>
+                        <button class="vecthare-btn" id="vecthare_metadata_done">Close</button>
+                    </div>
+                </div>
+            </div>
+        `);
+    $("#vecthare_metadata_close, #vecthare_metadata_done").on("click", () => {
+      browserState.openMetadataKey = null;
+      $("#vecthare_metadata_modal").removeClass("active").hide();
+    });
+    $("#vecthare_metadata_modal").on("mousedown touchstart", (e) => e.stopPropagation());
+    $("#vecthare_metadata_modal").on("click", function (e) {
+      if (e.target === this) {
+        browserState.openMetadataKey = null;
+        $(this).removeClass("active").hide();
+      }
+    });
+    $("#vecthare_metadata_json").on("click", function () {
+      const pane = $("#vecthare_metadata_raw");
+      pane.toggle();
+      $(this).text(pane.is(":visible") ? "Hide raw JSON" : "Show raw JSON");
+    });
+    // Local-only reset: removes VectHare's own records for this entry and
+    // deletes no vectors. Offered even while the collection exists, so the
+    // entry can be cleared and then rebuilt with Regenerate Metadata.
+    $("#vecthare_metadata_delete_meta").on("click", async function () {
+      if ($(this).prop("disabled")) return;
+      const collection = findCollectionByKey(browserState.openMetadataKey);
+      if (!collection) return;
+      const present = collection.existence === "present";
+      const confirmed = confirm(
+        `Delete VectHare's metadata for "${collection.name}"?\n\n` +
+          (present
+            ? "The collection itself is NOT deleted - its vectors stay exactly where they are. " +
+              "Only VectHare's own records for it are removed.\n\n"
+            : "The physical collection was confirmed absent at its recorded destination.\n\n") +
+          "Removed: registry entry, collection metadata and preferences, chat binding, " +
+          "this collection's chunk annotations and its identity ledger.\n\n" +
+          "Regenerate Metadata can afterwards recover only what it can verify at the " +
+          "destination - the registry entry and the chunk count. Your annotations, the chat " +
+          "binding and the identity ledger are NOT recoverable.\n\n" +
+          `Press OK for "Yes, Delete Metadata" or Cancel for "No, Cancel".`,
+      );
+      if (!confirmed) return;
+
+      const button = $(this);
+      button.prop("disabled", true);
+      try {
+        const result = await deleteCollectionMetadataOnly(
+          collection.id,
+          {
+            ...browserState.settings,
+            vector_backend: collection.backend,
+            source: collection.source,
+          },
+          collection.registryKey,
+          { model: collection.model || "", allowWhilePresent: present },
+        );
+        await refreshCollections({ reloadStore: true, invalidateInventory: true });
+        if (result.success) {
+          toastr.success(
+            `Removed VectHare's metadata for "${collection.name}" ` +
+              `(${result.removed.join(", ") || "nothing left to remove"})` +
+              `${result.verified ? " - verified gone from VectHare's metadata file" : ""}` +
+              `${present ? ". The collection itself was not touched." : ""}`,
+            "VectHare",
+            { timeOut: 12000 },
+          );
+        } else {
+          toastr.error(
+            `Metadata was not fully removed: ${result.errors.join(", ")}`,
+            "VectHare",
+            { timeOut: 0, extendedTimeOut: 0 },
+          );
+        }
+      } catch (error) {
+        console.error("VectHare: Metadata reset failed", error);
+        toastr.error(`Metadata reset failed: ${error.message}`, "VectHare");
+      } finally {
+        button.prop("disabled", false);
+      }
+    });
+
+    // Deliberately not a third deletion path: this closes the window and
+    // triggers the very button this entry's card offers, so Delete Collection
+    // and Delete Metadata keep their own confirmations, verification and
+    // cleanup exactly as they are.
+    $("#vecthare_metadata_delete").on("click", function () {
+      if ($(this).prop("disabled")) return;
+      const key = browserState.openMetadataKey;
+      const action = $(this).data("action");
+      if (!key || !action) return;
+      const card = $(`.${action}`).filter(function () {
+        return $(this).data("collection-key") === key;
+      }).first();
+      browserState.openMetadataKey = null;
+      $("#vecthare_metadata_modal").removeClass("active").hide();
+      if (card.length) card.trigger("click");
+      else toastr.warning("Reopen Database Browser and try the deletion from the collection card.", "VectHare");
+    });
+  }
+
+  // Remembered so a refresh (Resync, a deletion, a regeneration) can bring
+  // this window up to date instead of leaving stale values on screen.
+  browserState.openMetadataKey = collection.registryKey || collection.id;
+  updateMetadataDeleteButton(collection);
+
+  const body = $("#vecthare_metadata_body");
+  body.html("<p>Reading metadata…</p>");
+  $("#vecthare_metadata_modal").addClass("active").show();
+
+  let report;
+  try {
+    report = await collectMetadataReport(collection);
+  } catch (error) {
+    body.html(`<p>Could not read metadata: ${escapeHtml(error.message)}</p>`);
+    return;
+  }
+
+  const stateLabel = {
+    present: "Collection Exists",
+    empty: "Empty Collection",
+    "count-unverified": "Collection Exists — Count Unverified",
+    "metadata-only": "Metadata Only",
+    "invalid-metadata": "Invalid Metadata",
+    unverified: "Unverified",
+    "ownership-unverified": report.metadataRecord?.foreign
+      ? "Not VectHare-Owned" : "Ownership Unverified",
+  }[report.presence] || "Unverified";
+  const presenceText = {
+    present: "The physical collection exists at its recorded destination.",
+    empty: "The physical collection exists at its recorded destination and has a verified count of zero chunks.",
+    "count-unverified": "The physical collection exists at its recorded destination, but its chunk count could not be trusted.",
+    "metadata-only": "The physical collection was confirmed absent at its recorded destination, and VectHare's metadata file holds a validated record for it.",
+    "invalid-metadata": "This entry is not a usable VectHare metadata record. It is shown so it can be inspected, and VectHare will not act on it.",
+    unverified: "The recorded destination could not be checked, so nothing is assumed about this collection.",
+    "ownership-unverified": report.metadataRecord?.foreign
+      ? "This collection carries no VectHare marker: no VectHare-style name, no vectorization configuration recorded by VectHare and no chat bound to it. It was most likely created by SillyTavern itself or by another extension, so VectHare lists it for information and will not modify or delete it."
+      : "A record exists, but nothing establishes it as VectHare's own, or its binding is ambiguous, so destructive actions are withheld.",
+  }[report.presence] || "";
+
+  const row = (label, value) =>
+    `<div class="vecthare-collection-meta"><span>${escapeHtml(label)}</span><span>${escapeHtml(
+      value === undefined || value === null || value === "" ? "—" : String(value),
+    )}</span></div>`;
+
+  const original = report.originalConfiguration;
+  const checked = `${report.destinationChecked.backend} / ${report.destinationChecked.source}` +
+    `${report.destinationChecked.model && report.destinationChecked.model !== "(none recorded)"
+      ? ` / ${report.destinationChecked.model}` : ""}`;
+
+  body.html(`
+    <p><strong>${escapeHtml(report.displayName)}</strong></p>
+    <p><strong>${escapeHtml(stateLabel)}</strong></p>
+    <p><small>${escapeHtml(presenceText)}${report.presenceDetail && !["metadata-only", "empty", "invalid-metadata"].includes(report.presence) ? " " + escapeHtml(report.presenceDetail) : ""}</small></p>
+    <p><strong>Stored in VectHare's metadata file</strong></p>
+    ${row("Metadata record", report.metadataRecord.malformed
+      ? "present but unreadable"
+      : report.metadataRecord.present
+        ? `present (${report.metadataRecord.source})`
+        : "none - this identity has no VectHare metadata record")}
+    ${report.metadataRecord.present && !report.metadataRecord.malformed
+      ? row("Record key", report.metadataRecord.key) + row("Record fields stored", report.metadataRecord.fieldCount)
+      : ""}
+    ${row("Ownership validated", report.metadataRecord.ownershipValidated
+      ? "yes"
+      : report.metadataRecord.foreign
+        ? "no - not a VectHare collection (most likely SillyTavern's own or another extension's)"
+        : "no")}
+    ${row("Collection ID", report.collectionId)}
+    ${row("Registry key", report.registryKey)}
+    ${row("In registry", report.registered ? "yes" : "no")}
+    ${row("Backend recorded", report.destinationQualified
+      ? report.destination.backend
+      : `${report.destination.backend} (not recorded - assumed)`)}
+    ${row("Embedding source recorded", report.destinationQualified
+      ? report.destination.source
+      : `${report.destination.source} (not recorded - assumed)`)}
+    ${row("Model noted", report.destination.model)}
+    ${row("Chat binding", report.binding
+      ? `${report.binding.ownerType} ${report.binding.ownerId} · ${report.binding.chatFile}`
+      : report.quarantined ? "preserved, no current chat" : "none recorded")}
+    ${row("Local annotations", report.annotationCount)}
+    <p><strong>Not stored metadata - read from the backend this session</strong></p>
+    ${row("Destination checked", checked)}
+    ${row("Destination came from", report.destinationOrigin === "registry-key"
+      ? "VectHare's registry key (stored)"
+      : report.destinationOrigin === "backend-query"
+        ? "a backend query (not stored metadata)"
+        : "neither - assumed default")}
+    ${row("Existence result", report.existence)}
+    ${row("Chunks counted", report.chunkCountTrusted
+      ? report.chunkCount : `${report.chunkCount} (not verified)`)}
+    ${row("Identity ledger", report.ledger)}
+    ${row("Original configuration (backend record)", report.originalConfigurationStatus)}
+    ${report.originalConfigurationStatus !== "valid"
+      ? `<div class="vecthare-collection-meta"><small>No authoritative creation record was found at the destination, so the backend, source and model above are VectHare's own notes or this session's lookup, not verified original vectorization settings.</small></div>`
+      : ""}
+    ${original ? `
+      ${row("  provider (verified)", original.provider)}
+      ${row("  model (verified)", original.model)}
+      ${row("  dimensions (verified)", original.dimensions)}
+      ${row("  grouping (verified)", original.grouping)}
+      ${row("  group size (verified)", original.groupSize)}
+      ${row("  recorded at", original.recordedAt)}
+    ` : ""}
+    ${report.storeStatus.status !== "ready"
+      ? `<p><small>VectHare's metadata storage is ${escapeHtml(report.storeStatus.status)}: ${escapeHtml(report.storeStatus.detail)}</small></p>`
+      : ""}
+    <pre id="vecthare_metadata_raw" style="display:none;max-height:240px;overflow:auto;white-space:pre-wrap;"></pre>
+  `);
+  // Read-only: set as text so stored values can never be interpreted as markup.
+  $("#vecthare_metadata_raw").text(JSON.stringify(report, null, 2));
+  $("#vecthare_metadata_json").text("Show raw JSON");
 }
 
 /**
@@ -1092,9 +1642,32 @@ function bindCollectionCardEvents() {
 
       if (!collection) return;
 
+      const emptyButPresent =
+        collection.presence === "empty" ||
+        (collection.existence === "present" && collection.countTrusted === true &&
+          !collection.chunkCount);
+      // An old collection from before VectHare recorded ownership cannot be
+      // proven to be VectHare's. The destination is proven, so the user is the
+      // one who can say whether it is theirs - asked plainly, once, naming the
+      // exact destination that will be deleted.
+      const onUserAuthority = collection.presence === "ownership-unverified" &&
+        collection.existence === "present";
       const confirmed = confirm(
         `Delete collection "${collection.name}"?\n\n` +
-          `This will remove ${collection.chunkCount} chunks from the vector index.\n` +
+          (onUserAuthority
+            ? "VectHare cannot verify that this collection is its own - it carries no VectHare " +
+              "marker, and VectHare holds no original vectorization record for it. That is normal " +
+              "for a collection created before VectHare recorded this, but it also means VectHare " +
+              "cannot rule out that it belongs to SillyTavern or another extension.\n\n" +
+              `Destination to be deleted: ${collection.backend || "unknown"} / ` +
+              `${collection.source || "unknown"}${collection.model ? ` / ${collection.model}` : ""} / ` +
+              `${collection.id}\n\n` +
+              "Only continue if you recognise this as yours to delete.\n\n"
+            : "") +
+          (emptyButPresent
+            ? "This collection exists at its recorded destination and holds no chunks. " +
+              "It will be removed from the backend together with VectHare's metadata for it.\n"
+            : `This will remove ${collection.chunkCount} chunks from the vector index.\n`) +
           `This action cannot be undone.`,
       );
 
@@ -1112,15 +1685,27 @@ function bindCollectionCardEvents() {
           collection.id,
           collectionSettings,
           collection.registryKey,
+          // Set only here, only after the explicit confirmation above.
+          { userConfirmedUnownedDeletion: onUserAuthority },
         );
 
+        // Always reload, from the persisted document and a fresh backend
+        // inventory: a row only disappears when deletion AND the metadata
+        // cleanup actually completed, and a pending cleanup must stay visible.
+        await refreshCollections({ reloadStore: true, invalidateInventory: true });
+
         if (result.success) {
-          // A partial purge must stay visible so it can be retried.
-          browserState.collections = browserState.collections.filter(
-            (c) => (c.registryKey || c.id) !== collectionKey,
+          toastr.success(
+            `Deleted collection "${collection.name}" and its VectHare metadata`,
+            "VectHare",
           );
-          renderCollections();
-          toastr.success(`Deleted collection "${collection.name}"`, "VectHare");
+        } else if (result.vectorsDeleted && result.absenceVerified) {
+          toastr.error(
+            `Vectors were deleted but the metadata cleanup did not finish: ${result.errors.join(", ")}. ` +
+              "The entry is kept as a pending cleanup.",
+            "VectHare",
+            { timeOut: 0, extendedTimeOut: 0 },
+          );
         } else {
           toastr.warning(
             `Partial deletion: ${result.errors.join(", ")}`,
@@ -1130,6 +1715,150 @@ function bindCollectionCardEvents() {
       } catch (error) {
         console.error("VectHare: Failed to delete collection", error);
         toastr.error(`Failed to delete collection: ${error.message}`, "VectHare");
+      }
+    });
+
+  // Phase 2: inspect VectHare's stored metadata for a collection
+  $(".vecthare-action-view-metadata")
+    .off("click")
+    .on("click", async function (e) {
+      e.stopPropagation();
+      const collection = findCollectionByKey($(this).data("collection-key"));
+      if (!collection) return;
+      await openMetadataDialog(collection);
+    });
+
+  // Phase 2: remove leftover metadata for a confirmed-absent collection.
+  // This deletes no vectors; it makes the chat look never-vectorized again.
+  $(".vecthare-action-delete-metadata")
+    .off("click")
+    .on("click", async function (e) {
+      e.stopPropagation();
+      const collectionKey = $(this).data("collection-key");
+      const collection = findCollectionByKey(collectionKey);
+      if (!collection) return;
+
+      const unownedButAbsent =
+        (collection.presence === "ownership-unverified" ||
+          collection.presence === "invalid-metadata") && collection.existence === "absent";
+      if (collection.presence !== "metadata-only" && !unownedButAbsent) {
+        toastr.warning(
+          "This collection's absence is not confirmed, so its metadata is kept.",
+          "VectHare",
+        );
+        return;
+      }
+      // The row's state came from the last refresh. The core re-checks the
+      // exact recorded destination again before removing anything.
+
+      const confirmed = confirm(
+        `Delete VectHare metadata for "${collection.name}"?\n\n` +
+          (unownedButAbsent
+            ? "Nothing identifies this collection as VectHare's own, so only VectHare's own " +
+              "local record for it is removed. No vectors are deleted and no other extension's " +
+              "data is touched.\n\n"
+            : "") +
+          `The physical collection was confirmed absent at its recorded destination ` +
+          `(${collection.backend || "unknown"} / ${collection.source || "unknown"}).\n\n` +
+          `This removes VectHare's stored associations for it: registry entry, collection ` +
+          `metadata, chat binding, chunk annotations and its identity ledger. Reopening the ` +
+          `chat will then be treated as never vectorized.\n\n` +
+          `No vectors are deleted and your chat messages are not touched.\n\n` +
+          `Press OK for "Yes, Delete Metadata" or Cancel for "No, Cancel".`,
+      );
+      if (!confirmed) return;
+
+      try {
+        const result = await deleteCollectionMetadataOnly(
+          collection.id,
+          {
+            ...browserState.settings,
+            vector_backend: collection.backend,
+            source: collection.source,
+          },
+          collection.registryKey,
+          { model: collection.model || "" },
+        );
+
+        // Re-read the persisted document rather than assuming: the row only
+        // disappears if the reset actually reached disk, and a fresh inventory
+        // stops a stale cached count from rebuilding it.
+        await refreshCollections({ reloadStore: true, invalidateInventory: true });
+
+        if (result.success) {
+          toastr.success(
+            `Removed metadata for "${collection.name}" (${result.removed.join(", ") || "nothing left to remove"})` +
+              `${result.verified ? " - verified gone from VectHare's metadata file" : ""}`,
+            "VectHare",
+          );
+        } else {
+          toastr.error(
+            `Metadata was not fully removed: ${result.errors.join(", ")}`,
+            "VectHare",
+            { timeOut: 0, extendedTimeOut: 0 },
+          );
+        }
+      } catch (error) {
+        console.error("VectHare: Metadata reset failed", error);
+        toastr.error(`Metadata reset failed: ${error.message}`, "VectHare");
+      }
+    });
+
+  // Regenerate only the local metadata that can be independently verified.
+  // Never vectorizes and never fabricates provenance.
+  $(".vecthare-action-regenerate-metadata")
+    .off("click")
+    .on("click", async function (e) {
+      e.stopPropagation();
+      if ($(this).is(":disabled")) return;
+      const collection = findCollectionByKey($(this).data("collection-key"));
+      if (!collection) return;
+
+      const confirmed = confirm(
+        `Regenerate metadata for "${collection.name}"?\n\n` +
+          "This refreshes only VectHare's local records that can be independently " +
+          "verified at the recorded destination: registry entry, chunk count and " +
+          "demonstrably invalid local fields.\n\n" +
+          "It does NOT vectorize anything, does not create or change any collection, " +
+          "and never invents original settings, chat ownership or ledger history. " +
+          "Your annotations are kept.\n\n" +
+          'Press OK for "Yes, Regenerate" or Cancel for "No, Cancel".',
+      );
+      if (!confirmed) return;
+
+      try {
+        const result = await regenerateCollectionMetadata(
+          collection.id,
+          {
+            ...browserState.settings,
+            vector_backend: collection.backend,
+            source: collection.source,
+          },
+          collection.registryKey,
+        );
+        await refreshCollections({ reloadStore: true, invalidateInventory: true });
+
+        const summary = [
+          result.restored.length ? `restored: ${result.restored.join(", ")}` : "",
+          result.preserved.length ? `preserved: ${result.preserved.join(", ")}` : "",
+          result.cleared.length ? `cleared: ${result.cleared.join(", ")}` : "",
+          result.unverified.length ? `left unverified: ${result.unverified.join(", ")}` : "",
+        ]
+          .filter(Boolean)
+          .join(" · ");
+
+        if (result.success) {
+          toastr.success(summary || "Nothing needed regenerating", "VectHare", { timeOut: 12000 });
+        } else {
+          toastr.warning(
+            `Nothing was regenerated — ${summary}`,
+            "VectHare",
+            { timeOut: 12000 },
+          );
+        }
+      } catch (error) {
+        console.error("VectHare: Metadata regeneration failed", error);
+        toastr.error(`Metadata regeneration failed: ${error.message}`, "VectHare");
       }
     });
 
@@ -1416,13 +2145,89 @@ function bindCollectionCardEvents() {
  * @param {number} collectionCount Number of collections shown
  * @param {number} chunkCount Total chunks
  */
-function updateStats(collectionCount, chunkCount) {
-  const statsText =
-    collectionCount === 0
-      ? "No collections"
-      : `${collectionCount} collection${collectionCount === 1 ? "" : "s"}, ${chunkCount} total chunks`;
+function updateStats(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (list.length === 0) {
+    $("#vecthare_browser_stats_text").text("No collections").attr("title", "");
+    return;
+  }
 
-  $("#vecthare_browser_stats_text").text(statsText);
+  // Every row counts once, in exactly one bucket, decided by the explicit
+  // backend existence answer - never by a registry entry or a chunk count:
+  //   physical     = existence confirmed at the recorded destination (empty included)
+  //   metadataOnly = confirmed absent AND a validated VectHare record exists
+  //   unresolved   = existence not verifiable, or the record is invalid or unowned
+  let physical = 0;
+  let metadataOnly = 0;
+  let invalid = 0;
+  let ownershipUnverified = 0;
+  let notVectHareCount = 0;
+  let unverified = 0;
+  let chunks = 0;
+  let countsUnverified = 0;
+  for (const row of list) {
+    // Counted alongside its bucket, never instead of it: a collection that is
+    // not VectHare's still exists if the backend says so.
+    if (row.metadataRecord?.foreign) notVectHareCount++;
+    if (row.existence === "present") physical++;
+    else if (row.presence === "metadata-only") metadataOnly++;
+    else if (row.presence === "invalid-metadata") invalid++;
+    else if (row.presence === "ownership-unverified") ownershipUnverified++;
+    else unverified++;
+
+    // Verified counts only: an untrusted count contributes nothing.
+    if (row.existence === "present" && row.countTrusted === true) {
+      chunks += Number(row.chunkCount) || 0;
+    } else if (row.existence === "present") {
+      countsUnverified++;
+    }
+  }
+
+  const parts = [`${physical} Collection${physical === 1 ? "" : "s"}`];
+  if (metadataOnly) parts.push(`${metadataOnly} Metadata Only`);
+  if (invalid) parts.push(`${invalid} Invalid Metadata`);
+  if (notVectHareCount) parts.push(`${notVectHareCount} Not VectHare-Owned`);
+  if (ownershipUnverified) parts.push(`${ownershipUnverified} Ownership Unverified`);
+
+  if (unverified) parts.push(`${unverified} Unverified`);
+  parts.push(`${chunks} Total Chunks${countsUnverified ? "+" : ""}`);
+
+  const detail = [
+    `${physical} collection(s) whose existence was confirmed at their recorded destination, empty ones included`,
+    `${metadataOnly} entr(y/ies) confirmed absent with a validated VectHare metadata record`,
+    `${invalid} entr(y/ies) whose VectHare record is malformed, incomplete or not a record at all`,
+    `${notVectHareCount} of the entries above carry no VectHare marker (most likely SillyTavern's own or another extension's)`,
+    `${ownershipUnverified} entr(y/ies) whose VectHare ownership could not be established`,
+    `${unverified} entr(y/ies) whose existence could not be checked at their recorded destination`,
+    `${chunks} chunks counted from verified backend counts only`,
+  ];
+  if (countsUnverified) {
+    detail.push(`${countsUnverified} existing collection(s) had an untrusted count and add no chunks here`);
+  }
+
+  $("#vecthare_browser_stats_text").text(parts.join(" · ")).attr("title", detail.join("\n"));
+}
+
+/**
+ * Re-renders the open Metadata window, if any, from freshly loaded state.
+ * Read-only: it never writes, and an entry that no longer exists says so
+ * rather than being redrawn from the values it held before.
+ */
+async function refreshOpenMetadataDialog() {
+  const key = browserState.openMetadataKey;
+  if (!key || !$("#vecthare_metadata_modal").hasClass("active")) return;
+  const collection = findCollectionByKey(key);
+  if (!collection) {
+    $("#vecthare_metadata_body").html(
+      "<p>This entry no longer exists. Its VectHare metadata has been removed.</p>");
+    $("#vecthare_metadata_delete").prop("disabled", true).data("action", null)
+      .attr("title", "There is nothing left to delete.").text("Delete");
+    $("#vecthare_metadata_delete_meta").prop("disabled", true)
+      .attr("title", "There is nothing left to delete.");
+    return;
+  }
+  // Re-opening re-reads the entry and re-decides what Delete may offer.
+  await openMetadataDialog(collection);
 }
 
 // ============================================================================

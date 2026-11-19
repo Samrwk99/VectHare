@@ -24,6 +24,7 @@
 
 import { addInsertionProvenance } from './vector-provenance.js';
 import { getRequestHeaders } from '../../../../../script.js';
+import { vecthareState, assertStoreAuthoritative } from './vecthare-store.js';
 import { extension_settings, modules } from '../../../../extensions.js';
 import { secret_state } from '../../../../secrets.js';
 import { textgen_types, textgenerationwebui_settings } from '../../../../textgen-settings.js';
@@ -1553,11 +1554,37 @@ export async function queryActiveCollections(collectionIds, searchText, topK, th
  * @param {object} settings VectHare settings object
  * @returns {Promise<boolean>} True if deleted, false if not
  */
-export async function purgeVectorIndex(collectionId, settings) {
+export async function purgeVectorIndex(collectionId, settings, options = {}) {
+    // Phase 1: never purge while VectHare's own metadata is uncertain - the
+    // destination and ownership checks below depend on it.
+    assertStoreAuthoritative('Purging a collection');
     try {
-        assertVectHareCollectionForWrite(collectionId);
+        // The name check is VectHare's standing protection for collections it
+        // does not own. The single exception is a deletion the user explicitly
+        // confirmed for a named destination they recognise as theirs - an old
+        // collection predating VectHare's ownership markers would otherwise be
+        // undeletable forever. Nothing else in this module accepts that flag.
+        if (options.userConfirmedUnownedDeletion === true) {
+            console.warn(`VectHare: Purging ${collectionId} on explicit user authority - ` +
+                'VectHare cannot verify it owns this collection');
+        } else {
+            assertVectHareCollectionForWrite(collectionId);
+        }
         const backendName = settings?.vector_backend || 'standard';
         const isStandard = backendName === 'standard' || backendName === 'vectra';
+        // A collection VectHare cannot prove is its own has no VectHare
+        // identity ledger, so the Standard ledger-recovery machinery below has
+        // nothing to protect and nothing to recover - and its own routes are
+        // (correctly) closed to non-VectHare identities. Purge the destination
+        // directly instead of failing on a record that cannot exist.
+        if (isStandard && options.userConfirmedUnownedDeletion === true) {
+            const backend = await getBackend(settings);
+            await backend.purgeVectorIndex(collectionId,
+                { ...settings, __vecthareConfirmUnowned: true });
+            console.log(`VectHare: Purged vector index for collection ${collectionId}`);
+            notifyDatabaseChanged(collectionId);
+            return true;
+        }
         if (isStandard) {
             const source = settings?.source || 'transformers';
             const modelField = getModelField(source);
@@ -1593,12 +1620,37 @@ export async function purgeVectorIndex(collectionId, settings) {
                     }
                 }
             } else {
-                if (saved.status !== 'valid' ||
-                    saved.config.embedding.provider !== source ||
-                    (modelField && (saved.config.embedding.model || '') !== modelFolder)) {
-                    throw new Error('Standard collection original model/source cannot be verified; purge blocked');
+                // The provenance requirement protects VECTORS: it stops a purge
+                // whose destination cannot be proven to be the one the
+                // collection was written to. A collection the caller has just
+                // read as empty at this exact destination holds no vectors to
+                // protect, so an empty collection with no recorded
+                // configuration stays deletable instead of being stuck.
+                const provenanceVerified = saved.status === 'valid' &&
+                    saved.config.embedding.provider === source &&
+                    (!modelField || (saved.config.embedding.model || '') === modelFolder);
+                // A legacy or incompatible collection must not be permanently
+                // undeletable. Provenance is one way to prove the destination;
+                // the caller may instead have proved it independently - the
+                // collection was just confirmed to exist at THIS recorded
+                // destination, that destination is a backend-qualified registry
+                // entry for this identity, and the identity is VectHare-owned.
+                // Either proof is enough to delete; neither is enough to embed,
+                // sync, repair or rebuild, which still require the real config.
+                if (!provenanceVerified && options.verifiedEmpty !== true &&
+                    options.ownershipVerified !== true &&
+                    options.userConfirmedUnownedDeletion !== true) {
+                    throw new Error('Cannot verify this collection\'s original model/source, and its ' +
+                        'ownership and destination were not independently verified either; purge blocked. ' +
+                        `Unverified: original configuration (${saved.status}${saved.reason ? `: ${saved.reason}` : ''}).`);
                 }
-                if (saved.config.identityLedger === 1) {
+                if (!provenanceVerified) {
+                    console.warn(`VectHare: Purging ${collectionId} without a verifiable original ` +
+                        `configuration (${options.verifiedEmpty === true
+                            ? 'confirmed empty at this destination'
+                            : 'ownership and destination independently verified'})`);
+                }
+                if (saved.status === 'valid' && saved.config.identityLedger === 1) {
                     const config = saved.config;
                     const binding = {
                         backend: config.storage.backend,
@@ -1616,7 +1668,8 @@ export async function purgeVectorIndex(collectionId, settings) {
             }
             if (!absent()) {
                 const backend = await getBackend(settings);
-                await backend.purgeVectorIndex(collectionId, settings);
+                await backend.purgeVectorIndex(collectionId, options.userConfirmedUnownedDeletion === true
+                    ? { ...settings, __vecthareConfirmUnowned: true } : settings);
             }
             if (pending) {
                 saved = await readInitialVectorizationConfig(collectionId, settings, location);
@@ -1636,7 +1689,8 @@ export async function purgeVectorIndex(collectionId, settings) {
             }
         } else {
             const backend = await getBackend(settings);
-            await backend.purgeVectorIndex(collectionId, settings);
+            await backend.purgeVectorIndex(collectionId, options.userConfirmedUnownedDeletion === true
+                ? { ...settings, __vecthareConfirmUnowned: true } : settings);
         }
         console.log(`VectHare: Purged vector index for collection ${collectionId}`);
         notifyDatabaseChanged(collectionId);
@@ -1644,6 +1698,11 @@ export async function purgeVectorIndex(collectionId, settings) {
     } catch (error) {
         // VEC-33: Invalidate health cache on operation error
         invalidateBackendHealth(settings?.vector_backend || 'standard', error);
+        // Hand the real reason back so the caller can report what is
+        // unverified instead of a generic failure.
+        if (options.diagnostics && typeof options.diagnostics === 'object') {
+            options.diagnostics.reason = error.message;
+        }
         console.error('VectHare: Failed to purge', error);
         return false;
     }
@@ -1677,6 +1736,7 @@ export async function purgeFileVectorIndex(collectionId, settings) {
  * be verified; caller may retry after restoring the backend connection.
  */
 export async function purgeAllVectorIndexes(settings) {
+    assertStoreAuthoritative('Full Purge');
     const { getCollectionRegistry } = await import('./collection-loader.js');
     const { parseRegistryKey, getBoundChatDetails, chatStoreDestination } =
         await import('./collection-ids.js');
@@ -1702,7 +1762,7 @@ export async function purgeAllVectorIndexes(settings) {
         }
     }
     for (const [id, rec] of Object.entries(
-        extension_settings.vecthare?.chatCollectionBindings?.byCollection || {})) {
+        vecthareState().chatCollectionBindings?.byCollection || {})) {
         for (const store of rec?.stores || []) {
             const name = store.backend === 'vectra' ? 'standard' : store.backend;
             if (!knownDestinations.has(`${name}:${store.source}:${id}`)) {

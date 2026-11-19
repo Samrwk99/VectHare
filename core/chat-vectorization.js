@@ -22,6 +22,7 @@ import {
     queryActiveCollections,
     deleteVectorItems,
     purgeVectorIndex,
+    throwIfSourceInvalid,
 } from './core-vector-api.js';
 import { isBackendAvailable, getBackend } from '../backends/backend-manager.js';
 import { applyDecayToResults, applySceneAwareDecay } from './temporal-decay.js';
@@ -39,6 +40,10 @@ import {
     resolveCollectionOperationSettings,
     snapshotCollectionOperationSettings,
     assertCollectionOperationSettingsStable,
+    compareInitialVectorizationConfig,
+    carryOverCollectionPreferences,
+    transferCollectionAnnotations,
+    getAnnotatedChunkHashes,
 } from './collection-metadata.js';
 import { progressTracker } from '../ui/progress-tracker.js';
 import { sha256Text } from './vector-provenance.js';
@@ -54,6 +59,7 @@ import {
 } from './vectorization-control.js';
 import { buildSearchContext, filterChunksByConditions, processChunkLinks } from './conditional-activation.js';
 import { getChunkMetadata, getCollectionMeta, setCollectionMeta } from './collection-metadata.js';
+import { flushVectHareStore, persistVectHareStore, assertStoreAuthoritative } from './vecthare-store.js';
 import { processChunkGroups, mergeVirtualLinks } from './chunk-groups.js';
 import { createDebugData, setLastSearchDebug, addTrace, recordChunkFate } from '../ui/search-debug.js';
 import { getSemanticWorldInfoEntries } from './world-info-integration.js';
@@ -76,6 +82,10 @@ import {
     getChatOwner,
     normChat,
     peekChatCollectionId,
+    mintChatCollectionId,
+    beginChatCollectionRebuild,
+    endChatCollectionRebuild,
+    adoptChatCollection,
 } from './collection-ids.js';
 
 // Hash cache for performance
@@ -686,6 +696,243 @@ function uniqueReplacementSources(links) {
     return new Map(unique.filter(([next, old]) => byNew.get(next) === 1 && byOld.get(old) === 1));
 }
 
+// ============================================================================
+// PHASE 3: CONFIRMED STAGED REBUILD
+// ============================================================================
+
+/**
+ * Phase 3 preflight for Vectorize. Decides, without changing anything, whether
+ * the current settings can be used on this chat's existing collection or
+ * whether a confirmed rebuild is needed.
+ *
+ * @param {object} settings VectHare settings as selected now
+ * @returns {Promise<{action: string, reason?: string, collectionId?: string,
+ *   differences?: object[], chunkCount?: number}>}
+ *   action is 'vectorize' (proceed normally), 'rebuild' (ask the user) or
+ *   'blocked' (do not touch anything).
+ */
+export async function planChatVectorizationRebuild(settings) {
+    const target = captureChatTarget();
+    if (!target) return { action: 'blocked', reason: 'No chat is open.' };
+
+    // The proposed settings are validated before anything destructive is
+    // considered, so an unusable provider cannot start a rebuild.
+    try {
+        throwIfSourceInvalid(settings);
+    } catch (error) {
+        return { action: 'blocked', reason: `The selected embedding settings are not usable: ${error.message}` };
+    }
+    const chunking = chatConfigChunking(settings);
+    if (!createInitialVectorizationConfig(settings, chunking)) {
+        return { action: 'blocked', reason: 'The selected vectorization settings could not be described.' };
+    }
+
+    const binding = await ensureChatBinding();
+    if (!binding?.writable || !binding.collectionId) {
+        return { action: 'blocked', reason: "This chat's collection identity could not be verified." };
+    }
+    const collectionId = binding.collectionId;
+
+    let chunkCount = 0;
+    try {
+        const hashes = await getSavedHashes(collectionId, settings, false, getStopSignal());
+        chunkCount = Array.isArray(hashes) ? hashes.length : 0;
+    } catch (error) {
+        return { action: 'blocked', reason: `The existing collection could not be read: ${error.message}` };
+    }
+
+    let saved;
+    try {
+        saved = await readInitialVectorizationConfig(collectionId, settings);
+    } catch (error) {
+        return { action: 'blocked', reason: `The original configuration could not be read: ${error.message}` };
+    }
+
+    if (saved.status === 'valid') {
+        const comparison = compareInitialVectorizationConfig(saved.config,
+            createInitialVectorizationConfig(settings, chunking), 'sync-chat');
+        if (comparison.status === 'incompatible') {
+            return {
+                action: 'rebuild', collectionId, chunkCount,
+                differences: comparison.differences,
+                annotationCount: getAnnotatedChunkHashes(collectionId).length,
+                reason: 'The selected settings differ from the settings this chat was vectorized with.',
+            };
+        }
+        // 'cannot_verify' is not a licence to rebuild on its own: the existing
+        // collection keeps its own recorded settings. A rebuild the user asked
+        // for explicitly is still available (rebuildable), with no difference
+        // list because the selected settings reproduce the saved ones.
+        return {
+            action: 'vectorize', collectionId, chunkCount, rebuildable: chunkCount > 0,
+            differences: [], annotationCount: getAnnotatedChunkHashes(collectionId).length,
+        };
+    }
+
+    // No authoritative configuration. With no vectors there is nothing to
+    // replace, so a normal first vectorization applies.
+    if (chunkCount === 0) return { action: 'vectorize', collectionId, chunkCount };
+
+    return {
+        action: 'rebuild', collectionId, chunkCount, differences: [],
+        annotationCount: getAnnotatedChunkHashes(collectionId).length,
+        reason: saved.status === 'missing'
+            ? 'This chat has vectors but no verifiable record of the settings they were made with.'
+            : `The original configuration could not be verified (${saved.status}).`,
+    };
+}
+
+/**
+ * Phase 3: rebuilds this chat's collection into a NEW collection and switches
+ * the chat to it only after the replacement has been verified.
+ *
+ * The old collection is never purged first, and is never deleted here: after a
+ * successful switch it is retained as an inspectable cleanup candidate (listed
+ * in the Database Browser), because authorization to destroy vectors is not
+ * implied by a settings change.
+ *
+ * @param {object} settings VectHare settings as selected now
+ * @param {number} batchSize Items per vectorization pass
+ * @returns {Promise<{success: boolean, collectionId?: string, previousCollectionId?: string,
+ *   reason?: string, committed?: boolean}>}
+ */
+export async function rebuildChatCollection(settings, batchSize) {
+    assertStoreAuthoritative('Rebuilding a chat collection');
+    const target = captureChatTarget();
+    if (!target) return { success: false, reason: 'No chat is open.' };
+
+    const binding = await ensureChatBinding();
+    if (!binding?.writable || !binding.collectionId) {
+        return { success: false, reason: "This chat's collection identity could not be verified." };
+    }
+    const previousCollectionId = binding.collectionId;
+    const stagedCollectionId = mintChatCollectionId();
+
+    // A durable record of the staging attempt, so an interrupted rebuild is
+    // identifiable afterwards instead of leaving an unexplained collection.
+    setCollectionMeta(stagedCollectionId, {
+        scope: 'chat',
+        rebuildFrom: previousCollectionId,
+        rebuildState: 'staging',
+        rebuildStartedAt: Date.now(),
+    });
+    try {
+        await flushVectHareStore();
+    } catch (error) {
+        return { success: false, reason: `The rebuild could not be recorded: ${error.message}` };
+    }
+
+    let result;
+    if (!beginChatCollectionRebuild(stagedCollectionId)) {
+        return { success: false, reason: 'The rebuild destination could not be bound to this chat.' };
+    }
+    try {
+        result = await vectorizeAll(settings, batchSize, true);
+    } catch (error) {
+        endChatCollectionRebuild();
+        setCollectionMeta(stagedCollectionId, { rebuildState: 'failed', rebuildError: error.message });
+        persistVectHareStore();
+        return { success: false, collectionId: stagedCollectionId, previousCollectionId,
+            reason: `Embedding into the replacement collection failed: ${error.message}` };
+    }
+
+    // Verify the replacement on its own terms before anything is switched.
+    let verification = null;
+    let carried = [];
+    let annotations = { transferred: 0, skipped: 0 };
+    let transferError = null;
+    try {
+        if (!result?.success) throw new Error('vectorization did not complete');
+        if (!isChatTargetCurrent(target, stagedCollectionId)) {
+            throw new Error('the chat changed during the rebuild');
+        }
+        const hashes = await getSavedHashes(stagedCollectionId, settings, false, getStopSignal());
+        const stored = Array.isArray(hashes) ? hashes.length : 0;
+        if (stored === 0) throw new Error('the replacement collection is empty');
+        const savedConfig = await readInitialVectorizationConfig(stagedCollectionId, settings);
+        if (savedConfig.status !== 'valid') {
+            throw new Error(`the replacement has no verifiable configuration (${savedConfig.status})`);
+        }
+        const comparison = compareInitialVectorizationConfig(savedConfig.config,
+            createInitialVectorizationConfig(settings, chatConfigChunking(settings)), 'sync-chat');
+        if (comparison.status === 'incompatible') {
+            throw new Error('the replacement was not stored with the selected settings');
+        }
+        verification = { stored, hashes: Array.isArray(hashes) ? hashes.map(String) : [],
+            identityLedger: savedConfig.config.identityLedger === 1 };
+    } catch (error) {
+        endChatCollectionRebuild();
+        setCollectionMeta(stagedCollectionId, { rebuildState: 'unverified', rebuildError: error.message });
+        persistVectHareStore();
+        // The chat is still bound to its previous collection, untouched.
+        return { success: false, collectionId: stagedCollectionId, previousCollectionId,
+            reason: `The replacement could not be verified: ${error.message}. ` +
+                'Your previous collection is still in use.' };
+    }
+
+    // Commit: the chat adopts the verified replacement and the old collection
+    // is preserved, not deleted.
+    try {
+        const adopted = await adoptChatCollection(stagedCollectionId, previousCollectionId);
+        if (adopted.state !== 'active') {
+            throw new Error(`binding state "${adopted.state}"`);
+        }
+        setCollectionMeta(stagedCollectionId, {
+            rebuildState: 'committed', rebuildCommittedAt: Date.now(), rebuildError: null,
+        });
+        setCollectionMeta(previousCollectionId, { supersededBy: stagedCollectionId, supersededAt: Date.now() });
+        // The replacement's own vectorization record is already authoritative;
+        // what carries over is only what the USER configured, plus annotations
+        // for chunks the rebuild actually reproduced. The replaced collection
+        // keeps its own copy: it is retained, not deleted.
+        // The rebuild is already committed at this point, so a transfer problem
+        // is reported, never mistaken for a failed switch.
+        try {
+            carried = carryOverCollectionPreferences(previousCollectionId, stagedCollectionId);
+            annotations = transferCollectionAnnotations(previousCollectionId, stagedCollectionId,
+                verification.hashes);
+        } catch (error) {
+            transferError = error.message;
+            console.warn(`VectHare: Rebuilt collection settings could not be carried over: ${error.message}`);
+        }
+        await flushVectHareStore();
+    } catch (error) {
+        setCollectionMeta(stagedCollectionId, { rebuildState: 'verified_uncommitted', rebuildError: error.message });
+        persistVectHareStore();
+        return { success: false, collectionId: stagedCollectionId, previousCollectionId,
+            reason: `The replacement is complete but the chat could not be switched to it: ${error.message}. ` +
+                'Your previous collection is still in use.' };
+    } finally {
+        endChatCollectionRebuild();
+    }
+
+    console.log(`VectHare: Rebuilt ${previousCollectionId} as ${stagedCollectionId} ` +
+        `(${verification.stored} chunks, ledger ${verification.identityLedger ? 'enabled' : 'not used'})`);
+    return { success: true, committed: true, collectionId: stagedCollectionId,
+        previousCollectionId, chunkCount: verification.stored,
+        carriedFields: carried, annotationsTransferred: annotations.transferred,
+        annotationsNotTransferred: annotations.skipped, transferError };
+}
+
+/**
+ * Phase 2: removes the identity ledger belonging to one collection, for the
+ * exact destination recorded in its own saved configuration. Returns false
+ * when no ledger destination can be established - an unknown destination is
+ * never guessed at, so nothing else's ledger can be removed by mistake.
+ * @param {string} collectionId Collection identifier
+ * @param {object} settings VectHare settings
+ * @returns {Promise<boolean>} Whether a ledger was deleted or already absent
+ */
+export async function discardIdentityLedgerForCollection(collectionId, settings) {
+    const saved = await readInitialVectorizationConfig(collectionId, settings, {
+        backend: settings.vector_backend || 'standard',
+        source: settings.source,
+    });
+    if (saved.status !== 'valid' || !saved.config) return false;
+    await identityLedgerRequest('save', collectionId, identityBinding(settings, saved.config), null);
+    return true;
+}
+
 // Stage 13.0: message-occurrence identity is kept only in VectHare plugin data.
 // SillyTavern chat objects/files are read, never annotated or saved.
 function identityBinding(settings, config) {
@@ -797,9 +1044,24 @@ async function reconcileIdentityMessages(chat, ledger) {
     });
     for (const [key, indices] of keyedOld) {
         const fresh = keyedNew.get(key) || [];
-        if (indices.length === 1 && fresh.length === 1 &&
-            previous[indices[0]].role === current[fresh[0]].role &&
-            previous[indices[0]].name === current[fresh[0]].name) claim(indices[0], fresh[0]);
+        // Phase 4: a stable source key held by several messages (two messages
+        // from the same author within one send_date granularity) used to go
+        // unmatched entirely. An EDITED message among them was then given a new
+        // UID, so Repair could not recognise its group as a replacement of a
+        // formerly indexed one - while Sync embedded the new text as new
+        // content. That is the reported Repair/Sync discrepancy.
+        //
+        // When both sides hold the same number of occurrences of that immutable
+        // key, chat order is the only order-preserving correspondence between
+        // them, so the occurrences are paired by ordinal. Differing counts stay
+        // unmatched: an insert or delete within that key is not an edit, and
+        // remains uncertain rather than guessed at.
+        if (indices.length !== fresh.length) continue;
+        indices.forEach((oldIndex, occurrence) => {
+            const newIndex = fresh[occurrence];
+            if (previous[oldIndex].role === current[newIndex].role &&
+                previous[oldIndex].name === current[newIndex].name) claim(oldIndex, newIndex);
+        });
     }
     // An unchanged complete sequence is unambiguous as a sequence, including
     // multiple identical occurrences. No UID churn on repeated Sync/Repair.
@@ -4134,6 +4396,9 @@ export async function vectorizeAll(settings, batchSize, includeIndexedCount = fa
         vectorizeRunActive = false;
         resetControlState();
         progressTracker.complete(true, `Completed ${progressTracker.stats.groupsCompletedThisRun} ${progressUnit.toLowerCase()} this run (${totalChunks} chunks written)`, runId);
+        // Phase 1: make this run's registry/binding/annotation changes durable.
+        await flushVectHareStore().catch(error =>
+            console.error('VectHare: Collection metadata could not be saved:', error));
         toastr.success('Chat vectorized successfully', 'VectHare');
         console.log(`VectHare: ✅ Vectorization complete after ${iteration} iterations`);
         // Content Vectorizer needs the TOTAL stored count, not just the number
@@ -4603,6 +4868,14 @@ export async function repairChatVectors(settings, batchSize = 5, embeddedMode = 
             return 'ok';
         }
 
+        // Phase 4: current groups Repair deliberately does not touch because
+        // they contain messages that were never indexed - Sync Chat's work.
+        const replacementHashes = new Set(replacements.map(item => String(item.hash)));
+        const groupsLeftToSync = identityLedger
+            ? identityGroups.filter(group => !storedHashSet.has(String(group.hash)) &&
+                !replacementHashes.has(String(group.hash))).length
+            : 0;
+
         // Persist intent before the first embedding or deletion. A crash must
         // not leave a clean ledger falsely asserting the prior indexed state.
         if (identityLedger) {
@@ -4863,6 +5136,12 @@ export async function repairChatVectors(settings, batchSize = 5, embeddedMode = 
             `${replacementFailures ? `, ${replacementFailures} replacement write errors` : ''}` +
             `${deletionFailures ? `, ${deletionFailures} deletion keys without acknowledgement` : ''}` +
             `${unresolved ? `, ${unresolved} work units unresolved` : ''}` +
+            // Phase 4: say what was NOT acted on, so a pass that leaves groups
+            // behind is never read as "everything is repaired".
+            `${identityReconciliation?.uncertainUids?.size
+                ? `, ${identityReconciliation.uncertainUids.size} source identity association(s) unresolved and preserved`
+                : ''}` +
+            `${groupsLeftToSync ? `, ${groupsLeftToSync} group(s) left to Sync Chat (contain never-indexed messages)` : ''}` +
             `${!identityLedgerConfirmed ? ', identity ledger verification incomplete' : ''}`;
 
         releaseRun();

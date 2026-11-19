@@ -10,6 +10,7 @@
  */
 
 import { extension_settings } from '../../../../extensions.js';
+import { vecthareState, persistVectHareStore, assertStoreAuthoritative, flushVectHareStore } from './vecthare-store.js';
 import { getContext } from '../../../../extensions.js';
 import { characters, substituteParams, getRequestHeaders, saveSettingsDebounced } from '../../../../../script.js';
 import { getSavedHashes, queryCollection } from './core-vector-api.js';
@@ -22,8 +23,16 @@ import {
     deleteChunkMetadata,
     deleteCollectionMeta,
     recordVerifiedCollectionDeletion,
-    ensureCollectionMeta,
     getCollectionMeta,
+    setCollectionMeta,
+    getAllChunkMetadata,
+    readInitialVectorizationConfig,
+    verifyPhysicalCollectionExistence,
+    getStoredCollectionRecord,
+    findStoredCollectionKey,
+    forgetLegacyCollectionKeys,
+    hasLegacyCollectionKeys,
+    getAnnotatedChunkHashes,
 } from './collection-metadata.js';
 import { purgeVectorIndex } from './core-vector-api.js';
 // Import from collection-ids.js - single source of truth for collection ID operations
@@ -41,6 +50,7 @@ import {
     getBoundChatDetails,
     isQuarantinedChatCollection,
     withChatCollectionPurgeGuard,
+    removeChatBinding,
 } from './collection-ids.js';
 
 // Plugin detection state
@@ -52,10 +62,10 @@ let pluginAvailabilityCheckId = 0;
  * @returns {string[]} Array of collection IDs
  */
 export function getCollectionRegistry() {
-    if (!extension_settings.vecthare.vecthare_collection_registry) {
-        extension_settings.vecthare.vecthare_collection_registry = [];
+    if (!vecthareState().registry) {
+        vecthareState().registry = [];
     }
-    return extension_settings.vecthare.vecthare_collection_registry;
+    return vecthareState().registry;
 }
 
 /**
@@ -71,7 +81,7 @@ export function registerCollection(collectionId) {
     if (!registry.includes(collectionId)) {
         registry.push(collectionId);
         console.log(`VectHare: Registered collection: ${collectionId}`);
-        saveSettingsDebounced(); // Persist to disk!
+        persistVectHareStore(); // Persist to collections.json
     }
 }
 
@@ -85,7 +95,7 @@ export function unregisterCollection(collectionId) {
     if (index !== -1) {
         registry.splice(index, 1);
         console.log(`VectHare: Unregistered collection: ${collectionId}`);
-        saveSettingsDebounced(); // Persist to disk!
+        persistVectHareStore(); // Persist to collections.json
     } else {
         console.log(`VectHare: Collection not found in registry: ${collectionId}`);
     }
@@ -112,6 +122,31 @@ export function unregisterCollectionDestination(collectionId, settings) {
 }
 
 /**
+ * Whether VectHare's registry holds a BACKEND-QUALIFIED entry for this
+ * identity at exactly this destination. A bare, unqualified entry is not
+ * evidence of a destination and never counts here.
+ * @param {string} collectionId Bare collection identifier
+ * @param {object} settings Settings addressing the destination in question
+ * @returns {boolean}
+ */
+function registryRecordsThisDestination(collectionId, settings) {
+    const normalize = name => (name === 'vectra' ? 'standard' : name);
+    const selectedBackend = normalize(settings?.vector_backend || 'standard');
+    const selectedSource = settings?.source || 'transformers';
+    const matches = key => {
+        const parsed = parseRegistryKey(key);
+        if ((parsed.collectionId || key) !== collectionId) return false;
+        if (!parsed.backend || !parsed.source) return false;
+        return normalize(parsed.backend) === selectedBackend && parsed.source === selectedSource;
+    };
+    if (getCollectionRegistry().some(matches)) return true;
+    // The backend's own inventory is the same evidence from the other side: it
+    // reported this identity at this backend and source. A collection
+    // discovered but never registered is not left undeletable for that.
+    return Object.keys(pluginCollectionData || {}).some(matches);
+}
+
+/**
  * COMPLETE collection deletion - removes from ALL THREE stores:
  * 1. Vector backend (actual embeddings)
  * 2. Registry (collection tracking)
@@ -125,17 +160,17 @@ export function unregisterCollectionDestination(collectionId, settings) {
  * @param {string} [registryKey] - Optional registry key (source:id format) if different from collectionId
  * @returns {Promise<{success: boolean, errors: string[], vectorsDeleted: boolean, registryDeleted: boolean, metadataDeleted: boolean}>}
  */
-export async function deleteCollection(collectionId, settings, registryKey = null) {
+export async function deleteCollection(collectionId, settings, registryKey = null, options = {}) {
     try {
         return await withChatCollectionPurgeGuard(collectionId,
-            () => deleteCollectionUnlocked(collectionId, settings, registryKey));
+            () => deleteCollectionUnlocked(collectionId, settings, registryKey, options));
     } catch (error) {
         return { success: false, errors: [error.message], vectorsDeleted: false,
             registryDeleted: false, metadataDeleted: false };
     }
 }
 
-async function deleteCollectionUnlocked(collectionId, settings, registryKey = null) {
+async function deleteCollectionUnlocked(collectionId, settings, registryKey = null, options = {}) {
     const errors = [];
     let vectorsDeleted = false;
     let registryDeleted = false;
@@ -143,12 +178,62 @@ async function deleteCollectionUnlocked(collectionId, settings, registryKey = nu
 
     console.log(`VectHare: Deleting collection ${collectionId} (registry key: ${registryKey || collectionId})`);
 
-    // Step 1: Delete vectors from backend (most important - actual data)
+    // Step 0: establish, at the recorded destination and right now, whether
+    // this is an existing collection that holds no vectors. An empty
+    // collection must stay deletable even when it has no verifiable original
+    // configuration - there are no vectors for that record to protect. A
+    // failed read or a failed existence check is never treated as emptiness.
+    const target = parseRegistryKey(collectionId).collectionId || collectionId;
+    let verifiedEmpty = false;
+    let presentHere = false;
     try {
-        if (!await purgeVectorIndex(collectionId, settings)) {
-            throw new Error('Backend did not confirm collection purge');
+        const before = await verifyPhysicalCollectionExistence(collectionId, settings);
+        presentHere = before.existence === 'present';
+        if (presentHere) {
+            const hashes = await getSavedHashes(collectionId, settings);
+            verifiedEmpty = Array.isArray(hashes) && hashes.length === 0;
+        }
+    } catch (error) {
+        console.debug(`VectHare: Could not establish emptiness for ${collectionId}: ${error.message}`);
+    }
+
+    // Independent proof of WHAT is being deleted and WHOSE it is, for a legacy
+    // or incompatible collection whose original configuration cannot be read:
+    // it exists at this exact recorded destination, the registry records that
+    // destination for this identity, and the identity is VectHare-owned. This
+    // authorizes deletion only - it is never used to embed, sync or repair.
+    const identity = validateMetadataRecordIdentity(target, registryKey || collectionId);
+    const ownershipVerified = presentHere && identity.owned &&
+        registryRecordsThisDestination(target, settings);
+    // The user confirmed a specific destination they recognise as theirs, for a
+    // collection too old to carry VectHare's ownership markers. VectHare still
+    // requires the destination itself to be proven: the collection must exist
+    // at exactly this recorded destination. Nothing else relaxes.
+    const onUserAuthority = options.userConfirmedUnownedDeletion === true && presentHere;
+    if (options.userConfirmedUnownedDeletion === true && !presentHere) {
+        errors.push('This collection was not confirmed present at its recorded destination, ' +
+            'so it was not deleted on your authority alone.');
+        return { success: false, errors, vectorsDeleted: false,
+            registryDeleted: false, metadataDeleted: false };
+    }
+
+    // Step 1: Delete vectors from backend (most important - actual data)
+    const purgeDiagnostics = {};
+    try {
+        if (!await purgeVectorIndex(collectionId, settings,
+            { verifiedEmpty, ownershipVerified, userConfirmedUnownedDeletion: onUserAuthority,
+                diagnostics: purgeDiagnostics })) {
+            throw new Error(purgeDiagnostics.reason
+                ? `${purgeDiagnostics.reason}${ownershipVerified || onUserAuthority ? '' : ' ' + [
+                    presentHere ? '' : 'the collection was not confirmed present at this destination',
+                    identity.owned ? '' : 'VectHare ownership could not be established',
+                    registryRecordsThisDestination(target, settings) ? ''
+                        : 'no backend-qualified registry entry records this destination',
+                ].filter(Boolean).join('; ')}`.trim()
+                : 'Backend did not confirm collection purge');
         }
         vectorsDeleted = true;
+        invalidateCollectionInventory(collectionId);
         console.log(`VectHare: ✓ Deleted vectors for ${collectionId}`);
     } catch (error) {
         errors.push(`Vectors: ${error.message}`);
@@ -169,20 +254,52 @@ async function deleteCollectionUnlocked(collectionId, settings, registryKey = nu
         console.warn(`VectHare: ✗ Failed to unregister ${collectionId}:`, error.message);
     }
 
-    // Step 3: Delete metadata
+    // Step 3: confirm the physical collection is really gone, then remove the
+    // same VectHare-owned state Delete Metadata removes, so a successful
+    // deletion cannot leave a stale metadata-only record behind.
+    let absenceVerified = false;
     try {
-        deleteCollectionMeta(collectionId);
-        // Only a confirmed successful vector purge can authorize a fresh start.
-        // This marker lives in VectHare-owned metadata, not the chat file.
-        recordVerifiedCollectionDeletion(collectionId, settings);
-        metadataDeleted = true;
-        console.log(`VectHare: ✓ Deleted metadata for ${collectionId}`);
+        const verified = await verifyPhysicalCollectionExistence(collectionId, settings);
+        absenceVerified = verified.existence === 'absent';
+        if (!absenceVerified) {
+            errors.push(`Deletion could not be verified (${verified.existence}` +
+                `${verified.reason ? `: ${verified.reason}` : ''}); metadata was kept.`);
+        }
     } catch (error) {
-        errors.push(`Metadata: ${error.message}`);
-        console.warn(`VectHare: ✗ Failed to delete metadata for ${collectionId}:`, error.message);
+        errors.push(`Deletion verification: ${error.message}`);
     }
 
-    const success = vectorsDeleted && registryDeleted && metadataDeleted;
+    if (absenceVerified) {
+        try {
+            // Only a confirmed successful vector purge can authorize a fresh
+            // start. This marker lives in VectHare-owned metadata, never in the
+            // chat file, and is written before the record it refers to is gone.
+            recordVerifiedCollectionDeletion(collectionId, settings);
+            const cleanup = await deleteCollectionMetadataOnly(collectionId, settings, registryKey,
+                { verifiedAbsent: true });
+            metadataDeleted = cleanup.success;
+            if (!cleanup.success) {
+                errors.push(`Metadata cleanup incomplete: ${cleanup.errors.join(', ')}`);
+                // Leave a record so the pending cleanup is visible after a
+                // refresh or restart instead of disappearing silently.
+                setCollectionMeta(collectionId, { pendingMetadataCleanup: true,
+                    pendingMetadataCleanupAt: Date.now() });
+                persistVectHareStore();
+            } else {
+                console.log(`VectHare: ✓ Deleted metadata for ${collectionId} (${cleanup.removed.join(', ') || 'nothing left'})`);
+            }
+        } catch (error) {
+            errors.push(`Metadata: ${error.message}`);
+            console.warn(`VectHare: ✗ Failed to delete metadata for ${collectionId}:`, error.message);
+            try {
+                setCollectionMeta(collectionId, { pendingMetadataCleanup: true,
+                    pendingMetadataCleanupAt: Date.now() });
+                persistVectHareStore();
+            } catch { /* the record is best effort; the error above is reported */ }
+        }
+    }
+
+    const success = vectorsDeleted && absenceVerified && registryDeleted && metadataDeleted;
 
     if (success) {
         console.log(`VectHare: ✓ Fully deleted collection ${collectionId}`);
@@ -200,18 +317,354 @@ async function deleteCollectionUnlocked(collectionId, settings, registryKey = nu
         success,
         errors,
         vectorsDeleted,
+        absenceVerified,
         registryDeleted,
         metadataDeleted,
     };
 }
 
 /**
+ * Removes VectHare's own metadata for a collection whose physical absence has
+ * been confirmed, so the associated chat behaves like a chat that was never
+ * vectorized. Deletes NO vectors and never calls backend deletion: this is not
+ * Delete Collection.
+ *
+ * Only state uniquely associated with this collection is removed. Chat
+ * messages, characters, global settings and anything that might belong to
+ * another collection are left untouched.
+ *
+ * @param {string} collectionId Collection identifier
+ * @param {object} settings Settings addressing the collection's own destination
+ * @param {string|null} registryKey Full registry key, when known
+ * @param {object} options {verifiedAbsent, model} - verifiedAbsent skips the
+ *   absence re-check for a caller that has just verified deletion itself
+ * @returns {Promise<{success: boolean, removed: string[], errors: string[]}>}
+ */
+export async function deleteCollectionMetadataOnly(collectionId, settings, registryKey = null,
+    options = {}) {
+    assertStoreAuthoritative('Deleting collection metadata');
+    const removed = [];
+    const errors = [];
+
+    // Source-of-truth guard for the Delete Metadata path: act only on an
+    // identity VectHare's own metadata file actually holds a validated record
+    // for. A discovered name or an unreadable entry is inspected, not deleted.
+    // Delete Collection passes verifiedAbsent and has already established both
+    // ownership and absence for the row it is cleaning up after.
+    if (options.verifiedAbsent !== true) {
+        const target = parseRegistryKey(collectionId).collectionId || collectionId;
+        const identity = validateMetadataRecordIdentity(target, registryKey || collectionId);
+        // This path removes only VectHare's OWN state - it deletes no vectors
+        // and touches no other extension's data - so what it requires is that
+        // there is something of VectHare's to remove, and that the collection's
+        // absence is confirmed (verified immediately below, every time, never
+        // taken from a cached row). Ownership is not required: an unowned entry
+        // is still VectHare's own record to forget. Nor is a READABLE record:
+        // an unreadable entry is precisely the ghost that needs clearing, and
+        // it is matched by its key, not by its contents.
+        const stale = [registryKey, collectionId, target].filter(Boolean);
+        const hasRegistryEntry = getCollectionRegistry().some(key =>
+            (parseRegistryKey(key).collectionId || key) === target || stale.includes(key));
+        const hasAnnotations = getAnnotatedChunkHashes(target).length > 0 ||
+            getAnnotatedChunkHashes(registryKey || collectionId).length > 0;
+        if (!identity.hasRecord && !hasRegistryEntry && !hasAnnotations) {
+            return {
+                success: false, removed,
+                errors: ['VectHare holds nothing of its own for this identity, so nothing was removed.'],
+            };
+        }
+        if (identity.malformed) {
+            console.warn(`VectHare: Removing an unreadable VectHare entry for ${collectionId}. ` +
+                'No vectors are deleted.');
+        }
+        if (!identity.owned) {
+            console.warn(`VectHare: Removing VectHare's own local record for ${collectionId}, ` +
+                'which nothing identifies as VectHare-owned. No vectors are deleted.');
+        }
+    }
+
+    // Re-check absence at the exact recorded destination immediately before
+    // removing anything. A cached classification from the last refresh is not
+    // good enough, and anything other than an explicit 'absent' stops here.
+    // Delete Collection passes verifiedAbsent after its own verification.
+    // allowWhilePresent is a deliberate LOCAL reset of a collection that still
+    // exists: VectHare forgets its own records for it and the vectors stay
+    // where they are. Only the Metadata window's own Delete Metadata sets it,
+    // after a confirmation that says what Regenerate can and cannot recover.
+    if (options.verifiedAbsent !== true && options.allowWhilePresent !== true) {
+        const verified = await verifyPhysicalCollectionExistence(collectionId, settings, {
+            backend: settings.vector_backend,
+            source: settings.source,
+            model: options.model ?? '',
+        });
+        if (verified.existence !== 'absent') {
+            return {
+                success: false, removed, errors: [verified.existence === 'present'
+                    ? 'The physical collection still exists at its recorded destination; metadata was kept.'
+                    : `Absence could not be confirmed (${verified.reason || 'unverified'}); metadata was kept.`],
+            };
+        }
+    }
+
+    // The ledger goes first: it is the only part held outside collections.json,
+    // so a failure here must not leave a ledger behind with no record of it.
+    try {
+        // Imported lazily: chat-vectorization.js already imports this module.
+        const { discardIdentityLedgerForCollection } = await import('./chat-vectorization.js');
+        if (await discardIdentityLedgerForCollection(collectionId, settings)) {
+            removed.push('identity ledger');
+        }
+    } catch (error) {
+        errors.push(`Identity ledger: ${error.message}`);
+        console.warn(`VectHare: Could not remove the identity ledger for ${collectionId}:`, error.message);
+        return { success: false, removed, errors };
+    }
+
+    try {
+        const registry = getCollectionRegistry();
+        const target = parseRegistryKey(collectionId).collectionId || collectionId;
+        const keep = registry.filter(key => (parseRegistryKey(key).collectionId || key) !== target);
+        if (keep.length !== registry.length) {
+            vecthareState().registry = keep;
+            removed.push(`${registry.length - keep.length} registry entr${registry.length - keep.length === 1 ? 'y' : 'ies'}`);
+        }
+    } catch (error) {
+        errors.push(`Registry: ${error.message}`);
+    }
+
+    try {
+        deleteCollectionMeta(collectionId);
+        if (registryKey && registryKey !== collectionId) deleteCollectionMeta(registryKey);
+        removed.push('collection metadata');
+    } catch (error) {
+        errors.push(`Collection metadata: ${error.message}`);
+    }
+
+    // Chunk annotations scoped to this collection only; a shared (legacy)
+    // record is left for whichever collection still uses it.
+    try {
+        let annotations = 0;
+        for (const hash of Object.keys(vecthareState().chunkMetadata || {})) {
+            const before = JSON.stringify(vecthareState().chunkMetadata[hash] || null);
+            deleteChunkMetadata(hash, collectionId);
+            if (JSON.stringify(vecthareState().chunkMetadata[hash] || null) !== before) annotations++;
+        }
+        if (annotations) removed.push(`${annotations} chunk annotation(s)`);
+    } catch (error) {
+        errors.push(`Chunk annotations: ${error.message}`);
+    }
+
+    // The binding last: while it exists the chat can rebind to this identity,
+    // so removing it is what makes the chat fresh again.
+    try {
+        const target = parseRegistryKey(collectionId).collectionId || collectionId;
+        if (getBoundChatDetails(target) || isQuarantinedChatCollection(target)) {
+            removeChatBinding(target);
+            removed.push('chat binding');
+        }
+    } catch (error) {
+        errors.push(`Chat binding: ${error.message}`);
+    }
+
+    // Obsolete pre-migration keys for this identity. Left in place, the
+    // startup migration recreates a collection record from them, which is how
+    // a deleted record reappears after a restart.
+    try {
+        const legacy = forgetLegacyCollectionKeys(collectionId);
+        if (legacy.length) removed.push(`${legacy.length} obsolete migration key(s)`);
+    } catch (error) {
+        errors.push(`Obsolete migration keys: ${error.message}`);
+    }
+
+    // Cached backend inventory for this identity: stale counts and
+    // destinations must not reappear on the next refresh.
+    try {
+        invalidateCollectionInventory(collectionId);
+    } catch (error) {
+        errors.push(`Cached inventory: ${error.message}`);
+    }
+
+    // Nothing is reported as done until it is actually on disk.
+    try {
+        await flushVectHareStore();
+    } catch (error) {
+        errors.push(`Saving metadata: ${error.message}`);
+        return { success: false, removed, errors };
+    }
+
+    // Read back what is now stored. "Deleted" is only reported when the
+    // record, its registry entries, its binding and its obsolete migration
+    // keys are actually absent from the persisted state.
+    const target = parseRegistryKey(collectionId).collectionId || collectionId;
+    const leftovers = [];
+    try {
+        if (findStoredCollectionKey(collectionId) || findStoredCollectionKey(registryKey || collectionId)) {
+            leftovers.push('collection record');
+        }
+        if (getCollectionRegistry().some(key => (parseRegistryKey(key).collectionId || key) === target)) {
+            leftovers.push('registry entry');
+        }
+        if (getBoundChatDetails(target)) leftovers.push('chat binding');
+        if (hasLegacyCollectionKeys(collectionId)) leftovers.push('obsolete migration key');
+    } catch (error) {
+        leftovers.push(`verification failed (${error.message})`);
+    }
+    if (leftovers.length) {
+        errors.push(`Still present after saving: ${leftovers.join(', ')}`);
+    }
+
+    const success = errors.length === 0;
+    console.log(`VectHare: Metadata reset for ${collectionId} - removed: ${removed.join(', ') || 'nothing'}` +
+        (errors.length ? ` | errors: ${errors.join(', ')}` : ''));
+    return { success, removed, errors, verified: leftovers.length === 0 };
+}
+
+/**
+ * Rebuilds only the LOCAL VectHare metadata that can be independently
+ * verified for one collection. It never vectorizes, never creates a physical
+ * collection, and never invents original settings, chat ownership or ledger
+ * history: anything that cannot be established is reported as unverified and
+ * left exactly as it is.
+ *
+ * @param {string} collectionId Collection identifier
+ * @param {object} settings Settings addressing the recorded destination
+ * @param {string|null} registryKey Full registry key, when known
+ * @returns {Promise<{success: boolean, restored: string[], preserved: string[],
+ *   cleared: string[], unverified: string[]}>}
+ */
+export async function regenerateCollectionMetadata(collectionId, settings, registryKey = null) {
+    assertStoreAuthoritative('Regenerating collection metadata');
+    const restored = [];
+    const preserved = [];
+    const cleared = [];
+    const unverified = [];
+
+    const verified = await verifyPhysicalCollectionExistence(collectionId, settings, {
+        backend: settings.vector_backend,
+        source: settings.source,
+    });
+    if (verified.existence === 'unverified') {
+        return { success: false, restored, preserved, cleared,
+            unverified: [`physical existence (${verified.reason || 'could not be checked'})`] };
+    }
+
+    const target = parseRegistryKey(collectionId).collectionId || collectionId;
+    const key = registryKey || collectionId;
+
+    // Nothing to recover from: no record in VectHare's metadata file and
+    // nothing at the recorded destination. Regeneration must never bring back
+    // a record that was deliberately and successfully deleted, so this stops
+    // before any write rather than recreating one from a stale row.
+    if (verified.existence === 'absent' &&
+        !getStoredCollectionRecord(key) && !getStoredCollectionRecord(collectionId)) {
+        // An unreadable entry is a different situation from no entry, and
+        // regeneration can repair neither: there is nothing at the destination
+        // to verify anything against, and replacing an unreadable record with
+        // a clean one would be inventing a record. Use Delete Metadata.
+        const unreadable = Boolean(findStoredCollectionKey(key) || findStoredCollectionKey(collectionId));
+        return { success: false, restored, preserved, cleared,
+            unverified: [unreadable
+                ? 'nothing to regenerate (this entry is unreadable and nothing exists at the recorded ' +
+                  'destination to rebuild it from - use Delete Metadata to clear it)'
+                : 'nothing to regenerate (no VectHare record, and nothing exists at the recorded destination)'] };
+    }
+
+    // 1. Registry entry: recoverable only for a collection that demonstrably
+    //    exists at the destination the entry would name.
+    if (verified.existence === 'present') {
+        const registry = getCollectionRegistry();
+        if (!registry.some(entry => (parseRegistryKey(entry).collectionId || entry) === target)) {
+            const backend = settings.vector_backend || 'standard';
+            const source = verified.model && settings.source ? settings.source : (settings.source || 'transformers');
+            registerCollection(`${backend}:${source}:${target}`);
+            restored.push('registry entry');
+        } else {
+            preserved.push('registry entry');
+        }
+    } else {
+        unverified.push('registry entry (no physical collection to register)');
+    }
+
+    // 2. Physical presence and chunk count: refreshed from the backend only.
+    if (verified.existence === 'present') {
+        try {
+            const hashes = await getSavedHashes(target, settings);
+            if (Array.isArray(hashes)) {
+                setCollectionMeta(key, { chunkCount: hashes.length });
+                restored.push(`chunk count (${hashes.length})`);
+            } else {
+                unverified.push('chunk count');
+            }
+        } catch (error) {
+            unverified.push(`chunk count (${error.message})`);
+        }
+    }
+
+    // 3. The authoritative original configuration is backend-resident. It is
+    //    read to report its state and NEVER written, reconstructed or guessed.
+    try {
+        const saved = await readInitialVectorizationConfig(target, settings, {
+            backend: settings.vector_backend,
+            source: settings.source,
+        });
+        if (saved.status === 'valid') {
+            preserved.push('verified original configuration');
+        } else {
+            unverified.push(`original configuration (${saved.status})`);
+        }
+    } catch (error) {
+        unverified.push(`original configuration (${error.message})`);
+    }
+
+    // 4. Local annotations are user data: kept untouched.
+    const annotations = Object.keys(getAllChunkMetadata(target) || {}).length;
+    if (annotations) preserved.push(`${annotations} chunk annotation(s)`);
+
+    // 5. Chat binding: reconstructed only from an existing authoritative
+    //    binding record, never inferred from a name or an id resemblance.
+    const bound = getBoundChatDetails(target);
+    if (bound) preserved.push('chat binding');
+    else if (isQuarantinedChatCollection(target)) preserved.push('preserved (unassigned) binding');
+    else unverified.push('chat binding (no authoritative ownership evidence)');
+
+    // 6. Local metadata fields that are demonstrably invalid can be cleared;
+    //    missing information is never treated as verified.
+    const meta = getCollectionMeta(key) || {};
+    const invalid = {};
+    if (meta.chunkCount != null && !Number.isFinite(Number(meta.chunkCount))) invalid.chunkCount = null;
+    if (meta.preferredModel != null && typeof meta.preferredModel !== 'string') invalid.preferredModel = null;
+    if (meta.pendingMetadataCleanup === true && verified.existence === 'present') {
+        // The collection is here after all, so a pending-cleanup flag is stale.
+        invalid.pendingMetadataCleanup = false;
+    }
+    if (Object.keys(invalid).length) {
+        setCollectionMeta(key, invalid);
+        cleared.push(...Object.keys(invalid));
+    }
+
+    // 7. The identity ledger is never fabricated.
+    unverified.push('identity ledger (never reconstructed)');
+
+    try {
+        await flushVectHareStore();
+    } catch (error) {
+        return { success: false, restored, preserved, cleared,
+            unverified: [...unverified, `saving metadata (${error.message})`] };
+    }
+
+    console.log(`VectHare: Regenerated metadata for ${target} - restored: ${restored.join(', ') || 'nothing'}` +
+        ` | preserved: ${preserved.join(', ') || 'nothing'}` +
+        ` | cleared: ${cleared.join(', ') || 'nothing'}`);
+    return { success: true, restored, preserved, cleared, unverified };
+}
+
+/**
  * Clears the entire registry (useful for debugging/reset)
  */
 export function clearCollectionRegistry() {
-    extension_settings.vecthare.vecthare_collection_registry = [];
+    vecthareState().registry = [];
     console.log('VectHare: Cleared collection registry');
-    saveSettingsDebounced(); // Persist to disk!
+    persistVectHareStore(); // Persist to collections.json
 }
 
 /**
@@ -220,11 +673,11 @@ export function clearCollectionRegistry() {
 export function cleanupCollectionRegistry() {
     const registry = getCollectionRegistry();
     const cleaned = [...new Set(registry.filter(id => id != null && id !== ''))];
-    extension_settings.vecthare.vecthare_collection_registry = cleaned;
+    vecthareState().registry = cleaned;
     const removed = registry.length - cleaned.length;
     if (removed > 0) {
         console.log(`VectHare: Cleaned registry - removed ${removed} invalid/duplicate entries`);
-        saveSettingsDebounced(); // Persist to disk!
+        persistVectHareStore(); // Persist to collections.json
     }
     return removed;
 }
@@ -256,9 +709,9 @@ export function cleanupTestCollections() {
 
     const removed = registry.length - cleaned.length;
     if (removed > 0) {
-        extension_settings.vecthare.vecthare_collection_registry = cleaned;
+        vecthareState().registry = cleaned;
         console.log(`VectHare: Cleaned ${removed} test collection entries from registry`);
-        saveSettingsDebounced(); // Persist to disk!
+        persistVectHareStore(); // Persist to collections.json
     }
     return removed;
 }
@@ -368,11 +821,31 @@ export async function checkPluginAvailable(forceRefresh = false) {
 let pluginCollectionData = null;
 
 /**
+ * Drops the cached backend inventory and the cached plugin-availability answer,
+ * so the next load re-reads both from the backends instead of reusing counts
+ * and destinations gathered before a change. Touches no stored state.
+ * @param {string} [collectionId] Only forget this identity's cached entries
+ */
+export function invalidateCollectionInventory(collectionId = null) {
+    pluginAvailable = null;
+    if (!collectionId || !pluginCollectionData) {
+        pluginCollectionData = null;
+        return;
+    }
+    const target = parseRegistryKey(collectionId).collectionId || collectionId;
+    for (const key of Object.keys(pluginCollectionData)) {
+        if ((parseRegistryKey(key).collectionId || key) === target) {
+            delete pluginCollectionData[key];
+        }
+    }
+}
+
+/**
  * Discovers existing collections using server plugin (scans file system)
  * @param {object} settings VectHare settings
  * @returns {Promise<string[]>} Array of discovered collection IDs
  */
-async function discoverViaPlugin(settings) {
+async function discoverViaPlugin(settings, readOnly = false) {
     try {
         console.debug('🔍 VectHare: Requesting collection discovery from plugin...');
 
@@ -438,6 +911,12 @@ async function discoverViaPlugin(settings) {
                 }
             }
 
+            if (readOnly) {
+                // Display refresh: report what was found and change nothing.
+                console.debug(`   Read-only discovery: ${uniqueKeys.length} collection(s) reported, registry untouched`);
+                return uniqueKeys;
+            }
+
             // IMPORTANT: Replace registry with what plugin found (removes stale entries)
             // This ensures the registry matches actual disk state
             const currentRegistry = getCollectionRegistry();
@@ -486,11 +965,19 @@ async function discoverViaPlugin(settings) {
                 console.log(`   ✅ Migrated ${migratedEntries.length} old registry entries to new format`);
             }
 
-            // Remove entries that no longer exist on disk
+            // Remove entries that no longer exist on disk. An inventory that
+            // never covered a key's backend is not evidence about that key: an
+            // unreachable or unconfigured backend reports nothing, and pruning
+            // on that basis would silently drop a live collection's record.
+            const inventoriedBackends = new Set(uniqueKeys
+                .map(key => parseRegistryKey(key).backend).filter(Boolean));
             const updatedRegistry = getCollectionRegistry();
-            const staleEntries = updatedRegistry.filter(key =>
-                !pluginKeySet.has(key) &&
-                !parseRegistryKey(key).collectionId.startsWith(COLLECTION_PREFIXES.VECTHARE_CHAT));
+            const staleEntries = updatedRegistry.filter(key => {
+                if (pluginKeySet.has(key)) return false;
+                const parsed = parseRegistryKey(key);
+                if (parsed.collectionId.startsWith(COLLECTION_PREFIXES.VECTHARE_CHAT)) return false;
+                return parsed.backend ? inventoriedBackends.has(parsed.backend) : true;
+            });
             if (staleEntries.length > 0) {
                 console.debug(`   🗑️  Removing ${staleEntries.length} stale registry entries:`);
                 for (const staleKey of staleEntries) {
@@ -531,13 +1018,24 @@ async function discoverViaPlugin(settings) {
  * @returns {Promise<{exists: boolean, count: number}>}
  */
 async function probeCollection(collectionId, settings) {
+    // READ-ONLY. This used to ask getSavedHashes(), which goes through ST's
+    // native list endpoint - and listing a Vectra collection that does not
+    // exist CREATES it, so probing for a collection manufactured the very
+    // thing it was looking for. The explicit existence check never creates
+    // anything, and a count is only read once existence is confirmed.
     try {
-        const hashes = await getSavedHashes(collectionId, settings);
-        if (hashes && hashes.length > 0) {
-            return { exists: true, count: hashes.length };
+        const verified = await verifyPhysicalCollectionExistence(collectionId, settings, {
+            backend: settings.vector_backend,
+            source: settings.source,
+        });
+        if (verified.existence !== 'present') return { exists: false, count: 0 };
+        if (Number.isSafeInteger(verified.count) && verified.countTrusted) {
+            return { exists: true, count: verified.count };
         }
+        const hashes = await getSavedHashes(collectionId, settings);
+        return { exists: true, count: Array.isArray(hashes) ? hashes.length : 0 };
     } catch (error) {
-        // Collection doesn't exist or error - that's fine
+        console.debug(`VectHare: Could not probe ${collectionId}: ${error.message}`);
     }
     return { exists: false, count: 0 };
 }
@@ -552,7 +1050,7 @@ async function probeCollection(collectionId, settings) {
  * @param {object} settings VectHare settings
  * @returns {Promise<string[]>} Array of discovered collection IDs
  */
-async function discoverViaFallback(settings) {
+async function discoverViaFallback(settings, readOnly = false) {
     const context = getContext();
     const discovered = [];
     const probed = new Set();
@@ -578,9 +1076,10 @@ async function discoverViaFallback(settings) {
                 discovered.push(registryKey);
             }
             console.log(`VectHare: Verified registry entry: ${collectionId} (${result.count} chunks)`);
-        } else if (!collectionId.startsWith(COLLECTION_PREFIXES.VECTHARE_CHAT)) {
+        } else if (!readOnly && !collectionId.startsWith(COLLECTION_PREFIXES.VECTHARE_CHAT)) {
             // Chat collections may be on an unavailable backend. Never prune
-            // their registry entries on an inconclusive read.
+            // their registry entries on an inconclusive read. A display
+            // refresh prunes nothing at all.
             unregisterCollection(registryKey);
             console.log(`VectHare: Removed stale registry entry: ${registryKey}`);
         }
@@ -594,7 +1093,7 @@ async function discoverViaFallback(settings) {
             probed.add(newFormatId);
             const result = await probeCollection(newFormatId, settings);
             if (result.exists) {
-                registerCollection(newFormatId);
+                if (!readOnly) registerCollection(newFormatId);
                 discovered.push(newFormatId);
                 console.log(`VectHare: Discovered current chat collection: ${newFormatId} (${result.count} chunks)`);
             }
@@ -606,7 +1105,7 @@ async function discoverViaFallback(settings) {
             probed.add(legacyFormatId);
             const result = await probeCollection(legacyFormatId, settings);
             if (result.exists) {
-                registerCollection(legacyFormatId);
+                if (!readOnly) registerCollection(legacyFormatId);
                 discovered.push(legacyFormatId);
                 console.log(`VectHare: Discovered legacy chat collection: ${legacyFormatId} (${result.count} chunks)`);
             }
@@ -625,7 +1124,7 @@ async function discoverViaFallback(settings) {
             probed.add(charCollectionId);
             const result = await probeCollection(charCollectionId, settings);
             if (result.exists) {
-                registerCollection(charCollectionId);
+                if (!readOnly) registerCollection(charCollectionId);
                 discovered.push(charCollectionId);
                 console.log(`VectHare: Discovered character collection: ${charCollectionId} (${result.count} chunks)`);
             }
@@ -654,15 +1153,15 @@ async function discoverViaFallback(settings) {
  * @param {object} settings VectHare settings
  * @returns {Promise<string[]>} Array of discovered collection IDs
  */
-export async function discoverExistingCollections(settings) {
+export async function discoverExistingCollections(settings, options = {}) {
     const hasPlugin = await checkPluginAvailable();
 
     if (hasPlugin) {
         console.log('VectHare: Using plugin for collection discovery');
-        return await discoverViaPlugin(settings);
+        return await discoverViaPlugin(settings, options.readOnly === true);
     } else {
         console.log('VectHare: Plugin not available, using fallback discovery');
-        return await discoverViaFallback(settings);
+        return await discoverViaFallback(settings, options.readOnly === true);
     }
 }
 
@@ -692,11 +1191,25 @@ export async function doesChatHaveVectors(settings, overrideChatId, overrideUUID
         const parsed = parseRegistryKey(key);
         let chunkCount = pluginCollectionData?.[key]?.chunkCount || 0;
         try {
-            if (!chunkCount) chunkCount = (await getSavedHashes(collectionId, {
-                ...settings,
-                vector_backend: parsed.backend || settings.vector_backend,
-                source: parsed.source || settings.source,
-            })).length;
+            // Only count a collection the backend confirms is there. Counting
+            // first would create a missing Vectra index through ST's native
+            // list endpoint.
+            if (!chunkCount) {
+                const destinationSettings = {
+                    ...settings,
+                    vector_backend: parsed.backend || settings.vector_backend,
+                    source: parsed.source || settings.source,
+                };
+                const verified = await verifyPhysicalCollectionExistence(collectionId,
+                    destinationSettings, {
+                        backend: destinationSettings.vector_backend,
+                        source: destinationSettings.source,
+                    });
+                if (verified.existence !== 'present') continue;
+                chunkCount = Number.isSafeInteger(verified.count) && verified.countTrusted
+                    ? verified.count
+                    : (await getSavedHashes(collectionId, destinationSettings)).length;
+            }
         } catch (error) {
             console.debug('VectHare: Unable to confirm chat vector count', error);
             continue;
@@ -719,24 +1232,237 @@ export async function doesChatHaveVectors(settings, overrideChatId, overrideUUID
  * @param {boolean} autoDiscover If true, attempts to discover unregistered collections
  * @returns {Promise<object[]>} Array of collection objects
  */
-export async function loadAllCollections(settings, autoDiscover = true) {
+/**
+ * Establishes whether a listed identity is backed by a real record in
+ * VectHare's own metadata file, and whether that record is identifiably
+ * VectHare's. Nothing here reads or trusts the backend: a collection folder,
+ * a discovered collection name, a plugin cache entry or another extension's
+ * collection is NOT a VectHare metadata record.
+ *
+ * Ownership evidence, any one of which is sufficient:
+ *   - the collection ID carries a VectHare collection prefix;
+ *   - the record carries an initial vectorization config (VectHare-authored);
+ *   - VectHare holds a chat binding for the identity.
+ *
+ * @param {string} collectionId Bare collection identifier
+ * @param {string} registryKey Key the row was listed under
+ * @returns {{hasRecord: boolean, recordKey: string|null, fieldCount: number,
+ *            owned: boolean, reason: string}}
+ */
+function validateMetadataRecordIdentity(collectionId, registryKey) {
+    const stored = getStoredCollectionRecord(registryKey) || getStoredCollectionRecord(collectionId);
+    const bound = Boolean(getBoundChatDetails(registryKey) || getBoundChatDetails(collectionId));
+    // An entry present in the collections map whose value is not a readable
+    // record: the record is broken, which is not the same as having no record.
+    const brokenKey = !stored &&
+        (findStoredCollectionKey(registryKey) || findStoredCollectionKey(collectionId));
+    if (brokenKey) {
+        return {
+            hasRecord: true, recordKey: brokenKey, recordSource: 'collections (unreadable record)',
+            fieldCount: 0, malformed: true, owned: false, foreign: false,
+            reason: 'VectHare\'s metadata file holds an entry for this identity, but it is not a ' +
+                'readable record.',
+        };
+    }
+    // Both the collections map and the chat binding store live in VectHare's
+    // own metadata file. A binding never creates a row of its own (every chat
+    // VectHare has seen has one), but for an identity that is already listed it
+    // is a real, identifiable record for that identity.
+    const prefixed = Object.values(COLLECTION_PREFIXES).some(prefix =>
+        typeof prefix === 'string' && prefix.startsWith('vecthare_') && collectionId.startsWith(prefix));
+    const hasOwnConfig = Boolean(stored?.record?.initialVectorization);
+
+    if (!stored && !bound) {
+        return {
+            hasRecord: false, recordKey: null, recordSource: 'none', fieldCount: 0,
+            malformed: false,
+            // Ownership is judged the same way with or without a record: a
+            // VectHare-prefixed name is VectHare's own. Reporting a prefixed
+            // collection as unowned here made a legitimate VectHare collection
+            // with no metadata record undeletable.
+            owned: prefixed,
+            // Foreignness is a property of the identity, not of having a
+            // record: an entry with NO record and no VectHare marker is as
+            // much "not VectHare's" as one with a record, and must withhold
+            // the same actions. Reporting it as owned here is what let the
+            // Browser offer a Delete Collection the core then refused.
+            foreign: !prefixed && !hasOwnConfig,
+            reason: 'VectHare\'s metadata file holds no record for this identity.',
+        };
+    }
+    const owned = prefixed || hasOwnConfig || bound;
+    // No VectHare marker of any kind: not a VectHare name, no VectHare-authored
+    // configuration and no chat binding. That is a collection belonging to
+    // SillyTavern itself or to another extension, which is different from a
+    // VectHare collection whose ownership is merely ambiguous.
+    const foreign = !prefixed && !hasOwnConfig && !bound;
+
+    return {
+        hasRecord: true,
+        recordKey: stored ? stored.key : registryKey,
+        recordSource: stored ? (bound ? 'collections + chatCollectionBindings' : 'collections')
+            : 'chatCollectionBindings',
+        fieldCount: stored ? stored.fields.length : 0,
+        malformed: false,
+        owned,
+        foreign,
+        reason: owned ? '' : foreign
+            ? 'This is not a VectHare collection: its name carries no VectHare marker, VectHare ' +
+              'recorded no vectorization configuration for it and no chat is bound to it. It was ' +
+              'most likely created by SillyTavern itself or by another extension.'
+            : 'A metadata record exists, but nothing identifies this collection as VectHare\'s own.',
+    };
+}
+
+/**
+ * Classifies a browser row from an EXPLICIT backend existence check at the
+ * recorded destination. A registry entry, a folder name or a count of zero is
+ * never treated as evidence either way, and a failure is never absence.
+ *
+ * A confirmed absence is only shown as 'metadata-only' when VectHare's own
+ * metadata file holds a validated, VectHare-owned record for the identity at a
+ * backend-qualified destination. A record that fails validation is never
+ * hidden: it is classified 'invalid-metadata' (broken or incomplete record) or
+ * 'ownership-unverified' (record exists, ownership not established), stays
+ * visible for inspection, and has its actions restricted accordingly.
+ *
+ * @param {string} collectionId Collection identifier or registry key
+ * @param {object} destinationSettings Settings addressing the recorded destination
+ * @param {object} location {backend, source, model} actually recorded for the row
+ * @param {number} chunkCount Chunks counted, when the count succeeded
+ * @param {boolean} countFailed Whether every count attempt failed
+ * @param {object} identity Result of validateMetadataRecordIdentity() for the row
+ * @param {boolean} destinationQualified Whether {backend, source} came from a record
+ * @returns {Promise<{presence: string, detail: string, existence: string, countTrusted: boolean}>}
+ *   presence is 'present' | 'empty' | 'count-unverified' | 'metadata-only' |
+ *   'invalid-metadata' | 'ownership-unverified' | 'unverified'
+ */
+async function resolveCollectionPresence(collectionId, destinationSettings, location,
+    chunkCount, countFailed, identity = { hasRecord: false, owned: false, reason: '' },
+    destinationQualified = false) {
+    const verified = await verifyPhysicalCollectionExistence(collectionId, destinationSettings, location);
+
+    if (verified.existence === 'unverified') {
+        return {
+            presence: 'unverified', existence: 'unverified', countTrusted: false,
+            detail: verified.reason ||
+                'The recorded destination could not be checked, so nothing is assumed about this collection.',
+        };
+    }
+
+    if (verified.existence === 'absent') {
+        // Source-of-truth requirement: only an actual, validated record in
+        // VectHare's metadata file may be presented as Metadata Only. A record
+        // that fails validation is still listed, under a state that says so.
+        if (identity.malformed) {
+            return {
+                presence: 'invalid-metadata', existence: 'absent', countTrusted: false,
+                detail: identity.reason + ' Nothing exists at the checked destination. The entry is ' +
+                    'listed so it can be inspected and cleaned up; its actions are withheld.',
+            };
+        }
+        if (!identity.hasRecord) {
+            return {
+                presence: 'invalid-metadata', existence: 'absent', countTrusted: false,
+                detail: 'Nothing exists at the checked destination, and VectHare\'s metadata file ' +
+                    'holds no record for this identity - only its name, from collection discovery. ' +
+                    'It is listed for inspection and is not VectHare metadata.',
+            };
+        }
+        if (!destinationQualified) {
+            return {
+                presence: 'invalid-metadata', existence: 'absent', countTrusted: false,
+                detail: 'A VectHare metadata record exists, but it records no backend-qualified ' +
+                    'destination, so the destination that was checked is not known to be this ' +
+                    'record\'s. Nothing is assumed about its vectors and its actions are withheld.',
+            };
+        }
+        if (!identity.owned) {
+            return {
+                presence: 'ownership-unverified', existence: 'absent', countTrusted: false,
+                detail: identity.reason + ' The record is listed for inspection and its actions ' +
+                    'are withheld.',
+            };
+        }
+        return {
+            presence: 'metadata-only', existence: 'absent', countTrusted: false,
+            detail: 'The physical collection was confirmed absent at its recorded destination. ' +
+                'A VectHare metadata record for it still exists.',
+        };
+    }
+
+    // Confirmed present. Only now does the count mean anything.
+    if (countFailed) {
+        return {
+            presence: 'count-unverified', existence: 'present', countTrusted: false,
+            detail: 'The physical collection exists at its recorded destination, but its chunk count ' +
+                'could not be trusted.',
+        };
+    }
+    if (chunkCount > 0) {
+        return { presence: 'present', existence: 'present', countTrusted: true, detail: '' };
+    }
+    return {
+        presence: 'empty', existence: 'present', countTrusted: true,
+        detail: 'The physical collection exists at its recorded destination and has a verified count ' +
+            'of zero chunks.',
+    };
+}
+
+export async function loadAllCollections(settings, autoDiscover = true, options = {}) {
     console.debug('🐰 VectHare: Loading all collections for Database Browser...');
 
-    // Clean up registry first (remove nulls and duplicates)
-    cleanupCollectionRegistry();
+    // A display refresh (the Database Browser, Resync) must not write to
+    // VectHare's metadata document. In read-only mode nothing is cleaned up,
+    // migrated, pruned or registered: discovery only reports what the backends
+    // hold, and the discovered keys are listed alongside the stored ones.
+    const readOnly = options.readOnly === true;
+    if (!readOnly) {
+        // Clean up registry first (remove nulls and duplicates)
+        cleanupCollectionRegistry();
+    }
 
     // Auto-discover existing collections on first load
+    let discovered = [];
     if (autoDiscover) {
-        await discoverExistingCollections(settings);
+        discovered = await discoverExistingCollections(settings, { readOnly }) || [];
     }
 
     const registry = getCollectionRegistry();
     console.debug(`VectHare: Registry contains ${registry.length} collection(s):`, registry);
 
+    // Phase 2: list the union of registered collections and collection
+    // identities that exist only in local metadata, so a record whose physical
+    // collection is gone stays visible and inspectable. Registered keys come
+    // first, so a full backend:source:id key wins over a bare metadata key for
+    // the same identity. (Chat bindings are not listed here - every chat
+    // VectHare has seen has one; they are shown inside View Metadata.)
+    const identityKeys = [];
+    const seenIdentities = new Set();
+    // The metadata side of this union is VectHare's own metadata file and
+    // nothing else. Keys whose value is not a usable record are still listed -
+    // broken metadata must stay visible so it can be inspected and cleaned up -
+    // but they are classified as invalid, never as Metadata Only.
+    const recordKeys = Object.keys(vecthareState().collections || {});
+    // In read-only mode the discovered keys were not registered, so they are
+    // listed from the inventory instead. They come first: a backend-qualified
+    // key beats a bare one for the same identity.
+    for (const key of [...(readOnly ? discovered : []), ...registry, ...recordKeys]) {
+        if (typeof key !== 'string' || !key) continue;
+        const identity = parseRegistryKey(key).collectionId || key;
+        if (seenIdentities.has(identity)) continue;
+        seenIdentities.add(identity);
+        identityKeys.push(key);
+    }
+    if (identityKeys.length > registry.length) {
+        console.debug(`VectHare: ${identityKeys.length - registry.length} collection(s) exist only in VectHare's metadata file`);
+    }
+
+
     const collections = [];
     const hasPlugin = pluginAvailable === true;
 
-    for (const registryKey of registry) {
+    for (const registryKey of identityKeys) {
         try {
             // Use unified registry key parser from collection-ids.js
             const parsedKey = parseRegistryKey(registryKey);
@@ -759,9 +1485,18 @@ export async function loadAllCollections(settings, autoDiscover = true) {
             console.log(`VectHare:   Type: ${metadata.type}, Scope: ${metadata.scope}${storedMeta.contentType ? ' (from stored meta)' : ' (parsed from ID)'}`);
 
             let chunkCount = 0;
+            let readFailed = false;
             let hashes = [];
             let source = registrySource || 'unknown';
             let backend = registryBackend || 'standard';
+            // True only when {backend, source} came from a record (the registry
+            // key's qualification or the plugin's report), never from the
+            // defaults above. An absence answer for a guessed destination says
+            // nothing about where this record's collection was written.
+            let destinationQualified = Boolean(registryBackend && registrySource);
+            // Where {backend, source} came from, so the metadata viewer can
+            // never present a backend query's answer as a stored field.
+            let destinationOrigin = destinationQualified ? 'registry-key' : 'assumed';
             let model = '';
             let models = [];
 
@@ -774,6 +1509,8 @@ export async function loadAllCollections(settings, autoDiscover = true) {
                 source = cacheData.source;
                 backend = cacheData.backend;
                 models = cacheData.models || [];
+                destinationQualified = Boolean(cacheData.backend && cacheData.source);
+                destinationOrigin = destinationQualified ? 'backend-query' : 'assumed';
 
                 // Check if user has a preferred model saved
                 const collectionMeta = getCollectionMeta(registryKey);
@@ -793,47 +1530,92 @@ export async function loadAllCollections(settings, autoDiscover = true) {
 
                 console.log(`VectHare:   Plugin reported ${chunkCount} chunks (backend: ${backend}, source: ${source}, models: ${models.length})`);
             } else {
-                // Fallback mode: we don't know which backend the collection was created with
-                // Try 'standard' first (most common), only try configured backend if standard fails
-                console.log(`VectHare:   Using fallback mode - trying standard backend first`);
-                const standardSettings = { ...settings, vector_backend: 'standard' };
-                try {
-                    hashes = await getSavedHashes(collectionId, standardSettings);
-                    chunkCount = hashes?.length || 0;
-                    console.log(`VectHare:   Found ${chunkCount} hashes via standard backend`);
-                } catch (standardError) {
-                    // Standard failed, try the configured backend if different
-                    if (settings.vector_backend && settings.vector_backend !== 'standard') {
-                        console.log(`VectHare:   Standard backend failed, trying ${settings.vector_backend}`);
-                        try {
-                            hashes = await getSavedHashes(collectionId, settings);
-                            chunkCount = hashes?.length || 0;
-                            console.log(`VectHare:   Found ${chunkCount} hashes via ${settings.vector_backend}`);
-                        } catch (altError) {
-                            console.warn(`VectHare:   Both backends failed for ${collectionId}`);
-                            chunkCount = 0;
-                        }
-                    } else {
-                        console.warn(`VectHare:   Standard backend failed for ${collectionId}`);
-                        chunkCount = 0;
+                // Fallback mode: the inventory has nothing for this identity, so
+                // the backend it lives on is unknown.
+                //
+                // This used to count it with getSavedHashes() straight away.
+                // That goes through ST's native list endpoint, which CREATES a
+                // Vectra index that does not exist - so merely opening the
+                // Database Browser materialised an empty collection for every
+                // listed-but-missing identity, turning metadata-only rows into
+                // real empty collections and recreating deleted ones on every
+                // refresh. Existence is established read-only first, and a
+                // count is only read once a destination is confirmed.
+                console.log(`VectHare:   Using fallback mode - checking standard first (read-only)`);
+                const candidates = [{ ...settings, vector_backend: 'standard' }];
+                if (settings.vector_backend && settings.vector_backend !== 'standard') {
+                    candidates.push({ ...settings });
+                }
+                let located = null;
+                let anyVerified = false;
+                for (const candidate of candidates) {
+                    try {
+                        const verified = await verifyPhysicalCollectionExistence(collectionId, candidate, {
+                            backend: candidate.vector_backend,
+                            source: candidate.source,
+                        });
+                        if (verified.existence === 'unverified') continue;
+                        anyVerified = true;
+                        if (verified.existence === 'present') { located = { candidate, verified }; break; }
+                    } catch (error) {
+                        console.debug(`VectHare:   ${candidate.vector_backend} check failed for ${collectionId}: ${error.message}`);
                     }
+                }
+                if (located) {
+                    backend = located.candidate.vector_backend;
+                    if (Number.isSafeInteger(located.verified.count) && located.verified.countTrusted) {
+                        chunkCount = located.verified.count;
+                    } else {
+                        try {
+                            hashes = await getSavedHashes(collectionId, located.candidate);
+                            chunkCount = hashes?.length || 0;
+                        } catch (error) {
+                            console.warn(`VectHare:   Count failed for ${collectionId}: ${error.message}`);
+                            readFailed = true;
+                        }
+                    }
+                    console.log(`VectHare:   Found ${chunkCount} chunks via ${backend} backend`);
+                } else if (anyVerified) {
+                    // Confirmed absent everywhere checked: a real answer, and
+                    // nothing was created to produce it.
+                    chunkCount = 0;
+                    console.log(`VectHare:   Nothing exists for ${collectionId} at the destinations checked`);
+                } else {
+                    console.warn(`VectHare:   Could not verify any destination for ${collectionId}`);
+                    readFailed = true;
                 }
             }
 
-            // Skip empty collections (no point showing them)
-            if (chunkCount === 0) {
-                console.debug(`⚠️ VectHare: Skipping empty collection "${collectionId}" (0 chunks)`);
-                console.debug(`   💡 This collection exists but has no vectorized data`);
-                console.debug(`   💡 To see it in Database Browser, you need to vectorize some content first`);
-                continue;
-            }
+            // An entry with local metadata is listed whatever the backend says,
+            // with its state established by an explicit existence check at the
+            // recorded destination.
+            const presenceSettings = { ...settings, vector_backend: backend, source };
+            const identity = validateMetadataRecordIdentity(collectionId, registryKey);
+            const { presence, detail, existence, countTrusted } = await resolveCollectionPresence(
+                collectionId, presenceSettings, { backend, source, model }, chunkCount, readFailed,
+                identity, destinationQualified);
+            const boundChat = getBoundChatDetails(registryKey) || getBoundChatDetails(collectionId);
+            const quarantined = isQuarantinedChatCollection(collectionId);
+            const isChatCollection = metadata.scope === 'chat' ||
+                collectionId.startsWith('vecthare_chat_');
+            // A chat collection with no binding is ambiguous; a collection with
+            // no VectHare marker at all is not VectHare's to act on. Both
+            // withhold destructive actions - the second is reported as what it
+            // is (SillyTavern's own, or another extension's).
+            const ownershipUnverified = (isChatCollection && !boundChat) || identity.foreign === true;
+            // Ambiguous ownership withholds destructive actions, but it must not
+            // mask a confirmed absence or an unverified destination.
+            const presenceState = ownershipUnverified && ['present', 'empty', 'count-unverified'].includes(presence)
+                ? 'ownership-unverified' : presence;
 
             const displayName = getCollectionDisplayName(collectionId, metadata);
             console.log(`VectHare:   Display name: ${displayName}`);
 
             // Use registryKey (source:id) for internal tracking to keep collections unique
             const enabled = isCollectionEnabled(registryKey);
-            ensureCollectionMeta(registryKey, { scope: metadata.scope });
+            // Listing never writes. Creating a metadata record here would make
+            // every discovered name - including collections VectHare does not
+            // own - look like a VectHare record on the next refresh.
 
             collections.push({
                 id: collectionId,           // Original collection ID (for API calls)
@@ -841,6 +1623,24 @@ export async function loadAllCollections(settings, autoDiscover = true) {
                 name: displayName,
                 type: metadata.type,
                 scope: metadata.scope,
+                presence: presenceState,    // present | empty | count-unverified | metadata-only | invalid-metadata | ownership-unverified | unverified
+                presenceDetail: detail,
+                existence,                  // present | absent | unverified (explicit backend answer)
+                countTrusted,
+                // Source-of-truth facts about VectHare's own metadata file.
+                metadataRecord: {
+                    present: identity.hasRecord,
+                    key: identity.recordKey,
+                    source: identity.recordSource,
+                    fieldCount: identity.fieldCount,
+                    malformed: identity.malformed === true,
+                    ownershipValidated: identity.owned,
+                    foreign: identity.foreign === true,
+                },
+                destinationQualified,
+                destinationOrigin,
+                boundChat: boundChat ? { owner: boundChat.owner, chat: boundChat.chat } : null,
+                quarantined,
                 chunkCount: chunkCount,
                 enabled: enabled,
                 hashes: hashes,
@@ -859,7 +1659,11 @@ export async function loadAllCollections(settings, autoDiscover = true) {
         }
     }
 
-    console.log(`\n✅ VectHare: Loaded ${collections.length} non-empty collections for Database Browser`);
+    const byPresence = collections.reduce((acc, item) => {
+        acc[item.presence] = (acc[item.presence] || 0) + 1;
+        return acc;
+    }, {});
+    console.log(`\n✅ VectHare: Loaded ${collections.length} collection(s) for Database Browser`, byPresence);
     if (collections.length === 0 && registry.length > 0) {
         console.debug(`⚠️ VectHare: ${registry.length} collections in registry but all are empty!`);
         console.debug(`   💡 Collections need to have vectorized chunks to appear in Database Browser`);

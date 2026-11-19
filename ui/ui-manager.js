@@ -11,6 +11,7 @@
  */
 
 import { saveSettingsDebounced, getCurrentChatId, eventSource, event_types } from '../../../../../script.js';
+import { vecthareState } from '../core/vecthare-store.js';
 import { extension_settings, openThirdPartyExtensionMenu } from '../../../../extensions.js';
 import { writeSecret, SECRET_KEYS, secret_state, readSecretState } from '../../../../secrets.js';
 import { getWebLlmProvider as getSharedWebLlmProvider } from '../providers/webllm.js';
@@ -22,7 +23,8 @@ import { openTextCleaningManager } from './text-cleaning-manager.js';
 import { resetBackendHealth } from '../backends/backend-manager.js';
 import { getHealthIndicatorHtml, getHealthModalHtml, initializeHealthDashboard, checkBackendHealth } from './health-dashboard.js';
 import { getChatCollectionId } from '../core/chat-vectorization.js';
-import { doesChatHaveVectors } from '../core/collection-loader.js';
+import { doesChatHaveVectors, getCollectionRegistry } from '../core/collection-loader.js';
+import { parseRegistryKey } from '../core/collection-ids.js';
 import { getModelField } from '../core/providers.js';
 import { getChunkingStrategies } from '../core/content-types.js';
 
@@ -701,35 +703,19 @@ export function renderSettings(containerId, settings, callbacks) {
 
                             <!-- Collection lock moved to Database Browser (per-collection settings) -->
 
-                            <label for="vecthare_chunking_strategy" style="margin-top: 12px;">
-                                <small>Chunking Strategy</small>
-                            </label>
-                            <select id="vecthare_chunking_strategy" class="vecthare-select">
-                                <!-- Populated dynamically from content-types.js -->
-                            </select>
-
-                            <!-- Strategy description (populated dynamically) -->
-                            <div id="vecthare_strategy_info" class="vecthare_hint" style="margin-top: 4px; margin-bottom: 12px;">
-                                <span id="vecthare_strategy_description"></span>
-                            </div>
-
-                            <!-- Conversation Turns order (only shown for conversation_turns) -->
-                            <div id="vecthare_turn_order_settings" style="display: none; margin-bottom: 12px;">
-                                <label for="vecthare_turn_order"><small>Pairing Order</small></label>
-                                <select id="vecthare_turn_order" class="vecthare-select">
-                                    <option value="user_character">User → Character</option>
-                                    <option value="character_user">Character → User</option>
-                                </select>
-                                <small class="vecthare_hint">Consecutive messages from one speaker count as a single turn.</small>
-                            </div>
-
-                            <!-- Message Batch settings (only shown for message_batch strategy) -->
-                            <div id="vecthare_batch_settings" style="display: none;">
-                                <label for="vecthare_batch_size">
-                                    <small>Messages per Batch: <span id="vecthare_batch_size_value">4</span></small>
-                                </label>
-                                <input type="range" id="vecthare_batch_size" class="vecthare-slider" min="2" max="10" step="1" />
-                                <small class="vecthare_hint">How many messages to group together</small>
+                            <!-- Read-only. This chat collection's chunking and text cleaning are
+                                 whatever its original vectorization recorded, and auto-sync and
+                                 Repair reproduce them. They are changed by re-vectorizing
+                                 (Vectorize Content > Replace All), never from this card. -->
+                            <div id="vecthare_chat_config_readonly" style="margin-top: 12px;">
+                                <label><small>Chunking Strategy</small></label>
+                                <div id="vecthare_chat_config_strategy" class="vecthare_hint">Not Configured</div>
+                                <label style="margin-top: 8px;"><small>Text Cleaning</small></label>
+                                <div id="vecthare_chat_config_cleaning" class="vecthare_hint">Not Configured</div>
+                                <small class="vecthare_hint" style="margin-top: 4px; margin-bottom: 12px; display: block;">
+                                    This chat collection's original vectorization settings. To change them,
+                                    re-vectorize the chat from Vectorize Content.
+                                </small>
                             </div>
 
                         </div>
@@ -1398,10 +1384,138 @@ export function updateContinueVectorizationButton(mode, pending = 0, total = 0) 
  * @param {object} settings - VectHare settings object (unused, kept for API compatibility)
  */
 let autoSyncRefreshId = 0;
+let chatConfigDisplayId = 0;
+let chatConfigShown = { key: null, at: 0 };
+
+/**
+ * Read-only display of the chunking strategy and text cleaning this chat's
+ * collection was ACTUALLY vectorized with, read from its verified original
+ * vectorization configuration at its recorded destination.
+ *
+ * The current global settings are never shown here: auto-sync and Repair
+ * reproduce the collection's saved configuration, so showing today's settings
+ * would misreport what runs. Nothing is written and nothing is guessed - a
+ * chat with no collection reads "Not Configured", and a configuration that is
+ * missing, invalid or unverifiable reads "Unknown".
+ *
+ * @param {object} settings VectHare settings (used only to address the backend)
+ */
+export function refreshChatVectorizationConfig(settings) {
+    const requestId = ++chatConfigDisplayId;
+    const strategyEl = $('#vecthare_chat_config_strategy');
+    const cleaningEl = $('#vecthare_chat_config_cleaning');
+    if (!strategyEl.length || !cleaningEl.length) return;
+
+    const chatId = getCurrentChatId();
+    const collectionId = getChatCollectionId();
+    const destinations = collectionId
+        ? getCollectionRegistry().filter(key => (parseRegistryKey(key).collectionId || key) === collectionId)
+        : [];
+    // This refresh shares its entry point with the auto-sync checkbox, which
+    // runs several times per chat switch. One read per chat is enough, and the
+    // key changes as soon as the chat gains (or loses) a recorded destination.
+    const key = `${chatId}|${collectionId || ''}|${destinations.join(',')}`;
+    if (chatConfigShown.key === key && Date.now() - chatConfigShown.at < 5000) return;
+
+    const settle = (strategyText, cleaningText, detail = '') => {
+        // A later chat switch always wins; a stale read never paints.
+        if (requestId !== chatConfigDisplayId || getCurrentChatId() !== chatId) return;
+        strategyEl.text(strategyText).attr('title', detail);
+        cleaningEl.text(cleaningText).attr('title', detail);
+        chatConfigShown = { key, at: Date.now() };
+    };
+
+    if (!collectionId) {
+        settle('Not Configured', 'Not Configured', 'This chat has no vector collection yet.');
+        return;
+    }
+    if (!destinations.length) {
+        settle('Not Configured', 'Not Configured',
+            'This chat has not been vectorized yet, so it has no recorded configuration.');
+        return;
+    }
+
+    strategyEl.text('Reading…').attr('title', '');
+    cleaningEl.text('Reading…').attr('title', '');
+
+    void (async () => {
+        try {
+            const { readInitialVectorizationConfig } = await import('../core/collection-metadata.js');
+            let last = null;
+            for (const registryKey of destinations) {
+                const destination = parseRegistryKey(registryKey);
+                const saved = await readInitialVectorizationConfig(collectionId, settings, {
+                    backend: destination.backend || undefined,
+                    source: destination.source || undefined,
+                });
+                last = saved;
+                if (saved.status === 'valid' && saved.config) {
+                    settle(describeOriginalChunking(saved.config),
+                        describeOriginalCleaning(saved.config),
+                        `Recorded ${saved.config.recordedAt || 'at vectorization'}.`);
+                    return;
+                }
+            }
+            settle('Unknown', 'Unknown',
+                `The original configuration is ${last?.status || 'unverified'}` +
+                `${last?.reason ? ` (${last.reason})` : ''}. Nothing is assumed about it.`);
+        } catch (error) {
+            console.warn('VectHare: Could not read this chat collection\'s original configuration:', error);
+            settle('Unknown', 'Unknown', `The original configuration could not be read (${error.message}).`);
+        }
+    })();
+}
+
+/**
+ * Formats a verified original configuration's chunking for display.
+ * @param {object} config Verified original vectorization configuration
+ * @returns {string}
+ */
+function describeOriginalChunking(config) {
+    const chunking = config.chunking;
+    if (!chunking || typeof chunking !== 'object' || typeof chunking.strategy !== 'string') {
+        return 'Unknown';
+    }
+    const known = getChunkingStrategies('chat').find(item => item.id === chunking.strategy);
+    const name = known?.name || chunking.strategy;
+    const extra = [];
+    if (chunking.strategy === 'message_batch' && chunking.batchSize != null) {
+        extra.push(`batches of ${chunking.batchSize}`);
+    }
+    if (chunking.strategy === 'conversation_turns' && chunking.conversationTurnOrder) {
+        extra.push(chunking.conversationTurnOrder === 'character_user'
+            ? 'Character → User' : 'User → Character');
+    }
+    if (chunking.pipeline && chunking.pipeline !== 'sync-chat') {
+        extra.push(`vectorized as ${chunking.pipeline}`);
+    }
+    return extra.length ? `${name} (${extra.join(', ')})` : name;
+}
+
+/**
+ * Formats a verified original configuration's text cleaning for display.
+ * @param {object} config Verified original vectorization configuration
+ * @returns {string}
+ */
+function describeOriginalCleaning(config) {
+    const cleaning = config.textCleaning;
+    if (!cleaning || typeof cleaning !== 'object' || typeof cleaning.applied !== 'boolean') {
+        return 'Unknown';
+    }
+    if (!cleaning.applied) return 'Not applied';
+    const patterns = Array.isArray(cleaning.activePatterns) ? cleaning.activePatterns.length : null;
+    const preset = cleaning.preset || 'none';
+    return patterns === null ? `Preset: ${preset}`
+        : `Preset: ${preset} · ${patterns} pattern${patterns === 1 ? '' : 's'}`;
+}
+
 export function refreshAutoSyncCheckbox(settings) {
     const requestId = ++autoSyncRefreshId;
     const chatId = getCurrentChatId();
     const collectionId = getChatCollectionId();
+    // Same card, same chat: keep the read-only configuration display in step,
+    // including on chat switches (this already runs on CHAT_CHANGED).
+    refreshChatVectorizationConfig(settings);
     if (!collectionId) {
         $('#vecthare_autosync_enabled').prop('checked', false);
         return;
@@ -1680,7 +1794,94 @@ async function showAutoSyncConfirmModal(allMatches, settings) {
  * @param {object} settings - VectHare settings object
  * @param {object} callbacks - Callback functions
  */
+/**
+ * Asks what a Full Purge should remove. Both choices delete VectHare's own
+ * vectors and its metadata; only one of them also resets VectHare's settings.
+ * Resolves to 'all', 'data', or null when the user cancels.
+ * @returns {Promise<'all'|'data'|null>}
+ */
+export function openPurgeOptionsDialog() {
+    return new Promise(resolve => {
+        if ($('#vecthare_purge_options_modal').length === 0) {
+            $('body').append(`
+            <div id="vecthare_purge_options_modal" class="vecthare-modal">
+                <div class="vecthare-modal-content vecthare-rename-dialog popup">
+                    <div class="vecthare-modal-header">
+                        <h3>Full Purge</h3>
+                        <button class="vecthare-btn-icon" id="vecthare_purge_options_close">✕</button>
+                    </div>
+                    <div class="vecthare-rename-body">
+                        <p>Both choices delete every VectHare-owned vector collection and all of
+                        VectHare's stored metadata for them: the collection registry, collection
+                        records and preferences, chunk annotations, chat bindings and identity
+                        ledgers.</p>
+                        <p><strong>Your chats, characters and SillyTavern's own data are not
+                        touched, and collections VectHare does not own are left alone.</strong></p>
+                        <p>Choose whether your VectHare settings go too:</p>
+                        <ul>
+                            <li><strong>Everything</strong> — also resets VectHare's settings
+                            (backend, embedding provider and model, chunking, RAG, decay and the
+                            rest) to their defaults.</li>
+                            <li><strong>Vectors &amp; metadata only</strong> — keeps your settings
+                            exactly as they are, so you can re-vectorize with the same
+                            configuration.</li>
+                        </ul>
+                        <p><small>Nothing is deleted until the vector purge has completed and been
+                        verified. This cannot be undone.</small></p>
+                    </div>
+                    <div class="vecthare-modal-footer">
+                        <button class="vecthare-btn" id="vecthare_purge_options_cancel">Cancel</button>
+                        <button class="vecthare-btn vecthare-btn-danger" id="vecthare_purge_options_data">
+                            Purge Vectors &amp; Metadata
+                        </button>
+                        <button class="vecthare-btn vecthare-btn-danger" id="vecthare_purge_options_all">
+                            Purge Everything
+                        </button>
+                    </div>
+                </div>
+            </div>
+            `);
+            $('#vecthare_purge_options_modal').on('mousedown touchstart', e => e.stopPropagation());
+        }
+
+        const modal = $('#vecthare_purge_options_modal');
+        const finish = choice => {
+            modal.off('.vecthareePurge');
+            $('#vecthare_purge_options_close, #vecthare_purge_options_cancel, ' +
+              '#vecthare_purge_options_data, #vecthare_purge_options_all').off('.vecthareePurge');
+            modal.removeClass('active').hide();
+            resolve(choice);
+        };
+        $('#vecthare_purge_options_close').on('click.vecthareePurge', () => finish(null));
+        $('#vecthare_purge_options_cancel').on('click.vecthareePurge', () => finish(null));
+        $('#vecthare_purge_options_data').on('click.vecthareePurge', () => finish('data'));
+        $('#vecthare_purge_options_all').on('click.vecthareePurge', () => finish('all'));
+        modal.on('click.vecthareePurge', function (event) {
+            if (event.target === this) finish(null);
+        });
+        modal.addClass('active').show();
+    });
+}
+
+let uiCallbacks = {};
+
+/**
+ * Refreshes what a committed chat collection rebuild invalidates: the
+ * Chat Auto-Sync card's read-only configuration display and the cached
+ * collection/vectorization status. The Database Browser re-reads collections
+ * when it is opened, so nothing is pushed into it here.
+ */
+export function refreshAfterChatCollectionRebuild() {
+    refreshChatVectorizationConfig(extension_settings.vecthare);
+    try {
+        uiCallbacks.onCollectionsChanged?.();
+    } catch (error) {
+        console.warn('VectHare: Collection status could not be refreshed:', error);
+    }
+}
+
 function bindSettingsEvents(settings, callbacks) {
+    uiCallbacks = callbacks || {};
     // Auto-sync enable/disable - now per-collection instead of global
     // Initial state is set by refreshAutoSyncCheckbox() after chat loads
     $('#vecthare_autosync_enabled')
@@ -1771,51 +1972,11 @@ function bindSettingsEvents(settings, callbacks) {
 
         // Collection lock handled inside Database Browser per-collection settings
 
-    // Chunking strategy - populate from content-types.js (single source of truth)
-    const chatStrategies = getChunkingStrategies('chat');
-    const strategySelect = $('#vecthare_chunking_strategy');
-    strategySelect.empty();
-    for (const strategy of chatStrategies) {
-        const selected = strategy.id === (settings.chunking_strategy || 'per_message');
-        strategySelect.append(`<option value="${strategy.id}" ${selected ? 'selected' : ''}>${strategy.name}</option>`);
-    }
-
-    function updateStrategyUI(strategyId) {
-        // Update description from content-types.js
-        const strategy = chatStrategies.find(s => s.id === strategyId);
-        $('#vecthare_strategy_description').text(strategy?.description || '');
-        // Show/hide batch settings
-        $('#vecthare_batch_settings').toggle(strategyId === 'message_batch');
-        $('#vecthare_turn_order_settings').toggle(strategyId === 'conversation_turns');
-    }
-
-    strategySelect.on('change', function() {
-        settings.chunking_strategy = String($(this).val());
-        applySettingsSnapshot(settings);
-        saveSettingsDebounced();
-        updateStrategyUI(settings.chunking_strategy);
-    });
-    updateStrategyUI(settings.chunking_strategy || 'per_message');
-
-    $('#vecthare_turn_order')
-        .val(settings.conversation_turn_order || 'user_character')
-        .on('change', function() {
-            settings.conversation_turn_order = String($(this).val());
-            applySettingsSnapshot(settings);
-            saveSettingsDebounced();
-        });
-
-    // Batch size (for message_batch strategy)
-    $('#vecthare_batch_size')
-        .val(settings.batch_size || 4)
-        .on('input', function() {
-            const value = Number($(this).val());
-            $('#vecthare_batch_size_value').text(value);
-            settings.batch_size = value;
-            applySettingsSnapshot(settings);
-            saveSettingsDebounced();
-        });
-    $('#vecthare_batch_size_value').text(settings.batch_size || 4);
+    // Chat chunking and text cleaning are read-only here: they belong to the
+    // collection, not to the current global settings, and are set by
+    // vectorizing or rebuilding. Shown from the collection's verified original
+    // configuration only.
+    refreshChatVectorizationConfig(settings);
 
     // Chunk size (for adaptive strategy)
     $('#vecthare_chunk_size')
@@ -2292,7 +2453,7 @@ function bindSettingsEvents(settings, callbacks) {
                 if (!entries || entries.length === 0) {
                     try {
                         console.log('VectHare: No semantic entries — dumping registry and per-collection query info...');
-                        const registry = window.extension_settings?.vecthare?.vecthare_collection_registry || settings.vecthare_collection_registry || [];
+                        const registry = vecthareState().registry || [];
                         console.log('VectHare: Collection registry:', registry);
 
                         const coreApi = await import('../core/core-vector-api.js');
@@ -2361,7 +2522,7 @@ function bindSettingsEvents(settings, callbacks) {
 
     $('#vecthare_wi_dump_registry').on('click', function() {
         try {
-            const registry = window.extension_settings?.vecthare?.vecthare_collection_registry || settings.vecthare_collection_registry || [];
+            const registry = vecthareState().registry || [];
             console.log('VectHare: Collection registry dump:', registry);
             toastr.info(`Collection registry dumped to console (${registry.length} items)`);
         } catch (e) {
@@ -2803,7 +2964,10 @@ function bindSettingsEvents(settings, callbacks) {
 
     // Action buttons
     $('#vecthare_vectorize_content').on('click', () => {
-        openContentVectorizer();
+        // The caller decides whether this chat needs a re-vectorization
+        // confirmation first; without a handler, the plain setup opens.
+        if (callbacks.onVectorizeContent) callbacks.onVectorizeContent();
+        else openContentVectorizer();
     });
     $('#vecthare_vectorize_all').on('click', callbacks.onVectorizeAll);
     // VectHare+ R7/R10: Repair Chunks button (formerly "Continue Vectorization";

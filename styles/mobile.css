@@ -197,6 +197,35 @@
         transform: none !important;
     }
 
+    /* METADATA WINDOW and FULL PURGE OPTIONS - full screen, but the body
+       scrolls and the footer stays on screen (including above an Android/iOS
+       home indicator). */
+    #vecthare_metadata_modal .vecthare-modal-content,
+    #vecthare_metadata_modal div.vecthare-rename-dialog,
+    #vecthare_purge_options_modal .vecthare-modal-content,
+    #vecthare_purge_options_modal div.vecthare-rename-dialog {
+        display: flex !important;
+        flex-direction: column !important;
+    }
+
+    #vecthare_metadata_modal .vecthare-rename-body,
+    #vecthare_purge_options_modal .vecthare-rename-body {
+        flex: 1 1 auto !important;
+        min-height: 0 !important;
+        overflow-y: auto !important;
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior: contain;
+        padding: 16px !important;
+    }
+
+    #vecthare_metadata_modal .vecthare-modal-footer,
+    #vecthare_purge_options_modal .vecthare-modal-footer {
+        flex: 0 0 auto !important;
+        flex-wrap: wrap !important;
+        row-gap: 10px;
+        padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)) !important;
+    }
+
     /* ========================================================================
      * MODAL HEADER - Always visible and touchable
      * ======================================================================== */
