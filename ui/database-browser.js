@@ -856,6 +856,8 @@ function renderCollectionCard(collection) {
   // A row with no VectHare marker at all is reported as what it is rather than
   // as ambiguous ownership.
   const notVectHare = collection.metadataRecord?.foreign === true;
+  // Only these keep their vectors in a folder on this machine.
+  const fileBacked = ["standard", "vectra", "lancedb"].includes(collection.backend);
   const presenceBadge =
     {
       empty:
@@ -1021,13 +1023,22 @@ function renderCollectionCard(collection) {
                 `
                     : ""
                 }
+                ${
+                  // Qdrant and Milvus collections live on a server, not in a
+                  // folder on this machine, so the action is not offered for
+                  // them rather than failing when pressed.
+                  fileBacked
+                    ? `
                 <button class="vecthare-btn-sm vecthare-action-open-folder"
                         data-collection-key="${uniqueKey}"
                         data-backend="${collection.backend}"
                         data-source="${collection.source || "transformers"}"
-                        title="Open in file explorer">
+                        title="Open this collection's folder in your file explorer">
                     ${icons.folderOpen(16)} Open Folder
                 </button>
+                `
+                    : ""
+                }
                 <button class="vecthare-btn-sm vecthare-action-visualize"
                         data-collection-key="${uniqueKey}"
                         data-backend="${collection.backend}"
@@ -1204,6 +1215,29 @@ async function collectMetadataReport(collection) {
     }
   } catch (error) {
     report.originalConfigurationStatus = `unreadable (${error.message})`;
+  }
+
+  // Where this collection and VectHare's metadata document actually live.
+  // Read-only, and only reported when the plugin can confirm them: a remote
+  // backend has no local folder, and an unconfirmed path is not shown at all.
+  try {
+    const response = await fetch("/api/plugins/similharity/collections/paths", {
+      method: "POST",
+      headers: getRequestHeaders(),
+      body: JSON.stringify({
+        backend: collection.backend || "vectra",
+        collectionId: collection.id,
+        source: collection.source || "",
+        model: collection.model || "",
+      }),
+    });
+    if (response.ok) {
+      const paths = await response.json();
+      report.collectionPath = paths?.collection || null;
+      report.metadataPath = paths?.metadata || null;
+    }
+  } catch (error) {
+    console.debug("VectHare: Could not resolve storage paths", error);
   }
 
   return report;
@@ -1479,6 +1513,8 @@ async function openMetadataDialog(collection) {
       ? `${report.binding.ownerType} ${report.binding.ownerId} · ${report.binding.chatFile}`
       : report.quarantined ? "preserved, no current chat" : "none recorded")}
     ${row("Local annotations", report.annotationCount)}
+    ${report.metadataPath ? row("Metadata file", report.metadataPath) : ""}
+    ${report.collectionPath ? row("Collection folder", report.collectionPath) : ""}
     <p><strong>Not stored metadata - read from the backend this session</strong></p>
     ${row("Destination checked", checked)}
     ${row("Destination came from", report.destinationOrigin === "registry-key"
@@ -1884,13 +1920,16 @@ function bindCollectionCardEvents() {
         });
 
         if (!response.ok) {
-          throw new Error(`Failed to open folder: ${response.statusText}`);
+          // The plugin says exactly why (remote backend, folder missing); a
+          // bare "Bad Request" told the user nothing.
+          const reason = await response.json().then(body => body?.error).catch(() => "");
+          throw new Error(reason || response.statusText || `HTTP ${response.status}`);
         }
 
         toastr.success("Opened collection folder", "VectHare");
       } catch (error) {
         console.error("VectHare: Failed to open folder", error);
-        toastr.error(`Failed to open folder: ${error.message}`, "VectHare");
+        toastr.error(error.message, "VectHare: Could not open the folder");
       }
     });
 

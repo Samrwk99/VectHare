@@ -39,7 +39,7 @@ import {
 } from './collection-ids.js';
 import { extractLorebookKeywords, extractTextKeywords, extractChatKeywords, extractBM25Keywords, EXTRACTION_LEVELS, DEFAULT_EXTRACTION_LEVEL, DEFAULT_BASE_WEIGHT } from './keyword-boost.js';
 import { cleanText, cleanMessages } from './text-cleaning.js';
-import { progressTracker } from '../ui/progress-tracker.js';
+import { progressTracker, describeEffectiveSettings } from '../ui/progress-tracker.js';
 import { extension_settings, getContext } from '../../../../extensions.js';
 import { getStringHash } from '../../../../utils.js';
 
@@ -164,6 +164,9 @@ export async function vectorizeContent({ contentType, source, settings }) {
     const sourceName = source.name || source.filename || source.id || contentType;
     let initialConfig;
     const panelRunId = progressTracker.show(`Vectorizing ${type.label || contentType}`, 4, 'Steps');
+    progressTracker.setRunSettings(
+        describeEffectiveSettings(vecthareSettings, { 'Content': type.label || contentType }),
+        'as selected for this run');
     progressTracker.updateCurrentItem(sourceName);
 
     try {
@@ -725,7 +728,7 @@ function prepareChatContent(rawContent, settings) {
 
     // For adaptive or other text strategies - combine into single text
     const combined = cleanedMessages.map(m => {
-        const speaker = m.is_user ? 'User' : (m.name || 'Character');
+        const speaker = (typeof m.name === 'string' && m.name.trim()) || (m.is_user ? 'User' : 'Character');
         return `[${speaker}]: ${m.mes}`;
     }).join('\n\n');
 

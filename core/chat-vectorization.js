@@ -45,7 +45,7 @@ import {
     transferCollectionAnnotations,
     getAnnotatedChunkHashes,
 } from './collection-metadata.js';
-import { progressTracker } from '../ui/progress-tracker.js';
+import { progressTracker, describeEffectiveSettings } from '../ui/progress-tracker.js';
 import { sha256Text } from './vector-provenance.js';
 // VectHare+: run control (pause / resume / stop) for vectorization jobs
 import {
@@ -413,6 +413,24 @@ function prepareItemsForInsertion(items) {
  * @param {string} keywordLevel Keyword extraction level: 'off', 'minimal', 'balanced', 'aggressive'
  * @returns {object[]} Grouped message items ready for chunking
  */
+// Chunk text names the speakers as the chat does ([Peter]: / [Alice]:). The
+// HASH keeps the role labels ([User]: / [Character]:), so existing chunk
+// identities, ledgers and Sync/Repair diffing are unchanged, and renaming a
+// persona or character never makes a chunk look edited.
+function chatSpeakerLabel(m) {
+    const name = typeof m.name === 'string' ? m.name.trim() : '';
+    return name || (m.is_user ? 'User' : 'Character');
+}
+const chatRoleLabel = m => (m.is_user ? 'User' : 'Character');
+
+// Records written before speaker names were used carry role-labelled text.
+// Verification that compares stored text accepts that earlier form as well.
+const legacyLabelText = new WeakMap();
+function textVariants(item) {
+    const legacy = legacyLabelText.get(item);
+    return legacy && legacy !== item.text ? [item, { ...item, text: legacy }] : [item];
+}
+
 function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel = 'balanced', conversationTurnOrder = 'user_character') {
     if (!messages.length) return [];
 
@@ -433,10 +451,8 @@ function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel
             const grouped = [];
             for (const pair of groupConversationTurns(messages, conversationTurnOrder)) {
                 // Combine texts with speaker labels
-                const combinedText = pair.map(m => {
-                    const role = m.is_user ? 'User' : 'Character';
-                    return `[${role}]: ${m.text}`;
-                }).join('\n\n');
+                const combinedText = pair.map(m => `[${chatSpeakerLabel(m)}]: ${m.text}`).join('\n\n');
+                const legacyText = pair.map(m => `[${chatRoleLabel(m)}]: ${m.text}`).join('\n\n');
                 // R22: hash from RAW combined text (stable identity)
                 const combinedRaw = pair.map(m => {
                     const role = m.is_user ? 'User' : 'Character';
@@ -456,6 +472,7 @@ function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel
                         endIndex: pair[pair.length - 1].index
                     }
                 });
+                legacyLabelText.set(grouped[grouped.length - 1], legacyText);
             }
             return grouped;
         }
@@ -466,10 +483,8 @@ function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel
             for (let i = 0; i < messages.length; i += batchSize) {
                 const batch = messages.slice(i, i + batchSize);
                 // Combine texts with speaker labels
-                const combinedText = batch.map(m => {
-                    const role = m.is_user ? 'User' : 'Character';
-                    return `[${role}]: ${m.text}`;
-                }).join('\n\n');
+                const combinedText = batch.map(m => `[${chatSpeakerLabel(m)}]: ${m.text}`).join('\n\n');
+                const legacyText = batch.map(m => `[${chatRoleLabel(m)}]: ${m.text}`).join('\n\n');
                 // R22: hash from RAW combined text (stable identity)
                 const combinedRaw = batch.map(m => {
                     const role = m.is_user ? 'User' : 'Character';
@@ -490,6 +505,7 @@ function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel
                         endIndex: batch[batch.length - 1].index
                     }
                 });
+                legacyLabelText.set(grouped[grouped.length - 1], legacyText);
             }
             return grouped;
         }
@@ -537,7 +553,8 @@ function collectGroupedItems(chat, settings, hashOnly = false, memberPositions =
             raw: getTextWithoutAttachments(msg), // R22: unsubstituted, consumed by grouped strategies' stable hashing
             hash: getStringHash(getTextWithoutAttachments(msg)), // R22: raw text, not substituted - stable identity across reloads
             index: i,
-            is_user: msg.is_user
+            is_user: msg.is_user,
+            name: msg.name,
         });
     }
 
@@ -1417,9 +1434,14 @@ async function rebuildMissingIdentityLedger(collectionId, settings, config, chat
     for (let i = 0; i < items.length; i++) {
         const item = items[i];
         const ids = extractMessageIds(item.metadata);
-        const textFingerprint = `sha256:${await sha256Text(item.text)}`;
-        const candidates = (inventory.get(String(item.hash)) || []).filter(meta =>
-            chatRecordMatchesItem(meta, item, collectionId, textFingerprint));
+        const candidates = [];
+        for (const variant of textVariants(item)) {
+            const textFingerprint = `sha256:${await sha256Text(variant.text)}`;
+            for (const meta of inventory.get(String(item.hash)) || []) {
+                if (!candidates.includes(meta) &&
+                    chatRecordMatchesItem(meta, variant, collectionId, textFingerprint)) candidates.push(meta);
+            }
+        }
         // Multiple physical records or a UID that maps to conflicting positions
         // cannot establish a unique historical occurrence.
         if (candidates.length !== 1) continue;
@@ -4208,6 +4230,13 @@ export async function vectorizeAll(settings, batchSize, includeIndexedCount = fa
         // #33: this run's id; a later operation taking over the panel makes our
         // own completion a no-op instead of overwriting what the user now sees.
         runId = progressTracker.show('Vectorizing Chat', totalGroups, progressUnit);
+        // These are the settings the run resolved, which for an existing
+        // collection are its own saved vectorization settings - not today's
+        // global selection.
+        progressTracker.setRunSettings(describeEffectiveSettings(settings),
+            settings.__collectionCleaningPatterns
+                ? 'from this collection\'s saved configuration'
+                : 'as resolved for this run');
         progressTracker.stats.groupsCompletedThisRun = 0;
         progressShown = true;
 
@@ -5028,9 +5057,13 @@ export async function repairChatVectors(settings, batchSize = 5, embeddedMode = 
             try {
                 const inventory = await readIdentityInventory(collectionId, settings);
                 for (const item of writtenReplacements) {
-                    const fingerprint = `sha256:${await sha256Text(item.text)}`;
-                    if (!(inventory.get(String(item.hash)) || []).some(meta =>
-                        chatRecordMatchesItem(meta, item, collectionId, fingerprint, Boolean(identityLedger), true))) {
+                    let recordMatches = false;
+                    for (const variant of textVariants(item)) {
+                        const fingerprint = `sha256:${await sha256Text(variant.text)}`;
+                        if ((inventory.get(String(item.hash)) || []).some(meta => chatRecordMatchesItem(meta, variant,
+                            collectionId, fingerprint, Boolean(identityLedger), true))) { recordMatches = true; break; }
+                    }
+                    if (!recordMatches) {
                         replacementChecksPassed = false;
                         console.warn(`VectHare: Replacement record does not match its intended text/metadata (hash ${item.hash}); deletion deferred`);
                         break;

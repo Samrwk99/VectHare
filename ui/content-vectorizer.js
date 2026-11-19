@@ -91,6 +91,21 @@ export function openContentVectorizer(initialType = null, options = {}) {
 /**
  * Closes the modal
  */
+/**
+ * Hands the screen over to the status window while a run is in progress: the
+ * setup is put away WITHOUT losing the user's selections, so a failed run can
+ * bring it straight back. Used instead of closing, because closing discards
+ * the rebuild confirmation and the chosen settings.
+ */
+function hideContentVectorizer() {
+    $('#vecthare_content_vectorizer_modal').hide();
+}
+
+/** Brings the setup back, selections intact, after a failed run. */
+function revealContentVectorizer() {
+    $('#vecthare_content_vectorizer_modal').show();
+}
+
 export function closeContentVectorizer() {
     // A confirmed rebuild never outlives the window it was confirmed for.
     rebuildChatRequested = false;
@@ -1166,10 +1181,12 @@ function bindEvents() {
         $('#vecthare_cv_strategy_desc').text(selected?.description || '');
         currentSettings.strategy = strategy;
         updateSizeControlsVisibility();
+        refreshPreviewIfOpen();
     });
 
     $('#vecthare_cv_turn_order').on('change', function() {
         currentSettings.conversation_turn_order = String($(this).val());
+        refreshPreviewIfOpen();
     });
 
     // Size sliders
@@ -1177,12 +1194,14 @@ function bindEvents() {
         const val = $(this).val();
         $('#vecthare_cv_chunk_size_val').text(val);
         currentSettings.chunkSize = parseInt(val);
+        refreshPreviewIfOpen();
     });
 
     $('#vecthare_cv_overlap').on('input', function() {
         const val = parseInt($(this).val());
         $('#vecthare_cv_overlap_val').text(val === 0 ? 'Off' : val);
         currentSettings.chunkOverlap = val;
+        refreshPreviewIfOpen();
     });
 
     // Scope selection
@@ -2277,7 +2296,19 @@ function clearChatUpload() {
 /**
  * Previews how content will be chunked
  */
+// An open preview follows the chunking controls. Slider drags are coalesced,
+// and only the newest request may draw, so a slow earlier preview can never
+// overwrite the result for the strategy now selected.
+let previewGeneration = 0;
+let previewRefreshTimer = null;
+function refreshPreviewIfOpen() {
+    if (!$('.vecthare-cv-preview-section').is(':visible')) return;
+    clearTimeout(previewRefreshTimer);
+    previewRefreshTimer = setTimeout(() => { void previewChunks(); }, 250);
+}
+
 async function previewChunks() {
+    const generation = ++previewGeneration;
     const type = getContentType(currentContentType);
     const source = getSourceData();
 
@@ -2315,6 +2346,7 @@ async function previewChunks() {
             const prepared = await resolveAndPrepareContent(currentContentType, source, currentSettings);
             const contentText = prepared.text;
             if (!contentText || (Array.isArray(contentText) && contentText.length === 0)) {
+                if (generation !== previewGeneration) return;
                 container.html('<div class="vecthare-cv-error">Could not load content. Please check your selection.</div>');
                 return;
             }
@@ -2329,6 +2361,7 @@ async function previewChunks() {
                 : contentText.length;
         }
 
+        if (generation !== previewGeneration) return;
         // Handle empty or undefined chunks
         if (!chunks || chunks.length === 0) {
             container.html('<div class="vecthare-cv-error">No chunks generated. Content may be too short or empty.</div>');
@@ -2358,6 +2391,7 @@ async function previewChunks() {
         `);
 
     } catch (e) {
+        if (generation !== previewGeneration) return;
         console.error('VectHare: Preview failed:', e);
         container.html(`<div class="vecthare-cv-error">Preview failed: ${e.message}</div>`);
     }
@@ -2608,6 +2642,11 @@ async function startVectorization() {
     const btn = $('#vecthare_cv_vectorize');
     btn.prop('disabled', true).html('<i class="fa-solid fa-spinner fa-spin"></i> Vectorizing...');
 
+    // Every vectorization path drives the status window, and that window owns
+    // the progress, the settings in use, the run log and the Pause/Stop
+    // controls. Put the setup away so the status window has the screen.
+    hideContentVectorizer();
+
     try {
         // Import the appropriate handler
         const { vectorizeContent } = await import('../core/content-vectorization.js');
@@ -2685,6 +2724,9 @@ async function startVectorization() {
             toastr.error('Vectorization failed: ' + e.message, 'VectHare');
         }
 
+        // Bring the setup back with the selections intact so the run can be
+        // retried or adjusted.
+        revealContentVectorizer();
         btn.prop('disabled', false).html('<i class="fa-solid fa-bolt"></i> Vectorize');
     }
 }

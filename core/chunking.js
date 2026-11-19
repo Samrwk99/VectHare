@@ -129,7 +129,7 @@ const STRATEGIES = {
         const chunks = [];
         for (const msg of messages) {
             const text = typeof msg === 'string' ? msg : (msg.text || msg.mes || '');
-            const speaker = msg.is_user ? 'User' : (msg.name || 'Character');
+            const speaker = (typeof msg.name === 'string' && msg.name.trim()) || (msg.is_user ? 'User' : 'Character');
             const isUser = msg.is_user || false;
             const messageId = msg.index ?? msg.id ?? msg.send_date;
 
@@ -158,7 +158,7 @@ const STRATEGIES = {
         for (const pair of groupConversationTurns(messages, options.conversationTurnOrder)) {
             // Combine texts with speaker labels
             const combinedText = pair.map(m => {
-                const role = m.is_user ? 'User' : (m.name || 'Character');
+                const role = (typeof m.name === 'string' && m.name.trim()) || (m.is_user ? 'User' : 'Character');
                 const text = m.text || m.mes || '';
                 return `[${role}]: ${text}`;
             }).join('\n\n');
@@ -194,7 +194,7 @@ const STRATEGIES = {
 
             // Combine texts with speaker labels
             const combinedText = batch.map(m => {
-                const role = m.is_user ? 'User' : (m.name || 'Character');
+                const role = (typeof m.name === 'string' && m.name.trim()) || (m.is_user ? 'User' : 'Character');
                 const text = m.text || m.mes || '';
                 return `[${role}]: ${text}`;
             }).join('\n\n');

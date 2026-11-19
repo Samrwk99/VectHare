@@ -182,6 +182,11 @@ export class ProgressTracker {
         this.currentStatus = '';
         this.isStopping = false; // R10: fresh run must not inherit a stale stopping state
         this.currentEta = '';
+        // Each run gets its own log and its own settings summary.
+        this.runLog = [];
+        this.runSettings = null;
+        this.renderRunSettings();
+        this.renderRunLog();
         this.stats = {
             totalItems: totalItems,
             processedItems: 0,
@@ -211,11 +216,109 @@ export class ProgressTracker {
         // Start/restart time updater
         this.startTimeUpdater();
 
+        this.log(`Started: ${operation}${totalItems ? ` (${totalItems} ${itemLabel.toLowerCase()})` : ''}`);
         this.updateDisplay();
         this.modal.style.display = 'flex';
         this.isVisible = true;
         if (this.elements?.startBtn) this.elements.startBtn.style.display = 'none';
         return this.runId; // #33: callers pass this back to complete()
+    }
+
+    /**
+     * Appends one line to this run's log. Consecutive duplicates are collapsed
+     * with a counter so a per-chunk narration cannot flood the panel.
+     * @param {string} text Line to record
+     */
+    log(text) {
+        const line = String(text ?? '').trim();
+        if (!line) return;
+        if (!Array.isArray(this.runLog)) this.runLog = [];
+        const elapsed = this.stats?.startTime ? (Date.now() - this.stats.startTime) / 1000 : 0;
+        const at = `+${elapsed.toFixed(1)}s`;
+        const last = this.runLog[this.runLog.length - 1];
+        if (last && last.text === line) {
+            last.repeats = (last.repeats || 1) + 1;
+            last.at = at;
+        } else {
+            this.runLog.push({ at, text: line, repeats: 1 });
+            // Keep the panel bounded; the console still has everything.
+            if (this.runLog.length > 300) this.runLog.splice(0, this.runLog.length - 300);
+        }
+        this.renderRunLog();
+    }
+
+    /**
+     * Records what this run is ACTUALLY using, for display. The run passes its
+     * own effective settings, so a sync or repair shows the collection's saved
+     * configuration rather than today's global selection.
+     * @param {object} info Effective run settings
+     * @param {string} [origin] Where the values came from, shown beside the heading
+     */
+    setRunSettings(info, origin = '') {
+        this.runSettings = info && typeof info === 'object' ? info : null;
+        this.runSettingsOrigin = origin;
+        this.renderRunSettings();
+        if (this.runSettings) {
+            const summary = Object.entries(this.runSettings)
+                .filter(([, value]) => value !== undefined && value !== null && value !== '')
+                .map(([label, value]) => `${label}: ${value}`).join(' · ');
+            if (summary) this.log(`Settings in use - ${summary}`);
+        }
+    }
+
+    /** Renders the settings-in-use block. */
+    renderRunSettings() {
+        const section = this.elements?.settings;
+        const grid = this.elements?.settingsGrid;
+        if (!section || !grid) return;
+        const entries = Object.entries(this.runSettings || {})
+            .filter(([, value]) => value !== undefined && value !== null && value !== '');
+        if (!entries.length) {
+            section.style.display = 'none';
+            grid.replaceChildren();
+            return;
+        }
+        grid.replaceChildren(...entries.flatMap(([label, value]) => {
+            const key = document.createElement('div');
+            key.className = 'vecthare-progress-settings-key';
+            key.textContent = label;
+            const val = document.createElement('div');
+            val.className = 'vecthare-progress-settings-value';
+            val.textContent = String(value);
+            return [key, val];
+        }));
+        if (this.elements.settingsOrigin) {
+            this.elements.settingsOrigin.textContent = this.runSettingsOrigin || '';
+        }
+        section.style.display = 'block';
+    }
+
+    /** Renders the run log, newest last, and keeps it scrolled to the end. */
+    renderRunLog() {
+        const section = this.elements?.log;
+        const list = this.elements?.logList;
+        if (!section || !list) return;
+        const entries = this.runLog || [];
+        if (!entries.length) {
+            section.style.display = 'none';
+            list.replaceChildren();
+            return;
+        }
+        const atEnd = list.scrollTop + list.clientHeight >= list.scrollHeight - 24;
+        list.replaceChildren(...entries.map(entry => {
+            const row = document.createElement('div');
+            row.className = 'vecthare-progress-log-row';
+            const at = document.createElement('span');
+            at.className = 'vecthare-progress-log-at';
+            at.textContent = entry.at;
+            const text = document.createElement('span');
+            text.className = 'vecthare-progress-log-text';
+            text.textContent = entry.repeats > 1 ? `${entry.text} (×${entry.repeats})` : entry.text;
+            row.append(at, text);
+            return row;
+        }));
+        section.style.display = 'block';
+        if (atEnd) list.scrollTop = list.scrollHeight;
     }
 
     /**
@@ -269,6 +372,9 @@ export class ProgressTracker {
     updateProgress(processedItems, status = '') {
         this.stats.processedItems = processedItems;
         if (status) this.currentStatus = status;
+        // The run's own status line is the run log: no extra plumbing, and it
+        // records exactly what the panel reported at the time.
+        if (status) this.log(status);
         this.updateDisplay(status);
     }
 
@@ -322,6 +428,7 @@ export class ProgressTracker {
      * @param {string} text - Current item description
      */
     updateCurrentItem(text) {
+        if (text) this.log(text);
         // PERF: Use cached element references
         const el = this.elements?.current;
         const textEl = this.elements?.currentText;
@@ -344,6 +451,7 @@ export class ProgressTracker {
             message: error,
             timestamp: Date.now(),
         });
+        this.log(`Error: ${error}`);
         this.updateDisplay();
     }
 
@@ -380,6 +488,7 @@ export class ProgressTracker {
             console.debug(`VectHare: ignoring completion from a superseded operation (${message || 'no message'})`);
             return;
         }
+        this.log(`${success ? 'Finished' : 'Ended'}${message ? `: ${message}` : ''}`);
         this.isComplete = true;
         this.isPaused = false;
         this.isStopping = false; // R10: drain finished - no lingering "stopping…" state
@@ -449,7 +558,7 @@ export class ProgressTracker {
                     <div class="vecthare-progress-section" id="vecthare_progress_controls" style="margin-top: 8px;">
                         <button id="vecthare_progress_start" title="Start or continue syncing the current chat"
                             class="menu_button" style="display: none;">
-                            <i class="fa-solid fa-play"></i> Start / Sync Chat
+                            <i class="fa-solid fa-play"></i> Sync Chat
                         </button>
                         <button id="vecthare_progress_pause" title="Pause: finish in-flight work, then stop starting new items"
                             class="menu_button" style="display: none;">
@@ -485,6 +594,29 @@ export class ProgressTracker {
                         </div>
                     </div>
 
+                    <!-- What this run is actually using (set by the run itself) -->
+                    <div id="vecthare_progress_settings" class="vecthare-progress-section vecthare-progress-details" style="display: none;">
+                        <div class="vecthare-progress-details-header">
+                            <i class="fa-solid fa-sliders"></i>
+                            <span>Settings in use</span>
+                            <small id="vecthare_progress_settings_origin" class="vecthare-progress-details-note"></small>
+                        </div>
+                        <div id="vecthare_progress_settings_grid" class="vecthare-progress-settings-grid"></div>
+                    </div>
+
+                    <!-- Run log: this run's own narration, newest last -->
+                    <div id="vecthare_progress_log" class="vecthare-progress-section vecthare-progress-details" style="display: none;">
+                        <div class="vecthare-progress-details-header">
+                            <i class="fa-solid fa-list-ul"></i>
+                            <span>Run log</span>
+                            <button id="vecthare_progress_log_copy" class="vecthare-progress-log-copy"
+                                    title="Copy this log to the clipboard">
+                                <i class="fa-solid fa-copy"></i> Copy
+                            </button>
+                        </div>
+                        <div id="vecthare_progress_log_list" class="vecthare-progress-log-list"></div>
+                    </div>
+
                     <!-- Errors (hidden by default) -->
                     <div id="vecthare_progress_errors" class="vecthare-progress-errors" style="display: none;">
                         <div class="vecthare-progress-errors-header">
@@ -518,6 +650,11 @@ export class ProgressTracker {
             time: document.getElementById('vecthare_progress_time'),
             speed: document.getElementById('vecthare_progress_speed'),
             current: document.getElementById('vecthare_progress_current'),
+            settings: document.getElementById('vecthare_progress_settings'),
+            settingsGrid: document.getElementById('vecthare_progress_settings_grid'),
+            settingsOrigin: document.getElementById('vecthare_progress_settings_origin'),
+            log: document.getElementById('vecthare_progress_log'),
+            logList: document.getElementById('vecthare_progress_log_list'),
             currentText: document.getElementById('vecthare_progress_current_text'),
             statLabel: document.getElementById('vecthare_progress_stat_label'),
             errors: document.getElementById('vecthare_progress_errors'),
@@ -544,6 +681,18 @@ export class ProgressTracker {
             if (e.key === 'Escape') this.hide();
         });
         this.elements.startBtn?.addEventListener('click', () => this.startCallback?.());
+
+        document.getElementById('vecthare_progress_log_copy')?.addEventListener('click', async () => {
+            const text = (this.runLog || []).map(entry => `${entry.at}  ${entry.text}`).join('\n');
+            if (!text) return;
+            try {
+                await navigator.clipboard.writeText(text);
+                toastr.success('Run log copied', 'VectHare');
+            } catch (error) {
+                console.warn('VectHare: Could not copy the run log:', error);
+                toastr.info('Copying was blocked; the log is also in the browser console.', 'VectHare');
+            }
+        });
 
         // VectHare+: bind run-control buttons
         this.elements.pauseBtn?.addEventListener('click', () => {
@@ -773,4 +922,42 @@ export class ProgressTracker {
 }
 
 // Export singleton instance
+/**
+ * Summarizes the settings a run is ACTUALLY using, for the status window.
+ * Takes the run's own effective settings, so a sync or repair shows the
+ * collection's saved configuration rather than today's global selection.
+ * @param {object} settings Effective settings for the run
+ * @param {object} [extra] Extra labelled values to append
+ * @returns {object} Ordered label -> value pairs
+ */
+export function describeEffectiveSettings(settings, extra = {}) {
+    if (!settings || typeof settings !== 'object') return { ...extra };
+    const model = settings.openai_model || settings.ollama_model || settings.llamacpp_model ||
+        settings.vllm_model || settings.webllm_model || settings.togetherai_model ||
+        settings.cohere_model || settings.nomicai_model || settings.mistral_model ||
+        settings.palm_model || settings.koboldcpp_model || '';
+    const cleaning = settings.__collectionCleaningPatterns
+        ? `${settings.__collectionCleaningPatterns.length} pattern(s) from the collection`
+        : settings.text_cleaning_enabled === false
+            ? 'off'
+            : settings.text_cleaning_preset || 'default';
+    const out = {
+        'Backend': settings.vector_backend || 'standard',
+        'Embedding source': settings.source || 'transformers',
+        'Model': model || '(provider default)',
+        'Chunking': settings.chunking_strategy || 'per_message',
+    };
+    if (settings.chunking_strategy === 'message_batch' && settings.batch_size) {
+        out['Messages per batch'] = settings.batch_size;
+    }
+    if (settings.chunking_strategy === 'conversation_turns' && settings.conversation_turn_order) {
+        out['Pairing order'] = settings.conversation_turn_order === 'character_user'
+            ? 'Character → User' : 'User → Character';
+    }
+    if (settings.chunk_size) out['Chunk size'] = settings.chunk_size;
+    out['Text cleaning'] = cleaning;
+    if (settings.embedding_batch_size) out['Embedding batch'] = settings.embedding_batch_size;
+    return { ...out, ...extra };
+}
+
 export const progressTracker = new ProgressTracker();

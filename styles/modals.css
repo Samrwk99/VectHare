@@ -2284,3 +2284,10 @@
 #vecthare_purge_options_modal .vecthare-rename-body li {
     margin-bottom: 8px;
 }
+
+/* A resolved filesystem path is long; let it wrap instead of stretching the
+   Metadata window. */
+#vecthare_metadata_modal .vecthare-collection-meta span:last-child {
+    word-break: break-word;
+    text-align: right;
+}
