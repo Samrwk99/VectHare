@@ -2279,21 +2279,38 @@ async function previewChunks() {
         const { chunkText } = await import('../core/chunking.js');
         const { resolveAndPrepareContent } = await import('../core/content-vectorization.js');
 
-        // Resolve and prepare content (handles 'select' type sources like lorebooks)
-        const prepared = await resolveAndPrepareContent(currentContentType, source, currentSettings);
-        const contentText = prepared.text;
-
-        if (!contentText || (Array.isArray(contentText) && contentText.length === 0)) {
-            container.html('<div class="vecthare-cv-error">Could not load content. Please check your selection.</div>');
-            return;
+        let chunks, totalChars;
+        if (currentContentType === 'chat' && source.type === 'current' &&
+            ['per_message', 'conversation_turns', 'message_batch'].includes(currentSettings.strategy || type.defaultStrategy)) {
+            if (source.content !== getContext()?.chat) throw new Error('Selected chat changed during preview');
+            const { previewSyncChatGroups } = await import('../core/chat-vectorization.js');
+            const liveSettings = {
+                ...extension_settings.vecthare,
+                chunking_strategy: currentSettings.strategy || type.defaultStrategy,
+                conversation_turn_order: currentSettings.conversation_turn_order || 'user_character',
+                keyword_extraction_level: currentSettings.keywordLevel || extension_settings.vecthare?.keyword_extraction_level,
+                batch_size: currentSettings.batchSize || extension_settings.vecthare?.batch_size || 4,
+            };
+            chunks = await previewSyncChatGroups(source.content, liveSettings);
+            totalChars = chunks.reduce((sum, chunk) => sum + chunk.text.length, 0);
+        } else {
+            // Uploaded transcripts and non-Sync strategies keep their original preview.
+            const prepared = await resolveAndPrepareContent(currentContentType, source, currentSettings);
+            const contentText = prepared.text;
+            if (!contentText || (Array.isArray(contentText) && contentText.length === 0)) {
+                container.html('<div class="vecthare-cv-error">Could not load content. Please check your selection.</div>');
+                return;
+            }
+            chunks = await chunkText(contentText, {
+                strategy: currentSettings.strategy || type.defaultStrategy,
+                chunkSize: currentSettings.chunkSize || type.defaults.chunkSize,
+                chunkOverlap: currentSettings.chunkOverlap || type.defaults.chunkOverlap,
+                conversationTurnOrder: currentSettings.conversation_turn_order || 'user_character',
+            });
+            totalChars = Array.isArray(contentText)
+                ? contentText.reduce((sum, t) => sum + (t?.length || 0), 0)
+                : contentText.length;
         }
-
-        const chunks = await chunkText(contentText, {
-            strategy: currentSettings.strategy || type.defaultStrategy,
-            chunkSize: currentSettings.chunkSize || type.defaults.chunkSize,
-            chunkOverlap: currentSettings.chunkOverlap || type.defaults.chunkOverlap,
-            conversationTurnOrder: currentSettings.conversation_turn_order || 'user_character',
-        });
 
         // Handle empty or undefined chunks
         if (!chunks || chunks.length === 0) {
@@ -2302,9 +2319,6 @@ async function previewChunks() {
         }
 
         // Calculate total chars for average
-        const totalChars = Array.isArray(contentText)
-            ? contentText.reduce((sum, t) => sum + (t?.length || 0), 0)
-            : contentText.length;
         const avgChars = Math.round(totalChars / chunks.length);
 
         container.html(`
@@ -2461,7 +2475,7 @@ async function startVectorization() {
             const binding = await ensureChatBinding();
             if (!binding.writable) throw new Error('Chat collection identity is not verified');
             const { doesChatHaveVectors } = await import('../core/collection-loader.js');
-            const existing = await doesChatHaveVectors(currentSettings);
+            const existing = await doesChatHaveVectors(extension_settings.vecthare);
 
             if (existing.hasVectors && existing.chunkCount > 0) {
                 const confirmed = await callGenericPopup(
@@ -2509,11 +2523,16 @@ async function startVectorization() {
                         (originalStorage.backend === 'qdrant' && originalStorage.multitenancy)) {
                         throw new Error('Original collection storage does not match the selected destination.');
                     }
-                    // LanceDB stores tables under a provider-specific folder.
-                    // Purge the ORIGINAL table even if the global model changed;
-                    // subsequent vectorization still uses the selected settings.
-                    if (currentStorage.backend === 'lancedb') {
+                    // Purge the ORIGINAL provider/model destination, not the
+                    // user's newly selected embedding settings. The new first
+                    // write will use those new settings after confirmed purge.
+                    if (['standard', 'vectra', 'lancedb'].includes(currentStorage.backend)) {
                         backendSettings.source = stored.config.embedding.provider;
+                    }
+                    if (['standard', 'vectra'].includes(currentStorage.backend)) {
+                        const { getModelField } = await import('../core/providers.js');
+                        const modelField = getModelField(backendSettings.source);
+                        if (modelField) backendSettings[modelField] = stored.config.embedding.model || '';
                     }
                 } else if (stored.status === 'missing') {
                     // A legacy LanceDB collection may have no provenance, but
@@ -2527,7 +2546,7 @@ async function startVectorization() {
 
                 // User wants to replace - purge existing first
                 const { purgeVectorIndex } = await import('../core/core-vector-api.js');
-                const { unregisterCollection } = await import('../core/collection-loader.js');
+                const { unregisterCollectionDestination } = await import('../core/collection-loader.js');
                 const { withChatCollectionPurgeGuard } = await import('../core/collection-ids.js');
                 await withChatCollectionPurgeGuard(existing.collectionId, async () => {
                     if (!await purgeVectorIndex(existing.collectionId, backendSettings)) {
@@ -2535,11 +2554,11 @@ async function startVectorization() {
                     }
                     // Confirmed purge means a new physical collection can now be
                     // created; don't carry old createdAt/chunkCount into its identity.
-                    unregisterCollection(existing.registryKey || existing.collectionId);
-                    const { setCollectionMeta } = await import('../core/collection-metadata.js');
-                    setCollectionMeta(existing.collectionId, {
-                        vectorizationConfigFingerprint: null, createdAt: null, chunkCount: 0,
-                    });
+                    unregisterCollectionDestination(existing.collectionId, backendSettings);
+                    const { recordVerifiedCollectionDeletion } = await import('../core/collection-metadata.js');
+                    // This marker authorizes the NEXT first write, so bind it to
+                    // the selected destination, not the old index just purged.
+                    recordVerifiedCollectionDeletion(existing.collectionId, extension_settings.vecthare);
                 });
                 toastr.info('Cleared existing vectors', 'VectHare');
             }
@@ -2563,7 +2582,9 @@ async function startVectorization() {
             settings: currentSettings,
         });
 
-        toastr.success(`Vectorized ${result.chunkCount} chunks`, 'VectHare');
+        if (!result.handledBySyncChat) {
+            toastr.success(`Vectorized ${result.chunkCount} chunks`, 'VectHare');
+        }
         closeContentVectorizer();
 
     } catch (e) {

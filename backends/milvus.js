@@ -381,24 +381,10 @@ export class MilvusBackend extends VectorBackend {
         return this.purgeVectorIndex(collectionId, settings);
     }
 
-    async purgeAllVectorIndexes(settings) {
-        // Purge the entire main collection
-        const response = await fetch('/api/plugins/similharity/chunks/purge', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-            body: JSON.stringify({
-                backend: BACKEND_TYPE,
-                collectionId: 'vecthare_main',
-                source: settings.source || 'transformers',
-                model: getModelFromSettings(settings),
-                // No filters = purge everything
-            }),
-        });
-
-        if (!response.ok) {
-            const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`[Milvus] Failed to purge all collections: ${response.status} ${response.statusText} - ${errorBody}`);
-        }
+    async purgeAllVectorIndexes(_settings) {
+        // Never call a backend-wide purge: Standard shares ST's vector directory,
+        // and LanceDB/Milvus may share physical storage with other consumers.
+        throw new Error('Unsafe global purge is forbidden; delete verified VectHare collections individually');
     }
 
     // ========================================================================

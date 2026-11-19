@@ -17,9 +17,10 @@
  * ============================================================================
  */
 
+import { addInsertionProvenance, metadataForImport } from './vector-provenance.js';
 import { extension_settings } from '../../../../extensions.js';
 import { getRequestHeaders, saveSettingsDebounced } from '../../../../../script.js';
-import { getSavedHashes, insertVectorItems, purgeVectorIndex } from './core-vector-api.js';
+import { getSavedHashes, insertVectorItems, purgeVectorIndex, assertVectHareCollectionForWrite } from './core-vector-api.js';
 import {
     getCollectionMeta,
     setCollectionMeta,
@@ -139,6 +140,8 @@ export async function exportCollection(collectionId, settings, collectionInfo = 
                     speaker: meta.speaker,
                     isUser: meta.isUser,
                     messageId: meta.messageId,
+                    vecthareProvenance: meta.vecthareProvenance,
+                    vecthareImportedProvenance: meta.vecthareImportedProvenance,
                 },
             };
 
@@ -475,6 +478,7 @@ export function validateImportData(data, currentSettings = {}) {
  * @param {object} settings - VectHare settings
  */
 async function insertChunksWithVectors(collectionId, chunks, settings) {
+    assertVectHareCollectionForWrite(collectionId);
     const backendName = settings.vector_backend || 'standard';
     const response = await fetch('/api/plugins/similharity/chunks/insert', {
         method: 'POST',
@@ -569,25 +573,30 @@ async function importCollectionUnlocked(exportData, settings, options = {}) {
             index: chunk.index ?? index,
             hash: getStringHash(chunk.text),
             vector: canUseVectors ? chunk.vector : undefined,
-            metadata: chunk.metadata || {},
+            metadata: metadataForImport(chunk.metadata, collectionId),
         }));
+
+        // Preserve imported provenance; new legacy imports get clearly
+        // unverified import-origin metadata, never invented message UIDs.
+        const provenanceChunks = await addInsertionProvenance(collectionId, preparedChunks,
+            { writer: 'import', sourceType: 'import' });
 
         // Step 3: Insert chunks
         if (canUseVectors) {
             // Direct insert with pre-computed vectors (fast!)
-            progressTracker.updateProgress(3, `Inserting ${preparedChunks.length} chunks (using existing vectors)...`);
+            progressTracker.updateProgress(3, `Inserting ${provenanceChunks.length} chunks (using existing vectors)...`);
             try {
-                await insertChunksWithVectors(collectionId, preparedChunks, settings);
-                console.log(`VectHare Import: Inserted ${preparedChunks.length} chunks with pre-computed vectors`);
+                await insertChunksWithVectors(collectionId, provenanceChunks, settings);
+                console.log(`VectHare Import: Inserted ${provenanceChunks.length} chunks with pre-computed vectors`);
             } catch (error) {
                 throw new Error(`Failed to insert chunks: ${error.message}`);
             }
         } else {
             // Need to embed (slow)
-            progressTracker.updateProgress(3, `Embedding ${preparedChunks.length} chunks...`);
+            progressTracker.updateProgress(3, `Embedding ${provenanceChunks.length} chunks...`);
             try {
-                await insertVectorItems(collectionId, preparedChunks, settings);
-                console.log(`VectHare Import: Embedded and inserted ${preparedChunks.length} chunks`);
+                await insertVectorItems(collectionId, provenanceChunks, settings);
+                console.log(`VectHare Import: Embedded and inserted ${provenanceChunks.length} chunks`);
             } catch (error) {
                 throw new Error(`Failed to embed chunks: ${error.message}`);
             }
@@ -756,14 +765,17 @@ async function importCollectionSilentUnlocked(exportData, settings, options = {}
         index: chunk.index ?? index,
         hash: getStringHash(chunk.text),
         vector: canUseVectors ? chunk.vector : undefined,
-        metadata: chunk.metadata || {},
+        metadata: metadataForImport(chunk.metadata, collectionId),
     }));
+
+    const provenanceChunks = await addInsertionProvenance(collectionId, preparedChunks,
+        { writer: 'import', sourceType: 'import' });
 
     // Insert
     if (canUseVectors) {
-        await insertChunksWithVectors(collectionId, preparedChunks, settings);
+        await insertChunksWithVectors(collectionId, provenanceChunks, settings);
     } else {
-        await insertVectorItems(collectionId, preparedChunks, settings);
+        await insertVectorItems(collectionId, provenanceChunks, settings);
     }
 
     // Save metadata

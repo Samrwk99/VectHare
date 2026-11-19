@@ -97,7 +97,7 @@ export function buildChatCollectionId(_chatUUID) {
     return peekChatCollectionId();
 }
 
-/** The file claim survives ordinary chat and character renames. */
+/** Normalize names without modifying SillyTavern chat files. */
 export const normChat = name => String(name ?? '').replace(/\\/g, '/').split('/').pop().replace(/\.jsonl$/i, '');
 
 export function getChatOwner(ctx = getContext()) {
@@ -136,8 +136,30 @@ const currentSnapshot = (ctx = getContext()) => ({
     mainChat: normChat(ctx.chatMetadata?.main_chat),
     name: String(ctx.name2 || ''),
 });
-const liveSnapshotMatches = snap => sameChat(snap, currentSnapshot());
-const matchesClaim = (claim, id) => claim && claim.collectionId === id;
+const liveSnapshotMatches = snap => {
+    const live = currentSnapshot();
+    return sameChat(snap, live) && snap.uuid === live.uuid &&
+        (snap.claim?.collectionId || null) === (live.claim?.collectionId || null);
+};
+/**
+ * Legacy file-embedded claims are READ ONLY. New claims live exclusively in
+ * VectHare's own extension settings, never in SillyTavern chat metadata.
+ * A copied chat with a different UUID or a foreign saved claim is not its
+ * predecessor. An exact copy replacing the same filename/UUID is inherently
+ * indistinguishable without modifying the source (intentionally forbidden).
+ */
+const settingsClaimMatches = (snap, id, rec) => Boolean(
+    rec?.bindingKind === 'vecthare-settings' && rec.status === 'active' &&
+    sameOwner(snap.owner, rec.owner) && snap.chat === rec.chat &&
+    (!rec.uuid || (snap.uuid && snap.uuid === rec.uuid)) &&
+    (!snap.claim || claimMatchesRecord(snap.claim, id, rec) || (
+        rec.sourceClaimId === snap.claim.collectionId &&
+        rec.sourceClaimOwner === claimOwnerKey(snap.claim) &&
+        rec.sourceClaimChat === normChat(snap.claim.chat)
+    ))
+);
+const bindingMatches = (snap, id, rec) =>
+    claimMatchesRecord(snap.claim, id, rec) || settingsClaimMatches(snap, id, rec);
 const findBound = (owner, chat) => entries().filter(([, rec]) =>
     rec.status === 'active' && sameOwner(rec.owner, owner) && rec.chat === chat);
 
@@ -148,9 +170,9 @@ export function peekChatCollectionId(ctx = getContext()) {
     const hits = findBound(snap.owner, snap.chat);
     if (hits.length !== 1) return null;
     const [id] = hits[0];
-    // A restored or overwritten filename without its own claim must never
-    // inherit the previously bound chat's vectors.
-    return claimMatchesRecord(snap.claim, id, hits[0][1]) ? id : null;
+    // A VectHare-owned binding or an old read-only chat claim must match.
+    // A replacement file with different read-only identity is not adopted.
+    return bindingMatches(snap, id, hits[0][1]) ? id : null;
 }
 
 /** Exact, read-only lookup for a different filename under the known current owner. */
@@ -389,42 +411,40 @@ export function ensureChatBinding(ctx = getContext(), opts = {}) {
     return promise;
 }
 
-/** Save a new claim first; update the reverse index only after disk verification. */
-async function commit(snap, id, rec, retireId = null) {
+/**
+ * Commit ownership only to VectHare-owned extension settings. Never modify
+ * ctx.chatMetadata or invoke SillyTavern's saveMetadata/saveChat. Historical
+ * vecthare_binding claims are read-only evidence for legacy recovery.
+ */
+async function commit(snap, id, rec, retireId = null, allowCopiedClaim = false) {
     if (!liveSnapshotMatches(snap)) return { state: 'changed', writable: false };
-    const ctx = getContext();
-    if (!ctx.chatMetadata || typeof ctx.saveMetadata !== 'function') {
-        return { state: 'provisional', writable: false };
-    }
-    const originalClaim = ctx.chatMetadata.vecthare_binding;
-    const claim = { collectionId: id, chat: snap.chat, ownerId: ownerKey(snap.owner) };
-    ctx.chatMetadata.vecthare_binding = claim; // Fresh reference for ST change tracking.
     try {
-        await ctx.saveMetadata();
-        if (!liveSnapshotMatches(snap)) return { state: 'changed', writable: false };
-        const data = snap.owner.type === 'character'
-            ? await postJson('/api/chats/get', { avatar_url: snap.owner.id, file_name: snap.chat })
-            : await postJson('/api/chats/group/get', { id: snap.chat });
-        const saved = Array.isArray(data) ? data[0]?.chat_metadata?.vecthare_binding : null;
-        if (!matchesClaim(saved, id) || claimOwnerKey(saved) !== ownerKey(snap.owner) ||
-            normChat(saved.chat) !== snap.chat || !liveSnapshotMatches(snap)) {
+        // A conflicting legacy claim is evidence of a copied/imported file,
+        // not permission to overwrite its original collection binding.
+        const copiedClaim = snap.claim && !claimMatchesRecord(snap.claim, id, rec);
+        if (copiedClaim && !allowCopiedClaim) {
             return { state: 'provisional', writable: false };
         }
-        // One synchronous settings transition: no two active records claim a filename.
-        if (retireId && bindingStore().byCollection[retireId]) {
-            const old = bindingStore().byCollection[retireId];
-            bindingStore().byCollection[retireId] = { ...old, owner: null, chat: null, status: 'quarantined' };
+        const byCollection = bindingStore().byCollection;
+        if (retireId && byCollection[retireId]) {
+            const old = byCollection[retireId];
+            byCollection[retireId] = { ...old, owner: null, chat: null, status: 'quarantined' };
         }
-        bindingStore().byCollection[id] = rec;
+        byCollection[id] = {
+            ...rec, bindingKind: 'vecthare-settings', uuid: snap.uuid,
+            // When a copied branch retains its parent's old ST claim, record
+            // that header as read-only evidence for THIS new VectHare binding.
+            ...(copiedClaim ? {
+                sourceClaimId: snap.claim.collectionId,
+                sourceClaimOwner: claimOwnerKey(snap.claim),
+                sourceClaimChat: normChat(snap.claim.chat),
+            } : {}),
+        };
         saveSettingsDebounced();
         return { state: 'active', collectionId: id, writable: true };
     } catch (error) {
-        console.warn('VectHare: Chat binding could not be persisted:', error);
+        console.warn('VectHare: Could not persist its own chat binding:', error);
         return { state: 'provisional', writable: false };
-    } finally {
-        if (ctx.chatMetadata.vecthare_binding === claim && !bindingStore().byCollection[id]) {
-            ctx.chatMetadata.vecthare_binding = originalClaim;
-        }
     }
 }
 
@@ -467,9 +487,12 @@ async function resolveChatBinding(snap, opts = { create: true }) {
     if (hits.length > 1) return { state: 'provisional', writable: false };
     if (hits.length === 1) {
         const [id, rec] = hits[0];
-        if (claimMatchesRecord(snap.claim, id, rec)) {
-            // Heal stale owner/chat fields following a confirmed rename event.
-            if (claimOwnerKey(snap.claim) !== ownerKey(snap.owner) || normChat(snap.claim.chat) !== snap.chat) {
+        if (bindingMatches(snap, id, rec)) {
+            // One-time migration of a verified historical ST claim into our
+            // existing VectHare-owned settings. Never rewrite the chat header.
+            if (rec.bindingKind !== 'vecthare-settings' ||
+                (snap.claim && (claimOwnerKey(snap.claim) !== ownerKey(snap.owner) ||
+                    normChat(snap.claim.chat) !== snap.chat))) {
                 return commit(snap, id, rec);
             }
             return { state: 'active', collectionId: id, writable: true };
@@ -507,7 +530,7 @@ async function resolveChatBinding(snap, opts = { create: true }) {
         if (previous) {
             if (sameOwner(previous.owner, snap.owner) && previous.chat === snap.chat &&
                 claimMatchesRecord(snap.claim, claimId, previous)) {
-                return commit(snap, claimId, previous); // Heal old filename/owner in saved claim.
+                return commit(snap, claimId, previous); // Restore VectHare-owned binding only.
             }
             // Same collection claimed under a different filename: if the old
             // file exists, this is a copied branch; otherwise the distinction
@@ -620,7 +643,7 @@ function commitFresh(snap, opts = { create: true }, retireId = null) {
     if (!opts.create) return Promise.resolve({ state: 'unbound', writable: false });
     const id = freshId();
     return commit(snap, id, { owner: snap.owner, chat: snap.chat, origin: 'created', uuid: snap.uuid,
-        status: 'active', stores: [], createdAt: Date.now() }, retireId);
+        status: 'active', stores: [], createdAt: Date.now() }, retireId, true);
 }
 
 /** Small local guard: a known collection must not be purged during a write. */
@@ -710,7 +733,12 @@ export function onChatBindingRenamed({ avatarId, groupId, oldFileName, newFileNa
     const live = getContext();
     const selected = getChatOwner(live);
     const currentClaim = live.chatMetadata?.vecthare_binding?.collectionId;
-    const actual = sameOwner(owner, selected) && currentClaim === id ? normChat(live.chatId) : null;
+    const matchesSettingsOwner = rec.bindingKind === 'vecthare-settings' &&
+        (!rec.uuid || rec.uuid === String(live.chatMetadata?.integrity || '')) &&
+        [oldName, normChat(newFileName)].includes(normChat(live.chatId));
+    const actual = sameOwner(owner, selected) &&
+        (currentClaim === id || matchesSettingsOwner) && normChat(live.chatId) !== oldName
+        ? normChat(live.chatId) : null;
     const newName = actual || normChat(newFileName);
     if (findBound(owner, newName).length) return;
     rec.renamedChats = [...new Set([...(rec.renamedChats || []), oldName])];
@@ -739,8 +767,11 @@ export async function anotherChatClaimsCollection(rec, id, ctx = getContext()) {
     for (const owner of owners) {
         const all = await ownerChats(owner, ctx);
         if (all === null) return null;
-        if (all.some(file => !(sameOwner(owner, rec.owner) && file.chat === rec.chat) &&
-            file.meta?.vecthare_binding?.collectionId === id)) return true;
+        if (all.some(file => !(sameOwner(owner, rec.owner) && file.chat === rec.chat) && (
+            file.meta?.vecthare_binding?.collectionId === id ||
+            (rec.bindingKind === 'vecthare-settings' && rec.uuid &&
+                String(file.meta?.integrity || '') === rec.uuid)
+        ))) return true;
     }
     return false;
 }

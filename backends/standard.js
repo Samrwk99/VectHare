@@ -157,6 +157,11 @@ export class StandardBackend extends VectorBackend {
                 console.warn(`⚠️ VectHare: Install the Similharity plugin to save keywords: https://github.com/SillyTavern/SillyTavern-Extras-Similharity-plugin`);
             }
 
+            if (!usePluginApi && !this._provenanceNativeWarned) {
+                console.warn('VectHare: Native Standard insert cannot persist vecthareProvenance; records written there remain unverified.');
+                this._provenanceNativeWarned = true;
+            }
+
             const payload = usePluginApi ? {
                 backend: 'vectra',
                 collectionId: collectionId,
@@ -353,22 +358,27 @@ export class StandardBackend extends VectorBackend {
         return await response.json();
     }
 
-    /**
-     * Purge (delete) a collection
-     * Uses native ST API
+    /** Purge only this VectHare collection's source/model index.
+     * ST's native purge removes every embedding source for a collection ID.
      */
     async purgeVectorIndex(collectionId, settings) {
-        const response = await fetch('/api/vector/purge', {
+        const response = await fetch('/api/plugins/similharity/chunks/purge', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({
-                collectionId: collectionId,
+                backend: 'vectra',
+                collectionId,
+                source: settings.source || 'transformers',
+                model: getModelFromSettings(settings),
             }),
         });
 
         if (!response.ok) {
             const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`Failed to purge collection: ${response.status} ${response.statusText} - ${errorBody}`);
+            throw new Error(`Failed to purge scoped Vectra index: ${response.status} ${response.statusText} - ${errorBody}`);
+        }
+        if ((await response.json()).success !== true) {
+            throw new Error('Scoped Vectra purge was not confirmed');
         }
     }
 
@@ -380,16 +390,10 @@ export class StandardBackend extends VectorBackend {
      * Purge all vector indexes
      * Uses native ST API
      */
-    async purgeAllVectorIndexes(settings) {
-        const response = await fetch('/api/vector/purge-all', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-        });
-
-        if (!response.ok) {
-            const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`Failed to purge all: ${response.status} ${response.statusText} - ${errorBody}`);
-        }
+    async purgeAllVectorIndexes(_settings) {
+        // Never call a backend-wide purge: Standard shares ST's vector directory,
+        // and LanceDB/Milvus may share physical storage with other consumers.
+        throw new Error('Unsafe global purge is forbidden; delete verified VectHare collections individually');
     }
 
     // ========================================================================

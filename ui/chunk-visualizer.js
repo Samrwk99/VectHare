@@ -188,6 +188,7 @@ async function saveAllChanges() {
                             parentHash: hash,
                             contentType: 'summary',
                         },
+                        __vecthareProvenanceHint: { writer: 'chunk-visualizer', sourceType: 'summary' },
                     };
                     await insertVectorItems(currentCollectionId, [summaryItem], currentSettings);
                 }
@@ -1768,7 +1769,8 @@ function bindDetailEvents() {
             await insertVectorItems(currentCollectionId, [{
                 hash: newHash,
                 text: newText,
-                index: chunk.index
+                index: chunk.index,
+                __vecthareProvenanceHint: { writer: 'chunk-visualizer', sourceType: 'manual-edit' },
             }], currentSettings);
 
             // Update metadata (use string keys for metadata storage)
@@ -2028,7 +2030,8 @@ function openTextEditor(chunk) {
             await insertVectorItems(currentCollectionId, [{
                 hash: newHash,
                 text: newText,
-                index: chunk.index
+                index: chunk.index,
+                __vecthareProvenanceHint: { writer: 'chunk-visualizer', sourceType: 'manual-edit' },
             }], currentSettings);
 
             // Update metadata (use string keys for metadata storage)

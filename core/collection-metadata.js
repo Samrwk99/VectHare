@@ -304,11 +304,34 @@ export function setCollectionMeta(collectionId, data) {
  * write. An empty backend response alone does not make an old collection new:
  * its vectors may have been removed, or its storage backend may have changed.
  */
-export function canRecordInitialVectorizationConfig(collectionId) {
+// A confirmed VectHare purge may leave an old chat's registry aliases in
+// memory (discovery can restore them). Keep only the verified destination here;
+// disappearance without this record is NOT permission to reset provenance.
+function deletionDestination(settings) {
+    if (!settings) return null;
+    const config = createInitialVectorizationConfig(settings, {
+        pipeline: 'sync-chat', strategy: 'per_message',
+    });
+    return config ? JSON.stringify([
+        config.storage, config.embedding.provider, config.embedding.model || '',
+    ]) : null;
+}
+
+export function recordVerifiedCollectionDeletion(collectionId, settings) {
+    const destination = deletionDestination(settings);
+    if (!destination) throw new Error('Cannot record verified deletion destination');
+    setCollectionMeta(collectionId, { verifiedPurgeDestination: destination,
+        createdAt: null, chunkCount: 0, vectorizationConfigFingerprint: null });
+}
+
+export function canRecordInitialVectorizationConfig(collectionId, settings = null) {
     if (!collectionId || !ensureCollectionsObject()) return false;
     const collections = extension_settings.vecthare.collections;
     const key = resolveStoredCollectionKey(collectionId);
     const previous = key ? collections[key] : null;
+    const confirmedDeletion = previous?.verifiedPurgeDestination &&
+        previous.verifiedPurgeDestination === deletionDestination(settings);
+    if (confirmedDeletion) return true;
     if (previous?.initialVectorizationConfig || previous?.createdAt ||
         (Number(previous?.chunkCount) > 0)) return false;
 
@@ -771,7 +794,7 @@ export async function checkCollectionOperationSettings(collectionId, settings, o
     // Shared backends use a logical-collection hash check below.
     const local = ['standard', 'vectra', 'lancedb'].includes(settings.vector_backend || 'standard');
     const eligibleAbsence = saved.status === 'missing' && (!local || saved.physicalAbsent);
-    if (allowNew && canRecordInitialVectorizationConfig(collectionId) && eligibleAbsence) {
+    if (allowNew && canRecordInitialVectorizationConfig(collectionId, settings) && eligibleAbsence) {
         try {
             const { getSavedHashes } = await import('./core-vector-api.js');
             const hashes = await getSavedHashes(collectionId, settings);
@@ -875,7 +898,10 @@ export async function resolveCollectionOperationSettings(collectionId, currentSe
         const reasons = [...comparison.differences.map(item => item.field), ...comparison.unverifiable];
         throw new Error(`Collection ${collectionId}: cannot reproduce saved ${operation} settings (${reasons.join(', ') || comparison.status}).`);
     }
-    return { status: 'compatible', settings, chunking: effectiveChunking, config: intended };
+    // Keep the backend-recorded identity-ledger capability on this verified
+    // operation snapshot; callers must never infer it from today's settings.
+    return { status: 'compatible', settings, chunking: effectiveChunking,
+        config: original.identityLedger === 1 ? { ...intended, identityLedger: 1 } : intended };
 }
 
 /** Reject incompatible or unverifiable writes before insertion or deletion. */

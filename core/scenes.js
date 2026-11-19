@@ -199,6 +199,10 @@ export async function createSceneChunk(start, end, sceneData, settings) {
     };
 
     try {
+        // Provenance belongs to the outgoing vector, not the SillyTavern chat.
+        sceneChunk.__vecthareProvenanceHint = {
+            writer: 'scene-markers', sourceType: 'scene', groupingStrategy: 'per_scene',
+        };
         let initiallyEmpty = false;
         if (canRecordInitialVectorizationConfig(collectionId)) {
             try {

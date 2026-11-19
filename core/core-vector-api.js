@@ -22,6 +22,7 @@
  * ============================================================================
  */
 
+import { addInsertionProvenance } from './vector-provenance.js';
 import { getRequestHeaders } from '../../../../../script.js';
 import { extension_settings, modules } from '../../../../extensions.js';
 import { secret_state } from '../../../../secrets.js';
@@ -42,7 +43,8 @@ import { applyKeywordBoosts, getOverfetchAmount } from './keyword-boost.js';
 import { applyBM25Scoring } from './bm25-scorer.js';
 import { hybridSearch } from './hybrid-search.js';
 import { resolveCollectionOperationSettings, snapshotCollectionOperationSettings,
-    createInitialVectorizationConfig, assertCollectionOperationSettingsStable } from './collection-metadata.js';
+    createInitialVectorizationConfig, readInitialVectorizationConfig,
+    assertCollectionOperationSettingsStable } from './collection-metadata.js';
 import AsyncUtils from '../utils/async-utils.js';
 import StringUtils from '../utils/string-utils.js';
 import {
@@ -56,12 +58,34 @@ import {
     VECTOR_LIST_LIMIT
 } from './constants.js';
 
+// Only VectHare's own collection namespace may be mutated. ST's native
+// vector directory is shared and accepting an arbitrary collection ID here
+// could overwrite/delete another extension's or vanilla ST's vectors.
+export function assertVectHareCollectionForWrite(collectionId) {
+    if (typeof collectionId !== 'string' || !/^vecthare_[A-Za-z0-9_.-]+$/.test(collectionId)) {
+        throw new Error('Refusing to modify an unverified/non-VectHare vector collection');
+    }
+}
+
 // Notify the Status UI only after a write has successfully reached the DB.
 // Window events keep the backend/API independent of the progress panel.
 function notifyDatabaseChanged(collectionId = null) {
     if (typeof window !== 'undefined' && typeof CustomEvent !== 'undefined') {
         window.dispatchEvent(new CustomEvent('vecthare:database-changed', { detail: { collectionId } }));
     }
+}
+
+// The plugin retains an exact, VectHare-owned purge intent across reloads.
+// An interrupted purge must never be reconstructed from current settings alone.
+async function standardPurgeRecovery(collectionId, action, record = undefined) {
+    const response = await fetch('/api/plugins/similharity/identity-ledger/purge-recovery', {
+        method: 'POST', headers: getRequestHeaders(),
+        body: JSON.stringify({ collectionId, action, ...(record ? { record } : {}) }),
+    });
+    if (!response.ok) throw new Error(`Standard purge recovery ${action}: HTTP ${response.status}`);
+    const result = await response.json();
+    if (result.success !== true) throw new Error(`Standard purge recovery ${action} was not confirmed`);
+    return result;
 }
 
 // Get shared WebLLM provider singleton (lazy-initialized)
@@ -832,6 +856,10 @@ export async function getSavedHashes(collectionId, settings, includeMetadata = f
  * @returns {Promise<void>}
  */
 export async function insertVectorItems(collectionId, items, settings, onProgress = null, abortSignal = null) {
+    assertVectHareCollectionForWrite(collectionId);
+    // Write-only, optional provenance. Existing hash keys, chunk order and
+    // insert behavior are unchanged; no reader uses the new metadata yet.
+    items = await addInsertionProvenance(collectionId, items);
     // R17: getBackend was previously an UNABORTABLE, UNTIMED await executed
     // once per item - the exact place a run could hang forever with Stop
     // unable to free it (user symptom: "stopping hangs on embedding" while
@@ -1013,6 +1041,7 @@ async function streamEmbeddingsAndWrite(backend, collectionId, items, textString
  * @returns {Promise<void>}
  */
 export async function deleteVectorItems(collectionId, hashes, settings, abortSignal = null) {
+    assertVectHareCollectionForWrite(collectionId);
     // R17: guarded - deletes during a run were unabortable+untimed awaits
     const backend = await withOpGuard(() => getBackend(settings), abortSignal, 'Backend initialization (delete)');
     try {
@@ -1428,8 +1457,89 @@ export async function queryActiveCollections(collectionIds, searchText, topK, th
  */
 export async function purgeVectorIndex(collectionId, settings) {
     try {
-        const backend = await getBackend(settings);
-        await backend.purgeVectorIndex(collectionId, settings);
+        assertVectHareCollectionForWrite(collectionId);
+        const backendName = settings?.vector_backend || 'standard';
+        const isStandard = backendName === 'standard' || backendName === 'vectra';
+        if (isStandard) {
+            const source = settings?.source || 'transformers';
+            const modelField = getModelField(source);
+            const modelFolder = modelField ? (settings[modelField] || '') : '';
+            const destination = JSON.stringify([backendName, source, modelFolder]);
+            const stored = await standardPurgeRecovery(collectionId, 'read');
+            if (!['found', 'missing'].includes(stored.status)) {
+                throw new Error('Standard purge recovery record is invalid or unavailable');
+            }
+            let pending = stored.status === 'found' ? stored.record : null;
+            if (pending && pending.destination !== destination) {
+                throw new Error('Pending Standard ledger cleanup belongs to different collection settings');
+            }
+            const location = { backend: backendName, source, model: modelFolder };
+            let saved = await readInitialVectorizationConfig(collectionId, settings, location);
+            const absent = () => saved.status === 'missing' && saved.physicalAbsent === true;
+            if (pending) {
+                // The physical-absence check is read-only. Never use the native
+                // accessor here: listing a missing Vectra index can recreate it.
+                if (!absent()) {
+                    if (saved.status !== 'valid' || saved.config.identityLedger !== 1 ||
+                        saved.config.recordedAt !== pending.originalRecordedAt ||
+                        saved.config.embedding.provider !== source ||
+                        (saved.config.embedding.model || '') !== (pending.binding.model || '') ||
+                        JSON.stringify({
+                            backend: saved.config.storage.backend,
+                            source: saved.config.embedding.provider,
+                            model: saved.config.embedding.model || '',
+                            storage: saved.config.storage,
+                            chunking: saved.config.chunking,
+                        }) !== JSON.stringify(pending.binding)) {
+                        throw new Error('Pending Standard purge cannot verify original collection; cleanup blocked');
+                    }
+                }
+            } else {
+                if (saved.status !== 'valid' ||
+                    saved.config.embedding.provider !== source ||
+                    (modelField && (saved.config.embedding.model || '') !== modelFolder)) {
+                    throw new Error('Standard collection original model/source cannot be verified; purge blocked');
+                }
+                if (saved.config.identityLedger === 1) {
+                    const config = saved.config;
+                    const binding = {
+                        backend: config.storage.backend,
+                        source: config.embedding.provider,
+                        model: config.embedding.model || '',
+                        storage: config.storage,
+                        chunking: config.chunking,
+                    };
+                    pending = { version: 1, collectionId, backend: backendName,
+                        source, modelFolder, destination, originalRecordedAt: config.recordedAt, binding };
+                    // Must be durable BEFORE native deletion removes the original
+                    // saved configuration. An unconfirmed write blocks the purge.
+                    await standardPurgeRecovery(collectionId, 'prepare', pending);
+                }
+            }
+            if (!absent()) {
+                const backend = await getBackend(settings);
+                await backend.purgeVectorIndex(collectionId, settings);
+            }
+            if (pending) {
+                saved = await readInitialVectorizationConfig(collectionId, settings, location);
+                if (!absent()) {
+                    throw new Error('Standard purge not verified empty; VectHare ledger retained for recovery');
+                }
+                const response = await fetch('/api/plugins/similharity/identity-ledger/save', {
+                    method: 'POST', headers: getRequestHeaders(),
+                    body: JSON.stringify({ collectionId, binding: pending.binding, ledger: null }),
+                });
+                if (!response.ok || (await response.json()).success !== true) {
+                    throw new Error('Native vectors purged, but VectHare ledger cleanup was not confirmed');
+                }
+                // If this call fails, the durable intent remains. Retrying after
+                // a restart can safely repeat the idempotent ledger invalidation.
+                await standardPurgeRecovery(collectionId, 'clear', pending);
+            }
+        } else {
+            const backend = await getBackend(settings);
+            await backend.purgeVectorIndex(collectionId, settings);
+        }
         console.log(`VectHare: Purged vector index for collection ${collectionId}`);
         notifyDatabaseChanged(collectionId);
         return true;
@@ -1449,6 +1559,7 @@ export async function purgeVectorIndex(collectionId, settings) {
  */
 export async function purgeFileVectorIndex(collectionId, settings) {
     try {
+        assertVectHareCollectionForWrite(collectionId);
         console.log(`VectHare: Purging file vector index for collection ${collectionId}`);
         const backend = await getBackend(settings);
         await backend.purgeFileVectorIndex(collectionId, settings);
@@ -1462,23 +1573,104 @@ export async function purgeFileVectorIndex(collectionId, settings) {
 }
 
 /**
- * Purges all vector indexes.
- * @param {object} settings VectHare settings object
- * @returns {Promise<void>}
+ * Purge registered VectHare-owned collections only. Never invoke a backend's
+ * global purge, since those backends can share vanilla SillyTavern storage.
+ * Fail closed (and keep VectHare settings) when a registered destination cannot
+ * be verified; caller may retry after restoring the backend connection.
  */
 export async function purgeAllVectorIndexes(settings) {
-    try {
-        const backend = await getBackend(settings);
-        await backend.purgeAllVectorIndexes(settings);
-        console.log('VectHare: Purged all vector indexes');
-        notifyDatabaseChanged();
-        toastr.success('All vector indexes purged', 'Purge successful');
-    } catch (error) {
-        // VEC-33: Invalidate health cache on operation error
-        invalidateBackendHealth(settings?.vector_backend || 'standard', error);
-        console.error('VectHare: Failed to purge all', error);
-        toastr.error('Failed to purge all vector indexes', 'Purge failed');
+    const { getCollectionRegistry } = await import('./collection-loader.js');
+    const { parseRegistryKey, getBoundChatDetails, chatStoreDestination } =
+        await import('./collection-ids.js');
+    const { readInitialVectorizationConfig, createInitialVectorizationConfig } =
+        await import('./collection-metadata.js');
+    const registry = [...new Set(getCollectionRegistry())];
+    const visited = new Set();
+    let removed = 0;
+    const skipped = [];
+    const ignored = [];
+    // A deleted/undiscovered registry entry must not make us discard the only
+    // saved mapping to a collection that may still contain VectHare vectors.
+    const knownDestinations = new Set(registry.map(key => {
+        const p = parseRegistryKey(key);
+        return `${p.backend === 'vectra' ? 'standard' : p.backend}:${p.source}:${p.collectionId}`;
+    }));
+    const registeredIds = new Set(registry.map(key => parseRegistryKey(key).collectionId));
+    for (const [key, meta] of Object.entries(extension_settings.vecthare?.collections || {})) {
+        const id = parseRegistryKey(key).collectionId;
+        if (/^vecthare_[A-Za-z0-9_.-]+$/.test(id) && !registeredIds.has(id) &&
+            (meta?.createdAt || Number(meta?.chunkCount) > 0)) {
+            skipped.push(`unregistered-metadata:${id}`);
+        }
     }
+    for (const [id, rec] of Object.entries(
+        extension_settings.vecthare?.chatCollectionBindings?.byCollection || {})) {
+        for (const store of rec?.stores || []) {
+            const name = store.backend === 'vectra' ? 'standard' : store.backend;
+            if (!knownDestinations.has(`${name}:${store.source}:${id}`)) {
+                skipped.push(`unregistered:${name}:${store.source}:${id}`);
+            }
+        }
+    }
+    for (const registryKey of registry) {
+        const parsed = parseRegistryKey(registryKey);
+        const id = parsed.collectionId;
+        const backendName = parsed.backend === 'vectra' ? 'standard' : parsed.backend;
+        const source = parsed.source;
+        // Discovery may also record other ST vector collections. Ignore those
+        // entirely; they are not owned by VectHare and are not purge targets.
+        try { assertVectHareCollectionForWrite(id); }
+        catch { ignored.push(registryKey); continue; }
+        if (!backendName || !source ||
+            !['standard', 'lancedb', 'qdrant', 'milvus'].includes(backendName)) {
+            skipped.push(registryKey);
+            continue;
+        }
+        const destination = `${backendName}:${source}:${id}`;
+        if (visited.has(destination)) continue;
+        visited.add(destination);
+        const operationSettings = { ...settings, vector_backend: backendName, source };
+        // Shared-store cleanup is unsafe unless the backend can prove scoped
+        // deletion. Do not remove the Qdrant multitenancy or Milvus parent.
+        if (backendName === 'milvus' ||
+            (backendName === 'qdrant' && operationSettings.qdrant_multitenancy)) {
+            skipped.push(registryKey);
+            continue;
+        }
+        const binding = getBoundChatDetails(id);
+        if (binding) {
+            const destinations = binding.stores || [];
+            if (destinations.length && !destinations.some(store =>
+                (store.backend === backendName || (backendName === 'standard' && store.backend === 'vectra')) &&
+                store.source === source && store.destination &&
+                store.destination === chatStoreDestination(operationSettings))) {
+                skipped.push(registryKey);
+                continue;
+            }
+        }
+        // Remote address must match the database's saved original location;
+        // merely changing VectHare's active backend is not authorization.
+        if (backendName === 'qdrant') {
+            const saved = await readInitialVectorizationConfig(id, operationSettings,
+                { backend: backendName, source });
+            const actual = createInitialVectorizationConfig(operationSettings,
+                { pipeline: 'rag', strategy: 'query' });
+            if (saved.status !== 'valid' || !actual ||
+                saved.config.embedding.provider !== source ||
+                JSON.stringify(saved.config.storage) !== JSON.stringify(actual.storage)) {
+                skipped.push(registryKey);
+                continue;
+            }
+        }
+        if (!await purgeVectorIndex(id, operationSettings)) {
+            skipped.push(registryKey);
+            continue;
+        }
+        removed++;
+    }
+    // A fresh unregistered installation is empty, but any unknown registered
+    // collection means we cannot truthfully report a complete purge.
+    return { success: skipped.length === 0, removed, skipped, ignored };
 }
 
 /**
@@ -1489,6 +1681,7 @@ export async function purgeAllVectorIndexes(settings) {
  * @param {object} settings - VectHare settings
  */
 export async function updateChunkText(collectionId, hash, newText, settings) {
+    assertVectHareCollectionForWrite(collectionId);
     const backend = await getBackend(settings);
     return await backend.updateChunkText(collectionId, hash, newText, settings);
 }
@@ -1501,6 +1694,7 @@ export async function updateChunkText(collectionId, hash, newText, settings) {
  * @param {object} settings - VectHare settings
  */
 export async function updateChunkMetadata(collectionId, hash, metadata, settings) {
+    assertVectHareCollectionForWrite(collectionId);
     const backend = await getBackend(settings);
     return await backend.updateChunkMetadata(collectionId, hash, metadata, settings);
 }

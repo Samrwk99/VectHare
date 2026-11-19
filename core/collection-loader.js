@@ -21,6 +21,7 @@ import {
     saveChunkMetadata,
     deleteChunkMetadata,
     deleteCollectionMeta,
+    recordVerifiedCollectionDeletion,
     ensureCollectionMeta,
     getCollectionMeta,
 } from './collection-metadata.js';
@@ -91,6 +92,26 @@ export function unregisterCollection(collectionId) {
 }
 
 /**
+ * Remove registry aliases for the destination that was actually purged.
+ * Chat collection IDs can have both the old bare key and qualified keys.
+ * Never erase another backend/source's qualified record just because it
+ * shares this chat ID.
+ */
+export function unregisterCollectionDestination(collectionId, settings) {
+    const backend = name => name === 'vectra' ? 'standard' : name;
+    const selectedBackend = backend(settings?.vector_backend || 'standard');
+    const selectedSource = settings?.source || 'transformers';
+    const registry = [...getCollectionRegistry()];
+    for (const key of registry) {
+        const parsed = parseRegistryKey(key);
+        if (parsed.collectionId !== collectionId) continue;
+        if (parsed.backend && backend(parsed.backend) !== selectedBackend) continue;
+        if (parsed.source && parsed.source !== selectedSource) continue;
+        unregisterCollection(key);
+    }
+}
+
+/**
  * COMPLETE collection deletion - removes from ALL THREE stores:
  * 1. Vector backend (actual embeddings)
  * 2. Registry (collection tracking)
@@ -139,14 +160,8 @@ async function deleteCollectionUnlocked(collectionId, settings, registryKey = nu
 
     // Step 2: Unregister from registry (try both formats)
     try {
-        const keyToUnregister = registryKey || collectionId;
-        unregisterCollection(keyToUnregister);
-
-        // Also try the other format if they differ
-        if (registryKey && registryKey !== collectionId) {
-            unregisterCollection(collectionId);
-        }
-
+        // Only after confirmed backend deletion; keep unrelated destinations.
+        unregisterCollectionDestination(collectionId, settings);
         registryDeleted = true;
         console.log(`VectHare: ✓ Unregistered ${collectionId}`);
     } catch (error) {
@@ -157,6 +172,9 @@ async function deleteCollectionUnlocked(collectionId, settings, registryKey = nu
     // Step 3: Delete metadata
     try {
         deleteCollectionMeta(collectionId);
+        // Only a confirmed successful vector purge can authorize a fresh start.
+        // This marker lives in VectHare-owned metadata, not the chat file.
+        recordVerifiedCollectionDeletion(collectionId, settings);
         metadataDeleted = true;
         console.log(`VectHare: ✓ Deleted metadata for ${collectionId}`);
     } catch (error) {

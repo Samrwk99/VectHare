@@ -758,10 +758,8 @@ export function renderSettings(containerId, settings, callbacks) {
                                     <i class="fa-solid fa-gauge-high"></i>
                                     <span id="vecthare_vectorization_status_text">Status: checking…</span>
                                 </button>
-                                <!-- VectHare+ R7/R10: shown only when unfinished vectorization is detected.
-                                     R10 renamed: the operation IS the DB-diff repair (removes vectors of
-                                     edited/deleted messages, re-vectorizes edited content, continues pending
-                                     work) - "Repair Chunks" says what it does. -->
+                                <!-- Repair Chunks fixes previously indexed vectors; Sync Chat handles
+                                     unvectorized backlog. Keep Repair available for registered collections. -->
                                 <button id="vecthare_continue_vectorization" class="vecthare-action-btn vecthare-btn-primary" style="display: none;">
                                     <i class="fa-solid fa-screwdriver-wrench"></i>
                                     <span>Repair Chunks</span>
@@ -1384,7 +1382,7 @@ export function updateContinueVectorizationButton(mode, pending = 0, total = 0) 
     // racy async check (user: button disappeared after actions, reappeared
     // after reload). 'hide' = no collection for this chat.
     if (mode === 'backlog') {
-        $btn.attr('title', `${pending} of ${total} message groups pending. Click to continue from where it stopped.`);
+        $btn.attr('title', `${pending} of ${total} message groups pending. Use Sync Chat to finish vectorizing them; Repair Chunks fixes previously indexed chunks.`);
         $btn.show();
     } else if (mode === 'available') {
         $btn.attr('title', 'No pending backlog right now. Click to run a repair pass anyway (removes stale/duplicate vectors of edited or deleted messages - reports "Nothing to repair" if all is clean).');

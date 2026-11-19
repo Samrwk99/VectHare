@@ -280,30 +280,10 @@ export class LanceDBBackend extends VectorBackend {
         return this.purgeVectorIndex(collectionId, settings);
     }
 
-    async purgeAllVectorIndexes(settings) {
-        // Get all collections and purge ALL of them - no filtering
-        const response = await fetch('/api/plugins/similharity/collections', {
-            headers: getRequestHeaders(),
-        });
-
-        if (!response.ok) {
-            const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`[LanceDB] Failed to get collections: ${response.status} ${response.statusText} - ${errorBody}`);
-        }
-
-        const data = await response.json();
-
-        // Purge ALL collections - don't filter by backend
-        for (const collection of data.collections || []) {
-            try {
-                await this.purgeVectorIndex(collection.id, {
-                    ...settings,
-                    source: collection.source,
-                });
-            } catch (e) {
-                console.error(`Failed to purge ${collection.id}:`, e);
-            }
-        }
+    async purgeAllVectorIndexes(_settings) {
+        // Never call a backend-wide purge: Standard shares ST's vector directory,
+        // and LanceDB/Milvus may share physical storage with other consumers.
+        throw new Error('Unsafe global purge is forbidden; delete verified VectHare collections individually');
     }
 
     // ========================================================================

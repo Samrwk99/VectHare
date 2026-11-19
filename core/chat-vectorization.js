@@ -11,7 +11,7 @@
 
 import { getCurrentChatId, is_send_press, setExtensionPrompt, substituteParams, chat_metadata, extension_prompts } from '../../../../../script.js';
 import { getContext } from '../../../../extensions.js';
-import { getStringHash as calculateHash, waitUntilCondition, onlyUnique } from '../../../../utils.js';
+import { getStringHash as calculateHash, waitUntilCondition, onlyUnique, uuidv4 } from '../../../../utils.js';
 import { isUnitStrategy, groupConversationTurns } from './chunking.js';
 import { extractChatKeywords, extractBM25Keywords } from './keyword-boost.js';
 import { cleanText } from './text-cleaning.js';
@@ -23,7 +23,7 @@ import {
     deleteVectorItems,
     purgeVectorIndex,
 } from './core-vector-api.js';
-import { isBackendAvailable } from '../backends/backend-manager.js';
+import { isBackendAvailable, getBackend } from '../backends/backend-manager.js';
 import { applyDecayToResults, applySceneAwareDecay } from './temporal-decay.js';
 import { isChunkDisabledByScene } from './scenes.js';
 import { registerCollection, getCollectionRegistry } from './collection-loader.js';
@@ -35,11 +35,13 @@ import {
     canRecordInitialVectorizationConfig,
     createInitialVectorizationConfig,
     saveInitialVectorizationConfig,
+    readInitialVectorizationConfig,
     resolveCollectionOperationSettings,
     snapshotCollectionOperationSettings,
     assertCollectionOperationSettingsStable,
 } from './collection-metadata.js';
 import { progressTracker } from '../ui/progress-tracker.js';
+import { sha256Text } from './vector-provenance.js';
 // VectHare+: run control (pause / resume / stop) for vectorization jobs
 import {
     pauseVectorization,
@@ -445,7 +447,7 @@ function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel
  * @param {object} settings VectHare settings
  * @returns {object[]} Grouped items
  */
-function collectGroupedItems(chat, settings, hashOnly = false) {
+function collectGroupedItems(chat, settings, hashOnly = false, memberPositions = null) {
     const strategy = settings.chunking_strategy || 'per_message';
     const strategyBatchSize = settings.batch_size || 4;
     const keywordLevel = hashOnly ? 'off' : (settings.keyword_extraction_level || 'balanced');
@@ -465,7 +467,38 @@ function collectGroupedItems(chat, settings, hashOnly = false) {
         });
     }
 
-    return groupMessagesByStrategy(allMessages, strategy, strategyBatchSize, keywordLevel, settings.conversation_turn_order);
+    if (!memberPositions) {
+        return groupMessagesByStrategy(allMessages, strategy, strategyBatchSize, keywordLevel, settings.conversation_turn_order);
+    }
+    // Existing ledger groups have stable membership, even after chat positions
+    // change. Re-use the original text/hash rules for each selected membership.
+    const byPosition = new Map(allMessages.map(message => [message.index, message]));
+    return memberPositions.map(positions => {
+        const messages = positions.map(position => byPosition.get(position));
+        if (!messages.length || messages.some(message => !message) ||
+            (strategy === 'per_message' && messages.length !== 1)) {
+            throw new Error('Invalid persisted chat group membership');
+        }
+        const item = groupMessagesByStrategy(messages,
+            strategy === 'per_message' ? 'per_message' : 'message_batch',
+            messages.length, keywordLevel, settings.conversation_turn_order)[0];
+        if (strategy === 'conversation_turns') {
+            delete item.metadata.batchSize;
+            item.metadata.strategy = 'conversation_turns';
+        }
+        return item;
+    });
+}
+
+// The Content Vectorizer's current-chat preview must show the SAME groups
+// that its Sync-backed live-chat write will use. Read-only; no ledger changes.
+export async function previewSyncChatGroups(chat, settings) {
+    const target = captureChatTarget();
+    if (!target || target.messages !== chat) throw new Error('Selected chat changed during preview');
+    const collectionId = getChatCollectionId();
+    const items = await collectCurrentChatGroups(chat, settings, collectionId);
+    if (!isChatTargetCurrent(target, collectionId)) throw new Error('Selected chat changed during preview');
+    return items;
 }
 
 /**
@@ -488,6 +521,688 @@ function extractMessageIds(meta) {
         : (nested.messageId != null) ? [nested.messageId]
         : [];
     return raw.map(v => Number(v)).filter(v => Number.isFinite(v));
+}
+
+// Stage 13.0: message-occurrence identity is kept only in VectHare plugin data.
+// SillyTavern chat objects/files are read, never annotated or saved.
+function identityBinding(settings, config) {
+    return {
+        backend: settings.vector_backend || 'standard',
+        source: config.embedding.provider,
+        model: config.embedding.model || '',
+        storage: config.storage,
+        chunking: config.chunking,
+    };
+}
+
+async function identityLedgerRequest(action, collectionId, binding, ledger = undefined) {
+    const response = await fetch(`/api/plugins/similharity/identity-ledger/${action}`, {
+        method: 'POST', headers: getRequestHeaders(),
+        body: JSON.stringify({ collectionId, binding, ...(ledger !== undefined ? { ledger } : {}) }),
+    });
+    if (!response.ok) {
+        const error = new Error(`Identity ledger ${action}: HTTP ${response.status}`);
+        error.status = response.status;
+        throw error;
+    }
+    const result = await response.json();
+    if (result.success !== true) throw new Error('Identity ledger operation was not confirmed');
+    return result;
+}
+
+const emptyIdentityLedger = (collectionId, binding) => ({
+    version: 1, state: 'clean', pending: null, collectionId, binding, messages: [], groups: [],
+});
+
+async function readChatIdentityLedger(collectionId, settings, config, creating = false) {
+    // Native Standard writes omit chunk provenance; never mark them as
+    // ledger-verified even if the ledger HTTP routes happen to respond.
+    if (['standard', 'vectra'].includes(settings.vector_backend || 'standard')) {
+        const backend = await getBackend(settings);
+        if (!backend.pluginAvailable) throw new Error('Identity tracking requires plugin-backed Standard inserts');
+    }
+    const binding = identityBinding(settings, config);
+    const result = await identityLedgerRequest('read', collectionId, binding);
+    if (result.status === 'found') return result.ledger;
+    if (creating && result.status === 'missing') {
+        const ledger = emptyIdentityLedger(collectionId, binding);
+        await identityLedgerRequest('save', collectionId, binding, ledger);
+        return ledger;
+    }
+    const error = new Error(`Identity ledger ${result.status || 'unavailable'}; destructive actions blocked`);
+    error.ledgerStatus = result.status;
+    throw error;
+}
+
+async function saveChatIdentityLedger(ledger) {
+    await identityLedgerRequest('save', ledger.collectionId, ledger.binding, ledger);
+}
+
+// A match fingerprint includes speaker identity but no stored message text.
+async function describeIdentityMessages(chat) {
+    return Promise.all(chat.map(async (message, position) => {
+        if (message.is_system) return null;
+        const role = message.is_user ? 'user' : 'character';
+        const name = String(message.name || '');
+        const fingerprint = await sha256Text(JSON.stringify([role, name, getTextWithoutAttachments(message)]));
+        // ST's read-only send timestamp is helpful for edits where text changes.
+        // Only unique keys can be claimed; never write UIDs into chat objects.
+        const stamp = message.send_date;
+        const sourceKey = (typeof stamp === 'number' && Number.isFinite(stamp)) ||
+            (typeof stamp === 'string' && stamp.trim())
+            ? JSON.stringify([String(stamp), role, name]) : null;
+        return { position, role, name, fingerprint, sourceKey };
+    })).then(items => items.filter(Boolean));
+}
+
+// Match only unambiguous occurrences. Positional matching by itself is never
+// evidence; a one-for-one edit requires confirmed anchors on BOTH sides.
+async function reconcileIdentityMessages(chat, ledger) {
+    const previous = ledger.messages.filter(msg => msg.active !== false);
+    const current = await describeIdentityMessages(chat);
+    const oldUsed = new Set(), newUsed = new Set(), uidByPosition = new Map();
+    const claim = (oldIndex, newIndex) => {
+        oldUsed.add(oldIndex); newUsed.add(newIndex);
+        uidByPosition.set(current[newIndex].position, previous[oldIndex].uid);
+    };
+    const matches = (item) => `${item.role}:${item.name}:${item.fingerprint}`;
+    // A unique stable read-only source key is stronger evidence for edits than
+    // an index or equal sequence length. Timestamp collisions remain unclaimed.
+    const keyedOld = new Map(), keyedNew = new Map();
+    previous.forEach((msg, i) => {
+        if (msg.sourceKey) keyedOld.set(msg.sourceKey, [...(keyedOld.get(msg.sourceKey) || []), i]);
+    });
+    current.forEach((msg, i) => {
+        if (msg.sourceKey) keyedNew.set(msg.sourceKey, [...(keyedNew.get(msg.sourceKey) || []), i]);
+    });
+    for (const [key, indices] of keyedOld) {
+        const fresh = keyedNew.get(key) || [];
+        if (indices.length === 1 && fresh.length === 1 &&
+            previous[indices[0]].role === current[fresh[0]].role &&
+            previous[indices[0]].name === current[fresh[0]].name) claim(indices[0], fresh[0]);
+    }
+    // An unchanged complete sequence is unambiguous as a sequence, including
+    // multiple identical occurrences. No UID churn on repeated Sync/Repair.
+    if (previous.length === current.length &&
+        previous.every((msg, i) => matches(msg) === matches(current[i]))) {
+        // Exact unchanged sequence; ordinal duplicate identities are stable.
+        previous.forEach((_msg, i) => {
+            if (!oldUsed.has(i) && !newUsed.has(i)) claim(i, i);
+        });
+    }
+    // Unique unchanged messages remain identifiable after any position shift.
+    const byOld = new Map(), byNew = new Map();
+    previous.forEach((item, i) => {
+        const key = matches(item);
+        byOld.set(key, [...(byOld.get(key) || []), i]);
+    });
+    current.forEach((item, i) => {
+        const key = matches(item);
+        byNew.set(key, [...(byNew.get(key) || []), i]);
+    });
+    for (const [key, oldIndices] of byOld) {
+        const newIndices = byNew.get(key) || [];
+        if (oldIndices.length === 1 && newIndices.length === 1 &&
+            !oldUsed.has(oldIndices[0]) && !newUsed.has(newIndices[0])) claim(oldIndices[0], newIndices[0]);
+    }
+    // Within two matched neighbours, an unchanged repeated-text run can be
+    // associated one-to-one only when both gaps contain the same occurrences.
+    const oldIndexByUid = new Map(previous.map((msg, i) => [msg.uid, i]));
+    const newIndexByPosition = new Map(current.map((msg, i) => [msg.position, i]));
+    const ordered = [...uidByPosition.entries()].map(([position, uid]) => ({
+        old: oldIndexByUid.get(uid) ?? -1,
+        now: newIndexByPosition.get(position) ?? -1,
+    })).filter(pair => pair.old >= 0 && pair.now >= 0)
+        .sort((a, b) => a.old - b.old);
+    for (let a = 0; a < ordered.length - 1; a++) {
+        const left = ordered[a], right = ordered[a + 1];
+        if (left.now >= right.now) continue; // moved anchors are not a gap boundary
+        const oldGap = [], newGap = [];
+        for (let i = left.old + 1; i < right.old; i++) if (!oldUsed.has(i)) oldGap.push(i);
+        for (let i = left.now + 1; i < right.now; i++) if (!newUsed.has(i)) newGap.push(i);
+        if (oldGap.length !== newGap.length || !oldGap.length) continue;
+        const sameText = oldGap.every((i, j) => matches(previous[i]) === matches(current[newGap[j]]));
+        if (sameText) oldGap.forEach((i, j) => claim(i, newGap[j]));
+        // Different text between anchors may be edit OR remove+insert.
+        // Without a persistent read-only source key we cannot prove which.
+
+    }
+    // Unmatched unique fingerprints can identify reordered messages.
+    const oldRemaining = new Map(), newRemaining = new Map();
+    previous.forEach((msg, i) => {
+        if (oldUsed.has(i)) return;
+        const key = matches(msg);
+        oldRemaining.set(key, [...(oldRemaining.get(key) || []), i]);
+    });
+    current.forEach((msg, i) => {
+        if (newUsed.has(i)) return;
+        const key = matches(msg);
+        newRemaining.set(key, [...(newRemaining.get(key) || []), i]);
+    });
+    for (const [key, oldIndices] of oldRemaining) {
+        const newIndices = newRemaining.get(key) || [];
+        if (oldIndices.length === 1 && newIndices.length === 1 &&
+            !oldUsed.has(oldIndices[0]) && !newUsed.has(newIndices[0])) claim(oldIndices[0], newIndices[0]);
+    }
+    const activeMessages = current.map((msg, i) => ({
+        ...msg, uid: uidByPosition.get(msg.position) || `m_${uuidv4().replace(/-/g, '').toLowerCase()}`, active: true,
+    }));
+    for (const msg of activeMessages) uidByPosition.set(msg.position, msg.uid);
+    const activeUidSet = new Set(activeMessages.map(msg => msg.uid));
+    const activeIndexByUid = new Map(activeMessages.map((msg, i) => [msg.uid, i]));
+    const inactive = ledger.messages.filter(msg => msg.active === false ||
+        !activeUidSet.has(msg.uid)).map(msg => ({ ...msg, active: false }));
+    const previousKeyCounts = new Map(), previousSourceCounts = new Map();
+    for (const msg of previous) {
+        previousKeyCounts.set(matches(msg), (previousKeyCounts.get(matches(msg)) || 0) + 1);
+        if (msg.sourceKey) previousSourceCounts.set(msg.sourceKey,
+            (previousSourceCounts.get(msg.sourceKey) || 0) + 1);
+    }
+    const activeKeys = new Set(activeMessages.map(matches));
+    const activeSourceKeys = new Set(activeMessages.map(msg => msg.sourceKey).filter(Boolean));
+    // An unmatched new occurrence could be an edited/moved old message.
+    // Text absence alone cannot prove deletion in that case. Unique, stable
+    // source keys remain sufficient evidence even when other messages are new.
+    const hasUnmatchedNew = current.some((_msg, i) => !newUsed.has(i));
+    // A missing message is only a confidently deleted occurrence when both
+    // neighbouring persisted messages are matched, adjacent in the new chat,
+    // and that old fingerprint has no indistinguishable remaining occurrence.
+    const confidentDeleted = new Set();
+    for (let i = 0; i < previous.length; i++) {
+        if (oldUsed.has(i)) continue;
+        const before = i > 0 ? previous[i - 1] : null;
+        const after = i + 1 < previous.length ? previous[i + 1] : null;
+        const left = before ? (activeIndexByUid.get(before.uid) ?? -1) : -1;
+        const right = after ? (activeIndexByUid.get(after.uid) ?? -1) : -1;
+        const interior = before && after && left >= 0 && right === left + 1;
+        const first = !before && after && right === 0;
+        const last = before && !after && left === activeMessages.length - 1;
+        const uniqueRetiredSource = previous[i].sourceKey &&
+            previousSourceCounts.get(previous[i].sourceKey) === 1 &&
+            !activeSourceKeys.has(previous[i].sourceKey);
+        const uniqueRetiredText = !hasUnmatchedNew && !activeKeys.has(matches(previous[i])) &&
+            previousKeyCounts.get(matches(previous[i])) === 1;
+        if ((interior || first || last) && (uniqueRetiredSource || uniqueRetiredText)) {
+            confidentDeleted.add(previous[i].uid);
+        }
+    }
+    // The former immediate-neighbour check misses multi-message deletions.
+    // Two ordered, surviving anchors with no messages between them now can
+    // certify an entire missing run, but NEVER an edit/replacement or an
+    // indistinguishable duplicate. Include guarded start/end runs as well.
+    const currentAnchors = [...uidByPosition.entries()].map(([position, uid]) => ({
+        old: oldIndexByUid.get(uid) ?? -1,
+        now: newIndexByPosition.get(position) ?? -1,
+    })).filter(pair => pair.old >= 0 && pair.now >= 0)
+        .sort((a, b) => a.old - b.old);
+    const anchored = [{ old: -1, now: -1 }, ...currentAnchors, {
+        old: previous.length, now: activeMessages.length,
+    }];
+    for (let a = 0; a < anchored.length - 1; a++) {
+        const left = anchored[a], right = anchored[a + 1];
+        if (right.now !== left.now + 1 || right.old <= left.old + 1) continue;
+        const removed = previous.slice(left.old + 1, right.old);
+        if (removed.some(msg => oldUsed.has(oldIndexByUid.get(msg.uid)))) continue;
+        if (removed.every(msg => (
+            msg.sourceKey && previousSourceCounts.get(msg.sourceKey) === 1 &&
+                !activeSourceKeys.has(msg.sourceKey)
+        ) || (!hasUnmatchedNew && !activeKeys.has(matches(msg)) &&
+            previousKeyCounts.get(matches(msg)) === 1))) {
+            removed.forEach(msg => confidentDeleted.add(msg.uid));
+        }
+    }
+    // Persist the difference between a verified retirement and an ambiguous
+    // disappearance. Otherwise a second Sync loses the only evidence that a
+    // source was deleted and an old shared-hash group can never be cleaned up.
+    const allConfidentDeleted = new Set([
+        ...confidentDeleted,
+        ...inactive.filter(msg => msg.retiredConfirmed === true).map(msg => msg.uid),
+    ]);
+    const storedInactive = inactive.map(msg => ({ ...msg,
+        retiredConfirmed: allConfidentDeleted.has(msg.uid) }));
+    return { messages: [...activeMessages, ...storedInactive], uidByPosition,
+        activeUids: new Set(activeMessages.map(m => m.uid)),
+        confidentDeleted: allConfidentDeleted,
+        uncertainUids: new Set([
+            ...previous.filter((msg, i) => !oldUsed.has(i) &&
+                !allConfidentDeleted.has(msg.uid)).map(msg => msg.uid),
+            ...storedInactive.filter(msg => !msg.retiredConfirmed).map(msg => msg.uid),
+        ]) };
+}
+
+async function attachIdentityGroups(chat, groupedItems, reconciliation) {
+    const result = [];
+    for (const item of groupedItems) {
+        const ids = extractMessageIds(item.metadata);
+        const memberUids = ids.map(id => reconciliation.uidByPosition.get(id));
+        if (!ids.length || memberUids.some(uid => !uid)) throw new Error('Unknown source message in grouped chunk');
+        const raw = ids.map(id => {
+            const message = chat[id];
+            const text = getTextWithoutAttachments(message);
+            if (item.metadata?.strategy === 'per_message') return text;
+            return `[${message.is_user ? 'User' : 'Character'}]: ${text}`;
+        }).join('\n\n');
+        if (String(calculateHash(raw)) !== String(item.hash)) {
+            throw new Error('Identity group reconstruction does not match its existing content hash');
+        }
+        const hashInputFingerprint = await sha256Text(raw);
+        const group = { memberUids, hash: item.hash, hashInputFingerprint, indexed: false };
+        item.metadata = { ...item.metadata, messageUids: memberUids };
+        result.push(group);
+    }
+    // A 32-bit content hash must never silently represent two different inputs.
+    const seen = new Map();
+    for (const group of result) {
+        const key = String(group.hash);
+        if (seen.has(key) && seen.get(key) !== group.hashInputFingerprint) {
+            throw new Error(`Different group texts share hash ${key}; indexing blocked`);
+        }
+        seen.set(key, group.hashInputFingerprint);
+    }
+    return result;
+}
+
+const memberKey = group => group.memberUids.join('|');
+
+// Preserve indexed and previously staged (but unfinished) UID memberships.
+// Only genuinely new insertions between old groups become singleton chunks.
+async function collectStableIdentityGroups(chat, settings, ledger, reconciliation, hashOnly = false) {
+    const active = reconciliation.messages.filter(msg => msg.active !== false)
+        .sort((a, b) => a.position - b.position);
+    const indexByUid = new Map(active.map((msg, i) => [msg.uid, i]));
+    const positions = [];
+    const claimed = new Set();
+    const planned = ledger.groups;
+    if (!planned.length) return collectGroupedItems(chat, settings, hashOnly);
+
+    // Indexed membership has priority. Only reuse an unindexed group when its
+    // original members are still consecutive and its raw text is unchanged.
+    for (const group of [...planned.filter(g => g.indexed).reverse(),
+        ...planned.filter(g => !g.indexed).reverse()]) {
+        if (!group.indexed) {
+            const indices = group.memberUids.map(uid => indexByUid.get(uid));
+            if (indices.some(index => index === undefined) ||
+                indices.some((index, i) => i > 0 && index !== indices[i - 1] + 1) ||
+                group.memberUids.some(uid => claimed.has(uid))) continue;
+            const ids = indices.map(index => active[index].position);
+            const original = collectGroupedItems(chat, settings, true, [ids])[0];
+            const raw = ids.map(id => {
+                const message = chat[id];
+                const text = getTextWithoutAttachments(message);
+                return original.metadata.strategy === 'per_message' ? text :
+                    `[${message.is_user ? 'User' : 'Character'}]: ${text}`;
+            }).join('\n\n');
+            if (String(original.hash) !== String(group.hash) ||
+                await sha256Text(raw) !== group.hashInputFingerprint) continue;
+        }
+        let run = [], previousIndex = -1;
+        const flush = () => {
+            if (run.length) positions.push(run.map(i => active[i].position));
+            run = []; previousIndex = -1;
+        };
+        for (const uid of group.memberUids) {
+            const index = indexByUid.get(uid);
+            if (index === undefined || claimed.has(uid)) { flush(); continue; }
+            if (run.length && index !== previousIndex + 1) flush();
+            run.push(index);
+            previousIndex = index;
+            claimed.add(uid);
+        }
+        flush();
+    }
+    if (!positions.length) {
+        // No surviving verified boundaries: use the configured strategy for
+        // entirely new content, without claiming any historical membership.
+        return collectGroupedItems(chat, settings, hashOnly);
+    }
+    const covered = new Set(positions.flat());
+    for (let i = 0; i < active.length;) {
+        if (covered.has(active[i].position)) { i++; continue; }
+        let end = i + 1;
+        while (end < active.length && !covered.has(active[end].position)) end++;
+        const newcomers = active.slice(i, end).map(msg => msg.position);
+        if (end === active.length) {
+            // Only a genuinely appended tail uses initial batch/turn grouping.
+            const strategy = settings.chunking_strategy || 'per_message';
+            // Re-open the group that touches the tail so a short last batch or an
+            // unfinished turn can absorb appended messages, as before; a full group
+            // regroups identically. Without this, auto-sync fragments chunks.
+            const lastAt = positions.findIndex(p => p[p.length - 1] === active[i - 1].position);
+            if (lastAt >= 0) newcomers.unshift(...positions.splice(lastAt, 1)[0]);
+            if (strategy === 'message_batch') {
+                const size = settings.batch_size || 4;
+                for (let j = 0; j < newcomers.length; j += size) {
+                    positions.push(newcomers.slice(j, j + size));
+                }
+            } else if (strategy === 'conversation_turns') {
+                const tail = newcomers.map(position => ({ index: position, is_user: chat[position].is_user }));
+                for (const group of groupConversationTurns(tail, settings.conversation_turn_order)) {
+                    positions.push(group.map(msg => msg.index));
+                }
+            } else {
+                newcomers.forEach(position => positions.push([position]));
+            }
+        } else {
+            newcomers.forEach(position => positions.push([position]));
+        }
+        i = end;
+    }
+    positions.sort((a, b) => a[0] - b[0]);
+    return collectGroupedItems(chat, settings, hashOnly, positions);
+}
+
+// Read-only view of the group plan used by Sync/Repair. A new chat or a
+// deliberate change of preview strategy keeps normal initial grouping.
+// Never create, reset or save a ledger from preview/resume reporting.
+async function collectCurrentChatGroups(chat, settings, collectionId, hashOnly = false) {
+    if (!collectionId || !getCollectionRegistry().some(key =>
+        parseRegistryKey(key).collectionId === collectionId)) {
+        return collectGroupedItems(chat, settings, hashOnly);
+    }
+    const saved = await readInitialVectorizationConfig(collectionId, settings);
+    if (saved.status === 'invalid' || saved.status === 'unavailable') {
+        throw new Error('Cannot verify existing collection grouping for preview/resume');
+    }
+    if (saved.status !== 'valid' || saved.config.identityLedger !== 1 ||
+        saved.config.chunking?.pipeline !== 'sync-chat') {
+        return collectGroupedItems(chat, settings, hashOnly);
+    }
+    const requested = chatConfigChunking(settings);
+    const original = saved.config.chunking;
+    if (original.strategy !== requested.strategy ||
+        (original.batchSize || 4) !== requested.batchSize ||
+        (original.conversationTurnOrder || 'user_character') !== requested.conversationTurnOrder) {
+        // A differently configured preview shows the proposed new grouping;
+        // resume must not report that plan as the collection's actual backlog.
+        if (hashOnly) throw new Error('Saved grouping differs from current settings');
+        return collectGroupedItems(chat, settings, hashOnly);
+    }
+    const ledger = await readChatIdentityLedger(collectionId, settings, saved.config);
+    const reconciliation = await reconcileIdentityMessages(chat, ledger);
+    return collectStableIdentityGroups(chat, settings, ledger, reconciliation, hashOnly);
+}
+
+// A content hash alone is not source identity. The backend must show the
+// corresponding chat provenance for at least one ledger-tracked occurrence.
+function indexedChatProvenance(meta, ledger, group) {
+    const p = meta?.vecthareProvenance;
+    return p?.collectionId === ledger.collectionId &&
+        p.recordKind === 'sync-chat' && p.sourceType === 'chat' &&
+        p.sourceIdentity?.status === 'ledger-linked' &&
+        Array.isArray(p.sourceIdentity.messageUids) &&
+        p.sourceIdentity.messageUids.length === (group.provenanceUids || group.memberUids).length &&
+        p.sourceIdentity.messageUids.every((uid, i) =>
+            uid === (group.provenanceUids || group.memberUids)[i]);
+}
+
+// A hash delete removes all physical copies, not just the one whose ledger
+// provenance was checked first. Every copy must belong to an indexed group
+// that the caller has already determined is safe to remove.
+function allPhysicalCopiesMatchGroups(ledger, hash, records, eligibleGroups) {
+    return Array.isArray(records) && records.length > 0 && records.every(meta =>
+        eligibleGroups.some(group => group.indexed && String(group.hash) === String(hash) &&
+            indexedChatProvenance(meta, ledger, group)));
+}
+
+async function readIdentityInventory(collectionId, settings) {
+    const data = await getSavedHashes(collectionId, settings, true, null, true);
+    if (!Array.isArray(data?.hashes) || !Array.isArray(data?.metadata) ||
+        data.hashes.length !== data.metadata.length) {
+        throw new Error('Identity ledger requires a complete aligned backend inventory');
+    }
+    const byHash = new Map();
+    data.hashes.forEach((hash, i) => {
+        const key = String(hash);
+        const records = byHash.get(key) || [];
+        records.push(data.metadata[i]);
+        byHash.set(key, records);
+    });
+    return byHash;
+}
+
+// A missing ledger can be reconstructed only for current groups whose exact
+// source indices, message hashes, original submitted text, and source UIDs
+// are still attested by the backend. Stale/ambiguous historical vectors stay
+// unclaimed: Repair will not delete them or manufacture edited-message UIDs.
+async function rebuildMissingIdentityLedger(collectionId, settings, config, chat) {
+    const binding = identityBinding(settings, config);
+    const inventory = await readIdentityInventory(collectionId, settings);
+    const items = collectGroupedItems(chat, settings);
+    const descriptions = await describeIdentityMessages(chat);
+    const claimed = new Map();
+    const groupClaims = new Map();
+    const usedUids = new Set();
+    for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        const ids = extractMessageIds(item.metadata);
+        const textFingerprint = `sha256:${await sha256Text(item.text)}`;
+        const candidates = (inventory.get(String(item.hash)) || []).filter(meta => {
+            const p = meta?.vecthareProvenance;
+            const originalIds = extractMessageIds(meta);
+            return p?.collectionId === collectionId && p.recordKind === 'sync-chat' &&
+                p.sourceType === 'chat' && p.sourceIdentity?.status === 'ledger-linked' &&
+                p.submittedTextFingerprint === textFingerprint &&
+                meta.strategy === item.metadata.strategy &&
+                originalIds.length === ids.length && ids.every((id, j) => id === originalIds[j]) &&
+                Array.isArray(meta.messageHashes) &&
+                meta.messageHashes.length === item.metadata.messageHashes?.length &&
+                meta.messageHashes.every((hash, j) => String(hash) === String(item.metadata.messageHashes[j])) &&
+                Array.isArray(p.sourceIdentity.messageUids) &&
+                p.sourceIdentity.messageUids.length === ids.length &&
+                p.sourceIdentity.messageUids.every(uid => /^m_[0-9a-f]{32}$/.test(uid));
+        });
+        // Multiple physical records or a UID that maps to conflicting positions
+        // cannot establish a unique historical occurrence.
+        if (candidates.length !== 1) continue;
+        const uids = candidates[0].vecthareProvenance.sourceIdentity.messageUids;
+        if (new Set(uids).size !== uids.length || uids.some((uid, j) =>
+            usedUids.has(uid) || (claimed.has(ids[j]) && claimed.get(ids[j]) !== uid))) continue;
+        ids.forEach((id, j) => { claimed.set(id, uids[j]); usedUids.add(uids[j]); });
+        groupClaims.set(i, uids);
+    }
+    const messages = descriptions.map(msg => ({
+        ...msg, uid: claimed.get(msg.position) || `m_${uuidv4().replace(/-/g, '').toLowerCase()}`,
+        active: true,
+    }));
+    const uidByPosition = new Map(messages.map(msg => [msg.position, msg.uid]));
+    const groups = await attachIdentityGroups(chat, items, { uidByPosition });
+    const trusted = groups.filter((group, i) => groupClaims.has(i) &&
+        group.memberUids.every((uid, j) => uid === groupClaims.get(i)[j]))
+        .map(group => ({ ...group, indexed: true }));
+    // A nonempty collection with no verifiable group identity is not a
+    // reconstructable ledger. Do not persist invented UIDs as a clean history.
+    if (inventory.size > 0 && trusted.length === 0) {
+        throw new Error('Existing vectors lack verifiable message identities; ledger rebuild blocked');
+    }
+    const ledger = { ...emptyIdentityLedger(collectionId, binding), messages, groups: trusted };
+    // Existing unclaimed vectors are deliberately not considered repairable.
+    // Confirm every reconstructed group before committing it as indexed.
+    if (!trusted.every(group => verifiedGroupHash(ledger, group, inventory))) {
+        throw new Error('Backend identity evidence changed; ledger rebuild blocked');
+    }
+    await identityLedgerRequest('save', collectionId, binding, ledger);
+    console.info(`VectHare: Rebuilt ${trusted.length} verified groups for the current chat; unverified vectors retained`);
+    return ledger;
+}
+
+// An identical-text occurrence can share a physical vector whose provenance
+// names a different (now retired) occurrence. Carry that attested UID tuple in
+// the surviving group, rather than retaining phantom historical message rows.
+function verifiedGroupProvenance(ledger, group, inventory) {
+    const records = inventory.get(String(group.hash)) || [];
+    for (const meta of records) {
+        if (ledger.groups.some(known =>
+            String(known.hash) === String(group.hash) &&
+            known.hashInputFingerprint === group.hashInputFingerprint &&
+            indexedChatProvenance(meta, ledger, known))) {
+            return [...meta.vecthareProvenance.sourceIdentity.messageUids];
+        }
+    }
+    return null;
+}
+
+function verifiedGroupHash(ledger, group, inventory) {
+    return verifiedGroupProvenance(ledger, group, inventory) !== null;
+}
+
+async function stageIdentityLedger(ledger, insertHashes, deleteHashes, reconciliation, currentGroups) {
+    if (ledger.state !== 'clean') throw new Error('Identity ledger is dirty; writes blocked until verification');
+    if (!insertHashes.length && !deleteHashes.length) return;
+    // Keep confirmed indexed memberships and stage source UIDs as *unindexed*
+    // so a crash cannot erase the identity of just-attempted vector writes.
+    const existing = new Set(ledger.groups.map(g => `${memberKey(g)}:${g.hash}`));
+    const groups = [...ledger.groups];
+    for (const group of currentGroups) {
+        const key = `${memberKey(group)}:${group.hash}`;
+        if (!existing.has(key)) {
+            groups.push({ ...group, indexed: false });
+            existing.add(key);
+        }
+    }
+    const next = { ...ledger, messages: reconciliation.messages, groups,
+        state: 'dirty', pending: {
+            insertHashes: [...new Set(insertHashes.map(String))],
+            deleteHashes: [...new Set(deleteHashes.map(String))],
+        } };
+    await saveChatIdentityLedger(next); // REQUIRED before first backend mutation
+    Object.assign(ledger, next);
+}
+
+async function finishIdentityLedger(ledger, reconciliation, currentGroups, inventory) {
+    const currentByKey = new Map(currentGroups.map(g => [`${memberKey(g)}:${g.hash}`, g]));
+    const currentKeys = new Set(currentByKey.keys());
+    const indexedCurrent = currentGroups.map(group => {
+        const attested = verifiedGroupProvenance(ledger, group, inventory);
+        if (!attested) return null;
+        const sameSource = attested.length === group.memberUids.length &&
+            attested.every((uid, i) => uid === group.memberUids[i]);
+        return { ...group, indexed: true,
+            ...(sameSource ? {} : { provenanceUids: attested }) };
+    }).filter(Boolean);
+    const currentIndexedHashes = new Set(indexedCurrent.map(g => String(g.hash)));
+    // A shared hash can survive after one occurrence is removed. Do not leave
+    // the retired occurrence as a phantom active reference once the surviving
+    // group is confirmed in the backend.
+    // A present hash with missing/mismatched provenance is NOT a deletion.
+    // Keep the old group and its retired UIDs if even one physical copy cannot
+    // be attested; hash-only duplicate cleanup is intentionally out of scope.
+    const attestedOwners = [...ledger.groups.filter(group => group.indexed), ...indexedCurrent];
+    const oldGroups = ledger.groups.filter(group => {
+        const hash = String(group.hash);
+        const records = inventory.get(hash);
+        if (!records?.length) return false;
+        // An unfinished group can have a physical vector if a write succeeded
+        // before ledger finalization. Keep its evidence unless all copies are
+        // attributable to an already-indexed group, or it is still current
+        // (and will be retained in unfinishedCurrent below).
+        if (!group.indexed &&
+            currentByKey.get(`${memberKey(group)}:${group.hash}`)?.hashInputFingerprint ===
+                group.hashInputFingerprint) return false;
+        const verifiedCopies = records.every(meta =>
+            attestedOwners.some(known => String(known.hash) === hash &&
+                known.hashInputFingerprint === group.hashInputFingerprint &&
+                indexedChatProvenance(meta, ledger, known)));
+        if (!group.indexed) return !verifiedCopies;
+        // An already-verified current group retains the same member evidence;
+        // do not duplicate its ledger row merely because another copy is bad.
+        if (!verifiedCopies) return !indexedCurrent.some(current =>
+            memberKey(current) === memberKey(group) && String(current.hash) === hash &&
+            current.hashInputFingerprint === group.hashInputFingerprint);
+        return !currentKeys.has(`${memberKey(group)}:${group.hash}`) &&
+            !currentIndexedHashes.has(hash);
+    });
+    const pending = ledger.pending;
+    const pendingVerified = !pending || (
+        pending.insertHashes.every(hash => indexedCurrent.some(group => String(group.hash) === hash)) &&
+        pending.deleteHashes.every(hash => !inventory.has(hash))
+    );
+    // An uncertain operation must not turn an old hash or a foreign vector
+    // into verified chat membership.
+    if (!pendingVerified) return false;
+    // Keep unfinished, still-current planned groups after another group is
+    // successfully finalized. Otherwise the next pass splits their members.
+    const indexedKeys = new Set(indexedCurrent.map(g => `${memberKey(g)}:${g.hash}`));
+    const unfinishedCurrent = ledger.groups.filter(group => {
+        const key = `${memberKey(group)}:${group.hash}`;
+        return !group.indexed && !indexedKeys.has(key) && !oldGroups.includes(group) &&
+            currentByKey.get(key)?.hashInputFingerprint === group.hashInputFingerprint;
+    });
+    const groups = [...oldGroups, ...indexedCurrent, ...unfinishedCurrent];
+    const referenced = new Set(groups.flatMap(group => group.memberUids));
+    // Prune confirmed retirements only after their vector is absent or fully
+    // accounted for. Unverifiable existing vectors retain historical UIDs.
+    const messages = reconciliation.messages.filter(msg => msg.active !== false ||
+        !msg.retiredConfirmed || referenced.has(msg.uid));
+    const next = { ...ledger, messages,
+        groups, state: 'clean', pending: null };
+    await saveChatIdentityLedger(next);
+    Object.assign(ledger, next);
+    return true;
+}
+
+// Crash recovery for the same collection, with no concurrent-writer protocol.
+// Insert-only operations are safe to retry after inspecting the backend.
+async function recoverIdentityLedger(ledger, collectionId, settings) {
+    if (ledger.state !== 'dirty') return true;
+    const inventory = await readIdentityInventory(collectionId, settings);
+    // A remaining deletion target is not a reason to repeat a destructive
+    // request. Keep it in the backend, re-evaluate only on the next normal run.
+    const next = { ...ledger, state: 'clean', pending: null,
+        groups: ledger.groups.map(group => ({ ...group,
+            indexed: inventory.has(String(group.hash)) &&
+                verifiedGroupHash(ledger, group, inventory) })) };
+    await saveChatIdentityLedger(next);
+    Object.assign(ledger, next);
+    return true;
+}
+
+// Check first-write emptiness without accidentally creating a missing native
+// Vectra index via the plugin's listing accessor. Never infer first use from
+// an empty hash list alone; the saved provenance endpoint must agree.
+async function assertEmptyFirstInsertCollection(collectionId, settings, saved) {
+    if (saved.status !== 'missing') {
+        throw new Error('Collection configuration is not confirmed missing; ledger reset blocked');
+    }
+    if (saved.physicalAbsent) return; // Plugin verified there is no local index.
+    if (['standard', 'vectra'].includes(settings.vector_backend || 'standard')) {
+        const { getModelField } = await import('./providers.js');
+        const source = settings.source || 'transformers';
+        const modelField = getModelField(source);
+        const exact = await readInitialVectorizationConfig(collectionId, settings, {
+            source, model: modelField ? settings[modelField] || '' : '',
+        });
+        if (exact.status !== 'missing' || exact.physicalAbsent) {
+            throw new Error('Original Vectra model index cannot be verified; ledger reset blocked');
+        }
+    }
+    const inventory = await readIdentityInventory(collectionId, settings);
+    if (inventory.size !== 0) {
+        throw new Error('Existing backend records prevent first-insert ledger recovery');
+    }
+}
+
+// A failed FIRST insert may have created an empty Vectra index before the
+// initial-configuration marker could be saved. The normal Stage 2B preflight
+// rightly rejects an unrecorded physical collection. Allow this one retry only
+// with a matching VectHare ledger and a complete, empty backend inventory.
+// This does not make other legacy/unverified collections writable.
+async function recoverEmptyFirstSyncPreflight(collectionId, settings) {
+    if (!canRecordInitialVectorizationConfig(collectionId, settings)) return null;
+    const saved = await readInitialVectorizationConfig(collectionId, settings);
+    if (saved.status !== 'missing' || saved.physicalAbsent) return null;
+    const config = createInitialVectorizationConfig(settings, chatConfigChunking(settings));
+    if (!config) return null;
+    let ledger;
+    try { ledger = await readChatIdentityLedger(collectionId, settings, config); }
+    catch { return null; } // No matching ledger is NOT proof of a failed first insert.
+    // Only an interrupted first INSERT qualifies. A clean historical ledger,
+    // even with no vectors left, must not be silently reset.
+    if (ledger.state !== 'dirty' || !ledger.pending?.insertHashes?.length ||
+        ledger.pending.deleteHashes.length || ledger.groups.some(group => group.indexed)) {
+        return null;
+    }
+    await assertEmptyFirstInsertCollection(collectionId, settings, saved);
+    return { status: 'new', settings: snapshotCollectionOperationSettings(settings), config };
 }
 
 /**
@@ -694,8 +1409,14 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
         if (validationToken === validatedManualSync) {
             syncCompatibility = { status: 'compatible' };
         } else {
-            const resolved = await resolveCollectionOperationSettings(collectionId, settings, 'sync-chat',
-                chatConfigChunking(settings), { allowNew: true });
+            let resolved;
+            try {
+                resolved = await resolveCollectionOperationSettings(collectionId, settings, 'sync-chat',
+                    chatConfigChunking(settings), { allowNew: true });
+            } catch (error) {
+                resolved = await recoverEmptyFirstSyncPreflight(collectionId, settings);
+                if (!resolved) throw error;
+            }
             settings = resolved.settings;
             capturedConfig = resolved.config || createInitialVectorizationConfig(settings, chatConfigChunking(settings));
             syncCompatibility = { status: resolved.status };
@@ -789,21 +1510,77 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
         // different chat's messages after a backend await.
         assertCollectionOperationSettingsStable(capturedConfig, settings, chatConfigChunking(settings));
         const strategy = settings.chunking_strategy || 'per_message';
-        const wasUnregistered = canRecordInitialVectorizationConfig(collectionId);
+        const wasUnregistered = canRecordInitialVectorizationConfig(collectionId, settings);
         const initialConfig = wasUnregistered ? createInitialVectorizationConfig(settings,
             chatConfigChunking(settings)) : null;
-        const groupedItems = collectGroupedItems(target.messages, settings);
-
+        // Capture before preparing any groups, not only before the later
+        // inventory read. A changed chat must not use a stale deletion keep-set.
+        const groupedChatState = target.messages.map(msg => [msg, msg.is_system, msg.is_user,
+            msg.name, msg.send_date, getTextWithoutAttachments(msg)]);
+        const groupedChatUnchanged = () => target.messages.length === groupedChatState.length &&
+            !target.messages.some((msg, i) =>
+                msg !== groupedChatState[i][0] || msg.is_system !== groupedChatState[i][1] ||
+                msg.is_user !== groupedChatState[i][2] || msg.name !== groupedChatState[i][3] ||
+                msg.send_date !== groupedChatState[i][4] ||
+                getTextWithoutAttachments(msg) !== groupedChatState[i][5]);
+        let groupedItems = collectGroupedItems(target.messages, settings);
         // NOTE: Registration happens AFTER first successful insert to prevent ghosts.
-        // A deleted/empty legacy collection must not receive today's settings.
         let isRegistered = false;
         let initialConfigRecorded = false;
-
-        // Step 1: What's already vectorized? (source of truth = DB)
         const existingHashes = new Set(
             (await getSavedHashes(collectionId, settings)).map(hash => String(hash))
         );
         if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
+        let identityLedger = null, identityReconciliation = null, identityGroups = [];
+        const identityRequired = capturedConfig?.identityLedger === 1;
+        const identityNew = wasUnregistered && existingHashes.size === 0 && !identityRequired;
+        // Only genuinely empty collections initialize tracking. An existing
+        // unrecorded collection is legacy even when registry state is missing.
+        if (identityNew || identityRequired) {
+            const config = identityNew ? initialConfig : capturedConfig;
+            if (!config) throw new Error('Collection identity configuration unavailable');
+            try {
+                identityLedger = await readChatIdentityLedger(collectionId, settings, config, identityNew);
+                if (identityNew && (identityLedger.messages.length || identityLedger.groups.length ||
+                    identityLedger.state !== 'clean')) {
+                    // Only an interrupted first insert can be reset. An empty
+                    // backend by itself is not proof that old UID history is safe
+                    // to discard (for example after an external collection purge).
+                    if (identityLedger.state !== 'dirty' ||
+                        !identityLedger.pending?.insertHashes?.length ||
+                        identityLedger.pending.deleteHashes.length ||
+                        identityLedger.groups.some(group => group.indexed)) {
+                        throw new Error('Unregistered collection has historical identity ledger; manual recovery required');
+                    }
+                    const saved = await readInitialVectorizationConfig(collectionId, settings);
+                    await assertEmptyFirstInsertCollection(collectionId, settings, saved);
+                    identityLedger = emptyIdentityLedger(collectionId, identityLedger.binding);
+                    await saveChatIdentityLedger(identityLedger);
+                }
+                identityReconciliation = await reconcileIdentityMessages(target.messages, identityLedger);
+                groupedItems = await collectStableIdentityGroups(target.messages, settings,
+                    identityLedger, identityReconciliation);
+                identityGroups = await attachIdentityGroups(target.messages, groupedItems, identityReconciliation);
+                for (const group of identityGroups) {
+                    if (identityLedger.groups.some(old => String(old.hash) === String(group.hash) &&
+                        old.hashInputFingerprint !== group.hashInputFingerprint)) {
+                        throw new Error(`Content hash ${group.hash} maps to different inputs`);
+                    }
+                }
+                if (identityNew) initialConfig.identityLedger = 1;
+            } catch (error) {
+                // A new empty collection may work with older plugins, but a
+                // tracked collection must NEVER fall back to positional Repair.
+                if (identityRequired || identityLedger || error.status !== 404) throw error;
+                // An older plugin may lack only these routes. Preserve the
+                // untracked Sync path without trusting it for UID-based Repair.
+                console.warn('VectHare: Ledger routes absent on older plugin; retaining original Sync:', error.message);
+            }
+        }
+        if (identityLedger?.state === 'dirty' &&
+            !await recoverIdentityLedger(identityLedger, collectionId, settings)) {
+            throw new Error('Identity ledger has an unresolved deletion; Sync writes blocked');
+        }
 
         // ========================================================================
         // VectHare+ Step 1.5: Reverse sync (ghost vector cleanup)
@@ -847,18 +1624,30 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
             try {
                 const { getChunkMetadata } = await import('./collection-metadata.js');
 
-                const collectionData = await getSavedHashes(collectionId, settings, true, null, settings.vector_backend === 'qdrant');
+                // Compare to the state used to plan groups, including changes
+                // before this inventory read as well as while it was pending.
+                const collectionData = await getSavedHashes(collectionId, settings, true, null, Boolean(identityLedger) || settings.vector_backend === 'qdrant');
                 if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
-
-                // Rebuild next to the delete decision: edits or other writes
-                // during the backend read must not create false ghost hashes.
-                const keepHashes = new Set(collectGroupedItems(target.messages, settings, true)
-                    .map(item => String(item.hash)));
+                if (!groupedChatUnchanged()) {
+                    console.info('VectHare: Chat changed after Sync grouping; reverse cleanup deferred');
+                    return syncDeferred();
+                }
+                const keepHashes = new Set(groupedItems.map(item => String(item.hash)));
                 const allStoredHashes = Array.isArray(collectionData) ? collectionData : (collectionData?.hashes || []);
 
                 const metaByHash = (collectionData && !Array.isArray(collectionData) && Array.isArray(collectionData.metadata) && collectionData.metadata.length > 0)
                     ? new Map(collectionData.hashes.map((h, i) => [String(h), collectionData.metadata[i] || {}]))
                     : null;
+                // An identical hash may be shared with an imported/scene record.
+                // Do not let Map's last duplicate hide a protected earlier copy.
+                const allRecordsByHash = new Map();
+                if (identityLedger && metaByHash) {
+                    collectionData.hashes.forEach((hash, i) => {
+                        const records = allRecordsByHash.get(String(hash)) || [];
+                        records.push(collectionData.metadata[i]);
+                        allRecordsByHash.set(String(hash), records);
+                    });
+                }
 
                 const isProtectedMeta = (meta) => {
                     if (!meta) return false;
@@ -872,6 +1661,10 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                     // Check both DB-side metadata and settings-layer chunk metadata
                     const isProtected = (hash, meta) => {
                         if (isProtectedMeta(meta)) return true;
+                        if (identityLedger && (allRecordsByHash.get(String(hash)) || []).some(record =>
+                            isProtectedMeta(record) ||
+                            record?.vecthareProvenance?.recordKind !== 'sync-chat' ||
+                            record?.vecthareProvenance?.sourceIdentity?.status !== 'ledger-linked')) return true;
                         const chunkMeta = getChunkMetadata(hash);
                         if (chunkMeta && (isProtectedMeta(chunkMeta) || chunkMeta.disabledByScene != null)) return true;
                         return false;
@@ -888,9 +1681,14 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                         dupCounts.set(k, (dupCounts.get(k) || 0) + 1);
                     }
                     const duplicateHashes = [...dupCounts.entries()]
-                        .filter(([h, c]) => c > 1 && !isProtected(h, metaByHash.get(h) || null))
+                        // Stage 13.0: a hash required by any current group cannot
+                        // be removed for duplicate cleanup (even temporarily).
+                        .filter(([h, c]) => c > 1 && !keepHashes.has(h) &&
+                            !isProtected(h, metaByHash.get(h) || null))
                         .map(([h]) => h);
-                    if (duplicateHashes.length > 0) {
+                    if (duplicateHashes.length > 0 && !identityLedger) {
+                        // Exact physical duplicate cleanup is not part of the
+                        // ledger path (#61). Never delete a shared ledger hash.
                         if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
                         await deleteVectorItems(collectionId, duplicateHashes, settings);
                         if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
@@ -901,15 +1699,46 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                     }
 
                     const ghostHashes = [];
+                    const ledgerOwned = new Set(identityLedger?.groups.filter(g => g.indexed)
+                        .map(g => String(g.hash)) || []);
+                    const pendingReplacementUids = new Set(identityGroups
+                        .filter(g => !existingHashes.has(String(g.hash)))
+                        .flatMap(g => g.memberUids));
                     for (const [hash, meta] of metaByHash) {
-                        if (isProtected(hash, meta)) continue;
-                        if (!keepHashes.has(hash)) ghostHashes.push(hash);
+                        if (isProtected(hash, meta) || keepHashes.has(hash)) continue;
+                        if (identityLedger) {
+                            if (identityLedger.state === 'dirty' || !ledgerOwned.has(hash)) continue;
+                            const prior = identityLedger.groups.filter(g => String(g.hash) === hash);
+                            if (prior.some(g => g.memberUids.some(uid =>
+                                pendingReplacementUids.has(uid) || identityReconciliation.uncertainUids.has(uid)))) continue;
+                            if (prior.some(g => g.memberUids.some(uid =>
+                                !identityReconciliation.activeUids.has(uid) &&
+                                !identityReconciliation.confidentDeleted.has(uid)))) continue;
+                            // Deletion by hash removes every physical copy.
+                            // Any unrecognized UID provenance vetoes cleanup.
+                            if (!allPhysicalCopiesMatchGroups(identityLedger, hash,
+                                allRecordsByHash.get(hash), prior)) continue;
+                        }
+                        ghostHashes.push(hash);
                     }
 
-                    if (ghostHashes.length > 0) {
-                        if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
+                    if (ghostHashes.length && !groupedChatUnchanged()) return syncDeferred();
+                    if (identityLedger && ghostHashes.length && identityLedger.state === 'clean') {
+                        await stageIdentityLedger(identityLedger, [], ghostHashes, identityReconciliation, identityGroups);
+                    }
+                    if (ghostHashes.length > 0 && (!identityLedger || identityLedger.pending?.deleteHashes?.length)) {
+                        if (!isChatTargetCurrent(target, collectionId) || !groupedChatUnchanged()) return syncDeferred();
                         await deleteVectorItems(collectionId, ghostHashes, settings);
                         if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
+                        if (identityLedger) {
+                            // Finish the verified delete stage before beginning a
+                            // second write-ahead stage for forward Sync.
+                            const inventory = await readIdentityInventory(collectionId, settings);
+                            if (!await finishIdentityLedger(identityLedger, identityReconciliation,
+                                identityGroups, inventory)) {
+                                throw new Error('Reverse-sync deletion not verified; forward writes blocked');
+                            }
+                        }
                         console.log(`VectHare: Reverse sync removed ${ghostHashes.length} obsolete vector(s) (changed/deleted sources)`);
                         // VectHare+ FIX: do NOT deleteChunkMetadata(ghost) here.
                         // Chunk metadata is stored GLOBALLY by hash (shared across
@@ -930,18 +1759,23 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                     lastReverseSyncByCollection.set(collectionId,
                         Date.now() - REVERSE_SYNC_MIN_INTERVAL_MS + 30000);
                 }
+                if (identityLedger) throw reverseSyncError;
                 console.warn('VectHare: Reverse sync failed (forward vectorization continues):', reverseSyncError.message);
             }
         }
 
-        // A chat switch during reverse-sync must not reach forward inserts.
-        if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
+        // The forward plan was prepared from the same snapshot. A changed chat
+        // must be regrouped on a later pass, not indexed from stale membership.
+        if (!isChatTargetCurrent(target, collectionId) || !groupedChatUnchanged()) return syncDeferred();
 
         // Filter out already vectorized items (by their grouped hash)
         const queue = new Queue();
+        const queuedHashKeys = new Set();
         for (const item of groupedItems) {
-            if (!existingHashes.has(String(item.hash))) {
+            const key = String(item.hash);
+            if (!existingHashes.has(key) && (!identityLedger || !queuedHashKeys.has(key))) {
                 queue.enqueue(item);
+                queuedHashKeys.add(key); // identical occurrences share one embedding
             }
         }
 
@@ -956,7 +1790,15 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
         }
 
         if (queue.isEmpty()) {
+            if (identityLedger) {
+                const inventory = await readIdentityInventory(collectionId, settings);
+                await finishIdentityLedger(identityLedger, identityReconciliation, identityGroups, inventory);
+            }
             return { remaining: 0, messagesProcessed: 0, chunksCreated: 0, groupsCompleted: 0, total: groupedItems.length };
+        }
+        if (identityLedger) {
+            const queuedHashes = [...new Set(queue.items.slice(0, batchSize).map(g => String(g.hash)))];
+            await stageIdentityLedger(identityLedger, queuedHashes, [], identityReconciliation, identityGroups);
         }
 
         // Step 3: Process batch
@@ -980,6 +1822,11 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
             try {
                 // Prepare item for insertion (add source metadata)
                 const chunks = prepareItemsForInsertion([item]);
+                if (chunks[0]) chunks[0].__vecthareProvenanceHint = {
+                    writer: 'sync-chat', sourceType: 'chat',
+                    groupingStrategy: item.metadata?.strategy,
+                    ...(identityLedger ? { messageUids: item.metadata?.messageUids } : {}),
+                };
 
                 // Insert chunks (insertVectorItems handles duplicates at DB level)
                 // R13: pass the Stop signal - Stop now cancels the in-flight
@@ -1006,6 +1853,12 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                     // Existing/legacy collections must not be assigned today's settings.
                     if (existingHashes.size === 0 && wasUnregistered && !initialConfigRecorded) {
                         initialConfigRecorded = await saveInitialVectorizationConfig(collectionId, initialConfig, settings);
+                        if (initialConfigRecorded) {
+                            setCollectionMeta(collectionId, { verifiedPurgeDestination: null });
+                        }
+                        if (identityLedger && !initialConfigRecorded) {
+                            throw new Error('Cannot confirm ledger capability in saved collection settings');
+                        }
                     }
 
                     // Register on first successful insert (prevents ghost collections)
@@ -1033,6 +1886,9 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                     queue.enqueue(item); // Aborted item is still pending.
                     break;
                 }
+                if (identityLedger && itemError.message?.includes('Cannot confirm ledger capability')) {
+                    throw itemError; // never write further vectors without a saved identity marker
+                }
                 // Log error but continue processing other items
                 console.warn(`VectHare: Failed to process item (hash: ${item.hash}, index: ${item.index}):`, itemError.message);
                 itemsFailed++;
@@ -1044,6 +1900,14 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
         }
 
         progressTracker.updateCurrentItem(null);
+        if (identityLedger) {
+            // A partial batch remains dirty unless all planned writes can be
+            // confirmed. Never save optimistic `indexed:true` records.
+            const inventory = await readIdentityInventory(collectionId, settings);
+            if (!await finishIdentityLedger(identityLedger, identityReconciliation, identityGroups, inventory)) {
+                console.warn('VectHare: Identity ledger remains dirty; incomplete indexed evidence');
+            }
+        }
 
         if (itemsFailed > 0) {
             console.warn(`VectHare: Sync completed with ${itemsFailed} failed items out of ${itemsProcessed}`);
@@ -2575,7 +3439,7 @@ export async function rearrangeChat(chat, settings, type) {
  * @param {object} settings VectHare settings
  * @param {number} batchSize Batch size
  */
-export async function vectorizeAll(settings, batchSize) {
+export async function vectorizeAll(settings, batchSize, includeIndexedCount = false) {
     settings = snapshotCollectionOperationSettings(settings);
     let capturedConfig = null;
     let progressShown = false;
@@ -2613,8 +3477,14 @@ export async function vectorizeAll(settings, batchSize) {
 
         // Resolve the original model/grouping for this collection before any
         // health check or embedding. No global settings are changed.
-        const resolvedSync = await resolveCollectionOperationSettings(binding.collectionId, settings,
-            'sync-chat', chatConfigChunking(settings), { allowNew: true });
+        let resolvedSync;
+        try {
+            resolvedSync = await resolveCollectionOperationSettings(binding.collectionId, settings,
+                'sync-chat', chatConfigChunking(settings), { allowNew: true });
+        } catch (error) {
+            resolvedSync = await recoverEmptyFirstSyncPreflight(binding.collectionId, settings);
+            if (!resolvedSync) throw error;
+        }
         settings = resolvedSync.settings;
         capturedConfig = resolvedSync.config || createInitialVectorizationConfig(settings, chatConfigChunking(settings));
 
@@ -2724,7 +3594,10 @@ export async function vectorizeAll(settings, batchSize) {
         if (!isChatTargetCurrent(target, binding.collectionId)) throw new ChatSwitchStop();
 
         // Count the grouped units actually used by synchronization.
-        const totalGroups = collectGroupedItems(target.messages, settings).length;
+        // Progress total only: a failed ledger read must not abort Sync here.
+        const totalGroups = await collectCurrentChatGroups(target.messages, settings,
+            binding.collectionId).then(items => items.length,
+            () => collectGroupedItems(target.messages, settings).length);
         const progressUnit = !settings.chunking_strategy || settings.chunking_strategy === 'per_message'
             ? 'Messages' : 'Message groups';
         progressTracker.show('Vectorizing Chat', totalGroups, progressUnit);
@@ -2917,6 +3790,19 @@ export async function vectorizeAll(settings, batchSize) {
         progressTracker.complete(true, `Completed ${progressTracker.stats.groupsCompletedThisRun} ${progressUnit.toLowerCase()} this run (${totalChunks} chunks written)`);
         toastr.success('Chat vectorized successfully', 'VectHare');
         console.log(`VectHare: ✅ Vectorization complete after ${iteration} iterations`);
+        // Content Vectorizer needs the TOTAL stored count, not just the number
+        // newly written during this Sync. A read failure must not make a
+        // successful vectorization look like a failed one.
+        let indexedChunkCount = null;
+        if (includeIndexedCount) {
+            try {
+                const hashes = await getSavedHashes(binding.collectionId, settings);
+                if (Array.isArray(hashes)) indexedChunkCount = hashes.length;
+            } catch (error) {
+                console.warn('VectHare: Could not confirm the indexed collection count:', error);
+            }
+        }
+        return { success: true, chunkCount: totalChunks, indexedChunkCount };
     } catch (error) {
         vectorizeRunActive = false;
         resetControlState(); // Never let pause/stop flags leak into the next run.
@@ -2988,11 +3874,9 @@ export async function repairChatVectors(settings, batchSize = 5) {
         const registryEntries = getCollectionRegistry()
             .map(key => parseRegistryKey(key))
             .filter(entry => entry.collectionId === collectionId);
-        if (!registryEntries.length) {
-            toastr.info('This chat has no vector collection yet - nothing to repair. Use "Sync Chat" to vectorize it.', 'Repair');
-            vectorizeRunActive = false;
-            return;
-        }
+        // Registry tracking can be absent even though the backend still has
+        // verified Sync Chat vectors (e.g. after a UI reload). Check saved
+        // provenance before deciding that the collection is missing.
 
         // Repair must never act on unknown or incompatible provenance.
         try {
@@ -3004,7 +3888,22 @@ export async function repairChatVectors(settings, batchSize = 5) {
             if (!registryEntries.some(entry =>
                 entry.backend && backendName(entry.backend) === backendName(settings.vector_backend || 'standard') &&
                 entry.source === settings.source)) {
-                throw new Error('No qualified registry entry matches the saved collection backend/source');
+                // A bare registry key from an earlier Sync Chat build is not
+                // proof of destination; backend configuration + inventory are.
+                if (capturedConfig?.chunking?.pipeline !== 'sync-chat') {
+                    throw new Error('No qualified registry entry matches the saved collection backend/source');
+                }
+                const verifiedInventory = await getSavedHashes(collectionId, settings, true, null, true);
+                if (!Array.isArray(verifiedInventory?.hashes) ||
+                    !Array.isArray(verifiedInventory?.metadata) ||
+                    verifiedInventory.hashes.length !== verifiedInventory.metadata.length ||
+                    !verifiedInventory.metadata.some(meta =>
+                        meta?.vecthareProvenance?.collectionId === collectionId &&
+                        meta.vecthareProvenance.recordKind === 'sync-chat' &&
+                        meta.vecthareProvenance.sourceType === 'chat')) {
+                    throw new Error('Cannot verify old registry destination; Repair blocked');
+                }
+                registerCollection(`${settings.vector_backend || 'standard'}:${settings.source}:${collectionId}`);
             }
             assertCollectionOperationSettingsStable(capturedConfig, settings, chatConfigChunking(settings));
         } catch (error) {
@@ -3025,6 +3924,32 @@ export async function repairChatVectors(settings, batchSize = 5) {
             return;
         }
         if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
+
+        // Stage 13.0: existing collections opt in only if their original
+        // backend-resident configuration recorded the identity ledger capability.
+        let identityLedger = null, identityReconciliation = null, identityGroups = [];
+        if (capturedConfig?.identityLedger === 1) {
+            try {
+                try {
+                    identityLedger = await readChatIdentityLedger(collectionId, settings, capturedConfig);
+                } catch (readError) {
+                    if (readError.ledgerStatus !== 'missing') throw readError;
+                    identityLedger = await rebuildMissingIdentityLedger(collectionId, settings,
+                        capturedConfig, target.messages);
+                }
+                if (identityLedger.state !== 'clean') {
+                    if (identityLedger.state !== 'dirty' ||
+                        !await recoverIdentityLedger(identityLedger, collectionId, settings)) {
+                        throw new Error('Identity ledger state is not verified; Repair blocked');
+                    }
+                }
+            } catch (error) {
+                toastr.error(error.message, 'Repair blocked: identity ledger', { timeOut: 0, closeOnHover: false });
+                vectorizeRunActive = false;
+                resetControlState();
+                return;
+            }
+        }
 
         // Full metadata read - REQUIRED. Without per-chunk metadata we cannot
         // identify protected scene/summary chunks, so repair must not run.
@@ -3052,6 +3977,27 @@ export async function repairChatVectors(settings, batchSize = 5) {
         }
 
         if (storedHashes.length === 0) {
+            if (identityLedger) {
+                // Confirm empty with the ledger's strict inventory reader
+                // before invalidating any formerly indexed group claims.
+                const inventory = await readIdentityInventory(collectionId, settings);
+                if (inventory.size !== 0) throw new Error('Collection changed during empty Repair inventory');
+                if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
+                identityReconciliation = await reconcileIdentityMessages(target.messages, identityLedger);
+                const items = await collectStableIdentityGroups(target.messages, settings,
+                    identityLedger, identityReconciliation);
+                identityGroups = await attachIdentityGroups(target.messages, items, identityReconciliation);
+                // Preserve valid group boundaries as unfinished work for Sync;
+                // no absent vector can remain marked as indexed.
+                // Collection verified empty: a pending insert/delete is moot. Clear it,
+                // or a stale pending record would make this reconciliation throw.
+                const emptyLedger = { ...identityLedger, pending: null,
+                    groups: identityGroups.map(group => ({ ...group, indexed: false })) };
+                if (!await finishIdentityLedger(emptyLedger, identityReconciliation,
+                    identityGroups, inventory)) {
+                    throw new Error('Empty-collection ledger reconciliation could not be verified');
+                }
+            }
             toastr.info('The collection is empty - nothing to repair. Use "Sync Chat" to vectorize this chat.', 'Repair');
             vectorizeRunActive = false;
             return;
@@ -3064,6 +4010,7 @@ export async function repairChatVectors(settings, batchSize = 5) {
         }
 
         const metaByHash = new Map();
+        const copiesByHash = new Map();
         const storedHashSet = new Set(storedHashes.map(h => String(h)));
 
         const { getChunkMetadata } = await import('./collection-metadata.js');
@@ -3095,12 +4042,23 @@ export async function repairChatVectors(settings, batchSize = 5) {
             const hash = String(storedHashes[i]);
             const meta = metadataArr[i];
             if (!metaByHash.has(hash)) metaByHash.set(hash, meta);
+            if (identityLedger) {
+                const copies = copiesByHash.get(hash) || [];
+                copies.push(meta);
+                copiesByHash.set(hash, copies);
+            }
             // If any copy with this hash is protected, deleting by hash could
             // delete that copy too. Do not classify such a hash as deletable.
-            if (isProtectedMeta(meta)) protectedHashes.add(hash);
+            if (isProtectedMeta(meta) || (identityLedger && (
+                meta?.vecthareProvenance?.recordKind !== 'sync-chat' ||
+                meta?.vecthareProvenance?.sourceIdentity?.status !== 'ledger-linked'))) {
+                protectedHashes.add(hash);
+            }
         }
         const isProtected = (hash, meta) => {
             if (protectedHashes.has(String(hash)) || isProtectedMeta(meta)) return true;
+            if (identityLedger && (meta?.vecthareProvenance?.recordKind !== 'sync-chat' ||
+                meta?.vecthareProvenance?.sourceIdentity?.status !== 'ledger-linked')) return true;
             const chunkMeta = getChunkMetadata(hash);
             if (chunkMeta && (chunkMeta.disabledByScene != null ||
                 chunkMeta.isScene === true || chunkMeta.isSummaryChunk === true ||
@@ -3111,7 +4069,21 @@ export async function repairChatVectors(settings, batchSize = 5) {
 
         // Current chat, grouped EXACTLY like sync (shared helper)
         if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
-        const groupedItems = collectGroupedItems(target.messages, settings);
+        let groupedItems = collectGroupedItems(target.messages, settings);
+        if (identityLedger) {
+            identityReconciliation = await reconcileIdentityMessages(target.messages, identityLedger);
+            groupedItems = await collectStableIdentityGroups(target.messages, settings,
+                identityLedger, identityReconciliation);
+            identityGroups = await attachIdentityGroups(target.messages, groupedItems, identityReconciliation);
+            // A numeric content hash collision must not be silently treated as
+            // an unchanged vector merely because its key is still present.
+            for (const group of identityGroups) {
+                if (identityLedger.groups.some(old => String(old.hash) === String(group.hash) &&
+                    old.hashInputFingerprint !== group.hashInputFingerprint)) {
+                    throw new Error(`Content hash ${group.hash} maps to different inputs; Repair blocked`);
+                }
+            }
+        }
         const groupByHash = new Map(groupedItems.map(it => [String(it.hash), it]));
         const currentHashSet = new Set(groupByHash.keys());
 
@@ -3119,6 +4091,53 @@ export async function repairChatVectors(settings, batchSize = 5) {
         const hashesToDelete = [];   // stale/duplicate vectors to remove
         const replacements = [];     // current groups to (re-)insert
 
+        const ghosts = [];
+        if (identityLedger) {
+            const repairInventory = await readIdentityInventory(collectionId, settings);
+            const indexed = identityLedger.groups.filter(group => group.indexed &&
+                verifiedGroupHash(identityLedger, group, repairInventory));
+            const formerlyIndexedUids = new Set(indexed.flatMap(group => group.memberUids));
+            // Only groups consisting entirely of formerly indexed messages
+            // can be replacements. New backlog is still Sync Chat's job.
+            const seenReplacementHashes = new Set();
+            identityGroups.forEach((group, i) => {
+                const hash = String(group.hash);
+                if (storedHashSet.has(hash) || seenReplacementHashes.has(hash) ||
+                    !group.memberUids.every(uid => formerlyIndexedUids.has(uid)) ||
+                    group.memberUids.some(uid => identityReconciliation.uncertainUids.has(uid))) return;
+                replacements.push(groupedItems[i]);
+                seenReplacementHashes.add(hash); // preserve hash-based dedup
+            });
+            const replacementHashSet = new Set(replacements.map(item => String(item.hash)));
+            const processedHashes = new Set();
+            for (const old of indexed) {
+                const hash = String(old.hash);
+                if (processedHashes.has(hash) || currentHashSet.has(hash) ||
+                    !storedHashSet.has(hash) || isProtected(hash, metaByHash.get(hash)) ||
+                    !indexedChatProvenance(metaByHash.get(hash), identityLedger, old)) continue;
+                // Deletion by hash affects EVERY source occurrence using that
+                // hash. One unresolved occurrence or pending replacement vetoes
+                // deletion of the entire key (not just the first ledger group).
+                const everyOccurrence = indexed.filter(group => String(group.hash) === hash);
+                if (!allPhysicalCopiesMatchGroups(identityLedger, hash,
+                    copiesByHash.get(hash), everyOccurrence) ||
+                    !allPhysicalCopiesMatchGroups(identityLedger, hash,
+                        repairInventory.get(hash), everyOccurrence)) continue;
+                if (everyOccurrence.some(group => group.memberUids.some(uid =>
+                    !identityReconciliation.activeUids.has(uid) &&
+                    !identityReconciliation.confidentDeleted.has(uid)))) continue;
+                // A regrouped batch with new backlog must retain its old recall
+                // until Sync writes the new group. Check every occurrence.
+                if (everyOccurrence.some(prior => identityGroups.some(group =>
+                    group.memberUids.some(uid => prior.memberUids.includes(uid)) &&
+                    !storedHashSet.has(String(group.hash)) &&
+                    !replacementHashSet.has(String(group.hash))))) continue;
+                ghosts.push({ hash, meta: metaByHash.get(hash) });
+                hashesToDelete.push(hash);
+                processedHashes.add(hash);
+            }
+            // Physical duplicate cleanup (#61) is deliberately outside scope.
+        } else {
         // 1) Duplicate healing (non-protected only - a duplicated scene chunk
         //    must NOT be deleted: forward sync could never recreate it)
         const dupCounts = new Map();
@@ -3151,7 +4170,6 @@ export async function repairChatVectors(settings, batchSize = 5) {
         }
 
         // 2) Ghosts: stored hashes that no longer match any current content
-        const ghosts = [];
         for (const [hash, meta] of metaByHash) {
             if (currentHashSet.has(hash)) continue;          // still current
             if (isProtected(hash, meta)) continue;           // never delete protected
@@ -3181,6 +4199,8 @@ export async function repairChatVectors(settings, batchSize = 5) {
             }
         }
 
+        }
+
         // R14/R18: diagnostic logging. R18 expands this to hash-level detail so
         // the "repair looks clean in-session but dirty again after reload"
         // oscillation (user report) can be attributed in ONE test: compare the
@@ -3200,19 +4220,37 @@ export async function repairChatVectors(settings, batchSize = 5) {
 
         if (hashesToDelete.length === 0 && replacements.length === 0) {
             if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
+            if (identityLedger) {
+                if (!await finishIdentityLedger(identityLedger, identityReconciliation, identityGroups,
+                    await readIdentityInventory(collectionId, settings))) {
+                    throw new Error('Identity ledger could not verify the current indexed groups');
+                }
+            }
             // R16 FIX: complete() (not bare hide()) - the old bare hide left
             // the panel's Pause/Stop controls bound to a dead run; a later
             // panel reveal resurrected clickable controls for a run that no
             // longer existed. complete() hides controls and shows an honest
             // green-tick line.
             progressTracker.show('Repairing Chunks', 0, 'Items');
-            progressTracker.complete(true, 'Nothing to repair — no repair work detected for the current chat');
-            toastr.success('Nothing to repair — no repair work detected for the current chat.', 'Repair');
+            const uncertainCount = identityReconciliation?.uncertainUids?.size || 0;
+            const noWorkMessage = uncertainCount
+                ? `No verified repair actions; ${uncertainCount} source identity association(s) unresolved and preserved.`
+                : 'Nothing to repair — no repair work detected for the current chat';
+            progressTracker.complete(!uncertainCount, noWorkMessage);
+            if (uncertainCount) toastr.warning(noWorkMessage, 'Repair');
+            else toastr.success(noWorkMessage, 'Repair');
             vectorizeRunActive = false;
             resetControlState();
             return;
         }
 
+        // Persist intent before the first embedding or deletion. A crash must
+        // not leave a clean ledger falsely asserting the prior indexed state.
+        if (identityLedger) {
+            await stageIdentityLedger(identityLedger,
+                replacements.map(item => String(item.hash)), hashesToDelete,
+                identityReconciliation, identityGroups);
+        }
         // ---- Execute with progress panel + Pause/Stop ----
         const totalUnits = hashesToDelete.length + replacements.length;
         progressTracker.show('Repairing Chunks', totalUnits, 'Items');
@@ -3268,6 +4306,11 @@ export async function repairChatVectors(settings, batchSize = 5) {
             if (isVectorizationStopped()) break;
             try {
                 const chunks = prepareItemsForInsertion([item]);
+                if (chunks[0]) chunks[0].__vecthareProvenanceHint = {
+                    writer: 'repair', sourceType: 'chat',
+                    groupingStrategy: item.metadata?.strategy,
+                    ...(identityLedger ? { messageUids: item.metadata?.messageUids } : {}),
+                };
                 // R13: abortable - Stop cancels the in-flight repair embed
                 recordChatStore(collectionId, settings);
                 assertCollectionOperationSettingsStable(capturedConfig, settings, chatConfigChunking(settings));
@@ -3324,9 +4367,22 @@ export async function repairChatVectors(settings, batchSize = 5) {
             }
         }
 
-        const replacementChecksPassed =
+        let replacementChecksPassed =
             inserted === replacements.length && replacementFailures === 0 &&
             !verificationUnavailable && hashesFound === writtenReplacements.length;
+        if (identityLedger && replacementChecksPassed && replacements.length) {
+            // Hash presence alone could belong to an unrelated source. For
+            // identity-ledger deletes require the new chat provenance too.
+            try {
+                const inventory = await readIdentityInventory(collectionId, settings);
+                replacementChecksPassed = replacements.every(item =>
+                    identityGroups.some(group => String(group.hash) === String(item.hash) &&
+                        verifiedGroupHash(identityLedger, group, inventory)));
+            } catch (error) {
+                replacementChecksPassed = false;
+                console.warn('VectHare: Replacement source verification failed; deletion deferred:', error.message);
+            }
+        }
 
         // Hash-only deletion could also remove valid copies of current content.
         const deferredDuplicateKeys = [
@@ -3379,8 +4435,18 @@ export async function repairChatVectors(settings, batchSize = 5) {
             !verificationUnavailable && inserted === replacements.length &&
             hashesFound === replacements.length && deleted === hashesToDelete.length;
         const unresolved = Math.max(0, totalUnits - (hashesFound + deleted));
+        let identityLedgerConfirmed = !identityLedger;
+        if (identityLedger && !stopped) {
+            try {
+                const inventory = await readIdentityInventory(collectionId, settings);
+                identityLedgerConfirmed = await finishIdentityLedger(identityLedger,
+                    identityReconciliation, identityGroups, inventory);
+            } catch (error) {
+                console.warn('VectHare: Repair ledger remains dirty until verification succeeds:', error.message);
+            }
+        }
         const summary =
-            `Repair pass ${stopped ? 'stopped' : passSucceeded ? 'complete' : 'incomplete'}: ` +
+            `Repair pass ${stopped ? 'stopped' : passSucceeded && identityLedgerConfirmed ? 'complete' : 'incomplete'}: ` +
             `${inserted}/${replacements.length} replacement writes acknowledged, ` +
             `${hashesFound}/${inserted} replacement hashes found, ` +
             `${deleted}/${hashesToDelete.length} deletion keys acknowledged` +
@@ -3390,13 +4456,14 @@ export async function repairChatVectors(settings, batchSize = 5) {
             `${verificationUnavailable ? ', hash check unavailable' : ''}` +
             `${replacementFailures ? `, ${replacementFailures} replacement write errors` : ''}` +
             `${deletionFailures ? `, ${deletionFailures} deletion keys without acknowledgement` : ''}` +
-            `${unresolved ? `, ${unresolved} work units unresolved` : ''}`;
+            `${unresolved ? `, ${unresolved} work units unresolved` : ''}` +
+            `${!identityLedgerConfirmed ? ', identity ledger verification incomplete' : ''}`;
 
         vectorizeRunActive = false;
         resetControlState();
         progressTracker.updateProgress(hashesFound + deleted);
-        progressTracker.complete(passSucceeded, summary);
-        if (passSucceeded) {
+        progressTracker.complete(passSucceeded && identityLedgerConfirmed, summary);
+        if (passSucceeded && identityLedgerConfirmed) {
             toastr.success(summary, 'Repair');
         } else {
             toastr.warning(summary + '. Unresolved work can be checked on a later repair pass.',
@@ -3461,7 +4528,9 @@ export async function checkUnfinishedVectorization(settings, collectionIdOverrid
         if (!isChatTargetCurrent(target, collectionId)) return null;
 
         // Match Sync Chat's message preparation, grouping and raw-text hashes.
-        const groupedItems = collectGroupedItems(target.messages, settings, true);
+        const groupedItems = await collectCurrentChatGroups(target.messages, settings,
+            collectionId, true);
+        if (!isChatTargetCurrent(target, collectionId)) return null;
         const pending = groupedItems.filter(
             item => !existingHashes.has(String(item.hash))
         ).length;

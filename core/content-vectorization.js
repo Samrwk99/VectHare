@@ -15,7 +15,7 @@ import { chunkText } from './chunking.js';
 import { DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP } from './constants.js';
 import { insertVectorItems, getSavedHashes, purgeVectorIndex } from './core-vector-api.js';
 import {
-    setCollectionMeta, getDefaultDecayForType,
+    setCollectionMeta, getCollectionMeta, getDefaultDecayForType,
     canRecordInitialVectorizationConfig, createInitialVectorizationConfig,
     saveInitialVectorizationConfig,
     requireCollectionOperationSettings, resolveCollectionOperationSettings,
@@ -80,6 +80,50 @@ export async function vectorizeContent({ contentType, source, settings }) {
     const type = getContentType(contentType);
     if (!type) {
         throw new Error(`Unknown content type: ${contentType}`);
+    }
+
+    // A live chat must use precisely the same text/hash/group/UID pipeline as
+    // Sync Chat and Repair. Uploaded chat transcripts are NOT the live chat;
+    // they keep their independent Content Vectorizer pipeline and provenance.
+    if (contentType === 'chat' && source.type === 'current' &&
+        ['per_message', 'conversation_turns', 'message_batch'].includes(settings.strategy || type.defaultStrategy)) {
+        if (source.content !== getContext()?.chat) {
+            throw new Error('The selected chat changed; live chat vectorization cancelled');
+        }
+        const liveSettings = snapshotCollectionOperationSettings(vecthareSettings);
+        liveSettings.chunking_strategy = settings.strategy || type.defaultStrategy;
+        liveSettings.conversation_turn_order = settings.conversation_turn_order || 'user_character';
+        liveSettings.keyword_extraction_level = settings.keywordLevel || liveSettings.keyword_extraction_level;
+        if (liveSettings.chunking_strategy === 'message_batch') {
+            liveSettings.batch_size = settings.batchSize || liveSettings.batch_size || 4;
+        }
+        const binding = await ensureChatBinding();
+        if (!binding?.writable || !binding.collectionId || source.content !== getContext()?.chat) {
+            throw new Error('The selected chat identity changed; live chat vectorization cancelled');
+        }
+        const { vectorizeAll } = await import('./chat-vectorization.js');
+        const result = await vectorizeAll(liveSettings, liveSettings.embedding_batch_size || 5, true);
+        if (!result?.success) throw new Error('Live chat Sync was stopped or could not complete');
+        if (source.content !== getContext()?.chat || String(source.id) !== String(getContext()?.chatId)) {
+            throw new Error('The selected chat changed; collection metadata was not updated');
+        }
+        // Sync owns vectors and the ledger. Preserve Content Vectorizer's
+        // existing VectHare-only collection metadata for this selected chat.
+        const previousMeta = getCollectionMeta(binding.collectionId);
+        setCollectionMeta(binding.collectionId, {
+            contentType,
+            sourceName: source.name || source.filename || source.id || contentType,
+            scope: settings.scope || 'global',
+            ...(Number.isSafeInteger(result.indexedChunkCount) ? { chunkCount: result.indexedChunkCount } : {}),
+            createdAt: previousMeta.createdAt || new Date().toISOString(),
+            settings: {
+                strategy: settings.strategy,
+                conversation_turn_order: settings.conversation_turn_order,
+                chunkSize: settings.chunkSize,
+            },
+            temporalDecay: settings.temporalDecay || getDefaultDecayForType(contentType),
+        });
+        return { ...result, collectionId: binding.collectionId, handledBySyncChat: true };
     }
 
     const sourceName = source.name || source.filename || source.id || contentType;
@@ -161,6 +205,15 @@ export async function vectorizeContent({ contentType, source, settings }) {
             pipeline: 'content-vectorizer',
         }, { allowNew: true });
 
+        // Record the existing Content Vectorizer source/strategy only in the
+        // outgoing chunk. Never modify SillyTavern source messages or chat files.
+        for (const chunk of hashedChunks) {
+            chunk.__vecthareProvenanceHint = {
+                writer: 'content-vectorizer', sourceType: contentType,
+                groupingStrategy: chunk.metadata?.strategy || chunkOptions.strategy,
+            };
+        }
+
         // Step 4: Insert into vector store (streaming: embed + write together)
         progressTracker.stats.embeddingBasePercent = Math.round(3 / progressTracker.stats.totalItems * 100);
         progressTracker.updateProgress(3, 'Embedding and saving chunks...');
@@ -183,7 +236,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
         // An existing collection without a snapshot is legacy/unknown, not new.
         // A failed read must not block vectorization or imply an empty collection.
         let initiallyEmpty = false;
-        if (canRecordInitialVectorizationConfig(collectionId)) {
+        if (canRecordInitialVectorizationConfig(collectionId, vecthareSettings)) {
             try {
                 initiallyEmpty = (await getSavedHashes(collectionId, vecthareSettings)).length === 0;
             } catch (error) {
@@ -196,7 +249,11 @@ export async function vectorizeContent({ contentType, source, settings }) {
         let initialConfigSave = null;
         const recordFirstWrite = () => {
             if (initiallyEmpty && !initialConfigSave) {
-                initialConfigSave = saveInitialVectorizationConfig(collectionId, initialConfig, vecthareSettings);
+                initialConfigSave = saveInitialVectorizationConfig(collectionId, initialConfig, vecthareSettings)
+                    .then(success => {
+                        if (success) setCollectionMeta(collectionId, { verifiedPurgeDestination: null });
+                        return success;
+                    });
             }
         };
 
@@ -258,8 +315,12 @@ export async function vectorizeContent({ contentType, source, settings }) {
         });
 
         // Register collection in the registry so it's discoverable
-        registerCollection(collectionId);
-        console.log(`VectHare: Registered collection ${collectionId}`);
+        // The registry must match the saved backend/source for later Repair.
+        const registryKey = contentType === 'chat'
+            ? `${vecthareSettings.vector_backend || 'standard'}:${vecthareSettings.source || 'transformers'}:${collectionId}`
+            : collectionId;
+        registerCollection(registryKey);
+        console.log(`VectHare: Registered collection ${registryKey}`);
 
         progressTracker.updateProgress(4, 'Finalizing...');
         progressTracker.complete(true, `Vectorized ${hashedChunks.length} chunks`);
@@ -569,10 +630,13 @@ function prepareChatContent(rawContent, settings) {
         return { text: cleanText(String(messages), settings.__collectionCleaningPatterns), type: 'text' };
     }
 
-    // Filter out system messages and empty messages
-    const validMessages = messages.filter(m => m.mes && !m.is_system);
+    // Keep original source positions when filtering messages: chunk metadata
+    // must not refer to the compacted array indices (issue #65).
+    const indexedMessages = messages.map((message, sourceIndex) => ({ message, sourceIndex }))
+        .filter(({ message }) => message.mes && !message.is_system);
+    const validMessages = indexedMessages.map(({ message }) => message);
 
-    // Apply text cleaning to messages
+    // Apply text cleaning without changing source message objects or positions.
     const cleanedMessages = cleanMessages(validMessages, settings.__collectionCleaningPatterns);
 
     // Normalize messages to have consistent properties for chunking.js
@@ -581,8 +645,8 @@ function prepareChatContent(rawContent, settings) {
         mes: m.mes,
         is_user: m.is_user,
         name: m.name,
-        index: idx,
-        id: m.send_date || m.id || idx,
+        index: indexedMessages[idx].sourceIndex,
+        id: m.send_date || m.id || indexedMessages[idx].sourceIndex,
     }));
 
     // For per_message strategy - return array of messages for chunking.js

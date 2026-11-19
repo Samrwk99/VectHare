@@ -227,9 +227,9 @@ const RESUME_CHECK_MAX_ATTEMPTS = 5;   // covers slow collection discovery
 const RESUME_CHECK_RETRY_MS = 3000;
 
 function showResumeToast(pending, total) {
-    // R7/R10: informational only - points at the (renamed) Repair Chunks button
+    // Unfinished groups are Sync Chat backlog, not Repair Chunks work.
     toastr.info(
-        `${pending} of ${total} message groups not yet vectorized. Use the "Repair Chunks" button in VectHare's Actions panel to resume/repair from where it stopped.`,
+        `${pending} of ${total} message groups not yet vectorized. Use "Sync Chat" in VectHare's Actions panel to continue vectorization. Repair Chunks only fixes previously indexed chunks.`,
         'VectHare: Unfinished vectorization',
         {
             timeOut: 20000,
@@ -545,11 +545,11 @@ async function offerResumeOfUnfinishedVectorization() {
 }
 
 /**
- * Action: Full purge - wipes ALL vector data and settings
+ * Action: Full purge - removes VectHare-owned collections and resets VectHare settings.
  */
 async function onPurgeClick() {
     const confirmed = confirm(
-        'WARNING: This will delete ALL vector data and reset VectHare settings.\n\n' +
+        'WARNING: This will delete all registered VectHare-owned vectors and reset VectHare settings.\n\n' +
         'This cannot be undone. Continue?'
     );
 
@@ -559,15 +559,13 @@ async function onPurgeClick() {
     }
 
     try {
-        const { getRequestHeaders } = await import('../../../../script.js');
+        // Delete only VectHare-owned collections, never ST's shared folder.
+        const result = await purgeAllVectorIndexes(settings);
+        if (!result.success) {
+            throw new Error(`Some collections could not be safely purged (${result.skipped.length} unverified/failed). VectHare settings were retained so this can be retried.`);
+        }
 
-        // 1. Delete entire vectors folder
-        await fetch('/api/plugins/similharity/purge-all', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-        });
-
-        // 2. Clear extension_settings.vecthare
+        // Clear extension_settings.vecthare only after confirmed cleanup.
         for (const key in extension_settings.vecthare) {
             if (key !== 'enabled') {
                 delete extension_settings.vecthare[key];
@@ -578,7 +576,7 @@ async function onPurgeClick() {
         const { saveSettingsDebounced } = await import('../../../../script.js');
         saveSettingsDebounced();
 
-        toastr.success('All vector data purged', 'Purge Complete');
+        toastr.success('VectHare-owned vector data purged', 'Purge Complete');
 
     } catch (error) {
         console.error('VectHare: Purge failed:', error);
@@ -797,8 +795,8 @@ jQuery(async () => {
         void onChatDeleted(filename, 'group').catch(error =>
             console.error('VectHare: Group chat deletion cleanup failed; preserved remaining records', error));
     });
-    // Events are fast-path registry updates; the claim in the chat file is the
-    // recovery mechanism when an event is missed while the plugin was offline.
+    // Events update the VectHare-owned registry. Historical chat-file claims
+    // remain read-only; no new claims are written to SillyTavern chats.
     eventSource.on(event_types.CHAT_RENAMED, payload => {
         onChatBindingRenamed(payload);
         invalidateSavedVectorizationStatus();

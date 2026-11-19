@@ -119,6 +119,30 @@ let browserState = {
 let searchEventsBound = false;
 let bulkEventsBound = false;
 
+// Qdrant scroll order is not conversation order. Chat chunks carry their
+// original source position in metadata even when the list item has no index.
+function getChatChunkSourceIndex(item, fallback) {
+  const meta = item.metadata || {};
+  const candidates = [
+    meta.startIndex,
+    meta.messageIndex,
+    Array.isArray(meta.messageIds) ? meta.messageIds[0] : undefined,
+    // messageId is a position only for VectHare's per-message chunks;
+    // other records may use timestamps or unrelated external IDs.
+    meta.strategy === "per_message" ? meta.messageId : undefined,
+    meta.index,
+    item.index,
+  ];
+  for (const candidate of candidates) {
+    if (Number.isSafeInteger(candidate) && candidate >= 0) return candidate;
+    if (typeof candidate === "string" && /^(0|[1-9]\d*)$/.test(candidate)) {
+      const position = Number(candidate);
+      if (Number.isSafeInteger(position)) return position;
+    }
+  }
+  return fallback; // No trustworthy source index: preserve existing list order.
+}
+
 /**
  * Initializes the database browser
  * @param {object} settings VectHare settings
@@ -1090,15 +1114,12 @@ function bindCollectionCardEvents() {
           collection.registryKey,
         );
 
-        // Remove from state
-        browserState.collections = browserState.collections.filter(
-          (c) => (c.registryKey || c.id) !== collectionKey,
-        );
-
-        // Re-render
-        renderCollections();
-
         if (result.success) {
+          // A partial purge must stay visible so it can be retried.
+          browserState.collections = browserState.collections.filter(
+            (c) => (c.registryKey || c.id) !== collectionKey,
+          );
+          renderCollections();
           toastr.success(`Deleted collection "${collection.name}"`, "VectHare");
         } else {
           toastr.warning(
@@ -1207,7 +1228,7 @@ function bindCollectionCardEvents() {
         // Format chunks for visualizer
         const chunks = results.map((item, idx) => ({
           hash: item.hash,
-          index: item.index ?? idx,
+          index: collection.type === "chat" ? getChatChunkSourceIndex(item, idx) : item.index ?? idx,
           text: item.text || item.metadata?.text || "No text available",
           score: 1.0,
           similarity: 1.0,
@@ -3394,7 +3415,7 @@ function renderSearchResults(results, query, originalResults = null) {
         // Format chunks for visualizer
         const chunks = results.map((item, idx) => ({
           hash: item.hash,
-          index: item.index ?? idx,
+          index: collection.type === "chat" ? getChatChunkSourceIndex(item, idx) : item.index ?? idx,
           text: item.text || item.metadata?.text || "No text available",
           score: 1.0,
           similarity: 1.0,
