@@ -37,6 +37,9 @@ import {
     canRecordInitialVectorizationConfig,
     createInitialVectorizationConfig,
     saveInitialVectorizationConfig,
+    resolveCollectionOperationSettings,
+    snapshotCollectionOperationSettings,
+    assertCollectionOperationSettingsStable,
 } from './collection-metadata.js';
 
 // ============================================================================
@@ -137,6 +140,8 @@ export function getContainedChunkHashes(messages, start, end) {
  * @returns {Promise<{success: boolean, hash?: number, error?: string}>}
  */
 export async function createSceneChunk(start, end, sceneData, settings) {
+    settings = snapshotCollectionOperationSettings(settings);
+    let initialConfig;
     const binding = await ensureChatBinding();
     const collectionId = binding.writable ? binding.collectionId : null;
     if (!collectionId) {
@@ -153,10 +158,17 @@ export async function createSceneChunk(start, end, sceneData, settings) {
         return { success: false, error: 'Invalid scene boundaries' };
     }
 
-    const initialConfig = createInitialVectorizationConfig(settings, {
-        pipeline: 'scene-markers',
-        strategy: 'per_scene',
-    });
+    try {
+        const resolved = await resolveCollectionOperationSettings(collectionId, settings, 'scene-markers', {
+            pipeline: 'scene-markers', strategy: 'per_scene',
+        }, { allowNew: true });
+        settings = resolved.settings;
+        initialConfig = resolved.config || createInitialVectorizationConfig(settings, {
+            pipeline: 'scene-markers', strategy: 'per_scene',
+        });
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
 
     // Build scene text and compute hash
     // R24: display/embed text stays substituted; the HASH comes from RAW text
@@ -198,6 +210,7 @@ export async function createSceneChunk(start, end, sceneData, settings) {
         // Insert scene chunk into vector DB
         beginChatCollectionWrite(collectionId);
         try {
+            assertCollectionOperationSettingsStable(initialConfig, settings, initialConfig?.chunking);
             recordChatStore(collectionId, settings);
             await insertVectorItems(collectionId, [sceneChunk], settings);
             if (initiallyEmpty) await saveInitialVectorizationConfig(collectionId, initialConfig, settings);

@@ -2481,18 +2481,65 @@ async function startVectorization() {
                     return;
                 }
 
+                // Replace All is an explicit rebuild: changed settings must not
+                // prevent it. Freeze the destination before any asynchronous purge.
+                const { snapshotCollectionOperationSettings, readInitialVectorizationConfig,
+                    createInitialVectorizationConfig } = await import('../core/collection-metadata.js');
+                const backendSettings = snapshotCollectionOperationSettings(extension_settings.vecthare);
+                // Shared physical collections retain provenance after a logical
+                // purge; Qdrant multitenancy purge can also affect other chats.
+                if (backendSettings.vector_backend === 'milvus' ||
+                    (backendSettings.vector_backend === 'qdrant' && backendSettings.qdrant_multitenancy)) {
+                    throw new Error('Replace All cannot safely reset collection settings in shared storage.');
+                }
+                const sameBackend = name => name === 'vectra' ? 'standard' : name;
+                if (existing.backend && sameBackend(existing.backend) !==
+                    sameBackend(backendSettings.vector_backend || 'standard')) {
+                    throw new Error('The existing collection uses a different storage backend.');
+                }
+                const stored = await readInitialVectorizationConfig(existing.collectionId, backendSettings);
+                if (stored.status === 'valid') {
+                    const originalStorage = stored.config.storage;
+                    const currentStorage = createInitialVectorizationConfig(backendSettings, {
+                        pipeline: 'scene-markers', strategy: 'per_scene',
+                    })?.storage;
+                    if (!currentStorage || sameBackend(originalStorage.backend) !==
+                        sameBackend(currentStorage.backend) ||
+                        (originalStorage.address != null && originalStorage.address !== currentStorage.address) ||
+                        (originalStorage.backend === 'qdrant' && originalStorage.multitenancy)) {
+                        throw new Error('Original collection storage does not match the selected destination.');
+                    }
+                    // LanceDB stores tables under a provider-specific folder.
+                    // Purge the ORIGINAL table even if the global model changed;
+                    // subsequent vectorization still uses the selected settings.
+                    if (currentStorage.backend === 'lancedb') {
+                        backendSettings.source = stored.config.embedding.provider;
+                    }
+                } else if (stored.status === 'missing') {
+                    // A legacy LanceDB collection may have no provenance, but
+                    // its registered provider still identifies the source folder.
+                    if (backendSettings.vector_backend === 'lancedb' && existing.source) {
+                        backendSettings.source = existing.source;
+                    }
+                } else {
+                    throw new Error(`Cannot verify collection before replacement: ${stored.status}`);
+                }
+
                 // User wants to replace - purge existing first
                 const { purgeVectorIndex } = await import('../core/core-vector-api.js');
                 const { unregisterCollection } = await import('../core/collection-loader.js');
                 const { withChatCollectionPurgeGuard } = await import('../core/collection-ids.js');
                 await withChatCollectionPurgeGuard(existing.collectionId, async () => {
-                    if (!await purgeVectorIndex(existing.collectionId, currentSettings)) {
+                    if (!await purgeVectorIndex(existing.collectionId, backendSettings)) {
                         throw new Error('Existing vectors could not be purged; replacement cancelled');
                     }
-                    // Only clear registry and fingerprint after confirmed purge.
+                    // Confirmed purge means a new physical collection can now be
+                    // created; don't carry old createdAt/chunkCount into its identity.
                     unregisterCollection(existing.registryKey || existing.collectionId);
                     const { setCollectionMeta } = await import('../core/collection-metadata.js');
-                    setCollectionMeta(existing.collectionId, { vectorizationConfigFingerprint: null });
+                    setCollectionMeta(existing.collectionId, {
+                        vectorizationConfigFingerprint: null, createdAt: null, chunkCount: 0,
+                    });
                 });
                 toastr.info('Cleared existing vectors', 'VectHare');
             }

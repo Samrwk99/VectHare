@@ -222,10 +222,10 @@ function applyPattern(text, pattern) {
  * @param {string} text - Text to clean
  * @returns {string} Cleaned text
  */
-export function cleanText(text) {
+export function cleanText(text, operationPatterns = null) {
     if (!text || typeof text !== 'string') return text;
 
-    const patterns = getActivePatterns();
+    const patterns = operationPatterns ?? getActivePatterns();
     if (patterns.length === 0) return text;
 
     let result = text;
@@ -244,16 +244,16 @@ export function cleanText(text) {
  * @param {Array<object>} messages - Messages with .mes or .text property
  * @returns {Array<object>} Messages with cleaned text
  */
-export function cleanMessages(messages) {
+export function cleanMessages(messages, operationPatterns = null) {
     if (!Array.isArray(messages)) return messages;
 
     return messages.map(msg => {
         const cleaned = { ...msg };
         if (cleaned.mes) {
-            cleaned.mes = cleanText(cleaned.mes);
+            cleaned.mes = cleanText(cleaned.mes, operationPatterns);
         }
         if (cleaned.text) {
-            cleaned.text = cleanText(cleaned.text);
+            cleaned.text = cleanText(cleaned.text, operationPatterns);
         }
         return cleaned;
     });

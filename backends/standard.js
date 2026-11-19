@@ -414,16 +414,20 @@ export class StandardBackend extends VectorBackend {
                         offset: options.offset || 0,
                         limit: options.limit || 100,
                         includeVectors: options.includeVectors || false,
+                        strictRead: options.strictRead === true,
                     }),
                 });
 
                 if (response.ok) {
                     return await response.json();
                 }
+                if (options.strictRead) throw new Error(`Metadata listing failed (HTTP ${response.status})`);
             } catch (e) {
+                if (options.strictRead) throw e;
                 console.warn('VectHare: Plugin listChunks failed, using native fallback');
             }
         }
+        if (options.strictRead) throw new Error('Plugin metadata listing is unavailable');
 
         // Fallback: use native list (hashes only)
         const hashes = await this.getSavedHashes(collectionId, settings);

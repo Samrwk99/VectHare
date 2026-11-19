@@ -35,6 +35,9 @@ import {
     canRecordInitialVectorizationConfig,
     createInitialVectorizationConfig,
     saveInitialVectorizationConfig,
+    resolveCollectionOperationSettings,
+    snapshotCollectionOperationSettings,
+    assertCollectionOperationSettingsStable,
 } from './collection-metadata.js';
 import { progressTracker } from '../ui/progress-tracker.js';
 // VectHare+: run control (pause / resume / stop) for vectorization jobs
@@ -103,6 +106,18 @@ function isChatTargetCurrent(target, collectionId = null) {
 }
 
 const syncDeferred = () => ({ remaining: -1, messagesProcessed: 0, chunksCreated: 0 });
+const validatedManualSync = Symbol('validated-manual-sync');
+
+function chatConfigChunking(settings) {
+    return {
+        pipeline: 'sync-chat',
+        strategy: settings.chunking_strategy || 'per_message',
+        batchSize: settings.batch_size || 4,
+        conversationTurnOrder: settings.conversation_turn_order || 'user_character',
+        keywordLevel: settings.keyword_extraction_level || 'balanced',
+    };
+}
+
 
 // A deliberate, non-error stop: completed writes remain in their original chat.
 class ChatSwitchStop extends Error {
@@ -440,7 +455,7 @@ function collectGroupedItems(chat, settings, hashOnly = false) {
         const msg = chat[i];
         if (msg.is_system) continue;
         const text = hashOnly ? getTextWithoutAttachments(msg)
-            : cleanText(String(substituteParams(msg.mes)));
+            : cleanText(String(substituteParams(msg.mes)), settings.__collectionCleaningPatterns);
         allMessages.push({
             text,
             raw: getTextWithoutAttachments(msg), // R22: unsubstituted, consumed by grouped strategies' stable hashing
@@ -629,7 +644,10 @@ async function rerankWithBananaBread(query, chunks, settings) {
  * @param {number} batchSize Number of messages to process per call
  * @returns {Promise<object>} Progress info
  */
-export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = false) {
+export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = false, validationToken = null,
+    verifiedConfig = null) {
+    settings = snapshotCollectionOperationSettings(settings);
+    let capturedConfig = validationToken === validatedManualSync ? verifiedConfig : null;
     // Background events must not create chat bindings when auto-sync is off.
     // Explicit Sync Chat / Continue calls bypass this read-only eligibility gate.
     const target = captureChatTarget();
@@ -669,6 +687,33 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
         return { remaining: -1, messagesProcessed: 0, chunksCreated: 0 };
     }
 
+    // Protect both manual and automatic sync before reverse-sync can delete
+    // anything. Manual vectorizeAll validates once at operation start.
+    let syncCompatibility;
+    try {
+        if (validationToken === validatedManualSync) {
+            syncCompatibility = { status: 'compatible' };
+        } else {
+            const resolved = await resolveCollectionOperationSettings(collectionId, settings, 'sync-chat',
+                chatConfigChunking(settings), { allowNew: true });
+            settings = resolved.settings;
+            capturedConfig = resolved.config || createInitialVectorizationConfig(settings, chatConfigChunking(settings));
+            syncCompatibility = { status: resolved.status };
+        }
+    } catch (error) {
+        if (!bypassAutoSync) {
+            if (!autoSyncFingerprintWarned) {
+                autoSyncFingerprintWarned = true;
+                toastr.error(error.message, 'VectHare: Auto-sync blocked', { timeOut: 0, closeOnHover: false });
+            }
+            console.warn('VectHare: Auto-sync blocked by collection configuration:', error.message);
+            return syncDeferred();
+        }
+        throw error;
+    }
+    if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
+    assertCollectionOperationSettingsStable(capturedConfig, settings, chatConfigChunking(settings));
+
     // VectHare+ R9: config fingerprint gate for AUTO-SYNC. vectorizeAll enforces
     // this for manual runs; without this gate, changed embedding settings +
     // auto-sync enabled would silently embed new messages with vectors
@@ -676,7 +721,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
     // what the user flagged as important). On mismatch: refuse to add vectors,
     // warn once, fail-closed. Manual runs bypass via bypassAutoSync because
     // their own (stricter, blocking) check already ran in vectorizeAll.
-    if (!bypassAutoSync) {
+    if (!bypassAutoSync && syncCompatibility.status !== 'compatible') {
         try {
             const configFingerprint = await computeVectorizationConfigFingerprint(settings);
             if (configFingerprint) {
@@ -742,15 +787,11 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
 
         // Snapshot groups while the original chat is still active; never read a
         // different chat's messages after a backend await.
+        assertCollectionOperationSettingsStable(capturedConfig, settings, chatConfigChunking(settings));
         const strategy = settings.chunking_strategy || 'per_message';
         const wasUnregistered = canRecordInitialVectorizationConfig(collectionId);
-        const initialConfig = wasUnregistered ? createInitialVectorizationConfig(settings, {
-            pipeline: 'sync-chat',
-            strategy,
-            batchSize: settings.batch_size || 4,
-            conversationTurnOrder: settings.conversation_turn_order || 'user_character',
-            keywordLevel: settings.keyword_extraction_level || 'balanced',
-        }) : null;
+        const initialConfig = wasUnregistered ? createInitialVectorizationConfig(settings,
+            chatConfigChunking(settings)) : null;
         const groupedItems = collectGroupedItems(target.messages, settings);
 
         // NOTE: Registration happens AFTER first successful insert to prevent ghosts.
@@ -801,6 +842,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
         const REVERSE_SYNC_MIN_INTERVAL_MS = 5 * 60 * 1000;
         const generation = reverseSyncGeneration.get(collectionId) ?? 0;
         const lastAt = lastReverseSyncByCollection.get(collectionId) ?? 0;
+        assertCollectionOperationSettingsStable(capturedConfig, settings, chatConfigChunking(settings));
         if (existingHashes.size > 0 && Date.now() - lastAt >= REVERSE_SYNC_MIN_INTERVAL_MS) {
             try {
                 const { getChunkMetadata } = await import('./collection-metadata.js');
@@ -944,6 +986,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                 // embedding/insert request instead of draining it
                 if (chunks.length > 0) {
                     if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
+                    assertCollectionOperationSettingsStable(capturedConfig, settings, chatConfigChunking(settings));
                     recordChatStore(collectionId, settings);
                     await insertVectorItems(collectionId, chunks, settings, (embedded, total) => {
                         // R7 FIX: per-item embedding progress is always 1/1 here
@@ -2533,6 +2576,8 @@ export async function rearrangeChat(chat, settings, type) {
  * @param {number} batchSize Batch size
  */
 export async function vectorizeAll(settings, batchSize) {
+    settings = snapshotCollectionOperationSettings(settings);
+    let capturedConfig = null;
     let progressShown = false;
     try {
         // VectHare+: Manual Sync Chat / Continue always runs, regardless of the
@@ -2565,6 +2610,13 @@ export async function vectorizeAll(settings, batchSize) {
             vectorizeRunActive = false;
             return;
         }
+
+        // Resolve the original model/grouping for this collection before any
+        // health check or embedding. No global settings are changed.
+        const resolvedSync = await resolveCollectionOperationSettings(binding.collectionId, settings,
+            'sync-chat', chatConfigChunking(settings), { allowNew: true });
+        settings = resolvedSync.settings;
+        capturedConfig = resolvedSync.config || createInitialVectorizationConfig(settings, chatConfigChunking(settings));
 
         // Pre-flight check: verify backend is available before starting
         const backendName = settings.vector_backend || 'standard';
@@ -2611,6 +2663,12 @@ export async function vectorizeAll(settings, batchSize) {
             return;
         }
 
+        // Database provenance takes priority over the older settings fingerprint.
+        // A new collection is allowed only when it is unregistered and empty.
+        assertCollectionOperationSettingsStable(capturedConfig, settings, chatConfigChunking(settings));
+        const syncCompatibility = { status: resolvedSync.status };
+        if (!isChatTargetCurrent(target, binding.collectionId)) throw new ChatSwitchStop();
+
         // ====================================================================
         // VectHare+ R7: Vectorization configuration fingerprint
         // Continuing a run MUST use the same settings that produced the
@@ -2620,7 +2678,7 @@ export async function vectorizeAll(settings, batchSize) {
         // The fingerprint is persisted on the collection's metadata and
         // compared at the start of every run.
         // ====================================================================
-        {
+        if (syncCompatibility.status !== 'compatible') {
             const fpCollectionId = binding.collectionId;
             if (fpCollectionId) {
                 try {
@@ -2781,7 +2839,7 @@ export async function vectorizeAll(settings, batchSize) {
             // VectHare+ (restored + improved): bypassAutoSync=true - the run was
             // explicitly started by the user (Sync Chat / Continue button), so
             // synchronizeChat's autoSync gate must not block a manual run.
-            const result = await synchronizeChat(settings, batchSize, true);
+            const result = await synchronizeChat(settings, batchSize, true, validatedManualSync, capturedConfig);
             if (!isChatTargetCurrent(target, binding.collectionId)) throw new ChatSwitchStop();
 
             // VectHare+ BUG FIX (infinite failure loop): items that permanently
@@ -2897,6 +2955,8 @@ export async function vectorizeAll(settings, batchSize) {
  * @param {number} batchSize Embed batch size (unused for deletes)
  */
 export async function repairChatVectors(settings, batchSize = 5) {
+    settings = snapshotCollectionOperationSettings(settings);
+    let capturedConfig = null;
     let writeLockedCollection = null;
     let progressShown = false;
     try {
@@ -2921,41 +2981,49 @@ export async function repairChatVectors(settings, batchSize = 5) {
         beginChatCollectionWrite(collectionId);
         writeLockedCollection = collectionId;
 
-        // Repair only makes sense for an EXISTING collection (registry entries
-        // only exist after a successful insert). Never creates anything.
-        const known = getCollectionRegistry().some(
-            key => parseRegistryKey(key).collectionId === collectionId
-        );
-        if (!known) {
+        // Repair only makes sense for an existing, registered collection.
+        // Stage 2B checks the saved physical destination before any DB action.
+        // Require a qualified registry entry for destructive Repair; a bare
+        // legacy ID does not prove which backend/provider owns the collection.
+        const registryEntries = getCollectionRegistry()
+            .map(key => parseRegistryKey(key))
+            .filter(entry => entry.collectionId === collectionId);
+        if (!registryEntries.length) {
             toastr.info('This chat has no vector collection yet - nothing to repair. Use "Sync Chat" to vectorize it.', 'Repair');
             vectorizeRunActive = false;
             return;
         }
 
-        // Config fingerprint gate - same policy as vectorizeAll: repair adds/
-        // replaces vectors, so a settings mismatch would poison the collection.
+        // Repair must never act on unknown or incompatible provenance.
         try {
-            const { getCollectionMeta, setCollectionMeta } = await import('./collection-metadata.js');
-            const configFingerprint = await computeVectorizationConfigFingerprint(settings);
-            const storedFingerprint = getCollectionMeta(collectionId).vectorizationConfigFingerprint;
-            if (configFingerprint && storedFingerprint && storedFingerprint !== configFingerprint) {
-                toastr.error(
-                    'Vectorization settings changed since this collection was created. Repair would mix incompatible vectors. Restore the previous settings, or re-vectorize via Content Vectorizer (Replace All).',
-                    'Repair blocked: settings mismatch',
-                    { timeOut: 0, closeOnHover: false }
-                );
-                console.error('VectHare: Repair blocked - config fingerprint mismatch');
-                vectorizeRunActive = false;
-                resetControlState();
-                return;
+            const resolved = await resolveCollectionOperationSettings(collectionId, settings,
+                'repair', chatConfigChunking(settings));
+            settings = resolved.settings;
+            capturedConfig = resolved.config;
+            const backendName = name => name === 'vectra' ? 'standard' : name;
+            if (!registryEntries.some(entry =>
+                entry.backend && backendName(entry.backend) === backendName(settings.vector_backend || 'standard') &&
+                entry.source === settings.source)) {
+                throw new Error('No qualified registry entry matches the saved collection backend/source');
             }
-            if (configFingerprint && !storedFingerprint) {
-                setCollectionMeta(collectionId, { vectorizationConfigFingerprint: configFingerprint });
-            }
-        } catch (fpError) {
-            console.warn('VectHare: Repair fingerprint check failed (continuing):', fpError.message);
+            assertCollectionOperationSettingsStable(capturedConfig, settings, chatConfigChunking(settings));
+        } catch (error) {
+            toastr.error(error.message, 'Repair blocked: settings mismatch', { timeOut: 0, closeOnHover: false });
+            vectorizeRunActive = false;
+            resetControlState();
+            return;
         }
-
+        // These shared-store delete APIs currently delete by hash without a
+        // logical collection filter. Do not risk touching another chat's
+        // matching hash (issues #30/#70); this is not a settings mismatch.
+        if (settings.vector_backend === 'milvus' ||
+            (settings.vector_backend === 'qdrant' && settings.qdrant_multitenancy)) {
+            toastr.error('Repair is disabled for shared storage until deletion is scoped to the logical collection.',
+                'Repair blocked: unsafe shared storage', { timeOut: 0, closeOnHover: false });
+            vectorizeRunActive = false;
+            resetControlState();
+            return;
+        }
         if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
 
         // Full metadata read - REQUIRED. Without per-chunk metadata we cannot
@@ -2965,7 +3033,7 @@ export async function repairChatVectors(settings, batchSize = 5) {
             // R17: abortable+timed read (was an unbounded await - a hung backend
             // read previously stalled repair before it even started, with Stop
             // unable to free it)
-            collectionData = await getSavedHashes(collectionId, settings, true, getStopSignal());
+            collectionData = await getSavedHashes(collectionId, settings, true, getStopSignal(), true);
         } catch (readError) {
             toastr.error('Could not read collection metadata - repair aborted, nothing was changed.', 'Repair');
             console.warn('VectHare: Repair aborted - metadata read failed:', readError.message);
@@ -2974,8 +3042,14 @@ export async function repairChatVectors(settings, batchSize = 5) {
         }
 
         if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
-        const storedHashes = Array.isArray(collectionData) ? collectionData : (collectionData?.hashes || []);
-        const metadataArr = (!Array.isArray(collectionData) && Array.isArray(collectionData?.metadata)) ? collectionData.metadata : [];
+        const storedHashes = collectionData?.hashes;
+        const metadataArr = collectionData?.metadata;
+        if (!Array.isArray(storedHashes) || !Array.isArray(metadataArr) ||
+            storedHashes.length !== metadataArr.length) {
+            toastr.error('Collection inventory was incomplete - repair aborted without changes.', 'Repair');
+            vectorizeRunActive = false;
+            return;
+        }
 
         if (storedHashes.length === 0) {
             toastr.info('The collection is empty - nothing to repair. Use "Sync Chat" to vectorize this chat.', 'Repair');
@@ -2989,21 +3063,49 @@ export async function repairChatVectors(settings, batchSize = 5) {
             return;
         }
 
-        const metaByHash = new Map(storedHashes.map((h, i) => [String(h), metadataArr[i] || {}]));
+        const metaByHash = new Map();
         const storedHashSet = new Set(storedHashes.map(h => String(h)));
 
         const { getChunkMetadata } = await import('./collection-metadata.js');
-        const isProtectedMeta = (meta) => {
-            if (!meta) return false;
-            if (meta.isScene === true) return true;
+        // A record can only be classified as a stale Sync Chat vector when its
+        // persisted writer provenance says so. Content Vectorizer can store
+        // uploaded transcripts in the same logical chat collection; its chunks
+        // are NOT ghosts just because they differ from the current chat.
+        const isProtectedMeta = meta => {
+            if (!meta || meta.source !== 'chat' || meta.contentType != null || meta.sourceName != null) return true;
+            if (meta.isScene === true || meta.disabledByScene != null) return true;
             if (meta.isSummaryChunk === true || meta.isSummary === true || meta.isSummaryVector === true) return true;
             if (meta.parentHash != null) return true;
-            return false;
+            // `source: chat` alone is not enough evidence that Repair can
+            // safely delete a vector: unknown/legacy message identity cannot
+            // support replacement matching. All current Sync strategies store
+            // their member indices; leave records without them untouched.
+            const validId = id => (typeof id === 'number' ||
+                (typeof id === 'string' && id.trim() !== '')) &&
+                Number.isSafeInteger(Number(id)) && Number(id) >= 0;
+            if (meta.strategy === 'per_message') return !validId(meta.messageId);
+            if (meta.strategy === 'message_batch' || meta.strategy === 'conversation_turns') {
+                return !Array.isArray(meta.messageIds) || meta.messageIds.length === 0 ||
+                    !meta.messageIds.every(validId);
+            }
+            return true;
         };
+        const protectedHashes = new Set();
+        for (let i = 0; i < storedHashes.length; i++) {
+            const hash = String(storedHashes[i]);
+            const meta = metadataArr[i];
+            if (!metaByHash.has(hash)) metaByHash.set(hash, meta);
+            // If any copy with this hash is protected, deleting by hash could
+            // delete that copy too. Do not classify such a hash as deletable.
+            if (isProtectedMeta(meta)) protectedHashes.add(hash);
+        }
         const isProtected = (hash, meta) => {
-            if (isProtectedMeta(meta)) return true;
+            if (protectedHashes.has(String(hash)) || isProtectedMeta(meta)) return true;
             const chunkMeta = getChunkMetadata(hash);
-            if (chunkMeta && (isProtectedMeta(chunkMeta) || chunkMeta.disabledByScene != null)) return true;
+            if (chunkMeta && (chunkMeta.disabledByScene != null ||
+                chunkMeta.isScene === true || chunkMeta.isSummaryChunk === true ||
+                chunkMeta.isSummary === true || chunkMeta.isSummaryVector === true ||
+                chunkMeta.parentHash != null)) return true;
             return false;
         };
 
@@ -3168,6 +3270,7 @@ export async function repairChatVectors(settings, batchSize = 5) {
                 const chunks = prepareItemsForInsertion([item]);
                 // R13: abortable - Stop cancels the in-flight repair embed
                 recordChatStore(collectionId, settings);
+                assertCollectionOperationSettingsStable(capturedConfig, settings, chatConfigChunking(settings));
                 await insertVectorItems(collectionId, chunks, settings, (embedded, total) => {
                     progressTracker.updateCurrentItem(`${label} ${done + 1}/${totalUnits} - embedding ${embedded}/${total}`);
                 }, getStopSignal());
@@ -3247,6 +3350,7 @@ export async function repairChatVectors(settings, batchSize = 5) {
         if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
         if (safeDeletes.length > 0 && !isVectorizationStopped()) {
             try {
+                assertCollectionOperationSettingsStable(capturedConfig, settings, chatConfigChunking(settings));
                 await deleteVectorItems(collectionId, safeDeletes, settings, getStopSignal());
                 if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
                 deleted += safeDeletes.length;

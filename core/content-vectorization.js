@@ -18,6 +18,9 @@ import {
     setCollectionMeta, getDefaultDecayForType,
     canRecordInitialVectorizationConfig, createInitialVectorizationConfig,
     saveInitialVectorizationConfig,
+    requireCollectionOperationSettings, resolveCollectionOperationSettings,
+    snapshotCollectionOperationSettings,
+    assertCollectionOperationSettingsStable,
 } from './collection-metadata.js';
 import { registerCollection } from './collection-loader.js';
 import { getBackend } from '../backends/backend-manager.js';
@@ -40,6 +43,29 @@ import { progressTracker } from '../ui/progress-tracker.js';
 import { extension_settings, getContext } from '../../../../extensions.js';
 import { getStringHash } from '../../../../utils.js';
 
+/** The same effective Content Vectorizer options are used by insertion and pre-purge checks. */
+export function getContentVectorizerChunkingConfig(contentType, settings) {
+    const type = getContentType(contentType);
+    if (!type) throw new Error(`Unknown content type: ${contentType}`);
+    const chunkOptions = {
+        strategy: settings.strategy || type.defaultStrategy,
+        chunkSize: settings.chunkSize || type.defaults.chunkSize,
+        chunkOverlap: settings.chunkOverlap || type.defaults.chunkOverlap,
+        conversationTurnOrder: settings.conversation_turn_order || 'user_character',
+    };
+    return {
+        pipeline: 'content-vectorizer', contentType, ...chunkOptions,
+        chunkSize: chunkOptions.chunkSize === undefined ? DEFAULT_CHUNK_SIZE : chunkOptions.chunkSize,
+        chunkOverlap: chunkOptions.chunkOverlap === undefined ? DEFAULT_CHUNK_OVERLAP : chunkOptions.chunkOverlap,
+        batchSize: 4,
+        ...(contentType === 'character' ? {
+            fields: settings.fields || getContentTypeDefaults('character').fields,
+        } : {}),
+        keywordLevel: settings.keywordLevel || 'balanced',
+        keywordBaseWeight: settings.keywordBaseWeight || 1.5,
+    };
+}
+
 /**
  * Main entry point for content vectorization
  * @param {object} params - Vectorization parameters
@@ -49,12 +75,15 @@ import { getStringHash } from '../../../../utils.js';
  * @returns {Promise<{success: boolean, chunkCount: number, collectionId: string}>}
  */
 export async function vectorizeContent({ contentType, source, settings }) {
+    settings = snapshotCollectionOperationSettings(settings);
+    let vecthareSettings = snapshotCollectionOperationSettings(extension_settings.vecthare);
     const type = getContentType(contentType);
     if (!type) {
         throw new Error(`Unknown content type: ${contentType}`);
     }
 
     const sourceName = source.name || source.filename || source.id || contentType;
+    let initialConfig;
     progressTracker.show(`Vectorizing ${type.label || contentType}`, 4, 'Steps');
     progressTracker.updateCurrentItem(sourceName);
 
@@ -64,6 +93,27 @@ export async function vectorizeContent({ contentType, source, settings }) {
         if (contentType === 'chat' && !chatBinding?.writable) {
             throw new Error('Chat collection identity could not be verified; vectorization cancelled');
         }
+        const collectionId = contentType === 'chat'
+            ? chatBinding.collectionId
+            : generateCollectionId(contentType, source, settings);
+        // The collection's own saved preparation settings take precedence over
+        // the current Content Vectorizer controls. They are operation-local.
+        const resolved = await resolveCollectionOperationSettings(collectionId, vecthareSettings,
+            'content-vectorizer', getContentVectorizerChunkingConfig(contentType, settings), { allowNew: true });
+        vecthareSettings = resolved.settings;
+        if (vecthareSettings.__collectionCleaningPatterns) {
+            settings.__collectionCleaningPatterns = vecthareSettings.__collectionCleaningPatterns;
+        }
+        if (resolved.status === 'compatible') {
+            for (const key of ['strategy', 'chunkSize', 'chunkOverlap', 'fields', 'keywordLevel', 'keywordBaseWeight']) {
+                if (resolved.chunking[key] !== undefined) settings[key] = resolved.chunking[key];
+            }
+            if (resolved.chunking.conversationTurnOrder !== undefined) {
+                settings.conversation_turn_order = resolved.chunking.conversationTurnOrder;
+            }
+        }
+        initialConfig = createInitialVectorizationConfig(vecthareSettings,
+            getContentVectorizerChunkingConfig(contentType, settings));
 
         // Step 1: Resolve source
         progressTracker.updateProgress(1, 'Loading content...');
@@ -71,27 +121,12 @@ export async function vectorizeContent({ contentType, source, settings }) {
 
         // Keep the original chunkText options unchanged; record effective
         // defaults separately so this metadata change cannot change chunks.
-        const vecthareSettings = extension_settings.vecthare;
         const chunkOptions = {
             strategy: settings.strategy || type.defaultStrategy,
             chunkSize: settings.chunkSize || type.defaults.chunkSize,
             chunkOverlap: settings.chunkOverlap || type.defaults.chunkOverlap,
             conversationTurnOrder: settings.conversation_turn_order || 'user_character',
         };
-        const initialConfig = createInitialVectorizationConfig(vecthareSettings, {
-            pipeline: 'content-vectorizer',
-            contentType,
-            ...chunkOptions,
-            chunkSize: chunkOptions.chunkSize === undefined ? DEFAULT_CHUNK_SIZE : chunkOptions.chunkSize,
-            chunkOverlap: chunkOptions.chunkOverlap === undefined ? DEFAULT_CHUNK_OVERLAP : chunkOptions.chunkOverlap,
-            batchSize: 4, // chunkText's default; not passed as an extra option.
-            ...(contentType === 'character' ? {
-                fields: settings.fields || getContentTypeDefaults('character').fields,
-            } : {}),
-            keywordLevel: settings.keywordLevel || 'balanced',
-            keywordBaseWeight: settings.keywordBaseWeight || 1.5,
-        });
-
         // Step 2: Prepare and chunk
         progressTracker.updateProgress(2, 'Chunking content...');
         const preparedContent = await prepareContent(contentType, rawContent, settings);
@@ -111,16 +146,20 @@ export async function vectorizeContent({ contentType, source, settings }) {
 
         // Step 3: Enrich and hash
         progressTracker.updateProgress(3, 'Processing chunks...');
-        const collectionId = contentType === 'chat'
-            ? chatBinding.collectionId
-            : generateCollectionId(contentType, source, settings);
-        
         // Get full extension settings for keyword extraction (includes custom_stopwords)
         const enrichedChunks = enrichChunks(chunks, contentType, source, settings, preparedContent, vecthareSettings);
         const hashedChunks = enrichedChunks.map(chunk => ({
             ...chunk,
             hash: getStringHash(chunk.text),
         }));
+
+        assertCollectionOperationSettingsStable(initialConfig, vecthareSettings, initialConfig?.chunking);
+        // Validate the original collection configuration before any embedding
+        // or database write; first-time collections are allowed when empty.
+        await requireCollectionOperationSettings(collectionId, vecthareSettings, 'content-vectorizer', {
+            ...initialConfig?.chunking,
+            pipeline: 'content-vectorizer',
+        }, { allowNew: true });
 
         // Step 4: Insert into vector store (streaming: embed + write together)
         progressTracker.stats.embeddingBasePercent = Math.round(3 / progressTracker.stats.totalItems * 100);
@@ -452,7 +491,7 @@ function prepareLorebookContent(rawContent, settings) {
     // Filter to entries that have content, and apply text cleaning
     const validEntries = entries
         .filter(e => e && e.content)
-        .map(e => ({ ...e, content: cleanText(e.content) }));
+        .map(e => ({ ...e, content: cleanText(e.content, settings.__collectionCleaningPatterns) }));
 
     if (settings.strategy === 'per_entry') {
         // Each entry becomes its own chunk - return array of content strings
@@ -497,7 +536,7 @@ function prepareCharacterContent(rawContent, settings) {
         const fields = {};
         for (const [fieldId, enabled] of Object.entries(selectedFields)) {
             if (enabled && FIELD_MAP[fieldId] && character[FIELD_MAP[fieldId].key]) {
-                fields[FIELD_MAP[fieldId].label] = cleanText(character[FIELD_MAP[fieldId].key]);
+                fields[FIELD_MAP[fieldId].label] = cleanText(character[FIELD_MAP[fieldId].key], settings.__collectionCleaningPatterns);
             }
         }
         return { text: fields, type: 'fields', character: character };
@@ -509,7 +548,7 @@ function prepareCharacterContent(rawContent, settings) {
         .map(([fieldId]) => {
             const field = FIELD_MAP[fieldId];
             if (field && character[field.key]) {
-                return `## ${field.label}\n${cleanText(character[field.key])}`;
+                return `## ${field.label}\n${cleanText(character[field.key], settings.__collectionCleaningPatterns)}`;
             }
             return null;
         })
@@ -527,14 +566,14 @@ function prepareChatContent(rawContent, settings) {
     const messages = rawContent.messages || rawContent.content;
 
     if (!Array.isArray(messages)) {
-        return { text: cleanText(String(messages)), type: 'text' };
+        return { text: cleanText(String(messages), settings.__collectionCleaningPatterns), type: 'text' };
     }
 
     // Filter out system messages and empty messages
     const validMessages = messages.filter(m => m.mes && !m.is_system);
 
     // Apply text cleaning to messages
-    const cleanedMessages = cleanMessages(validMessages);
+    const cleanedMessages = cleanMessages(validMessages, settings.__collectionCleaningPatterns);
 
     // Normalize messages to have consistent properties for chunking.js
     const normalizedMessages = cleanedMessages.map((m, idx) => ({
@@ -591,7 +630,7 @@ function prepareUrlContent(rawContent, settings) {
     // Basic text cleaning for web content
     if (typeof text === 'string') {
         // Apply user's cleaning patterns first
-        text = cleanText(text);
+        text = cleanText(text, settings.__collectionCleaningPatterns);
         // Remove excessive whitespace
         text = text.replace(/\n{3,}/g, '\n\n');
         // Remove common web artifacts
@@ -613,7 +652,7 @@ function prepareDocumentContent(rawContent, settings) {
     // Basic text cleaning
     if (typeof text === 'string') {
         // Apply user's cleaning patterns first
-        text = cleanText(text);
+        text = cleanText(text, settings.__collectionCleaningPatterns);
         // Remove excessive whitespace
         text = text.replace(/\n{3,}/g, '\n\n');
         // Trim
@@ -632,7 +671,7 @@ function prepareWikiContent(rawContent, settings) {
     // Wiki content is already formatted with headers from scraper
     if (typeof text === 'string') {
         // Apply user's cleaning patterns first
-        text = cleanText(text);
+        text = cleanText(text, settings.__collectionCleaningPatterns);
         // Remove excessive whitespace
         text = text.replace(/\n{3,}/g, '\n\n');
         // Trim
@@ -643,7 +682,7 @@ function prepareWikiContent(rawContent, settings) {
     if (settings.strategy === 'per_page' && rawContent.pages) {
         return {
             text: rawContent.pages.map(p => ({
-                text: cleanText(`# ${p.title}\n\n${p.content}`),
+                text: cleanText(`# ${p.title}\n\n${p.content}`, settings.__collectionCleaningPatterns),
                 metadata: {
                     pageTitle: p.title,
                 },
@@ -672,7 +711,7 @@ function prepareYouTubeContent(rawContent, settings) {
     // Clean up transcript text
     if (typeof text === 'string') {
         // Apply user's cleaning patterns first
-        text = cleanText(text);
+        text = cleanText(text, settings.__collectionCleaningPatterns);
         // Remove excessive whitespace
         text = text.replace(/\n{3,}/g, '\n\n');
         // Trim

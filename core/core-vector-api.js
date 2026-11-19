@@ -41,6 +41,8 @@ import {
 import { applyKeywordBoosts, getOverfetchAmount } from './keyword-boost.js';
 import { applyBM25Scoring } from './bm25-scorer.js';
 import { hybridSearch } from './hybrid-search.js';
+import { resolveCollectionOperationSettings, snapshotCollectionOperationSettings,
+    createInitialVectorizationConfig, assertCollectionOperationSettingsStable } from './collection-metadata.js';
 import AsyncUtils from '../utils/async-utils.js';
 import StringUtils from '../utils/string-utils.js';
 import {
@@ -702,7 +704,8 @@ export async function getSavedHashes(collectionId, settings, includeMetadata = f
                 offset: 0, limit: Number.MAX_SAFE_INTEGER,
             }), abortSignal, 'Read collection metadata');
         const items = data?.items;
-        if (!Array.isArray(items) || data.hasMore !== false ||
+        if ((strictMetadata && (data?.success !== true || data.offset !== 0)) ||
+            !Array.isArray(items) || data.hasMore !== false ||
             !Number.isSafeInteger(data.total) || data.total !== items.length || items.some(item =>
             item?.hash === undefined || !item.metadata ||
             typeof item.metadata.text !== 'string' ||
@@ -713,6 +716,58 @@ export async function getSavedHashes(collectionId, settings, includeMetadata = f
             hashes: items.map(item => item.hash),
             metadata: items.map(item => item.metadata),
         };
+    }
+
+    if (strictMetadata) {
+        // Repair needs a COMPLETE, aligned inventory. The ordinary hash API on
+        // other backends may be capped; never join a truncated list to metadata
+        // or turn a failed metadata request into an apparently empty collection.
+        const pageSize = 500;
+        const items = [];
+        let offset = 0;
+        let expectedTotal = null;
+        while (true) {
+            const page = await withOpGuard(
+                () => backend.listChunks(collectionId, settings, {
+                    offset, limit: pageSize, strictRead: true,
+                }), abortSignal, 'Read complete collection metadata');
+            if (page?.success !== true || !Array.isArray(page.items) ||
+                page.offset !== offset || typeof page.hasMore !== 'boolean' ||
+                !Number.isSafeInteger(page.total) || page.total < 0 ||
+                page.items.length > pageSize ||
+                (page.hasMore && page.items.length !== pageSize)) {
+                throw new Error(`VectHare: Invalid or incomplete collection inventory for ${collectionId}`);
+            }
+            if (expectedTotal === null) expectedTotal = page.total;
+            if (page.total !== expectedTotal || offset + page.items.length > expectedTotal ||
+                page.hasMore !== (offset + page.items.length < expectedTotal)) {
+                throw new Error(`VectHare: Collection inventory changed or was truncated for ${collectionId}`);
+            }
+            for (const item of page.items) {
+                // Adapters put hash/text either at the record top level or
+                // inside metadata. Accept either, require them to agree, and
+                // hand Repair normalized values for every distinct record.
+                const meta = item?.metadata;
+                const hash = item?.hash ?? meta?.hash;
+                const text = item?.text ?? meta?.text;
+                if (!meta || typeof meta !== 'object' || Array.isArray(meta) ||
+                    !['number', 'string'].includes(typeof hash) ||
+                    typeof text !== 'string' ||
+                    (item.hash != null && meta.hash != null && String(item.hash) !== String(meta.hash)) ||
+                    (item.text != null && meta.text != null && item.text !== meta.text)) {
+                    throw new Error(`VectHare: Incomplete chunk metadata for ${collectionId}`);
+                }
+                items.push({ hash, metadata: { ...meta, hash, text } });
+            }
+            offset += page.items.length;
+            if (!page.hasMore) {
+                if (offset !== expectedTotal) {
+                    throw new Error(`VectHare: Incomplete collection inventory for ${collectionId}`);
+                }
+                break;
+            }
+        }
+        return { hashes: items.map(item => item.hash), metadata: items.map(item => item.metadata) };
     }
 
     const hashes = await withOpGuard(
@@ -981,6 +1036,49 @@ export async function deleteVectorItems(collectionId, hashes, settings, abortSig
     }
 }
 
+// RAG is read-only: older collections without provenance may still be searched
+// (unverified), but confirmed mismatches and unreadable records are excluded.
+const ragCompatibilityWarnings = new Set();
+async function getQueryCollectionSettings(collectionId, settings) {
+    try {
+        const result = await resolveCollectionOperationSettings(collectionId, settings, 'rag',
+            { pipeline: 'rag', strategy: 'query' }, { readOnly: true });
+        if (result.status === 'legacy_readonly') {
+            const key = `${collectionId}:legacy_readonly`;
+            if (!ragCompatibilityWarnings.has(key)) {
+                ragCompatibilityWarnings.add(key);
+                console.warn(`VectHare: RAG using unverified legacy collection ${collectionId}`);
+            }
+        }
+        return result.settings;
+    } catch (error) {
+        const key = `${collectionId}:blocked:${error.message}`;
+        if (!ragCompatibilityWarnings.has(key)) {
+            ragCompatibilityWarnings.add(key);
+            console.warn(`VectHare: RAG skipping collection ${collectionId}: ${error.message}`);
+        }
+        return null;
+    }
+}
+
+/** Separate collections by effective query embedding/storage settings. Never
+ * query two different embedding spaces with one prepared query vector. */
+async function groupQueryCollections(collectionIds, settings) {
+    const located = await Promise.all(collectionIds.map(async collectionId => ({
+        collectionId, settings: await getQueryCollectionSettings(collectionId, settings),
+    })));
+    const groups = new Map();
+    for (const entry of located) {
+        if (!entry.settings) continue;
+        const snapshot = createInitialVectorizationConfig(entry.settings, { pipeline: 'rag', strategy: 'query' });
+        if (!snapshot) continue;
+        const key = JSON.stringify([snapshot.embedding, snapshot.storage]);
+        if (!groups.has(key)) groups.set(key, { collectionIds: [], settings: entry.settings });
+        groups.get(key).collectionIds.push(entry.collectionId);
+    }
+    return [...groups.values()];
+}
+
 /**
  * Queries a single collection for similar vectors
  * Applies keyword boost system: overfetch → boost → trim
@@ -992,6 +1090,12 @@ export async function deleteVectorItems(collectionId, hashes, settings, abortSig
  * @returns {Promise<{ hashes: number[], metadata: object[]}>} - Hashes and metadata of the results
  */
 export async function queryCollection(collectionId, searchText, topK, settings) {
+    const resolved = await getQueryCollectionSettings(collectionId, settings);
+    if (!resolved) return { hashes: [], metadata: [] };
+    settings = resolved;
+    const queryChunking = { pipeline: 'rag', strategy: 'query' };
+    const capturedConfig = createInitialVectorizationConfig(settings, queryChunking);
+    assertCollectionOperationSettingsStable(capturedConfig, settings, queryChunking);
     const backend = await getBackend(settings);
 
     // Sources that require client-side embedding generation
@@ -1132,6 +1236,23 @@ function scoreResults(resultsForBoost, searchText, topK, settings, overfetchAmou
  * @returns {Promise<Record<string, { hashes: number[], metadata: object[] }>>} - Results mapped to collection IDs
  */
 export async function queryMultipleCollections(collectionIds, searchText, topK, threshold, settings) {
+    const groups = await groupQueryCollections(collectionIds, settings);
+    const results = {};
+    for (const group of groups) {
+        try {
+            Object.assign(results, await queryMultipleCollectionsForSettings(group.collectionIds,
+                searchText, topK, threshold, group.settings));
+        } catch (error) {
+            console.warn('VectHare: RAG failed for a saved embedding configuration:', error.message);
+        }
+    }
+    return results;
+}
+
+async function queryMultipleCollectionsForSettings(collectionIds, searchText, topK, threshold, settings) {
+    const queryChunking = { pipeline: 'rag', strategy: 'query' };
+    const capturedConfig = createInitialVectorizationConfig(settings, queryChunking);
+    assertCollectionOperationSettingsStable(capturedConfig, settings, queryChunking);
     const backend = await getBackend(settings);
 
     // Sources that require client-side embedding generation
@@ -1280,9 +1401,23 @@ export async function queryActiveCollections(collectionIds, searchText, topK, th
         return {};
     }
 
-    // Query only the active collections
-    const backend = await getBackend(settings);
-    return await backend.queryMultipleCollections(activeCollectionIds, searchText, topK, threshold, settings);
+    // Guard the direct backend route too. Query each embedding space using
+    // its own saved settings rather than applying one global model to all.
+    const groups = await groupQueryCollections(activeCollectionIds, settings);
+    const results = {};
+    for (const group of groups) {
+        try {
+            const queryChunking = { pipeline: 'rag', strategy: 'query' };
+            const capturedConfig = createInitialVectorizationConfig(group.settings, queryChunking);
+            assertCollectionOperationSettingsStable(capturedConfig, group.settings, queryChunking);
+            const backend = await getBackend(group.settings);
+            Object.assign(results, await backend.queryMultipleCollections(group.collectionIds,
+                searchText, topK, threshold, group.settings));
+        } catch (error) {
+            console.warn('VectHare: RAG failed for a saved embedding configuration:', error.message);
+        }
+    }
+    return results;
 }
 
 /**

@@ -13,7 +13,7 @@ import { extension_settings } from '../../../../extensions.js';
 import { isQuarantinedChatCollection } from './collection-ids.js';
 import { getRequestHeaders, saveSettingsDebounced } from '../../../../../script.js';
 import { parseRegistryKey } from './collection-ids.js';
-import { getModelField } from './providers.js';
+import { getModelField, isValidProvider } from './providers.js';
 import { getCleaningSettings, getActivePatterns } from './text-cleaning.js';
 import { textgen_types, textgenerationwebui_settings } from '../../../../textgen-settings.js';
 import { oai_settings } from '../../../../openai.js';
@@ -400,7 +400,7 @@ function buildInitialVectorizationConfig(settings, chunking) {
             applied: cleaningApplied,
             preset: cleaning?.selectedPreset || 'none',
             activePatterns: cleaningApplied
-                ? getActivePatterns().map(({ pattern, flags, replacement }) => ({
+                ? (settings.__collectionCleaningPatterns ?? getActivePatterns()).map(({ pattern, flags, replacement }) => ({
                     pattern, flags: flags || 'g', replacement: replacement || '',
                 })) : [],
         },
@@ -482,7 +482,8 @@ export async function readInitialVectorizationConfig(collectionId, settings, loc
     const parsed = parseRegistryKey(collectionId);
     const logicalId = parsed.collectionId || collectionId;
     const backend = location.backend || parsed.backend || settings.vector_backend || 'standard';
-    const source = location.source || parsed.source || settings.source || 'transformers';
+    const source = location.source || parsed.source ||
+        (['standard', 'vectra', 'lancedb'].includes(backend) ? '*' : (settings.source || 'transformers'));
     // An unspecified model searches existing Vectra model folders; it must not
     // depend on today's global model selection.
     const model = location.model ?? '';
@@ -504,7 +505,17 @@ export async function readInitialVectorizationConfig(collectionId, settings, loc
                 signal: controller.signal,
                 body: JSON.stringify({ backend, collectionId: logicalId, physicalCollectionId, source, model }),
             });
-            if (!response.ok) return { status: 'unavailable', reason: `Backend returned HTTP ${response.status}` };
+            if (!response.ok) {
+                // Only the plugin's explicit physical-collection 404 proves
+                // absence. An older/missing read endpoint may also return 404.
+                if (response.status === 404) {
+                    const error = await response.json().catch(() => null);
+                    if (error?.error === 'Collection not found') {
+                        return { status: 'missing', physicalAbsent: true };
+                    }
+                }
+                return { status: 'unavailable', reason: `Backend returned HTTP ${response.status}` };
+            }
             result = await response.json();
         } finally {
             clearTimeout(timeout);
@@ -539,13 +550,342 @@ export async function readInitialVectorizationConfig(collectionId, settings, loc
             return { status: 'invalid', reason: 'Stored configuration is malformed or has a different collection identity' };
         }
         // For local storage, the embedding source is part of the physical directory.
-        if (['standard', 'vectra', 'lancedb'].includes(backend) && config.embedding.provider !== source) {
+        if (['standard', 'vectra', 'lancedb'].includes(backend) && source !== '*' &&
+            config.embedding.provider !== source) {
             return { status: 'invalid', reason: 'Stored embedding source does not match collection storage' };
         }
         return { status: 'valid', config };
     } catch (error) {
         return { status: 'unavailable', reason: error.message || 'Backend read failed' };
     }
+}
+
+/**
+ * Compare an operation's intended settings with a Stage 2A collection record.
+ * Pure comparison only: no backend reads, settings changes, or enforcement.
+ * "compatible" means the recorded, comparable settings match; it cannot
+ * establish an unrecorded model revision or prove historical vector contents.
+ *
+ * @param {object} original Stage 2A result or its validated .config
+ * @param {object} intended Snapshot made with createInitialVectorizationConfig()
+ * @param {'sync-chat'|'content-vectorizer'|'scene-markers'|'rag'|'repair'} operation
+ * @returns {{status: 'compatible'|'incompatible'|'cannot_verify', differences: object[], unverifiable: string[]}}
+ */
+export function compareInitialVectorizationConfig(original, intended, operation) {
+    const differences = [];
+    const unverifiable = [];
+    const result = () => ({
+        status: differences.length ? 'incompatible' : unverifiable.length ? 'cannot_verify' : 'compatible',
+        differences,
+        unverifiable,
+    });
+    const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+    const same = (a, b) => {
+        if (Object.is(a, b)) return true;
+        if (Array.isArray(a) && Array.isArray(b)) {
+            return a.length === b.length && a.every((value, i) => same(value, b[i]));
+        }
+        if (isObject(a) && isObject(b)) {
+            const keys = Object.keys(a);
+            return keys.length === Object.keys(b).length &&
+                keys.every(key => Object.hasOwn(b, key) && same(a[key], b[key]));
+        }
+        return false;
+    };
+    const check = (field, saved, current, { required = false, nullIsValue = false } = {}) => {
+        if (!nullIsValue && (saved == null || current == null)) {
+            if (required || saved != null || current != null) unverifiable.push(field);
+        } else if (nullIsValue && (saved === undefined || current === undefined)) {
+            unverifiable.push(field);
+        } else if (!same(saved, current)) {
+            differences.push({ field, saved, intended: current });
+        }
+    };
+    const operations = ['sync-chat', 'content-vectorizer', 'scene-markers', 'rag', 'repair'];
+    if (!operations.includes(operation)) {
+        unverifiable.push('operation');
+        return result();
+    }
+    if (original?.status) {
+        if (original.status !== 'valid') {
+            unverifiable.push(`original configuration: ${original.status}`);
+            return result();
+        }
+        original = original.config;
+    }
+    if (!isObject(original) || original.schemaVersion !== 1 ||
+        !isObject(original.embedding) || !isObject(original.storage) ||
+        !isObject(intended) || !isObject(intended.embedding) || !isObject(intended.storage)) {
+        unverifiable.push('configuration structure');
+        return result();
+    }
+
+    // Standard and Vectra name the same backend. Other backend changes are real.
+    const backendName = name => name === 'vectra' ? 'standard' : name;
+    check('storage.backend', backendName(original.storage.backend),
+        backendName(intended.storage.backend), { required: true });
+    if (backendName(original.storage.backend) === 'qdrant' ||
+        backendName(intended.storage.backend) === 'qdrant') {
+        check('storage.multitenancy', original.storage.multitenancy,
+            intended.storage.multitenancy, { required: true });
+    }
+    if (['qdrant', 'milvus'].includes(backendName(original.storage.backend)) ||
+        ['qdrant', 'milvus'].includes(backendName(intended.storage.backend))) {
+        check('storage.address', original.storage.address,
+            intended.storage.address, { required: true });
+    }
+
+    check('embedding.provider', original.embedding.provider,
+        intended.embedding.provider, { required: true });
+    if (!isValidProvider(original.embedding.provider) || !isValidProvider(intended.embedding.provider)) {
+        unverifiable.push('embedding.provider identity');
+    }
+    // A provider with no configurable model can legitimately record null.
+    const modelRequired = !!getModelField(original.embedding.provider) ||
+        !!getModelField(intended.embedding.provider);
+    check('embedding.model', original.embedding.model, intended.embedding.model,
+        { required: modelRequired });
+    // The alternate-endpoint toggle is only a routing mechanism. If the
+    // effective provider URL matches, the embedding destination is identical.
+    const urlRequired = ['ollama', 'llamacpp', 'vllm', 'koboldcpp', 'bananabread', 'extras']
+        .includes(original.embedding.provider);
+    check('embedding.endpoint', original.embedding.endpoint, intended.embedding.endpoint,
+        { required: urlRequired });
+    check('embedding.configuredDimensions', original.embedding.configuredDimensions,
+        intended.embedding.configuredDimensions);
+    check('embedding.preprocessing', original.embedding.preprocessing,
+        intended.embedding.preprocessing, { nullIsValue: true });
+    if (original.embedding.provider === 'vertexai' || intended.embedding.provider === 'vertexai') {
+        check('embedding.region', original.embedding.region, intended.embedding.region, { required: true });
+        check('embedding.authMode', original.embedding.authMode,
+            intended.embedding.authMode, { required: true });
+    }
+
+    // RAG only embeds queries. Scene markers are independent, protected chunks:
+    // they can coexist with chat chunks and need the same embedding space, but
+    // their intentionally different chunking/hashing pipeline is not a mismatch.
+    if (operation === 'rag' || operation === 'scene-markers') return result();
+    if (!isObject(original.chunking) || !isObject(intended.chunking) ||
+        !isObject(original.hashing) || !isObject(intended.hashing) ||
+        !isObject(original.textCleaning) || !isObject(intended.textCleaning)) {
+        unverifiable.push('chunk preparation configuration');
+        return result();
+    }
+    const expectedPipeline = operation === 'repair' ? 'sync-chat' : operation;
+    if (intended.chunking.pipeline !== expectedPipeline) {
+        unverifiable.push('intended chunking.pipeline');
+    }
+    if (original.chunking.pipeline !== intended.chunking.pipeline) {
+        // Different pipelines can have different algorithms behind the same
+        // strategy name. Their equivalence is not established by Stage 1.
+        unverifiable.push('chunking.pipeline');
+        return result();
+    }
+    check('chunking.strategy', original.chunking.strategy,
+        intended.chunking.strategy, { required: true });
+    if (original.chunking.strategy === 'message_batch' ||
+        intended.chunking.strategy === 'message_batch') {
+        check('chunking.batchSize', original.chunking.batchSize,
+            intended.chunking.batchSize, { required: true });
+    }
+    if (original.chunking.strategy === 'conversation_turns' ||
+        intended.chunking.strategy === 'conversation_turns') {
+        check('chunking.conversationTurnOrder', original.chunking.conversationTurnOrder,
+            intended.chunking.conversationTurnOrder, { required: true });
+    }
+    if (operation === 'content-vectorizer' && original.chunking.pipeline === 'content-vectorizer') {
+        check('chunking.contentType', original.chunking.contentType,
+            intended.chunking.contentType, { required: true });
+        if (original.chunking.contentType === 'character' || intended.chunking.contentType === 'character') {
+            check('chunking.fields', original.chunking.fields,
+                intended.chunking.fields, { required: true });
+        }
+        // These strategies actually use the chunk size in chunking.js.
+        const sized = ['adaptive', 'combined', 'sentence', 'dialogue'];
+        if (sized.includes(original.chunking.strategy) || sized.includes(intended.chunking.strategy)) {
+            check('chunking.chunkSize', original.chunking.chunkSize,
+                intended.chunking.chunkSize, { required: true });
+        }
+        // chunkOverlap is recorded but not consumed by current chunkText strategies.
+    }
+    check('hashing.algorithm', original.hashing.algorithm,
+        intended.hashing.algorithm, { required: true });
+    check('hashing.input', original.hashing.input,
+        intended.hashing.input, { required: true });
+    check('textCleaning.applied', original.textCleaning.applied,
+        intended.textCleaning.applied, { required: true });
+    if (original.textCleaning.applied || intended.textCleaning.applied) {
+        // Effective patterns matter; different preset names alone do not.
+        check('textCleaning.activePatterns', original.textCleaning.activePatterns,
+            intended.textCleaning.activePatterns, { required: true });
+    }
+    return result();
+}
+
+/** Copy the operation's settings so later UI changes cannot retarget its requests. */
+export function snapshotCollectionOperationSettings(settings) {
+    return JSON.parse(JSON.stringify(settings));
+}
+
+/** Refuse a mid-run change to settings still read from global provider/cleaning state. */
+export function assertCollectionOperationSettingsStable(captured, settings, chunking) {
+    const current = createInitialVectorizationConfig(settings, chunking);
+    // The preset label is not used to clean text once the effective patterns
+    // are captured. Changing that UI label must not interrupt a saved-settings
+    // operation; a change to effective rules or the embedding destination must.
+    const comparable = config => ({
+        embedding: config.embedding,
+        storage: config.storage,
+        ...(chunking?.pipeline === 'rag' ? {} : {
+            cleaningApplied: config.textCleaning?.applied,
+            cleaningPatterns: config.textCleaning?.activePatterns,
+        }),
+    });
+    if (!captured || !current ||
+        JSON.stringify(comparable(captured)) !== JSON.stringify(comparable(current))) {
+        throw new Error('Relevant embedding or text-preparation settings changed during this operation.');
+    }
+}
+
+/**
+ * Check Stage 1 provenance without modifying it. Only a genuinely unregistered
+ * and empty collection can start its first write without a saved record.
+ * A missing legacy record is usable for read-only RAG, but never for writes.
+ */
+export async function checkCollectionOperationSettings(collectionId, settings, operation, chunking = null,
+    { allowNew = false, readOnly = false } = {}) {
+    const intended = createInitialVectorizationConfig(settings, chunking || { pipeline: operation, strategy: 'query' });
+    if (!intended) return { status: 'cannot_verify', reason: 'Could not capture operation settings' };
+
+    const saved = await readInitialVectorizationConfig(collectionId, settings);
+    if (saved.status === 'valid') {
+        return compareInitialVectorizationConfig(saved, intended, operation);
+    }
+    if (readOnly && saved.status === 'missing') {
+        return { status: 'legacy_readonly', reason: 'Legacy collection has no initial configuration' };
+    }
+    // A missing record in an EXISTING local physical collection isn't proof
+    // of first use: the current provider/model's hash list can be empty while
+    // another provider/model folder contains historical vectors. For local
+    // backends, only the plugin's verified physical absence is eligible.
+    // Shared backends use a logical-collection hash check below.
+    const local = ['standard', 'vectra', 'lancedb'].includes(settings.vector_backend || 'standard');
+    const eligibleAbsence = saved.status === 'missing' && (!local || saved.physicalAbsent);
+    if (allowNew && canRecordInitialVectorizationConfig(collectionId) && eligibleAbsence) {
+        try {
+            const { getSavedHashes } = await import('./core-vector-api.js');
+            const hashes = await getSavedHashes(collectionId, settings);
+            if (Array.isArray(hashes) && hashes.length === 0) return { status: 'new' };
+        } catch (error) {
+            return { status: 'cannot_verify', reason: `Could not confirm empty collection: ${error.message}` };
+        }
+    }
+    return { status: 'cannot_verify', reason: `Original configuration ${saved.status}: ${saved.reason || 'not verified'}` };
+}
+
+/**
+ * Resolve an operation against the saved collection settings without changing
+ * SillyTavern preferences. Saved values take precedence where the current
+ * pipeline can reproduce them; global-only settings must still agree or we
+ * refuse the operation rather than silently embedding incompatible vectors.
+ */
+export async function resolveCollectionOperationSettings(collectionId, currentSettings, operation, chunking,
+    options = {}) {
+    const saved = await readInitialVectorizationConfig(collectionId, currentSettings);
+    if (saved.status !== 'valid') {
+        if (options.readOnly && saved.status === 'missing') {
+            return { status: 'legacy_readonly', settings: snapshotCollectionOperationSettings(currentSettings), chunking };
+        }
+        // A transient error (including a 404 from an absent plugin endpoint)
+        // never qualifies a collection for a first write.
+        if (options.allowNew && saved.status === 'missing') {
+            const result = await checkCollectionOperationSettings(collectionId, currentSettings, operation,
+                chunking, { allowNew: true });
+            if (result.status === 'new') {
+                return { ...result, settings: snapshotCollectionOperationSettings(currentSettings), chunking };
+            }
+        }
+        throw new Error(`Collection ${collectionId}: original configuration ${saved.status} (${saved.reason || 'not verified'}).`);
+    }
+
+    const original = saved.config;
+    const settings = snapshotCollectionOperationSettings(currentSettings);
+    // A change of storage backend or physical server could target a different
+    // collection. Never "restore" those values without locating that store.
+    settings.source = original.embedding.provider;
+    if (original.textCleaning?.applied) {
+        // Per-operation cleaning reproduces the original rules without
+        // changing the user's current cleaning preset.
+        settings.__collectionCleaningPatterns = snapshotCollectionOperationSettings(
+            original.textCleaning.activePatterns);
+    }
+    if (original.keywordExtraction) {
+        settings.keyword_extraction_level = original.keywordExtraction.level;
+        settings.custom_stopwords = original.keywordExtraction.customStopwords;
+    }
+    const modelField = getModelField(settings.source);
+    if (modelField && original.embedding.model != null) settings[modelField] = original.embedding.model;
+    if (settings.source === 'koboldcpp' && original.embedding.model != null) {
+        settings.koboldcpp_model = original.embedding.model;
+    }
+    if (settings.source === 'bananabread' && original.embedding.model != null) {
+        settings.bananabread_model = original.embedding.model;
+    }
+    // Use the saved local provider address without changing ST's global URL.
+    // A configured alternate URL with credentials is preserved when it already
+    // points at the right host. Credentials are never restored from metadata.
+    const alternateProviders = ['ollama', 'llamacpp', 'vllm', 'koboldcpp', 'bananabread'];
+    if (alternateProviders.includes(settings.source) && original.embedding.endpoint) {
+        const currentEndpoint = createInitialVectorizationConfig(settings, chunking)?.embedding?.endpoint;
+        if (currentEndpoint !== original.embedding.endpoint) {
+            settings.use_alt_endpoint = true;
+            settings.alt_endpoint_url = original.embedding.endpoint;
+        }
+    }
+    if (original.embedding.configuredDimensions != null && settings.vector_backend === 'milvus') {
+        settings.milvus_dimensions = original.embedding.configuredDimensions;
+    }
+
+    const effectiveChunking = { ...chunking };
+    if ((operation === 'sync-chat' || operation === 'repair') &&
+        original.chunking?.pipeline === 'sync-chat') {
+        settings.chunking_strategy = original.chunking.strategy;
+        if (original.chunking.batchSize != null) settings.batch_size = original.chunking.batchSize;
+        if (original.chunking.conversationTurnOrder != null) {
+            settings.conversation_turn_order = original.chunking.conversationTurnOrder;
+        }
+        effectiveChunking.strategy = settings.chunking_strategy;
+        effectiveChunking.batchSize = settings.batch_size || 4;
+        effectiveChunking.conversationTurnOrder = settings.conversation_turn_order || 'user_character';
+        effectiveChunking.keywordLevel = settings.keyword_extraction_level || 'balanced';
+    } else if (operation === 'content-vectorizer' &&
+        original.chunking?.pipeline === 'content-vectorizer') {
+        // The type-specific Content Vectorizer settings are supplied by its
+        // caller; it must apply the returned chunking options before preparing text.
+        for (const key of ['strategy', 'chunkSize', 'chunkOverlap', 'conversationTurnOrder',
+            'batchSize', 'fields', 'keywordLevel', 'keywordBaseWeight']) {
+            if (original.chunking[key] !== undefined) effectiveChunking[key] =
+                JSON.parse(JSON.stringify(original.chunking[key]));
+        }
+    }
+
+    const intended = createInitialVectorizationConfig(settings, effectiveChunking);
+    const comparison = compareInitialVectorizationConfig(saved, intended, operation);
+    if (comparison.status !== 'compatible') {
+        const reasons = [...comparison.differences.map(item => item.field), ...comparison.unverifiable];
+        throw new Error(`Collection ${collectionId}: cannot reproduce saved ${operation} settings (${reasons.join(', ') || comparison.status}).`);
+    }
+    return { status: 'compatible', settings, chunking: effectiveChunking, config: intended };
+}
+
+/** Reject incompatible or unverifiable writes before insertion or deletion. */
+export async function requireCollectionOperationSettings(collectionId, settings, operation, chunking, options = {}) {
+    const result = await checkCollectionOperationSettings(collectionId, settings, operation, chunking, options);
+    if (result.status === 'compatible' || result.status === 'new') return result;
+    const reasons = result.differences?.map(change => change.field) || [];
+    if (result.unverifiable?.length) reasons.push(...result.unverifiable);
+    const explanation = reasons.length ? reasons.join(', ') : (result.reason || 'unknown settings');
+    throw new Error(`Collection ${collectionId}: ${result.status} configuration (${explanation}). This check did not modify vectors.`);
 }
 
 /**
