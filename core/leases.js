@@ -17,6 +17,7 @@
  *   nothing changes compared with earlier builds.
  */
 
+import { readPluginCapabilities } from './plugin-health.js';
 import { getRequestHeaders } from '../../../../../script.js';
 import { vhLog } from '../utils/log.js';
 
@@ -31,20 +32,12 @@ const tabId = (() => {
     return 'tab_' + Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
 })();
 
-let supportPromise = null;
-/** Whether the plugin offers leases (checked once per page load). */
-export function leasesSupported() {
-    supportPromise ??= (async () => {
-        try {
-            const response = await fetch('/api/plugins/similharity/health');
-            if (!response.ok) return false;
-            const data = await response.json();
-            return data?.capabilities?.leases === 1;
-        } catch {
-            return false;
-        }
-    })();
-    return supportPromise;
+/**
+ * Whether the plugin offers leases (VH-006: from the shared status reader; a
+ * failed check throws instead of silently running without leases).
+ */
+export async function leasesSupported() {
+    return (await readPluginCapabilities()).leases === 1;
 }
 
 /** collectionId -> { token, count, lastRenew, released, lost, timer } */
@@ -92,6 +85,18 @@ export async function acquireLease(collectionId, { label = '', isPaused = null }
     entry = { token: result.data.token, count: 1, lastRenew: Date.now(), released: false, lost: false, isPaused, timer: null };
     held.set(collectionId, entry);
     entry.timer = setInterval(() => { void renew(collectionId, entry, false); }, RENEW_EVERY_MS);
+    // VH-012: whoever held the lease before (a storage move, another tab's
+    // Sync) may have changed where this collection lives. Look again now that
+    // nobody else can: a check made before the lease could be out of date.
+    try {
+        const { refreshStoreIfStale } = await import('./vecthare-store.js');
+        await refreshStoreIfStale({ minIntervalMs: 0, strict: true });
+    } catch (error) {
+        clearInterval(entry.timer);
+        held.delete(collectionId);
+        await post('release', { collectionId, token: entry.token }).catch(() => {});
+        throw new LeaseHeldError(`the saved collection list could not be checked (${error?.message || error})`);
+    }
     return handleFor(collectionId, entry);
 }
 

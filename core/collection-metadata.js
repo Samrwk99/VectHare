@@ -13,7 +13,7 @@ import { vhLog } from '../utils/log.js';
 import { extension_settings, getContext } from '../../../../extensions.js';
 // Phase 1: VectHare's own collection state is persisted to collections.json,
 // not to SillyTavern's settings. vecthareState() is the working copy.
-import { vecthareState, persistVectHareStore } from './vecthare-store.js';
+import { vecthareState, persistVectHareStore, recordRecentlyDeleted, setCollectionRecordDefaults } from './vecthare-store.js';
 import { isQuarantinedChatCollection, peekChatCollectionId, getBoundChatDetails, getChatOwner, normChat } from './collection-ids.js';
 import { getRequestHeaders, saveSettingsDebounced } from '../../../../../script.js';
 import { parseRegistryKey } from './collection-ids.js';
@@ -28,6 +28,7 @@ import {
 import { getCleaningSettings, getActivePatterns } from './text-cleaning.js';
 import { textgen_types, textgenerationwebui_settings } from '../../../../textgen-settings.js';
 import { oai_settings } from '../../../../openai.js';
+import { safePatternTest } from './safe-regex.js';
 
 // ============================================================================
 // COLLECTION METADATA CRUD
@@ -116,6 +117,8 @@ const defaultCollectionMeta = {
     context: '',      // Natural language context shown before this collection's chunks
     xmlTag: '',       // XML tag to wrap this collection's chunks (e.g., "memories")
 };
+// VH-021: the merge compares a record created in two tabs at once with these.
+setCollectionRecordDefaults(defaultCollectionMeta);
 
 const defaultChatCollectionPolicy = {
     mode: 'normal', // 'normal', 'prefer_selected', 'only_selected'
@@ -495,11 +498,14 @@ export function setCollectionMeta(collectionId, data) {
     ensureCollectionsObject();
 
     const key = resolveStoredCollectionKey(collectionId) || collectionId;
-    const existing = vecthareState().collections[key] || {};
+    const existing = vecthareState().collections[key];
 
     vecthareState().collections[key] = {
         ...defaultCollectionMeta,
-        ...existing,
+        // VH-021: when this record came into being, so a recorded deletion can
+        // tell a re-created collection from a stale copy of the deleted one.
+        ...(existing ? {} : { recordCreatedAt: Date.now() }),
+        ...(existing || {}),
         ...data,
     };
 
@@ -781,6 +787,9 @@ export async function verifyPhysicalCollectionExistence(collectionId, settings, 
                     backend: backend === 'standard' ? 'vectra' : backend,
                     collectionId: logicalId, physicalCollectionId, source, model,
                     ...(v2Storage ? { storage: v2Storage } : {}),
+                    // VH-011: a check right after a delete (Milvus' older shared
+                    // store: rows another collection shares do not count).
+                    ...(location.afterDelete === true ? { afterDelete: true } : {}),
                 }),
             });
             if (!response.ok) {
@@ -801,6 +810,7 @@ export async function verifyPhysicalCollectionExistence(collectionId, settings, 
             ...(Number.isFinite(result.count) ? { count: result.count } : {}),
             ...(result.countTrusted === true ? { countTrusted: true } : {}),
             ...(result.model ? { model: result.model } : {}),
+            ...(Number(result.sharedLeftover) > 0 ? { sharedLeftover: Number(result.sharedLeftover) } : {}),
         };
     } catch (error) {
         return { ...describe, existence: 'unverified',
@@ -852,13 +862,18 @@ export async function readInitialVectorizationConfig(collectionId, settings, loc
             if (!response.ok) {
                 // Only the plugin's explicit physical-collection 404 proves
                 // absence. An older/missing read endpoint may also return 404.
-                if (response.status === 404) {
-                    const error = await response.json().catch(() => null);
-                    if (error?.error === 'Collection not found') {
-                        return { status: 'missing', physicalAbsent: true };
-                    }
+                const error = await response.json().catch(() => null);
+                if (response.status === 404 && error?.error === 'Collection not found') {
+                    return { status: 'missing', physicalAbsent: true };
                 }
-                return { status: 'unavailable', reason: `Backend returned HTTP ${response.status}` };
+                // VH-080: a refused API key is named as such.
+                if (error?.credentials === true) {
+                    const name = { qdrant: 'Qdrant', milvus: 'Milvus' }[error.backend] || 'The vector backend';
+                    return { status: 'unavailable', reason: `${name} refused the API key or login` +
+                        `${error.backendStatus ? ` (HTTP ${error.backendStatus})` : ''}; check it in VectHare's backend settings` };
+                }
+                return { status: 'unavailable', reason: `Backend returned HTTP ${response.status}` +
+                    (error?.backendStatus ? ` (the backend answered ${error.backendStatus})` : '') };
             }
             result = await response.json();
         } finally {
@@ -876,7 +891,18 @@ export async function readInitialVectorizationConfig(collectionId, settings, loc
         if (result.status !== 'found') return { status: 'unavailable', reason: 'Unexpected backend response' };
 
         const record = result.record;
-        const config = record?.snapshot;
+        let config = record?.snapshot;
+        // VH-063: saved settings from an earlier 13.3x build may lack fields added
+        // later. Known defaults are filled in memory (and recorded as needing an
+        // upgrade: RAG reads go on, Sync asks for Repair, Repair records it).
+        let upgrade = null;
+        if (isObject(record) && record.collectionId === logicalId && isObject(config) && config.schemaVersion === 1) {
+            const filled = fillOlderSavedSettings(config, { backend, physicalCollectionId, logicalId, settings });
+            if (filled.added.length) {
+                config = filled.config;
+                upgrade = filled.added;
+            }
+        }
         if (!isObject(record) || record.collectionId !== logicalId || !isObject(config) ||
             config.schemaVersion !== 1 || typeof config.recordedAt !== 'string' ||
             !Number.isFinite(Date.parse(config.recordedAt)) ||
@@ -902,10 +928,75 @@ export async function readInitialVectorizationConfig(collectionId, settings, loc
             config.embedding.provider !== source) {
             return { status: 'invalid', reason: 'Stored embedding source does not match collection storage' };
         }
+        if (upgrade) {
+            // Repair has upgraded it before: the same completed record is kept locally.
+            const done = getCollectionMeta(logicalId)?.upgradedSavedSettings;
+            const upgradedBefore = isObject(done) && Array.isArray(done.added) &&
+                done.added.length === upgrade.length && upgrade.every(field => done.added.includes(field)) &&
+                isObject(done.config) && done.config.recordedAt === config.recordedAt;
+            if (upgradedBefore) return { status: 'valid', config: done.config, upgradedFrom: upgrade, ...(foundAt ? { location: foundAt } : {}) };
+            return { status: 'valid', config, needsUpgrade: upgrade, ...(foundAt ? { location: foundAt } : {}) };
+        }
         return { status: 'valid', config, ...(foundAt ? { location: foundAt } : {}) };
     } catch (error) {
         return { status: 'unavailable', reason: error.message || 'Backend read failed' };
     }
+}
+
+/**
+ * VH-063: fields that saved settings written by earlier 13.3x builds may lack,
+ * with the value they had before the field existed. Fields that cannot be known
+ * (the provider or model) are not invented: such a record stays invalid (VH-061).
+ * @returns {{config: object, added: string[]}}
+ */
+export function fillOlderSavedSettings(config, { backend, physicalCollectionId, logicalId, settings }) {
+    const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+    const added = [];
+    const next = JSON.parse(JSON.stringify(config));
+    if (typeof next.recordedAt !== 'string' || !Number.isFinite(Date.parse(next.recordedAt))) {
+        next.recordedAt = new Date(0).toISOString(); added.push('recordedAt');
+    }
+    if (!isObject(next.storage)) return { config, added: [] }; // nothing safe to default
+    if (!isObject(next.chunking)) {
+        next.chunking = /^vecthare_chat_/.test(logicalId)
+            ? { pipeline: 'sync-chat', strategy: settings?.chunking_strategy || 'per_message', batchSize: settings?.batch_size || 4,
+                conversationTurnOrder: settings?.conversation_turn_order || 'user_character',
+                keywordLevel: settings?.keyword_extraction_level || 'balanced' }
+            : { pipeline: 'content-vectorizer', strategy: 'unknown (upgraded)' };
+        added.push('chunking');
+    }
+    if (!isObject(next.hashing)) {
+        next.hashing = { algorithm: 'getStringHash', input: next.chunking.pipeline === 'content-vectorizer'
+            ? 'prepared chunk text' : next.chunking.pipeline === 'scene-markers'
+                ? 'raw scene text with speaker names' : 'raw chat message text/group text' };
+        added.push('hashing');
+    }
+    // Builds before these fields applied today's cleaning and keyword settings
+    // the same way; the best record of them is today's values. If they differ
+    // from what was used, Repair finds the changed chunks by their hashes.
+    const today = (!isObject(next.textCleaning) || next.keywordExtraction === undefined)
+        ? createInitialVectorizationConfig(settings || {}, next.chunking) : null;
+    if (!isObject(next.textCleaning)) {
+        next.textCleaning = isObject(today?.textCleaning) ? today.textCleaning
+            : { applied: false, preset: 'none', activePatterns: [] };
+        added.push('textCleaning');
+    }
+    if (next.keywordExtraction === undefined) {
+        next.keywordExtraction = today ? (today.keywordExtraction ?? null) : null; added.push('keywordExtraction');
+    }
+    const name = normalizeBackend(backend);
+    if (name === 'qdrant' && typeof next.storage.multitenancy !== 'boolean') {
+        const expected = expectedStorageAt('qdrant', physicalCollectionId, logicalId);
+        next.storage.multitenancy = expected ? expected.multitenancy === true : physicalCollectionId === QDRANT_LEGACY_MT;
+        added.push('storage.multitenancy');
+    }
+    if ((name === 'qdrant' || name === 'milvus') && !next.storage.address) {
+        // Read from this server, so this server is where it is stored.
+        const here = createInitialVectorizationConfig({ ...(settings || {}), vector_backend: name },
+            { pipeline: 'sync-chat', strategy: 'per_message' })?.storage?.address;
+        if (here) { next.storage.address = here; added.push('storage.address'); }
+    }
+    return { config: next, added };
 }
 
 /**
@@ -1035,6 +1126,71 @@ export async function ensureStorageLocator(collectionId, settings, { signal, cre
     if (failed) return { status: 'unavailable', reason: `${failed.physical}: ${failed.read.status}${failed.read.reason ? ` (${failed.read.reason})` : ''}` };
     locatorNone.set(noneKey, Date.now() + LOCATOR_NONE_TTL_MS);
     return { status: 'none' };
+}
+
+/**
+ * VH-089: where a Qdrant collection WITHOUT a locator really is, by presence.
+ * Without a locator every lookup used today's multitenancy switch, so with the
+ * switch on, a collection in its own Qdrant collection (made while the switch
+ * was off, or found on the server by discovery) was looked for in the old
+ * shared store: it showed 0 chunks and "invalid metadata", Delete refused with
+ * "not available while Qdrant multitenancy is on", and Delete Metadata took the
+ * wrong place's absence as proof, leaving the real collection on the server.
+ * This checks both locations the switch can mean (its own collection and the
+ * old shared store) and records a locator when exactly one holds it. Read-only
+ * on the backend; changes nothing when it is in both, neither, or unknown.
+ * @param {string} collectionId Logical id or registry key
+ * @param {object} settings VectHare settings
+ * @param {{ownPresent?: boolean}} [options] ownPresent: the server already listed it as its own collection
+ * @returns {Promise<{status: 'present'|'recorded'|'both'|'none'|'unknown'|'not-applicable', locator?: object}>}
+ */
+export async function locateQdrantCollectionByPresence(collectionId, settings, { ownPresent = false } = {}) {
+    const parsed = parseRegistryKey(collectionId);
+    const id = bareCollectionId(parsed.collectionId || collectionId);
+    const backend = normalizeBackend(parsed.backend || settings?.vector_backend);
+    if (backend !== 'qdrant' || !id || id === QDRANT_LEGACY_MT || /^vecthare_mt_\d+$/.test(id)) {
+        return { status: 'not-applicable' };
+    }
+    const present = getStorageLocator(id);
+    if (present) return { status: 'present', locator: present };
+    const probe = async multitenancy => {
+        try {
+            const probeSettings = { ...settings, vector_backend: 'qdrant', qdrant_multitenancy: multitenancy };
+            delete probeSettings.__newStorageLayout;
+            return (await verifyPhysicalCollectionExistence(id, probeSettings, { backend: 'qdrant' })).existence;
+        } catch {
+            return 'unknown';
+        }
+    };
+    // The old shared store cannot confirm one collection by an existence check
+    // ("unverified"), so: no such store on the server -> not there; otherwise
+    // its saved hashes for this collection decide.
+    const probeShared = async () => {
+        try {
+            const store = await verifyPhysicalCollectionExistence(QDRANT_LEGACY_MT,
+                { ...settings, vector_backend: 'qdrant', qdrant_multitenancy: false }, { backend: 'qdrant' });
+            if (store.existence === 'absent') return 'absent';
+            if (store.existence !== 'present') return 'unknown';
+            const { getSavedHashes } = await import('./core-vector-api.js');
+            const sharedSettings = { ...settings, vector_backend: 'qdrant', qdrant_multitenancy: true };
+            delete sharedSettings.__newStorageLayout;
+            const hashes = await getSavedHashes(id, sharedSettings);
+            return Array.isArray(hashes) ? (hashes.length ? 'present' : 'absent') : 'unknown';
+        } catch {
+            return 'unknown';
+        }
+    };
+    const own = ownPresent ? 'present' : await probe(false);
+    const shared = await probeShared();
+    if (own === 'present' && shared === 'present') return { status: 'both' };
+    const found = own === 'present' && shared === 'absent' ? id
+        : shared === 'present' && own === 'absent' ? QDRANT_LEGACY_MT : null;
+    if (!found) return { status: own === 'absent' && shared === 'absent' ? 'none' : 'unknown' };
+    const locator = locatorForPhysical(id, 'qdrant', found);
+    if (!locator) return { status: 'unknown' };
+    recordStorageLocator(id, locator, { createRecord: true });
+    persistVectHareStore();
+    return { status: 'recorded', locator };
 }
 
 /**
@@ -1304,6 +1460,54 @@ export async function checkCollectionOperationSettings(collectionId, settings, o
     return { status: 'cannot_verify', reason: `Original configuration ${saved.status}: ${saved.reason || 'not verified'}` };
 }
 
+// VH-044: RAG reads each active collection's saved settings on every
+// generation. They change only when the collection is (re)made, moved, imported
+// or deleted, so RAG keeps what it read for a short while. Only RAG uses this
+// (writes always read fresh). The cache is emptied by any database change in
+// this tab, by a reload of VectHare's metadata from another tab or device, and
+// each entry expires after RAG_SAVED_CONFIG_TTL_MS as a backstop.
+const RAG_SAVED_CONFIG_TTL_MS = 60 * 1000;
+const ragSavedConfigCache = new Map();
+let ragCacheListening = false;
+
+/** Empties the RAG saved-settings cache (all collections, or one). */
+export function forgetRagSavedConfig(collectionId = null) {
+    if (!collectionId) { ragSavedConfigCache.clear(); return; }
+    const id = parseRegistryKey(collectionId).collectionId || collectionId;
+    for (const key of [...ragSavedConfigCache.keys()]) {
+        if (JSON.parse(key)[0] === id) ragSavedConfigCache.delete(key);
+    }
+}
+
+function listenForRagCacheChanges() {
+    if (ragCacheListening || typeof window === 'undefined' || !window.addEventListener) return;
+    ragCacheListening = true;
+    window.addEventListener('vecthare:database-changed', () => ragSavedConfigCache.clear());
+    window.addEventListener('vecthare:store-reloaded', () => ragSavedConfigCache.clear());
+}
+
+async function readSavedConfigForRag(collectionId, settings) {
+    listenForRagCacheChanges();
+    const id = parseRegistryKey(collectionId).collectionId || collectionId;
+    const backend = parseRegistryKey(collectionId).backend || settings.vector_backend || 'standard';
+    const storage = resolveStorage(id, settings, backend);
+    const fileBacked = ['standard', 'vectra', 'lancedb'].includes(backend);
+    const key = JSON.stringify([id, backend, storage.physical ?? null, storage.layout ?? null, storage.v2 ?? null,
+        fileBacked ? '*' : (settings.source || 'transformers'),
+        backend === 'qdrant' ? [settings.qdrant_use_cloud, settings.qdrant_url, settings.qdrant_host, settings.qdrant_port] : null,
+        backend === 'milvus' ? [settings.milvus_address, settings.milvus_host, settings.milvus_port] : null]);
+    const hit = ragSavedConfigCache.get(key);
+    if (hit && Date.now() - hit.at < RAG_SAVED_CONFIG_TTL_MS) return structuredClone(hit.result);
+    const result = await readInitialVectorizationConfig(collectionId, settings, {});
+    // Only definite answers are kept; a failed read is retried next time.
+    if (result?.status === 'valid' || result?.status === 'missing') {
+        ragSavedConfigCache.set(key, { at: Date.now(), result: structuredClone(result) });
+    } else {
+        ragSavedConfigCache.delete(key);
+    }
+    return result;
+}
+
 /**
  * Resolve an operation against the saved collection settings without changing
  * SillyTavern preferences. Saved values take precedence where the current
@@ -1318,9 +1522,19 @@ export async function resolveCollectionOperationSettings(collectionId, currentSe
     if (!options.readOnly) {
         const located = await ensureStorageLocator(collectionId, currentSettings, { signal: options.signal });
         if (located.status === 'conflict') throw new StorageConflictError(collectionId, located.locations);
+        // VH-017: a place that could not be read may hold this collection; a
+        // write now could start a second copy at today's location.
+        if (located.status === 'unavailable') {
+            const error = new Error(`The storage location of ${collectionId} could not be checked` +
+                `${located.reason ? ` (${located.reason})` : ''}; nothing was changed. Try again in a moment.`);
+            error.code = 'VH_STORAGE_UNCHECKED';
+            throw error;
+        }
     }
-    const saved = await readInitialVectorizationConfig(collectionId, currentSettings,
-        options.signal ? { signal: options.signal } : {});
+    const saved = options.ragCache
+        ? await readSavedConfigForRag(collectionId, currentSettings)
+        : await readInitialVectorizationConfig(collectionId, currentSettings,
+            options.signal ? { signal: options.signal } : {});
     if (saved.status !== 'valid') {
         if (options.readOnly && saved.status === 'missing') {
             return { status: 'legacy_readonly', settings: snapshotCollectionOperationSettings(currentSettings), chunking };
@@ -1342,6 +1556,28 @@ export async function resolveCollectionOperationSettings(collectionId, currentSe
     }
 
     const original = saved.config;
+    // VH-063: older saved settings: reads go on, Repair upgrades, other writes wait for Repair.
+    const logicalForUpgrade = parseRegistryKey(collectionId).collectionId || collectionId;
+    const chatCollection = /^vecthare_chat_/.test(logicalForUpgrade);
+    if (saved.needsUpgrade && !options.readOnly && !chatCollection) {
+        // Documents and lorebooks have no Repair: their writes upgrade the record,
+        // unless how the text was split was never recorded (then nothing can be checked).
+        if (saved.needsUpgrade.includes('chunking')) {
+            throw new Error(`Collection ${collectionId} was made by an earlier VectHare build that did not record how its text was split. ` +
+                'Its existing vectors still answer searches; to add to it, purge it and vectorize it again.');
+        }
+    }
+    if (saved.needsUpgrade && !options.readOnly && chatCollection && operation !== 'repair') {
+        throw new Error(`Collection ${collectionId} was made by an earlier VectHare build and needs a one-time upgrade. ` +
+            `Press Repair for this chat (it records the missing settings: ${saved.needsUpgrade.join(', ')}); then Sync works again.`);
+    }
+    if (saved.needsUpgrade && !options.readOnly && (operation === 'repair' || !chatCollection)) {
+        setCollectionMeta(collectionId, { upgradedSavedSettings: { config: original, added: saved.needsUpgrade,
+            at: new Date().toISOString() } });
+        console.info(`VectHare: Upgraded the saved settings of ${collectionId} (added ${saved.needsUpgrade.join(', ')})`);
+        globalThis.toastr?.success?.(`Upgraded this collection from an earlier VectHare build (recorded: ${saved.needsUpgrade.join(', ')}).`,
+            'VectHare', { timeOut: 6000 });
+    }
     const settings = snapshotCollectionOperationSettings(currentSettings);
     // A change of storage backend or physical server could target a different
     // collection. Never "restore" those values without locating that store.
@@ -1450,6 +1686,9 @@ export function deleteCollectionMeta(collectionId) {
     const key = resolveStoredCollectionKey(collectionId);
     if (key) {
         delete vecthareState().collections[key];
+        // VH-021: only called after a verified delete; another tab's older copy
+        // of this record must not bring it back.
+        recordRecentlyDeleted([key]);
         persistVectHareStore();
         vhLog(`VectHare: Deleted metadata for collection ${key}`);
     }
@@ -2242,6 +2481,7 @@ export function ensureCollectionMeta(collectionId, initialData = {}) {
             ...defaultCollectionMeta,
             temporalDecay: getDefaultDecayForType(collectionType),
             createdAt: Date.now(),
+            recordCreatedAt: Date.now(), // VH-021
             ...initialData,
         };
         persistVectHareStore();
@@ -2313,7 +2553,7 @@ function checkTriggers(triggers, context, options = {}) {
                 const pattern = trigger.slice(1, lastSlash);
                 const flags = trigger.slice(lastSlash + 1) || (caseSensitive ? '' : 'i');
                 const regex = new RegExp(pattern, flags);
-                return regex.test(searchText);
+                return safePatternTest(regex, searchText, 'collection trigger'); // VH-043
             } catch (e) {
                 console.warn(`VectHare: Invalid trigger regex: ${trigger}`);
                 return false;

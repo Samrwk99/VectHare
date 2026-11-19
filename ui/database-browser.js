@@ -1,3 +1,6 @@
+import { legacyNeedsRebuild } from '../core/legacy-collections.js';
+import { escapeHtml } from '../utils/html.js';
+import { getStorageLocator } from "../core/storage-resolver.js";
 import { vhLog } from '../utils/log.js';
 import { progressTracker } from './progress-tracker.js';
 /**
@@ -88,9 +91,10 @@ import { world_names, loadWorldInfo } from "../../../../world-info.js";
 import { icons } from "./icons.js";
 import { openVisualizer } from "./chunk-visualizer.js";
 import { queryCollection } from "../core/core-vector-api.js";
+import { getModelField } from "../core/providers.js";
 import {
   exportCollection,
-  importCollection,
+  importCollectionFromFile,
   downloadExport,
   readImportFile,
   validateImportData,
@@ -110,6 +114,12 @@ import {
   convertToPNG,
   isVectHarePNG,
 } from "../core/png-export.js";
+
+/** VH-064: what kind of SillyTavern built-in collection a row is, in words. */
+function stBuiltInLabel(kind) {
+  return { chat: "a chat", file: "a file or Data Bank attachment", "world-info": "World Info" }[kind] ||
+    "SillyTavern's Vector Storage";
+}
 
 // Plugin availability is managed by collection-loader.js.
 
@@ -200,12 +210,18 @@ export async function openDatabaseBrowser() {
   // Show/hide plugin warning banner
   updatePluginWarningBanner();
 
-  // Load collections
+  // Load collections (fast: what is already known)
   await refreshCollections();
 
   // Show modal
   $("#vecthare_database_browser_modal").fadeIn(200);
   vhLog("VectHare Database Browser: Opened");
+
+  // Then the same read-only refresh as Resync, in the background: re-read
+  // VectHare's metadata file, drop the cached server listing, re-check every
+  // collection where it lives, and update the list in place.
+  refreshCollections({ reloadStore: true, invalidateInventory: true }).catch((error) =>
+    console.warn("VectHare: Background resync of the Database Browser failed:", error));
 }
 
 /**
@@ -775,9 +791,17 @@ function bindBrowserEvents() {
       if (!confirmed) return;
 
       // Perform import
-      const result = await importCollection(data, browserState.settings, {
-        overwrite: true, // Overwrite if exists
+      // VH-046: import as new unless the collection exists; replacing asks first.
+      const result = await importCollectionFromFile(data, browserState.settings, {
+        confirmReplace: (id) =>
+          confirm(
+            `A collection "${id}" already exists here.\n\nReplace it with the imported one? Its current contents will be removed.`,
+          ),
       });
+      if (result.cancelled) {
+        toastr.info("Import cancelled; the existing collection was not changed.", "VectHare Import");
+        return;
+      }
 
       if (result.success) {
         const vectorMsg = result.usedVectors
@@ -788,8 +812,8 @@ function bindBrowserEvents() {
           "VectHare Import",
         );
 
-        // Refresh collections list
-        await refreshCollections();
+        // Refresh collections list (as Resync does)
+        await refreshCollections({ reloadStore: true, invalidateInventory: true });
       }
     } catch (error) {
       console.error("VectHare: Import failed", error);
@@ -957,19 +981,21 @@ function renderStorageReport() {
         <td><small>${escapeHtml(notes.join("; "))}</small></td>
       </tr>${(r.oldCopies || []).map((copy) => `
       <tr class="vecthare-storage-oldcopy">
-        <td><small>↳ old copy (moved)</small></td>
+        <td><small>${copy.pending ? "↳ leftover copy from an unfinished move" : "↳ old copy (moved)"}</small></td>
         <td>${escapeHtml(copy.backend || r.backend)}</td>
         <td>${escapeHtml(LAYOUT_LABELS[copy.layout] || copy.layout)}</td>
-        <td>${escapeHtml(copy.physical)}</td>
+        <td>${escapeHtml(copy.physical || "(not known yet)")}</td>
         <td>${escapeHtml(formatStorageCount(copy))}</td>
         <td>${copy.config ? escapeHtml(CONFIG_LABELS[copy.config.status] || copy.config.status || "") : ""}</td>
-        <td><small>${escapeHtml([copy.movedAt ? `moved ${new Date(copy.movedAt).toLocaleString()}` : "", copy.note || "",
+        <td><small>${escapeHtml([copy.movedAt ? `moved ${new Date(copy.movedAt).toLocaleString()}` : "",
+          copy.pending && copy.startedAt ? `move started ${new Date(copy.startedAt).toLocaleString()}, not finished` : "", copy.note || "",
           copy.foreignOwner ? `owner stamp: ${copy.foreignOwner}` : ""].filter(Boolean).join("; "))}</small>
           <button class="vecthare-btn-sm vecthare-btn-danger vecthare-storage-delete-old"
                   data-collection-id="${escapeHtml(r.collectionId).replace(/"/g, "&quot;")}"
                   data-backend="${escapeHtml(copy.backend || r.backend)}"
                   data-layout="${escapeHtml(copy.layout)}"
-                  data-physical="${escapeHtml(copy.physical).replace(/"/g, "&quot;")}">Delete old copy</button></td>
+                  data-pending="${copy.pending ? "1" : ""}"
+                  data-physical="${escapeHtml(copy.physical || "").replace(/"/g, "&quot;")}">${copy.pending ? "Delete leftover copy" : "Delete old copy"}</button></td>
       </tr>`).join("")}`;
   }).join("");
 
@@ -1017,14 +1043,20 @@ function renderStorageReport() {
     e.preventDefault();
     const button = $(this);
     const collectionId = String(button.data("collection-id"));
-    const which = { layout: String(button.data("layout")), physical: String(button.data("physical")) };
+    const which = { layout: String(button.data("layout")), physical: String(button.data("physical") || "") };
     const backend = String(button.data("backend"));
-    if (!confirm(`Delete the old copy of "${collectionId}" in ${LAYOUT_LABELS[which.layout] || which.layout} (${which.physical})?\n\n` +
-      "The collection itself is not affected: it now lives elsewhere. This removes the old copy's vectors and saved settings and cannot be undone.")) return;
+    const pending = String(button.data("pending") || "") === "1";
+    // VH-010: a leftover copy is the target of a move that did not finish.
+    const message = pending
+      ? `Delete the leftover copy of "${collectionId}" in ${LAYOUT_LABELS[which.layout] || which.layout}${which.physical ? ` (${which.physical})` : ""}?\n\n` +
+        "A move of this collection did not finish; the collection still lives where it was. This removes the unfinished copy's vectors and saved settings and cannot be undone."
+      : `Delete the old copy of "${collectionId}" in ${LAYOUT_LABELS[which.layout] || which.layout} (${which.physical})?\n\n` +
+        "The collection itself is not affected: it now lives elsewhere. This removes the old copy's vectors and saved settings and cannot be undone.";
+    if (!confirm(message)) return;
     button.prop("disabled", true);
     const result = await deleteOldStorageCopy(collectionId, { ...browserState.settings, vector_backend: backend }, which);
     if (result.success) {
-      toastr.success(`Old copy in ${which.physical} deleted.${result.warnings.length ? ` ${result.warnings.join(" ")}` : ""}`, "VectHare");
+      toastr.success(`${pending ? "Leftover" : "Old"} copy${which.physical ? ` in ${which.physical}` : ""} deleted.${result.warnings.length ? ` ${result.warnings.join(" ")}` : ""}`, "VectHare");
       $("#vecthare_storage_run").trigger("click");
     } else {
       toastr.warning(result.reason, "VectHare: Delete old copy", { timeOut: 10000 });
@@ -1057,10 +1089,19 @@ async function listCollectionChunksForBrowser(collection, collectionSettings, re
   return await response.json();
 }
 
+// Refreshes run one at a time (opening, Resync and actions can overlap).
+let refreshChain = Promise.resolve();
+
 /**
- * Refreshes collections from storage
+ * Refreshes collections from storage. Queued behind any refresh in progress.
  */
-async function refreshCollections(options = {}) {
+function refreshCollections(options = {}) {
+  const run = refreshChain.then(() => refreshCollectionsNow(options));
+  refreshChain = run.catch(() => {});
+  return run;
+}
+
+async function refreshCollectionsNow(options = {}) {
   try {
     // Resync asks for the authoritative metadata document to be re-read and
     // the cached backend inventory to be dropped, so the rebuilt list comes
@@ -1089,7 +1130,12 @@ async function refreshCollections(options = {}) {
     // and metadata-only records have to stay visible so they can be inspected
     // and removed deliberately (View Metadata / Delete Metadata).
 
+    // Keep the user's place when the list is rebuilt (a background resync
+    // must not jump the list back to the top).
+    const list = $("#vecthare_collections_list");
+    const scrollers = [list, list.parent()].map((el) => [el, el.scrollTop()]);
     renderCollections();
+    for (const [el, top] of scrollers) if (top) el.scrollTop(top);
     await refreshOpenMetadataDialog();
   } catch (error) {
     console.error("VectHare: Failed to load collections", error);
@@ -1240,7 +1286,8 @@ function renderCollectionCard(collection) {
       character:
         '<span class="vecthare-badge vecthare-badge-character">Character</span>',
       chat: '<span class="vecthare-badge vecthare-badge-chat">Chat</span>',
-    }[collection.scope] || "";
+    // A chat's own collection is used only in its chat, whatever scope older runs stamped on it.
+    }[String(collection.id || "").startsWith("vecthare_chat_") ? "chat" : collection.scope] || "";
 
   const statusBadge = collection.enabled
     ? '<span class="vecthare-badge vecthare-badge-success">Active</span>'
@@ -1250,7 +1297,12 @@ function renderCollectionCard(collection) {
   const deletedInfo = getDeletedChatInfo(collection.id);
   const deletedDays = deletedInfo ? deletedChatDaysLeft(deletedInfo) : 0;
   const deletedBadge = deletedInfo
-    ? `<span class="vecthare-badge vecthare-badge-muted" title="The chat this collection belonged to was deleted${deletedInfo.filename ? ` (${escapeHtml(deletedInfo.filename)})` : ""}. Its memories are not used. Re-importing the chat offers to re-use them; otherwise they are purged ${deletedDays ? `in ${deletedDays} day(s)` : "at the next startup"}, or now with Empty deleted.">Deleted chat — kept ${deletedDays} day${deletedDays === 1 ? "" : "s"}</span>`
+    ? `<span class="vecthare-badge vecthare-badge-muted" title="The chat this collection belonged to was deleted${deletedInfo.filename ? ` (${escapeHtml(deletedInfo.filename)})` : ""}. Its memories are not used. Re-importing the chat offers to re-use them; otherwise they are purged ${escapeHtml(deletedDays ? `in ${deletedDays} day(s)` : "at the next startup")}, or now with Empty deleted.">Deleted chat — kept ${escapeHtml(deletedDays)} day${deletedDays === 1 ? "" : "s"}</span>`
+    : "";
+
+  // VH-061: an older collection that is searched although its settings were never recorded.
+  const legacyBadge = legacyNeedsRebuild(collection.id)
+    ? '<span class="vecthare-badge vecthare-badge-muted" title="Made by an older VectHare that did not record its settings. It is searched with the current settings until you re-vectorize it (Vectorize asks before rebuilding).">Needs re-vectorizing</span>'
     : "";
 
   // What an explicit existence check at the recorded destination established.
@@ -1275,7 +1327,9 @@ function renderCollectionCard(collection) {
       "ownership-unverified":
         '<span class="vecthare-badge vecthare-badge-muted" title="A record exists, but nothing establishes it as VectHare\'s own, or its binding is ambiguous. Destructive actions are withheld.">Ownership Unverified</span>',
       "not-vecthare": '<span class="vecthare-badge vecthare-badge-muted" title="This collection is not VectHare\'s: it carries no VectHare marker, VectHare recorded no vectorization configuration for it and no chat is bound to it. It was most likely created by SillyTavern itself or another extension. VectHare lists it for information and will not modify or delete it.">Not VectHare-Owned</span>',
-    }[notVectHare && presence === "ownership-unverified" ? "not-vecthare" : presence] || "";
+      "st-builtin": `<span class="vecthare-badge vecthare-badge-muted" title="This is one of SillyTavern's own vector collections (${escapeHtml(stBuiltInLabel(collection.metadataRecord?.sillyTavernBuiltIn))}), made by SillyTavern's built-in Vector Storage. VectHare lists it for information and will not change it on its own.">SillyTavern Built-in Vectors</span>`,
+    }[notVectHare && presence === "ownership-unverified"
+      ? (collection.metadataRecord?.sillyTavernBuiltIn ? "st-builtin" : "not-vecthare") : presence] || "";
 
   // Which actions this state may offer. A record is never treated as a real
   // collection without a confirmed existence answer.
@@ -1322,23 +1376,37 @@ function renderCollectionCard(collection) {
       standard: "Standard",
       lancedb: "LanceDB",
       qdrant: "Qdrant",
+      milvus: "Milvus",
     }[collection.backend] || collection.backend;
 
   const backendBadge = collection.backend
-    ? `<span class="vecthare-badge vecthare-badge-backend" title="Vector backend">${backendDisplayName}</span>`
+    ? `<span class="vecthare-badge vecthare-badge-backend" title="Vector backend">${escapeHtml(backendDisplayName)}</span>`
     : "";
+
+  // Shared (multitenancy) storage, from the collection's recorded location only.
+  let storageBadge = "";
+  try {
+    const where = ["qdrant", "milvus"].includes(collection.backend) ? getStorageLocator(collection.id) : null;
+    if (where?.layout === "mt-v2") {
+      storageBadge = `<span class="vecthare-badge vecthare-badge-backend" title="Stored in the shared multitenancy store ${escapeHtml(where.physical)}, kept separate from other collections there. Database Browser &gt; Storage can move it.">Multitenancy</span>`;
+    } else if (where?.layout === "legacy-mt" || where?.layout === "legacy-shared") {
+      storageBadge = `<span class="vecthare-badge vecthare-badge-backend" title="Stored in the older shared store ${escapeHtml(where.physical)}. Database Browser &gt; Storage can move it to the newer layout.">Multitenancy (old store)</span>`;
+    }
+  } catch {
+    storageBadge = "";
+  }
 
   // Source badge - shows embedding source (transformers, palm, openai, etc.)
   const sourceBadge =
     collection.source && collection.source !== "unknown"
-      ? `<span class="vecthare-badge vecthare-badge-source" title="Embedding source">${collection.source}</span>`
+      ? `<span class="vecthare-badge vecthare-badge-source" title="Embedding source">${escapeHtml(collection.source)}</span>`
       : "";
 
   // Model info - show current model and count if multiple
   const hasMultipleModels = collection.models && collection.models.length > 1;
   const currentModelName = collection.model || "(default)";
   const modelBadge = hasMultipleModels
-    ? `<span class="vecthare-badge vecthare-badge-model" title="Current model: ${currentModelName} (${collection.models.length} available)">📐 ${currentModelName}</span>`
+    ? `<span class="vecthare-badge vecthare-badge-model" title="Current model: ${escapeHtml(currentModelName)} (${collection.models.length} available)">📐 ${escapeHtml(currentModelName)}</span>`
     : "";
 
   // Temporal decay badge
@@ -1349,7 +1417,7 @@ function renderCollectionCard(collection) {
     const decayTitle = decaySummary.isCustom
       ? `Custom decay: ${decaySummary.description}`
       : `Default decay: ${decaySummary.description}`;
-    decayBadge = `<span class="vecthare-badge vecthare-badge-decay ${decaySummary.isCustom ? "vecthare-badge-decay-custom" : ""}" title="${decayTitle}">${decayIcon}</span>`;
+    decayBadge = `<span class="vecthare-badge vecthare-badge-decay ${decaySummary.isCustom ? "vecthare-badge-decay-custom" : ""}" title="${escapeHtml(decayTitle)}">${decayIcon}</span>`;
   }
 
   // Lock badge - shows if collection is locked and to how many chats
@@ -1357,23 +1425,25 @@ function renderCollectionCard(collection) {
   let lockBadge = "";
   if (lockCount > 0) {
     const lockTitle = `Locked to ${lockCount} chat${lockCount !== 1 ? "s" : ""}`;
-    lockBadge = `<span class="vecthare-badge vecthare-badge-lock" title="${lockTitle}">🔒 ${lockCount}</span>`;
+    lockBadge = `<span class="vecthare-badge vecthare-badge-lock" title="${escapeHtml(lockTitle)}">🔒 ${lockCount}</span>`;
   }
 
   // Use registryKey for unique identification (source:id format)
   const uniqueKey = collection.registryKey || collection.id;
 
   return `
-        <div class="vecthare-collection-card" data-collection-key="${uniqueKey}" data-status="${collection.enabled ? "active" : "paused"}">
+        <div class="vecthare-collection-card" data-collection-key="${escapeHtml(uniqueKey)}" data-status="${collection.enabled ? "active" : "paused"}">
             <div class="vecthare-collection-header">
                 <span class="vecthare-collection-title">
-                    ${typeIcon} ${collection.name}
+                    ${typeIcon} ${escapeHtml(collection.name)}
                 </span>
                 <div class="vecthare-collection-badges">
                     ${deletedBadge}
+                    ${legacyBadge}
                     ${presenceBadge}
                     ${scopeBadge}
                     ${backendBadge}
+                    ${storageBadge}
                     ${sourceBadge}
                     ${modelBadge}
                     ${decayBadge}
@@ -1384,7 +1454,7 @@ function renderCollectionCard(collection) {
 
             <div class="vecthare-collection-meta">
                 <span>${collection.chunkCount} chunks</span>
-                <span>ID: ${collection.id}</span>
+                <span>ID: ${escapeHtml(collection.id)}</span>
             </div>
             ${
               collection.presenceDetail && presence !== "present"
@@ -1400,18 +1470,18 @@ function renderCollectionCard(collection) {
                   canUseCollectionActions
                     ? `
                 <button class="vecthare-btn-sm vecthare-action-toggle"
-                        data-collection-key="${uniqueKey}"
-                        data-enabled="${collection.enabled}">
+                        data-collection-key="${escapeHtml(uniqueKey)}"
+                        data-enabled="${escapeHtml(collection.enabled)}">
                     ${collection.enabled ? icons.pause(16) + " Pause" : icons.play(16) + " Enable"}
                 </button>
                 <button class="vecthare-btn-sm vecthare-action-rename"
-                        data-collection-key="${uniqueKey}"
-                        data-current-name="${collection.name.replace(/"/g, "&quot;")}"
+                        data-collection-key="${escapeHtml(uniqueKey)}"
+                        data-current-name="${escapeHtml(collection.name)}"
                         title="Rename this collection">
                     ${icons.pencil(16)} Rename
                 </button>
                 <button class="vecthare-btn-sm vecthare-action-activation ${activationSummary.mode !== "auto" || decaySummary.isCustom ? "vecthare-has-settings" : ""}"
-                        data-collection-key="${uniqueKey}"
+                        data-collection-key="${escapeHtml(uniqueKey)}"
                         title="Configure activation, triggers, conditions, and temporal decay">
                     ${icons.settings(16)} Settings
                 </button>
@@ -1419,7 +1489,7 @@ function renderCollectionCard(collection) {
                   hasMultipleModels
                     ? `
                 <button class="vecthare-btn-sm vecthare-action-switch-model"
-                        data-collection-key="${uniqueKey}"
+                        data-collection-key="${escapeHtml(uniqueKey)}"
                         title="Switch embedding model (${collection.models.length} available)">
                     <i class="fa-solid fa-code-branch"></i> Model
                 </button>
@@ -1433,9 +1503,9 @@ function renderCollectionCard(collection) {
                   fileBacked
                     ? `
                 <button class="vecthare-btn-sm vecthare-action-open-folder"
-                        data-collection-key="${uniqueKey}"
-                        data-backend="${collection.backend}"
-                        data-source="${collection.source || "transformers"}"
+                        data-collection-key="${escapeHtml(uniqueKey)}"
+                        data-backend="${escapeHtml(collection.backend)}"
+                        data-source="${escapeHtml(collection.source || "transformers")}"
                         title="Open this collection's folder in your file explorer">
                     ${icons.folderOpen(16)} Open Folder
                 </button>
@@ -1448,7 +1518,7 @@ function renderCollectionCard(collection) {
                   ["qdrant", "milvus"].includes(collection.backend)
                     ? `
                 <button class="vecthare-btn-sm vecthare-action-move-storage"
-                        data-collection-key="${uniqueKey}"
+                        data-collection-key="${escapeHtml(uniqueKey)}"
                         title="Move this collection to the storage layout the multitenancy switch selects for new collections (same server; the old copy is kept until you delete it in the Storage tab)">
                     <i class="fa-solid fa-right-left"></i> Move storage…
                 </button>
@@ -1456,9 +1526,9 @@ function renderCollectionCard(collection) {
                     : ""
                 }
                 <button class="vecthare-btn-sm vecthare-action-visualize"
-                        data-collection-key="${uniqueKey}"
-                        data-backend="${collection.backend}"
-                        data-source="${collection.source || "transformers"}"
+                        data-collection-key="${escapeHtml(uniqueKey)}"
+                        data-backend="${escapeHtml(collection.backend)}"
+                        data-source="${escapeHtml(collection.source || "transformers")}"
                         title="View and edit chunks in this collection">
                     ${icons.eye(16)} View Chunks
                 </button>
@@ -1469,20 +1539,20 @@ function renderCollectionCard(collection) {
                     </button>
                     <div class="vecthare-export-options">
                         <button class="vecthare-btn-sm vecthare-btn-json vecthare-action-export"
-                                data-collection-key="${uniqueKey}"
-                                data-collection-id="${collection.id}"
-                                data-backend="${collection.backend}"
-                                data-source="${collection.source || "transformers"}"
-                                data-model="${collection.model || ""}"
+                                data-collection-key="${escapeHtml(uniqueKey)}"
+                                data-collection-id="${escapeHtml(collection.id)}"
+                                data-backend="${escapeHtml(collection.backend)}"
+                                data-source="${escapeHtml(collection.source || "transformers")}"
+                                data-model="${escapeHtml(collection.model || "")}"
                                 title="Export as JSON (includes vectors)">
                             ${icons.fileExport(16)} JSON
                         </button>
                         <button class="vecthare-btn-sm vecthare-btn-png vecthare-action-export-png"
-                                data-collection-key="${uniqueKey}"
-                                data-collection-id="${collection.id}"
-                                data-backend="${collection.backend}"
-                                data-source="${collection.source || "transformers"}"
-                                data-model="${collection.model || ""}"
+                                data-collection-key="${escapeHtml(uniqueKey)}"
+                                data-collection-id="${escapeHtml(collection.id)}"
+                                data-backend="${escapeHtml(collection.backend)}"
+                                data-source="${escapeHtml(collection.source || "transformers")}"
+                                data-model="${escapeHtml(collection.model || "")}"
                                 title="Export as PNG (shareable image)">
                             ${icons.image(16)} PNG
                         </button>
@@ -1492,12 +1562,12 @@ function renderCollectionCard(collection) {
                     : ""
                 }
                 <button class="vecthare-btn-sm vecthare-action-view-metadata"
-                        data-collection-key="${uniqueKey}"
+                        data-collection-key="${escapeHtml(uniqueKey)}"
                         title="Inspect VectHare's stored metadata for this collection">
                     ${icons.eye(16)} View Metadata
                 </button>
                 <button class="vecthare-btn-sm vecthare-action-regenerate-metadata"
-                        data-collection-key="${uniqueKey}"
+                        data-collection-key="${escapeHtml(uniqueKey)}"
                         ${blocked ? "disabled" : ""}
                         title="${blocked
                           ? presence === "invalid-metadata"
@@ -1510,7 +1580,7 @@ function renderCollectionCard(collection) {
                   metadataOnly || localRecordOnly
                     ? `
                 <button class="vecthare-btn-sm vecthare-btn-danger vecthare-action-delete-metadata"
-                        data-collection-key="${uniqueKey}"
+                        data-collection-key="${escapeHtml(uniqueKey)}"
                         title="${localRecordOnly
                           ? "Remove only VectHare's own local record for this confirmed-absent collection. No vectors are touched."
                           : "Remove VectHare's leftover metadata for this confirmed-absent collection"}">
@@ -1520,7 +1590,7 @@ function renderCollectionCard(collection) {
                     : canDeleteCollection
                       ? `
                 <button class="vecthare-btn-sm vecthare-btn-danger vecthare-action-delete"
-                        data-collection-key="${uniqueKey}">
+                        data-collection-key="${escapeHtml(uniqueKey)}">
                     ${icons.trash(16)} Delete Collection
                 </button>
                 `
@@ -1872,8 +1942,9 @@ async function openMetadataDialog(collection) {
     "metadata-only": "Metadata Only",
     "invalid-metadata": "Invalid Metadata",
     unverified: "Unverified",
-    "ownership-unverified": report.metadataRecord?.foreign
-      ? "Not VectHare-Owned" : "Ownership Unverified",
+    "ownership-unverified": report.metadataRecord?.sillyTavernBuiltIn
+      ? "SillyTavern Built-in Vectors"
+      : report.metadataRecord?.foreign ? "Not VectHare-Owned" : "Ownership Unverified",
   }[report.presence] || "Unverified";
   const presenceText = {
     present: "The physical collection exists at its recorded destination.",
@@ -1882,7 +1953,9 @@ async function openMetadataDialog(collection) {
     "metadata-only": "The physical collection was confirmed absent at its recorded destination, and VectHare's metadata file holds a validated record for it.",
     "invalid-metadata": "This entry is not a usable VectHare metadata record. It is shown so it can be inspected, and VectHare will not act on it.",
     unverified: "The recorded destination could not be checked, so nothing is assumed about this collection.",
-    "ownership-unverified": report.metadataRecord?.foreign
+    "ownership-unverified": report.metadataRecord?.sillyTavernBuiltIn
+      ? `This is one of SillyTavern's own vector collections (${stBuiltInLabel(report.metadataRecord.sillyTavernBuiltIn)}), made by SillyTavern's built-in Vector Storage. It carries no VectHare marker, so VectHare lists it for information and will not change it on its own.`
+      : report.metadataRecord?.foreign
       ? "This collection carries no VectHare marker: no VectHare-style name, no vectorization configuration recorded by VectHare and no chat bound to it. It was most likely created by SillyTavern itself or by another extension, so VectHare lists it for information and will not modify or delete it."
       : "A record exists, but nothing establishes it as VectHare's own, or its binding is ambiguous, so destructive actions are withheld.",
   }[report.presence] || "";
@@ -1912,7 +1985,9 @@ async function openMetadataDialog(collection) {
       : ""}
     ${row("Ownership validated", report.metadataRecord.ownershipValidated
       ? "yes"
-      : report.metadataRecord.foreign
+      : report.metadataRecord.sillyTavernBuiltIn
+        ? `no - SillyTavern built-in vectors (${stBuiltInLabel(report.metadataRecord.sillyTavernBuiltIn)})`
+        : report.metadataRecord.foreign
         ? "no - not a VectHare collection (most likely SillyTavern's own or another extension's)"
         : "no")}
     ${row("Collection ID", report.collectionId)}
@@ -2043,16 +2118,19 @@ function formatBytes(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
 }
 
+
 /**
- * Escapes HTML special characters to prevent XSS
- * @param {string} text Text to escape
- * @returns {string} Escaped text
+ * VH-045: settings for acting on one collection: its backend, embedding source
+ * and model (as listed), not today's global choice.
  */
-function escapeHtml(text) {
-  if (!text) return "";
-  const div = document.createElement("div");
-  div.textContent = text;
-  return div.innerHTML;
+function settingsForCollection(collection) {
+  const settings = { ...browserState.settings, vector_backend: collection.backend };
+  if (collection.source) {
+    settings.source = collection.source;
+    const field = getModelField(collection.source);
+    if (field && collection.model) settings[field] = collection.model;
+  }
+  return settings;
 }
 
 /**
@@ -2151,6 +2229,8 @@ function bindCollectionCardEvents() {
             `Deleted collection "${collection.name}" and its VectHare metadata`,
             "VectHare",
           );
+          // VH-011: rows that had to stay in Milvus' older shared store.
+          for (const note of result.notes || []) toastr.info(note, "VectHare", { timeOut: 15000 });
         } else if (result.vectorsDeleted && result.absenceVerified) {
           toastr.error(
             `Vectors were deleted but the metadata cleanup did not finish: ${result.errors.join(", ")}. ` +
@@ -2388,7 +2468,14 @@ function bindCollectionCardEvents() {
           throw new Error(reason || response.statusText || `HTTP ${response.status}`);
         }
 
-        toastr.success("Opened collection folder", "VectHare");
+        // VH-060: on a shared server the folder is not on this device; show where it is.
+        const result = await response.json().catch(() => ({}));
+        if (result?.opened === false) {
+          toastr.info(`${escapeHtml(result.reason || "The folder is on the server")}:<br><code>${escapeHtml(result.path || "")}</code>`,
+            "VectHare: Collection folder", { timeOut: 20000, escapeHtml: false });
+        } else {
+          toastr.success("Opened collection folder", "VectHare");
+        }
       } catch (error) {
         console.error("VectHare: Failed to open folder", error);
         toastr.error(error.message, "VectHare: Could not open the folder");
@@ -2420,10 +2507,7 @@ function bindCollectionCardEvents() {
           return;
         }
 
-        const collectionSettings = {
-          ...browserState.settings,
-          vector_backend: collection.backend,
-        };
+        const collectionSettings = settingsForCollection(collection);
 
         // Use unified plugin endpoint
         const requestBody = {
@@ -2653,13 +2737,15 @@ function updateStats(rows) {
   let invalid = 0;
   let ownershipUnverified = 0;
   let notVectHareCount = 0;
+  let stBuiltInCount = 0;
   let unverified = 0;
   let chunks = 0;
   let countsUnverified = 0;
   for (const row of list) {
     // Counted alongside its bucket, never instead of it: a collection that is
     // not VectHare's still exists if the backend says so.
-    if (row.metadataRecord?.foreign) notVectHareCount++;
+    if (row.metadataRecord?.sillyTavernBuiltIn) stBuiltInCount++;
+    else if (row.metadataRecord?.foreign) notVectHareCount++;
     if (row.existence === "present") physical++;
     else if (row.presence === "metadata-only") metadataOnly++;
     else if (row.presence === "invalid-metadata") invalid++;
@@ -2677,6 +2763,7 @@ function updateStats(rows) {
   const parts = [`${physical} Collection${physical === 1 ? "" : "s"}`];
   if (metadataOnly) parts.push(`${metadataOnly} Metadata Only`);
   if (invalid) parts.push(`${invalid} Invalid Metadata`);
+  if (stBuiltInCount) parts.push(`${stBuiltInCount} SillyTavern Built-in`);
   if (notVectHareCount) parts.push(`${notVectHareCount} Not VectHare-Owned`);
   if (ownershipUnverified) parts.push(`${ownershipUnverified} Ownership Unverified`);
 
@@ -2687,7 +2774,8 @@ function updateStats(rows) {
     `${physical} collection(s) whose existence was confirmed at their recorded destination, empty ones included`,
     `${metadataOnly} entr(y/ies) confirmed absent with a validated VectHare metadata record`,
     `${invalid} entr(y/ies) whose VectHare record is malformed, incomplete or not a record at all`,
-    `${notVectHareCount} of the entries above carry no VectHare marker (most likely SillyTavern's own or another extension's)`,
+    `${stBuiltInCount} of the entries above are SillyTavern's own built-in vectors (chats, files or World Info made by its Vector Storage)`,
+    `${notVectHareCount} of the entries above carry no VectHare marker (most likely another extension's, or a SillyTavern collection VectHare could not recognise)`,
     `${ownershipUnverified} entr(y/ies) whose VectHare ownership could not be established`,
     `${unverified} entr(y/ies) whose existence could not be checked at their recorded destination`,
     `${chunks} chunks counted from verified backend counts only`,
@@ -2800,7 +2888,7 @@ function openRenameDialog(collectionId, currentName) {
       }
 
       closeRenameDialog();
-      refreshCollections(); // Reload to get updated names
+      refreshCollections({ reloadStore: true, invalidateInventory: true }); // Reload to get updated names
 
       if (newName) {
         toastr.success(`Renamed to "${newName}"`, "VectHare");
@@ -2876,13 +2964,13 @@ function openModelSwitcher(collection) {
 
       return `
             <div class="vecthare-model-item ${isActive ? "vecthare-model-active" : ""}"
-                 data-model-path="${model.path}">
+                 data-model-path="${escapeHtml(model.path)}">
                 <div class="vecthare-model-item-info">
                     <span class="vecthare-model-name">
                         ${isActive ? '<i class="fa-solid fa-check"></i>' : '<i class="fa-solid fa-cube"></i>'}
-                        ${modelName}
+                        ${escapeHtml(modelName)}
                     </span>
-                    <span class="vecthare-model-chunks">${model.chunkCount} ${chunkLabel}</span>
+                    <span class="vecthare-model-chunks">${model.chunkCount} ${escapeHtml(chunkLabel)}</span>
                 </div>
                 ${
                   isActive
@@ -3734,7 +3822,7 @@ function saveActivation() {
   }
 
   closeActivationEditor();
-  refreshCollections();
+  refreshCollections({ reloadStore: true, invalidateInventory: true });
   toastr.success("Collection settings saved", "VectHare");
 }
 
@@ -3767,7 +3855,7 @@ function renderConditionRules() {
 function renderConditionRule(rule, index) {
   const typeOptions = CONDITION_TYPES.map(
     (t) =>
-      `<option value="${t.value}" ${rule.type === t.value ? "selected" : ""}>${t.label}</option>`,
+      `<option value="${escapeHtml(t.value)}" ${rule.type === t.value ? "selected" : ""}>${escapeHtml(t.label)}</option>`,
   ).join("");
 
   return `
@@ -3803,7 +3891,7 @@ function renderConditionSettings(rule, index) {
                     <div class="vecthare-pattern-row">
                         <textarea class="vecthare-pattern-input" placeholder="Patterns (one per line)&#10;Plain text or regex: /pattern/i"
                                   data-field="patterns" data-rule-index="${index}"
-                                  rows="3">${(settings.patterns || settings.values || []).join("\n")}</textarea>
+                                  rows="3">${escapeHtml((settings.patterns || settings.values || []).join("\n"))}</textarea>
                     </div>
                     <div class="vecthare-pattern-options">
                         <div class="vecthare-option-row">
@@ -3816,7 +3904,7 @@ function renderConditionSettings(rule, index) {
                         <div class="vecthare-option-row">
                             <label>Scan depth:</label>
                             <input type="number" data-field="scanDepth" data-rule-index="${index}"
-                                   min="1" max="100" value="${settings.scanDepth || 10}">
+                                   min="1" max="100" value="${escapeHtml(settings.scanDepth || 10)}">
                             <small>messages</small>
                         </div>
                         <div class="vecthare-option-row">
@@ -3842,7 +3930,7 @@ function renderConditionSettings(rule, index) {
     case "characterPresent":
       return `
                 <input type="text" placeholder="Character names (comma-separated)"
-                       value="${(settings.values || []).join(", ")}"
+                       value="${escapeHtml((settings.values || []).join(", "))}"
                        data-field="values" data-rule-index="${index}">
                 <select data-field="matchType" data-rule-index="${index}">
                     <option value="any" ${settings.matchType === "any" ? "selected" : ""}>Any matches</option>
@@ -3866,7 +3954,7 @@ function renderConditionSettings(rule, index) {
     case "emotion":
       const emotionOptions = VALID_EMOTIONS.map(
         (e) =>
-          `<option value="${e}" ${(settings.values || []).includes(e) ? "selected" : ""}>${e}</option>`,
+          `<option value="${escapeHtml(e)}" ${(settings.values || []).includes(e) ? "selected" : ""}>${escapeHtml(e)}</option>`,
       ).join("");
       const expressionsStatus = getExpressionsExtensionStatus();
       return `
@@ -3899,7 +3987,7 @@ function renderConditionSettings(rule, index) {
     case "generationType":
       const genOptions = VALID_GENERATION_TYPES.map(
         (g) =>
-          `<option value="${g}" ${(settings.values || []).includes(g) ? "selected" : ""}>${g}</option>`,
+          `<option value="${escapeHtml(g)}" ${(settings.values || []).includes(g) ? "selected" : ""}>${escapeHtml(g)}</option>`,
       ).join("");
       return `
                 <select multiple data-field="values" data-rule-index="${index}" class="vecthare-multi-select">
@@ -3911,7 +3999,7 @@ function renderConditionSettings(rule, index) {
       // Get available world names for the picker
       const availableWorlds = world_names || [];
       const worldOptions = availableWorlds
-        .map((w) => `<option value="${w}">${w}</option>`)
+        .map((w) => `<option value="${escapeHtml(w)}">${escapeHtml(w)}</option>`)
         .join("");
       const selectedValues = settings.values || [];
       return `
@@ -3930,30 +4018,30 @@ function renderConditionSettings(rule, index) {
                         ${selectedValues
                           .map(
                             (v) => `
-                            <span class="vecthare-lorebook-tag" data-value="${v}">
-                                ${v} <button class="vecthare-lorebook-remove" data-value="${v}" data-rule-index="${index}">×</button>
+                            <span class="vecthare-lorebook-tag" data-value="${escapeHtml(v)}">
+                                ${escapeHtml(v)} <button class="vecthare-lorebook-remove" data-value="${escapeHtml(v)}" data-rule-index="${index}">×</button>
                             </span>
                         `,
                           )
                           .join("")}
                     </div>
-                    <input type="hidden" data-field="values" data-rule-index="${index}" value="${selectedValues.join(",")}">
+                    <input type="hidden" data-field="values" data-rule-index="${index}" value="${escapeHtml(selectedValues.join(","))}">
                 </div>
             `;
 
     case "timeOfDay":
       return `
-                <input type="time" value="${settings.startTime || "00:00"}"
+                <input type="time" value="${escapeHtml(settings.startTime || "00:00")}"
                        data-field="startTime" data-rule-index="${index}">
                 <span>to</span>
-                <input type="time" value="${settings.endTime || "23:59"}"
+                <input type="time" value="${escapeHtml(settings.endTime || "23:59")}"
                        data-field="endTime" data-rule-index="${index}">
             `;
 
     case "randomChance":
       return `
                 <input type="number" placeholder="Probability %" min="0" max="100"
-                       value="${settings.probability || 50}"
+                       value="${escapeHtml(settings.probability || 50)}"
                        data-field="probability" data-rule-index="${index}">
                 <span>%</span>
             `;
@@ -4082,7 +4170,7 @@ function bindConditionRuleEvents() {
             .map((entry) => {
               const displayName =
                 entry.comment || entry.key?.join(", ") || `Entry ${entry.uid}`;
-              return `<option value="${entry.uid}" data-key="${entry.key?.join(",") || ""}">${displayName}</option>`;
+              return `<option value="${escapeHtml(entry.uid)}" data-key="${escapeHtml(entry.key?.join(",") || "")}">${escapeHtml(displayName)}</option>`;
             })
             .join("");
           entrySelect.html(
@@ -4155,8 +4243,8 @@ function bindConditionRuleEvents() {
         ? `${worldName}:${entrySelect.find(":selected").text()}`
         : worldName;
       selectedContainer.append(`
-            <span class="vecthare-lorebook-tag" data-value="${valueToAdd}">
-                ${displayName} <button class="vecthare-lorebook-remove" data-value="${valueToAdd}" data-rule-index="${idx}">×</button>
+            <span class="vecthare-lorebook-tag" data-value="${escapeHtml(valueToAdd)}">
+                ${escapeHtml(displayName)} <button class="vecthare-lorebook-remove" data-value="${escapeHtml(valueToAdd)}" data-rule-index="${idx}">×</button>
             </span>
         `);
 
@@ -4562,7 +4650,7 @@ function renderSearchResults(results, query, originalResults = null) {
     return;
   }
 
-  let summaryHtml = `<div class="vecthare-search-summary">Found ${totalResults} result(s) in ${collectionIds.length} collection(s)`;
+  let summaryHtml = `<div class="vecthare-search-summary">Found ${escapeHtml(totalResults)} result(s) in ${collectionIds.length} collection(s)`;
   if (wasFiltered) {
     summaryHtml += ` <span class="vecthare-filter-badge" title="Keyword filter active">🏷️ filtered from ${originalTotal}</span>`;
   }
@@ -4627,7 +4715,7 @@ function renderSearchResults(results, query, originalResults = null) {
       }
 
       html += `
-                <div class="vecthare-search-result" data-collection="${collectionId}" data-hash="${collectionResults.hashes[i]}">
+                <div class="vecthare-search-result" data-collection="${escapeHtml(collectionId)}" data-hash="${escapeHtml(collectionResults.hashes[i])}">
                     ${scoreDisplay}
                     <div class="vecthare-search-result-content">
                         <div class="vecthare-search-result-text">${escapeHtml(preview)}</div>
@@ -4636,9 +4724,9 @@ function renderSearchResults(results, query, originalResults = null) {
                 </div>
 
                 <button class="vecthare-btn-sm vecthare-action-visualize"
-                        data-collection-key="${uniqueKey}"
-                        data-backend="${collection.backend}"
-                        data-source="${collection.source || "transformers"}"
+                        data-collection-key="${escapeHtml(uniqueKey)}"
+                        data-backend="${escapeHtml(collection.backend)}"
+                        data-source="${escapeHtml(collection.source || "transformers")}"
                         title="View and edit chunks in this collection">
                     ${icons.eye(16)} View Chunks
                 </button>
@@ -4674,10 +4762,7 @@ function renderSearchResults(results, query, originalResults = null) {
           return;
         }
 
-        const collectionSettings = {
-          ...browserState.settings,
-          vector_backend: collection.backend,
-        };
+        const collectionSettings = settingsForCollection(collection);
 
         // Use unified plugin endpoint (9c: Qdrant/Milvus through their adapter)
         const data = await listCollectionChunksForBrowser(collection, collectionSettings, {
@@ -4747,9 +4832,9 @@ function renderBulkList() {
     const isSelected = browserState.bulkSelected.has(uniqueKey);
 
     html += `
-            <div class="vecthare-bulk-item ${isSelected ? "selected" : ""}" data-key="${uniqueKey}">
+            <div class="vecthare-bulk-item ${isSelected ? "selected" : ""}" data-key="${escapeHtml(uniqueKey)}">
                 <label class="vecthare-bulk-checkbox">
-                    <input type="checkbox" ${isSelected ? "checked" : ""} data-key="${uniqueKey}">
+                    <input type="checkbox" ${isSelected ? "checked" : ""} data-key="${escapeHtml(uniqueKey)}">
                 </label>
                 <div class="vecthare-bulk-item-info">
                     <span class="vecthare-bulk-item-name">${escapeHtml(collection.name || collection.id)}</span>
@@ -4971,7 +5056,7 @@ function bindBulkEvents() {
 
       browserState.bulkSelected.clear();
       progressTracker.countedStep(panelRun, "Refreshing the list", selectedKeys.length, selectedKeys.length, false);
-      await refreshCollections();
+      await refreshCollections({ reloadStore: true, invalidateInventory: true });
       renderBulkList();
       if (panelRun != null) {
         progressTracker.complete(partialCount === 0 && successCount === selectedKeys.length,
@@ -5023,11 +5108,11 @@ function openCollectionLockDialog(collectionId) {
     const locksHtml = locks.length === 0
         ? '<div class="vecthare-lock-list-empty">No chats locked yet</div>'
         : locks.map((chatId) => `
-            <div class="vecthare-lock-item" data-chat-id="${chatId}">
-                <span class="vecthare-lock-chat-id" title="${chatId}">${chatId}</span>
+            <div class="vecthare-lock-item" data-chat-id="${escapeHtml(chatId)}">
+                <span class="vecthare-lock-chat-id" title="${escapeHtml(chatId)}">${escapeHtml(chatId)}</span>
                 <div class="vecthare-lock-item-actions">
                     ${String(chatId) === String(currentChatId) ? '<span class="vecthare-lock-badge-current">Current</span>' : ''}
-                    <button class="vecthare-lock-remove-btn" data-chat-id="${chatId}" title="Remove lock">
+                    <button class="vecthare-lock-remove-btn" data-chat-id="${escapeHtml(chatId)}" title="Remove lock">
                         <i class="fa-solid fa-trash"></i>
                     </button>
                 </div>
@@ -5040,14 +5125,14 @@ function openCollectionLockDialog(collectionId) {
         : characterLocks.map((charId) => {
             const charName = characters[charId]?.data?.name || `Character ${charId}`;
             return `
-                <div class="vecthare-lock-item" data-character-id="${charId}">
+                <div class="vecthare-lock-item" data-character-id="${escapeHtml(charId)}">
                     <span class="vecthare-lock-character-name">
                         <i class="fa-solid fa-user"></i>
-                        ${charName}
+                        ${escapeHtml(charName)}
                     </span>
                     <div class="vecthare-lock-item-actions">
                         ${String(charId) === String(currentCharacterId) ? '<span class="vecthare-lock-badge-current">Active</span>' : ''}
-                        <button class="vecthare-lock-remove-char-btn" data-character-id="${charId}" title="Remove lock">
+                        <button class="vecthare-lock-remove-char-btn" data-character-id="${escapeHtml(charId)}" title="Remove lock">
                             <i class="fa-solid fa-trash"></i>
                         </button>
                     </div>
@@ -5087,7 +5172,7 @@ function openCollectionLockDialog(collectionId) {
                         <div class="vecthare-lock-list">
                             ${locksHtml}
                         </div>
-                        <p class="${chatHintClass}">${chatHintText}</p>
+                        <p class="${escapeHtml(chatHintClass)}">${escapeHtml(chatHintText)}</p>
                         <button id="vecthare_lock_add_current" class="vecthare-btn-sm vecthare-btn-primary" ${!currentChatId || locks.includes(currentChatId) ? 'disabled' : ''}>
                             <i class="fa-solid fa-plus"></i> Lock to Current Chat
                         </button>
@@ -5101,7 +5186,7 @@ function openCollectionLockDialog(collectionId) {
                         <div class="vecthare-lock-list">
                             ${charLocksHtml}
                         </div>
-                        <p class="${charHintClass}">${charHintText}</p>
+                        <p class="${escapeHtml(charHintClass)}">${escapeHtml(charHintText)}</p>
                         <button id="vecthare_lock_add_character" class="vecthare-btn-sm vecthare-btn-primary" ${!currentCharacterId || characterLocks.includes(currentCharacterId) ? 'disabled' : ''}>
                             <i class="fa-solid fa-plus"></i> Lock to Current Character
                         </button>

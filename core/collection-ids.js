@@ -510,6 +510,23 @@ export async function reattachChatCollection(collectionId, savedRec, ctx = getCo
 const isVectHareChatCollection = id =>
     typeof id === 'string' && id.startsWith(COLLECTION_PREFIXES.VECTHARE_CHAT);
 
+/**
+ * VH-083: a chat whose old claim names a character or chat file that no longer
+ * exists cannot be verified, so VectHare will not guess which collection is
+ * its own. The user can choose to start a new collection for it; the old
+ * collection is kept untouched. The choice applies to this chat in this page.
+ */
+const freshStartRequests = new Set();
+const freshKey = snap => JSON.stringify([snap.owner?.type, snap.owner?.id, snap.chat]);
+export function requestFreshChatCollection(ctx = getContext()) {
+    const snap = currentSnapshot(ctx);
+    if (!snap.owner || !snap.chat) return false;
+    freshStartRequests.add(freshKey(snap));
+    return true;
+}
+const provisionalOr = (snap, opts, retireId = null) => freshStartRequests.has(freshKey(snap))
+    ? commitFresh(snap, opts, retireId) : { state: 'provisional', writable: false, unverifiedClaim: true };
+
 export function ensureChatBinding(ctx = getContext(), opts = {}) {
     const snap = currentSnapshot(ctx);
     if (!snap.owner || !snap.chat) return Promise.resolve({ state: 'unbound', writable: false });
@@ -656,8 +673,13 @@ async function resolveChatBinding(snap, opts = { create: true }) {
         if (bindingMatches(snap, id, rec)) {
             // One-time migration of a verified historical ST claim into our
             // existing VectHare-owned settings. Never rewrite the chat header.
+            // VH-083: a fresh collection made for a chat that carries someone
+            // else's claim records that claim as its source; it is not migrated
+            // again (that commit refused it and left the chat read-only).
+            const freshFromCopiedClaim = snap.claim && rec.sourceClaimId === snap.claim.collectionId &&
+                rec.sourceClaimOwner === claimOwnerKey(snap.claim) && rec.sourceClaimChat === normChat(snap.claim.chat);
             if (rec.bindingKind !== 'vecthare-settings' ||
-                (snap.claim && (claimOwnerKey(snap.claim) !== ownerKey(snap.owner) ||
+                (snap.claim && !freshFromCopiedClaim && (claimOwnerKey(snap.claim) !== ownerKey(snap.owner) ||
                     normChat(snap.claim.chat) !== snap.chat))) {
                 return commit(snap, id, rec);
             }
@@ -700,7 +722,7 @@ async function resolveChatBinding(snap, opts = { create: true }) {
                     ? (getContext().characters || []).some(char => char.avatar === original.id)
                     : (getContext().groups || []).some(group => String(group.id) === original.id)
             );
-            return knownOwner ? commitFresh(snap, opts) : { state: 'provisional', writable: false };
+            return knownOwner ? commitFresh(snap, opts) : provisionalOr(snap, opts);
         }
         if (previous?.status === 'quarantined') return commitFresh(snap, opts);
         if (previous) {
@@ -716,7 +738,7 @@ async function resolveChatBinding(snap, opts = { create: true }) {
             if (copiedBranch) return commitFresh(snap, opts);
             const originalExists = await chatFileExists(previous.owner, previous.chat);
             if (originalExists === true) return commitFresh(snap, opts);
-            return { state: 'provisional', writable: false };
+            return provisionalOr(snap, opts);
         }
         // An unregistered claim naming another file may be a copied branch
         // whose parent was deleted. Never silently adopt that old collection.

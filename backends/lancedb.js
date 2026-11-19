@@ -1,3 +1,4 @@
+import { itemMetadata } from './item-metadata.js';
 import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
@@ -102,7 +103,8 @@ export class LanceDBBackend extends VectorBackend {
                 collectionId: actualCollectionId,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                limit: VECTOR_LIST_LIMIT, // Get all for hash comparison
+                limit: VECTOR_LIST_LIMIT,
+                allHashes: true, // VH-027: every hash, not the first VECTOR_LIST_LIMIT
             }),
         });
 
@@ -112,7 +114,13 @@ export class LanceDBBackend extends VectorBackend {
         }
 
         const data = await response.json();
-        return data.items ? data.items.map(item => item.hash) : [];
+        // VH-027: the plugin answers allHashes with every hash and complete:true.
+        // An older plugin ignores it and returns a capped page: never treat that as everything.
+        if (data.complete === true && Array.isArray(data.items)) return data.items.map(item => item.hash);
+        if (Array.isArray(data.items) && data.hasMore === false && Number(data.total) === data.items.length) {
+            return data.items.map(item => item.hash);
+        }
+        throw new Error(`[LanceDB] The stored hash list of ${collectionId} could not be read completely (update the Similharity plugin). Nothing was changed.`);
     }
 
     async insertVectorItems(collectionId, items, settings) {
@@ -130,19 +138,7 @@ export class LanceDBBackend extends VectorBackend {
                     text: item.text,
                     index: item.index,
                     vector: item.vector,
-                    metadata: {
-                        ...item.metadata,
-                        // Pass through VectHare-specific fields
-                        importance: item.importance,
-                        keywords: item.keywords,
-                        customWeights: item.customWeights,
-                        disabledKeywords: item.disabledKeywords,
-                        chunkGroup: item.chunkGroup,
-                        conditions: item.conditions,
-                        summary: item.summary,
-                        isSummaryChunk: item.isSummaryChunk,
-                        parentHash: item.parentHash,
-                    } || {},
+                    metadata: itemMetadata(item),
                 })),
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),

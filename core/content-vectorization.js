@@ -138,7 +138,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
             setCollectionMeta(rebuild.collectionId, {
                 contentType,
                 sourceName: source.name || source.filename || source.id || contentType,
-                scope: settings.scope || 'global',
+                scope: contentType === 'chat' ? 'chat' : (settings.scope || 'global'), // a chat's own collection is used only in that chat
                 ...(Number.isSafeInteger(rebuild.chunkCount) ? { chunkCount: rebuild.chunkCount } : {}),
                 createdAt: new Date().toISOString(),
                 settings: {
@@ -167,7 +167,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
         setCollectionMeta(binding.collectionId, {
             contentType,
             sourceName: source.name || source.filename || source.id || contentType,
-            scope: settings.scope || 'global',
+            scope: contentType === 'chat' ? 'chat' : (settings.scope || 'global'), // a chat's own collection is used only in that chat
             ...(Number.isSafeInteger(result.indexedChunkCount) ? { chunkCount: result.indexedChunkCount } : {}),
             createdAt: previousMeta.createdAt || new Date().toISOString(),
             settings: {
@@ -183,6 +183,10 @@ export async function vectorizeContent({ contentType, source, settings }) {
     const sourceName = source.name || source.filename || source.id || contentType;
     let initialConfig;
     const panelRunId = progressTracker.show(`Vectorizing ${type.label || contentType}`, 4, 'Steps');
+    // VH-056: a collection this run created (new id, verified empty before the
+    // first write) is removed again if the run fails part-way.
+    let createdByThisRun = null;
+    let createdSettings = null;
     progressTracker.setRunSettings(
         describeEffectiveSettings(vecthareSettings, { 'Content': type.label || contentType }),
         'as selected for this run');
@@ -305,6 +309,11 @@ export async function vectorizeContent({ contentType, source, settings }) {
             }
         }
 
+        if (!liveChatSource && initiallyEmpty) {
+            createdByThisRun = collectionId;
+            createdSettings = vecthareSettings;
+        }
+
         // The callback runs after each successfully-written batch. Keep its
         // persistence promise so partial success also records first settings.
         let initialConfigSave = null;
@@ -389,9 +398,8 @@ export async function vectorizeContent({ contentType, source, settings }) {
 
         // Register collection in the registry so it's discoverable
         // The registry must match the saved backend/source for later Repair.
-        const registryKey = liveChatSource
-            ? `${vecthareSettings.vector_backend || 'standard'}:${vecthareSettings.source || 'transformers'}:${collectionId}`
-            : collectionId;
+        // VH-028: every collection gets the backend:source:id form.
+        const registryKey = `${vecthareSettings.vector_backend || 'standard'}:${vecthareSettings.source || 'transformers'}:${collectionId}`;
         registerCollection(registryKey);
         vhLog(`VectHare: Registered collection ${registryKey}`);
 
@@ -404,9 +412,44 @@ export async function vectorizeContent({ contentType, source, settings }) {
             collectionId,
         };
     } catch (error) {
+        if (createdByThisRun) await removeIncompleteCollection(createdByThisRun, createdSettings, error);
         progressTracker.addError(error.message);
         progressTracker.complete(false, 'Vectorization failed', panelRunId);
         throw error;
+    }
+}
+
+/**
+ * VH-056: a Content Vectorizer run that created a collection and then failed
+ * part-way removes what it wrote (the collection is new and holds nothing
+ * else), so a retry does not leave a second, partial copy that RAG searches
+ * too. If the removal cannot be confirmed, the leftover is switched off and
+ * marked incomplete instead.
+ * @param {string} collectionId
+ * @param {object} settings The settings the run wrote with
+ * @param {Error} cause
+ */
+async function removeIncompleteCollection(collectionId, settings, cause) {
+    try {
+        const { deleteCollection } = await import('./collection-loader.js');
+        const registryKey = `${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}`;
+        const result = await deleteCollection(collectionId, settings, registryKey, {});
+        if (result?.success) {
+            vhLog(`VectHare: Removed the incomplete collection ${collectionId} after a failed run`);
+            try {
+                toastr.info('The partly written collection was removed. Fix the problem and vectorize again.', 'VectHare');
+            } catch { /* no toast */ }
+            return;
+        }
+        throw new Error((result?.errors || []).join('; ') || 'deletion not confirmed');
+    } catch (error) {
+        console.warn(`VectHare: Could not remove the incomplete collection ${collectionId}:`, error?.message || error);
+        try {
+            setCollectionMeta(collectionId, { enabled: false,
+                incompleteRun: { at: new Date().toISOString(), reason: String(cause?.message || cause).slice(0, 300) } });
+            toastr.warning('The partly written collection could not be removed, so it was switched off. ' +
+                'Delete it in the Database Browser, then vectorize again.', 'VectHare', { timeOut: 12000 });
+        } catch { /* best effort */ }
     }
 }
 

@@ -1,4 +1,5 @@
 import { vhLog } from '../utils/log.js';
+import { safePatternTest, riskyRegexReason } from './safe-regex.js';
 /**
  * ============================================================================
  * VECTHARE CONDITIONAL ACTIVATION SYSTEM
@@ -150,7 +151,7 @@ function parseEmotionPattern(pattern) {
         if (match) {
             try {
                 const regex = new RegExp(match[1], match[2]);
-                return (text) => regex.test(text);
+                return (text) => safePatternTest(regex, text, 'emotion condition'); // VH-043
             } catch (e) {
                 console.warn(`VectHare: Invalid regex pattern: ${pattern}`, e);
                 return () => false;
@@ -241,7 +242,7 @@ function evaluatePatternCondition(rule, context) {
                 const regexPattern = pattern.slice(1, lastSlash);
                 const flags = pattern.slice(lastSlash + 1) || (caseSensitive ? '' : 'i');
                 const regex = new RegExp(regexPattern, flags);
-                return regex.test(searchText);
+                return safePatternTest(regex, searchText, 'pattern condition'); // VH-043
             } catch (e) {
                 console.warn(`VectHare: Invalid pattern regex: ${pattern}`, e);
                 return false;
@@ -1158,6 +1159,15 @@ export function validateConditionRule(rule) {
                 errors.push('Cooldown messages must be 0 or positive');
             }
             break;
+    }
+
+    // VH-043: a /regex/ value with nested repetition can freeze the page on every
+    // generation; refuse it here (matching also skips it, for imported rules).
+    const regexValues = [rule.value, ...(rule.settings?.values || []), ...(rule.settings?.patterns || [])]
+        .filter(v => typeof v === 'string' && v.startsWith('/') && v.lastIndexOf('/') > 0);
+    for (const value of regexValues) {
+        const risky = riskyRegexReason(value.slice(1, value.lastIndexOf('/')));
+        if (risky) errors.push(`Pattern ${value} can freeze the page: ${risky}`);
     }
 
     return {

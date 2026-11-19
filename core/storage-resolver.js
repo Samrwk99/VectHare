@@ -24,6 +24,7 @@
  * import it without import cycles.
  */
 
+import { readPluginCapabilities, resetPluginCapabilitiesCache, backendWriteRefusal } from './plugin-health.js';
 import { vecthareState } from './vecthare-store.js';
 import { getValidProviderIds } from './providers.js';
 
@@ -184,22 +185,13 @@ export function newCollectionLayout(settings, capable, backend = settings?.vecto
 }
 
 // Plugin capabilities, read once per page load (reload tabs after updating).
-let capabilitiesPromise = null;
+// VH-006: a failed read is not cached and throws (status unknown) instead of
+// looking like an old plugin.
 export function pluginCapabilities() {
-    capabilitiesPromise ??= (async () => {
-        try {
-            const response = await fetch('/api/plugins/similharity/health');
-            if (!response.ok) return {};
-            const data = await response.json();
-            return data?.capabilities && typeof data.capabilities === 'object' ? data.capabilities : {};
-        } catch {
-            return {};
-        }
-    })();
-    return capabilitiesPromise;
+    return readPluginCapabilities();
 }
 /** For probes: forget the cached capabilities. */
-export function resetPluginCapabilities() { capabilitiesPromise = null; }
+export function resetPluginCapabilities() { resetPluginCapabilitiesCache(); }
 
 /** 9c: whether the plugin scopes the new layouts itself (P7 flag). */
 export async function scopedTenancySupported() {
@@ -215,6 +207,8 @@ export class StorageReadOnlyError extends Error {
     constructor(message) { super(message); this.code = 'VH_STORAGE_READ_ONLY'; }
 }
 export async function assertStorageWritable(collectionId, settings, backend = settings?.vector_backend) {
+    const refusal = backendWriteRefusal(backend);
+    if (refusal) throw new StorageReadOnlyError(refusal);
     const storage = resolveStorage(collectionId, settings, backend);
     const capable = await scopedTenancySupported();
     if (storage.v2 && !capable) {

@@ -37,7 +37,11 @@ const MOVE = '/api/plugins/similharity/storage/move';
 async function post(url, body) {
     const response = await fetch(url, { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify(body) });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data?.error || `HTTP ${response.status}`);
+    if (!response.ok) {
+        const error = new Error(data?.error || `HTTP ${response.status}`);
+        error.status = response.status;
+        throw error;
+    }
     return data;
 }
 
@@ -66,7 +70,7 @@ export async function planStorageMove(collectionId, settings) {
     const backend = normalizeBackend(settings?.vector_backend);
     const id = bareCollectionId(collectionId);
     if (!['qdrant', 'milvus'].includes(backend)) return { ok: false, reason: 'Only Qdrant and Milvus collections have more than one storage layout.' };
-    if (!await scopedTenancySupported()) return { ok: false, reason: 'The installed Similharity plugin cannot move storage. Update it (13.32 or later).' };
+    if (!await scopedTenancySupported()) return { ok: false, reason: 'The installed Similharity plugin cannot move storage. Install the plugin that comes with this VectHare.' };
     const located = await ensureStorageLocator(id, settings);
     if (located.status === 'conflict') return { ok: false, reason: `Its saved settings are in more than one place (${located.locations.join(', ')}).` };
     const from = getStorageLocator(id);
@@ -122,25 +126,80 @@ export async function moveCollectionStorage(collectionId, settings, { onPhase } 
             return { success: false, reason: `Its vectors could not be confirmed at ${plan.from.physical} (${before.reason || before.existence}); nothing was moved.`, warnings };
         }
         const sourceCount = before.countTrusted === true && Number.isSafeInteger(before.count) ? before.count : null;
-        const stillUnchanged = async () => {
-            if (sourceCount === null) return true;
-            const now = await verifyPhysicalCollectionExistence(id, settings, where);
-            return !(now.countTrusted === true && now.count !== sourceCount);
+        // VH-012: "unchanged" used to be answered "yes" whenever the count could
+        // not be trusted. The hash list taken now is compared instead in that
+        // case; a list that cannot be read counts as changed (nothing switches).
+        const hashKey = list => [...new Set((list || []).map(String))].sort().join(',');
+        const { getSavedHashes } = await import('./core-vector-api.js');
+        let sourceHashes = null;
+        try { sourceHashes = hashKey(await getSavedHashes(id, settings)); } catch { sourceHashes = null; }
+        const sameHashes = async () => {
+            if (sourceHashes === null) return false;
+            try { return hashKey(await getSavedHashes(id, settings)) === sourceHashes; } catch { return false; }
         };
+        const stillUnchanged = async () => {
+            if (sourceCount === null) return sameHashes();
+            const now = await verifyPhysicalCollectionExistence(id, settings, where);
+            if (now.countTrusted !== true) return sameHashes();
+            return now.count === sourceCount;
+        };
+
+        // VH-010: record the target as a pending copy BEFORE copying, so a move
+        // that is interrupted or fails half-way leaves a copy the Storage tab
+        // can show and delete ("Leftover copy from an unfinished move").
+        const pendingEntry = { backend, layout: plan.to, pending: true, startedAt: new Date().toISOString(),
+            physical: backend === 'qdrant' && plan.to === 'per-collection' ? id : null };
+        try {
+            await setPendingCopy(id, null, pendingEntry);
+        } catch (error) {
+            return { success: false, reason: `The move could not be recorded first (${error.message}); nothing was moved.`, warnings };
+        }
+        let pendingNow = pendingEntry;
 
         // 1-3: copy and verify on the server.
         onPhase?.('Copying vectors…');
-        const copy = await post(MOVE, { action: 'copy', backend, collectionId: id,
-            from: locationOf(plan.from), to: { layout: plan.to },
-            embedding: { source: config.embedding.provider, model: config.embedding.model || '' } });
+        let copy;
+        try {
+            copy = await post(MOVE, { action: 'copy', backend, collectionId: id,
+                from: locationOf(plan.from), to: { layout: plan.to },
+                embedding: { source: config.embedding.provider, model: config.embedding.model || '' } });
+        } catch (error) {
+            // The plugin refused before writing (or the answer was lost). The
+            // pending record stays only if something may have been written.
+            if (error?.status >= 400 && error.status < 500) {
+                await setPendingCopy(id, pendingNow, null).catch(() => {});
+                const earlier = (getStoredCollectionRecord(id)?.record?.storageOldCopies || [])
+                    .some(entry => entry?.pending === true && entry.layout === plan.to);
+                if (earlier && /already holds a copy/i.test(error.message)) {
+                    return { success: false, warnings, reason: 'A leftover copy from an earlier unfinished move is in the way. ' +
+                        'Delete it in the Storage tab ("Delete leftover copy"), then move again; nothing was moved.' };
+                }
+            }
+            throw error;
+        }
+        if (copy?.target?.physical) {
+            const known = { ...pendingNow, physical: copy.target.physical, ...(copy.target.dim ? { dim: copy.target.dim } : {}) };
+            await setPendingCopy(id, pendingNow, known).catch(error =>
+                warnings.push(`The new copy could not be recorded yet (${error.message}).`));
+            pendingNow = known;
+        }
         if (await lease.touch() === false) {
-            await post(MOVE, { action: 'delete-copy', backend, collectionId: id, location: copy.target }).catch(() => {});
+            try {
+                await post(MOVE, { action: 'delete-copy', backend, collectionId: id, location: copy.target });
+                await setPendingCopy(id, pendingNow, null).catch(() => {});
+            } catch { /* stays listed as a leftover copy (VH-010) */ }
             return { success: false, reason: 'Another tab took over this chat while it was being copied; nothing was moved.', warnings };
         }
         const target = locatorForPhysical(id, backend, copy.target?.physical, copy.target?.dim ?? null);
         const removeTarget = async () => {
-            try { await post(MOVE, { action: 'delete-copy', backend, collectionId: id, location: copy.target }); }
-            catch (error) { warnings.push(`The partial copy in ${copy.target?.physical} could not be removed: ${error.message}`); }
+            try {
+                await post(MOVE, { action: 'delete-copy', backend, collectionId: id, location: copy.target });
+                // VH-010: removed, so it is no longer a leftover.
+                await setPendingCopy(id, pendingNow, null).catch(() => {});
+            } catch (error) {
+                warnings.push(`The partial copy in ${copy.target?.physical} could not be removed: ${error.message}. ` +
+                    'It is listed in the Storage tab as a leftover copy you can delete.');
+            }
         };
         if (!target || (sourceCount !== null && copy.sourceCount !== sourceCount)) {
             await removeTarget();
@@ -149,6 +208,12 @@ export async function moveCollectionStorage(collectionId, settings, { onPhase } 
 
         // 4: the target's saved settings (written once).
         onPhase?.('Saving settings at the new location…');
+        // VH-012: the copy can take long; make sure the lease still holds before
+        // writing anything at the new location.
+        if (await lease.touch() === false) {
+            await removeTarget();
+            return { success: false, reason: 'Another tab took over this chat while it was being copied; nothing was moved.', warnings };
+        }
         const newStorage = storageFor(config.storage, plan.to);
         const { identityLedger, ...snapshotFields } = config;
         const snapshot = { ...snapshotFields, ...(identityLedger === 1 ? { identityLedger } : {}), storage: newStorage,
@@ -170,6 +235,11 @@ export async function moveCollectionStorage(collectionId, settings, { onPhase } 
         // The old copy remembers its own saved-settings binding, so deleting it
         // later can also delete the identity ledger that belongs to it.
         const oldCopy = { ...plan.from, ...(config.identityLedger === 1 ? { ledgerBinding: oldBinding } : {}) };
+        // VH-012: and again right before the switch-over.
+        if (await lease.touch() === false) {
+            await removeTarget();
+            return { success: false, reason: 'Another tab took over this chat during the move; nothing was moved.', warnings };
+        }
         const committed = await commitMove(id, settings, plan.from, oldCopy, target, stillUnchanged);
         if (!committed.ok) {
             if (committed.uncertain) {
@@ -228,7 +298,10 @@ async function commitMove(id, settings, from, oldCopy, target, stillUnchanged) {
             const oldCopies = Array.isArray(collections[key]?.storageOldCopies) ? collections[key].storageOldCopies : [];
             setCollectionMeta(key, {
                 storage: target,
-                storageOldCopies: [...oldCopies.filter(copy => !(copy.physical === target.physical && copy.layout === target.layout)),
+                // VH-010: the target is the collection's home now - no longer a
+                // pending copy (whether or not its store was known when recorded).
+                storageOldCopies: [...oldCopies.filter(copy => !(copy.physical === target.physical && copy.layout === target.layout) &&
+                    !(copy.pending === true && copy.physical == null && copy.layout === target.layout)),
                     { ...oldCopy, movedAt: new Date().toISOString() }],
             });
             // R13: the chat's recorded store destination follows the collection
@@ -282,12 +355,100 @@ async function commitMove(id, settings, from, oldCopy, target, stillUnchanged) {
  * vectors and saved settings are removed (verified empty by the plugin), and
  * the identity ledger that belonged to it.
  */
+/**
+ * VH-053: deletes every recorded old copy of a collection (used before the
+ * collection itself is deleted). Stops at the first copy that cannot be deleted.
+ * @returns {Promise<{success: boolean, deleted: number, reason?: string, warnings: string[]}>}
+ */
+export async function deleteAllOldStorageCopies(collectionId, settings) {
+    const id = bareCollectionId(collectionId);
+    const copies = getStoredCollectionRecord(id)?.record?.storageOldCopies || [];
+    const warnings = [];
+    let deleted = 0;
+    for (const copy of copies) {
+        const result = await deleteOldStorageCopy(id, settings, copy);
+        warnings.push(...(result.warnings || []));
+        if (!result.success) {
+            return { success: false, deleted, warnings,
+                reason: `its old copy (moved) in ${copy.physical || copy.layout} could not be deleted: ${result.reason}` };
+        }
+        deleted++;
+    }
+    return { success: true, deleted, warnings };
+}
+
+/**
+ * VH-010: asks the storage report where a leftover copy of `layout` is (the
+ * report matches an unknown pending copy to any location of that layout other
+ * than the collection's current one). null: nothing is there.
+ */
+async function findLeftoverPhysical(id, settings, layout) {
+    const { fetchStorageReport } = await import('./storage-report.js');
+    const result = await fetchStorageReport(settings);
+    if (!result?.ok || !Array.isArray(result.report?.collections)) {
+        throw new Error(result?.reason || 'the storage report is not available');
+    }
+    const row = result.report.collections.find(r => r.collectionId === id);
+    // No row at all means the report could not see this collection: never read
+    // that as "nothing left".
+    if (!row) throw new Error('the storage report does not list this collection');
+    // Any store the report could not read could be the one holding the copy.
+    const backend = normalizeBackend(settings.vector_backend);
+    const storeErrors = [result.report.backends?.[backend]?.error,
+        ...(result.report.sharedStores || []).filter(s => normalizeBackend(s.backend) === backend).map(s => s.error)].filter(Boolean);
+    if (storeErrors.length) throw new Error(`part of the storage could not be read (${storeErrors[0]})`);
+    const hit = (row?.oldCopies || []).find(copy => copy.pending === true && copy.layout === layout &&
+        typeof copy.physical === 'string' && copy.physical && !(copy.count === 0 && copy.note));
+    return hit ? hit.physical : null;
+}
+
+/**
+ * VH-010: replaces one pending-copy entry (`from`, matched by layout, physical
+ * and startedAt) with `to` in the collection's storageOldCopies, or adds `to`
+ * (from = null) or removes `from` (to = null); then saves.
+ */
+async function setPendingCopy(id, from, to) {
+    const record = getStoredCollectionRecord(id);
+    const key = record?.key || findStoredCollectionKey(id) || id;
+    const list = Array.isArray(record?.record?.storageOldCopies) ? record.record.storageOldCopies : [];
+    const isFrom = copy => from && copy?.pending === true && copy.layout === from.layout &&
+        (copy.physical ?? null) === (from.physical ?? null) && copy.startedAt === from.startedAt;
+    const next = [...list.filter(copy => !isFrom(copy)), ...(to ? [to] : [])];
+    setCollectionMeta(key, { storageOldCopies: next });
+    persistVectHareStore();
+    await flushVectHareStore();
+}
+
 export async function deleteOldStorageCopy(collectionId, settings, which) {
     assertStoreAuthoritative('Deleting an old copy');
     const id = bareCollectionId(collectionId);
     const record = getStoredCollectionRecord(id);
-    const listed = (record?.record?.storageOldCopies || [])
-        .find(copy => copy?.physical === which?.physical && copy?.layout === which?.layout);
+    const copies = record?.record?.storageOldCopies || [];
+    const isUnknownPending = copy => copy?.pending === true && copy.physical == null && copy.layout === which?.layout;
+    let listed = copies.find(copy => copy?.physical != null && copy.physical === which?.physical && copy?.layout === which?.layout);
+    // VH-010: a leftover copy recorded before its store was known. The Storage
+    // report names the store it found (which.physical); without that name it is
+    // looked up here, and with nothing left the record is simply removed.
+    // A pending entry whose store is known, asked for without a store name.
+    if (!listed && !which?.physical) {
+        const known = copies.filter(copy => copy?.pending === true && copy.physical != null && copy.layout === which?.layout);
+        if (known.length === 1) listed = known[0];
+    }
+    const unknownPending = !listed && copies.find(isUnknownPending);
+    if (unknownPending) {
+        let named = typeof which?.physical === 'string' && which.physical && which.physical !== 'null' ? which.physical : null;
+        if (!named) {
+            let found;
+            try { found = await findLeftoverPhysical(id, settings, unknownPending.layout); }
+            catch (error) { return { success: false, reason: `Where the leftover copy is could not be checked (${error.message}); nothing was deleted.` }; }
+            if (found === null) {
+                await setPendingCopy(id, unknownPending, null);
+                return { success: true, warnings: ['Nothing was left of that copy; its record was removed.'] };
+            }
+            named = found;
+        }
+        listed = { ...unknownPending, physical: named };
+    }
     if (!listed) return { success: false, reason: 'That location is not recorded as an old copy of this collection.' };
     const backend = normalizeBackend(listed.backend || settings.vector_backend);
     const current = getStorageLocator(id);
@@ -300,7 +461,12 @@ export async function deleteOldStorageCopy(collectionId, settings, which) {
     const warnings = [];
     try {
         await flushVectHareStore();
-        await post(MOVE, { action: 'delete-copy', backend, collectionId: id, location: locationOf(listed) });
+        const removed = await post(MOVE, { action: 'delete-copy', backend, collectionId: id, location: locationOf(listed) });
+        if (Number(removed?.leftShared) > 0) {
+            // VH-011 (option B): Milvus' older shared store.
+            const { sharedLeftoverNote } = await import('./collection-loader.js');
+            warnings.push(sharedLeftoverNote(Number(removed.leftShared)));
+        }
         if (listed.ledgerBinding) {
             try {
                 await post('/api/plugins/similharity/identity-ledger/save', { collectionId: id, binding: listed.ledgerBinding, ledger: null });
@@ -310,7 +476,9 @@ export async function deleteOldStorageCopy(collectionId, settings, which) {
         }
         const fresh = getStoredCollectionRecord(id);
         const remaining = (fresh?.record?.storageOldCopies || [])
-            .filter(copy => !(copy.physical === listed.physical && copy.layout === listed.layout));
+            .filter(copy => !(copy.physical === listed.physical && copy.layout === listed.layout) &&
+                !(unknownPending && copy.pending === true && copy.physical == null && copy.layout === listed.layout &&
+                    copy.startedAt === unknownPending.startedAt));
         setCollectionMeta(fresh?.key || id, { storageOldCopies: remaining });
         await flushVectHareStore();
         return { success: true, warnings };

@@ -10,6 +10,7 @@
  * ============================================================================
  */
 
+import { escapeHtml } from '../utils/html.js';
 import {
     getScenes,
     getSceneStats,
@@ -31,12 +32,6 @@ let isPanelOpen = false;
 // HELPERS
 // ============================================================================
 
-function escapeHtml(str) {
-    if (!str) return '';
-    const div = document.createElement('div');
-    div.textContent = str;
-    return div.innerHTML;
-}
 
 /**
  * Gets preview text for a scene
@@ -96,10 +91,10 @@ function renderSceneCard(scene, index) {
                 <div class="vecthare-scene-card-title">
                     <i class="fa-solid fa-chevron-right vecthare-scene-expand-icon"></i>
                     <span class="vecthare-scene-display-title">${escapeHtml(displayTitle)}</span>
-                    <span class="vecthare-scene-card-range">${rangeText}</span>
+                    <span class="vecthare-scene-card-range">${escapeHtml(rangeText)}</span>
                 </div>
                 <div class="vecthare-scene-card-status">
-                    <span class="vecthare-scene-badge ${statusClass}">${statusText}</span>
+                    <span class="vecthare-scene-badge ${escapeHtml(statusClass)}">${escapeHtml(statusText)}</span>
                     <div class="vecthare-scene-card-actions">
                         <button class="vecthare-scene-card-btn vecthare-scene-jump" title="Jump to scene">
                             <i class="fa-solid fa-arrow-right"></i>
@@ -173,7 +168,7 @@ function renderPanelContent() {
                 ${bodyContent}
             </div>
             <div class="vecthare-scenes-footer">
-                <span class="vecthare-scenes-stats">${statsText}</span>
+                <span class="vecthare-scenes-stats">${escapeHtml(statsText)}</span>
                 <div class="vecthare-scenes-footer-actions">
                     ${scenes.length > 0 ? `
                         <button class="menu_button" id="vecthare_scenes_clear_all">

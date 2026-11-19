@@ -231,7 +231,8 @@ function deduplicateWithActiveEntries(semanticEntries, activeEntries) {
 export function isLorebookVectorized(lorebookName, settings) {
     const collectionId = buildLorebookCollectionId(lorebookName, 'global');
     const collectionRegistry = vecthareState().registry || [];
-    return collectionRegistry.includes(collectionId);
+    // VH-028: registry keys are backend:source:id
+    return collectionRegistry.some(key => key === collectionId || parseRegistryKey(key).collectionId === collectionId);
 }
 
 /**

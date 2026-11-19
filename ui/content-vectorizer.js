@@ -10,6 +10,7 @@
  * ============================================================================
  */
 
+import { escapeHtml } from '../utils/html.js';
 import {
     CONTENT_TYPES,
     CHUNKING_STRATEGIES,
@@ -26,7 +27,7 @@ import {
     LIVE_CHAT_STRATEGIES,
 } from '../core/content-types.js';
 import { extension_settings, getContext } from '../../../../extensions.js';
-import { saveSettingsDebounced, getRequestHeaders } from '../../../../../script.js';
+import { saveSettingsDebounced, getRequestHeaders, chat_metadata } from '../../../../../script.js';
 import { getChatUUID } from '../core/chat-vectorization.js';
 import { callGenericPopup, POPUP_TYPE } from '../../../../popup.js';
 import { openTextCleaningManager } from './text-cleaning-manager.js';
@@ -146,8 +147,8 @@ function createModal() {
                             <select id="vecthare_cv_type_select" class="vecthare-cv-type-dropdown">
                                 <option value="">-- Choose content type --</option>
                                 ${contentTypes.map(type => `
-                                    <option value="${type.id}" ${type.id === currentContentType ? 'selected' : ''}>
-                                        ${type.name}
+                                    <option value="${escapeHtml(type.id)}" ${type.id === currentContentType ? 'selected' : ''}>
+                                        ${escapeHtml(type.name)}
                                     </option>
                                 `).join('')}
                             </select>
@@ -340,7 +341,7 @@ function renderUrlSource(type) {
             <div class="vecthare-cv-url-input-row">
                 <input type="text" id="vecthare_cv_url_input"
                        class="vecthare-input"
-                       placeholder="${options.placeholder || 'https://example.com'}">
+                       placeholder="${escapeHtml(options.placeholder || 'https://example.com')}">
                 <button id="vecthare_cv_fetch_url" class="vecthare-btn-primary">
                     <i class="fa-solid fa-download"></i> Fetch
                 </button>
@@ -390,12 +391,12 @@ function renderChatSource(type) {
                                 <span class="vecthare-cv-stat-label">Messages</span>
                             </div>
                             <div class="vecthare-cv-stat">
-                                <span class="vecthare-cv-stat-value">${context?.name2 || 'Unknown'}</span>
+                                <span class="vecthare-cv-stat-value">${escapeHtml(context?.name2 || 'Unknown')}</span>
                                 <span class="vecthare-cv-stat-label">Character</span>
                             </div>
                         </div>
                         <div class="vecthare-cv-chat-uuid" style="text-align: center; margin-top: 8px;">
-                            <code style="font-size: 0.7em; opacity: 0.6; user-select: all;">${getChatUUID() || 'unknown'}</code>
+                            <code style="font-size: 0.7em; opacity: 0.6; user-select: all;">${escapeHtml(getChatUUID() || 'unknown')}</code>
                         </div>
                         <div class="vecthare-cv-chat-note">
                             <i class="fa-solid fa-info-circle"></i>
@@ -468,12 +469,12 @@ function renderCurrentChatSource(type) {
                     <span class="vecthare-cv-stat-label">Messages</span>
                 </div>
                 <div class="vecthare-cv-stat">
-                    <span class="vecthare-cv-stat-value">${context?.name2 || 'Unknown'}</span>
+                    <span class="vecthare-cv-stat-value">${escapeHtml(context?.name2 || 'Unknown')}</span>
                     <span class="vecthare-cv-stat-label">Character</span>
                 </div>
             </div>
             <div class="vecthare-cv-chat-uuid" style="text-align: center; margin-top: 8px;">
-                <code style="font-size: 0.7em; opacity: 0.6; user-select: all;">${getChatUUID() || 'unknown'}</code>
+                <code style="font-size: 0.7em; opacity: 0.6; user-select: all;">${escapeHtml(getChatUUID() || 'unknown')}</code>
             </div>
             <div class="vecthare-cv-chat-note">
                 <i class="fa-solid fa-info-circle"></i>
@@ -503,7 +504,7 @@ function renderSelectSource(type) {
             </div>
 
             <div class="vecthare-cv-source-panel" data-panel="existing">
-                <label>${options.selectLabel || 'Select'}</label>
+                <label>${escapeHtml(options.selectLabel || 'Select')}</label>
                 <select id="vecthare_cv_source_select" class="vecthare-select">
                     <option value="">-- Select --</option>
                     <!-- Populated dynamically -->
@@ -550,9 +551,9 @@ function renderInputSource(type) {
         <div class="vecthare-cv-input-source">
             <div class="vecthare-cv-input-tabs">
                 ${methods.map((m, i) => `
-                    <button class="vecthare-cv-input-tab ${i === 0 ? 'active' : ''}" data-method="${m.id}">
+                    <button class="vecthare-cv-input-tab ${i === 0 ? 'active' : ''}" data-method="${escapeHtml(m.id)}">
                         <i class="fa-solid ${m.icon}"></i>
-                        <span>${m.name}</span>
+                        <span>${escapeHtml(m.name)}</span>
                     </button>
                 `).join('')}
             </div>
@@ -570,10 +571,10 @@ function renderInputSource(type) {
                     <i class="fa-solid fa-cloud-arrow-up"></i>
                     <span>Drop file here or click to browse</span>
                     <span class="vecthare-cv-upload-formats">
-                        Formats: ${methods.find(m => m.id === 'upload')?.formats?.join(', ') || '.txt, .md'}
+                        Formats: ${escapeHtml(methods.find(m => m.id === 'upload')?.formats?.join(', ') || '.txt, .md')}
                     </span>
                     <input type="file" id="vecthare_cv_doc_file_input"
-                           accept="${methods.find(m => m.id === 'upload')?.formats?.join(',') || '.txt,.md'}" hidden>
+                           accept="${escapeHtml(methods.find(m => m.id === 'upload')?.formats?.join(',') || '.txt,.md')}" hidden>
                 </div>
             </div>
 
@@ -617,7 +618,7 @@ function renderWikiSource(type) {
                 <label>Wiki Type</label>
                 <select id="vecthare_cv_wiki_type" class="vecthare-select">
                     ${options.types.map(t => `
-                        <option value="${t.id}">${t.name}</option>
+                        <option value="${escapeHtml(t.id)}">${escapeHtml(t.name)}</option>
                     `).join('')}
                 </select>
             </div>
@@ -627,7 +628,7 @@ function renderWikiSource(type) {
                 <label>Wiki URL or ID</label>
                 <input type="text" id="vecthare_cv_wiki_url"
                        class="vecthare-input"
-                       placeholder="${options.types[0].placeholder}">
+                       placeholder="${escapeHtml(options.types[0].placeholder)}">
             </div>
 
             <!-- Page Filter (for bulk scraping) -->
@@ -638,7 +639,7 @@ function renderWikiSource(type) {
                 </label>
                 <input type="text" id="vecthare_cv_wiki_filter"
                        class="vecthare-input"
-                       placeholder="${options.filterPlaceholder}">
+                       placeholder="${escapeHtml(options.filterPlaceholder)}">
                 <div class="vecthare-cv-hint">
                     Leave empty to scrape single page, or enter comma-separated page names for bulk scrape
                 </div>
@@ -681,7 +682,7 @@ function renderYouTubeSource(type) {
                 <div class="vecthare-cv-youtube-input-row">
                     <input type="text" id="vecthare_cv_youtube_url"
                            class="vecthare-input"
-                           placeholder="${options.placeholder}">
+                           placeholder="${escapeHtml(options.placeholder)}">
                     <button id="vecthare_cv_fetch_youtube" class="vecthare-btn-primary">
                         <i class="fa-brands fa-youtube"></i> Fetch
                     </button>
@@ -696,7 +697,7 @@ function renderYouTubeSource(type) {
                 </label>
                 <input type="text" id="vecthare_cv_youtube_lang"
                        class="vecthare-input vecthare-input-sm"
-                       placeholder="${options.langPlaceholder}"
+                       placeholder="${escapeHtml(options.langPlaceholder)}"
                        maxlength="5"
                        style="width: 100px;">
                 <div class="vecthare-cv-hint">
@@ -745,7 +746,7 @@ function updateChunkingSection(type) {
 
     strategies.forEach(s => {
         const selected = s.id === selectedStrategyId;
-        strategySelect.append(`<option value="${s.id}" ${selected ? 'selected' : ''}>${s.name}</option>`);
+        strategySelect.append(`<option value="${escapeHtml(s.id)}" ${selected ? 'selected' : ''}>${escapeHtml(s.name)}</option>`);
     });
 
     // Update description
@@ -901,7 +902,7 @@ function renderScopeOptions(type) {
     let chatName = 'No chat';
     if (hasChat) {
         // Try to get a meaningful chat name
-        if (typeof chat_metadata !== 'undefined' && chat_metadata?.chat_name) {
+        if (chat_metadata?.chat_name) {
             chatName = chat_metadata.chat_name;
         } else {
             chatName = `Chat #${context.chatId}`;
@@ -938,13 +939,13 @@ function renderScopeOptions(type) {
             <div class="vecthare-cv-scope-options">
                 ${scopeData.map(scope => `
                     <label class="vecthare-cv-scope-option ${scope.id === defaultScope ? 'selected' : ''} ${!scope.enabled ? 'disabled' : ''}">
-                        <input type="radio" name="vecthare_cv_scope" value="${scope.id}"
+                        <input type="radio" name="vecthare_cv_scope" value="${escapeHtml(scope.id)}"
                                ${scope.id === defaultScope ? 'checked' : ''}
                                ${!scope.enabled ? 'disabled' : ''}>
                         <div class="vecthare-cv-scope-card">
                             <i class="fa-solid ${scope.icon}"></i>
-                            <span class="vecthare-cv-scope-name">${scope.name}</span>
-                            <span class="vecthare-cv-scope-desc">${scope.desc}</span>
+                            <span class="vecthare-cv-scope-name">${escapeHtml(scope.name)}</span>
+                            <span class="vecthare-cv-scope-desc">${escapeHtml(scope.desc)}</span>
                         </div>
                     </label>
                 `).join('')}
@@ -966,9 +967,9 @@ function renderFieldSelection() {
                 ${CHARACTER_FIELDS.map(field => `
                     <label class="vecthare-cv-field-option">
                         <input type="checkbox" name="vecthare_cv_field"
-                               value="${field.id}"
+                               value="${escapeHtml(field.id)}"
                                ${(currentSettings.fields ?? defaults.fields)?.[field.id] ? 'checked' : ''}>
-                        <span class="vecthare-cv-field-name">${field.name}</span>
+                        <span class="vecthare-cv-field-name">${escapeHtml(field.name)}</span>
                     </label>
                 `).join('')}
             </div>
@@ -1057,7 +1058,7 @@ function renderTemporalDecayOptions() {
                 <div class="vecthare-cv-decay-exponential" style="display: ${decayMode === 'exponential' ? 'block' : 'none'};">
                     <div class="vecthare-cv-inline-setting">
                         <label>Half-life:</label>
-                        <input type="number" id="vecthare_cv_decay_halflife" min="1" max="500" value="${halfLife}" class="vecthare-input-number">
+                        <input type="number" id="vecthare_cv_decay_halflife" min="1" max="500" value="${escapeHtml(halfLife)}" class="vecthare-input-number">
                         <small>messages until 50% effect</small>
                     </div>
                 </div>
@@ -1066,7 +1067,7 @@ function renderTemporalDecayOptions() {
                 <div class="vecthare-cv-decay-linear" style="display: ${decayMode === 'linear' ? 'block' : 'none'};">
                     <div class="vecthare-cv-inline-setting">
                         <label>Rate:</label>
-                        <input type="number" id="vecthare_cv_decay_rate" min="0.001" max="0.5" step="0.001" value="${linearRate}" class="vecthare-input-number">
+                        <input type="number" id="vecthare_cv_decay_rate" min="0.001" max="0.5" step="0.001" value="${escapeHtml(linearRate)}" class="vecthare-input-number">
                         <small>per message (0.01 = 1%)</small>
                     </div>
                 </div>
@@ -1075,7 +1076,7 @@ function renderTemporalDecayOptions() {
                 <div class="vecthare-cv-decay-floor" style="display: ${decayType === 'decay' ? 'block' : 'none'};">
                     <div class="vecthare-cv-inline-setting">
                         <label>Min relevance:</label>
-                        <input type="number" id="vecthare_cv_decay_min" min="0" max="1" step="0.05" value="${minRelevance}" class="vecthare-input-number">
+                        <input type="number" id="vecthare_cv_decay_min" min="0" max="1" step="0.05" value="${escapeHtml(minRelevance)}" class="vecthare-input-number">
                         <small>floor (0-1)</small>
                     </div>
                 </div>
@@ -1123,15 +1124,15 @@ function renderTextCleaningOptions() {
                     <label for="vecthare_cv_cleaning_preset">Preset:</label>
                     <select id="vecthare_cv_cleaning_preset" class="vecthare-select">
                         ${presets.map(p => `
-                            <option value="${p.id}" ${p.id === currentPreset ? 'selected' : ''}>
-                                ${p.name}
+                            <option value="${escapeHtml(p.id)}" ${p.id === currentPreset ? 'selected' : ''}>
+                                ${escapeHtml(p.name)}
                             </option>
                         `).join('')}
                     </select>
                 </div>
             </div>
             <span class="vecthare-cv-option-hint" id="vecthare_cv_cleaning_hint">
-                ${presets.find(p => p.id === currentPreset)?.desc || ''}
+                ${escapeHtml(presets.find(p => p.id === currentPreset)?.desc || '')}
             </span>
         </div>
     `;
@@ -1554,7 +1555,7 @@ async function populateSourceSelect(type) {
 
                 if (worldNames && worldNames.length > 0) {
                     worldNames.forEach(name => {
-                        select.append(`<option value="${name}">${name}</option>`);
+                        select.append(`<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`);
                     });
                 } else {
                     select.append('<option value="" disabled>No lorebooks found</option>');
@@ -1574,7 +1575,7 @@ async function populateSourceSelect(type) {
                 if (context?.characterId) {
                     const currentChar = characters.find(c => c.avatar === context.characterId);
                     if (currentChar) {
-                        select.append(`<option value="${currentChar.avatar}" selected>📌 ${currentChar.name} (current)</option>`);
+                        select.append(`<option value="${escapeHtml(currentChar.avatar)}" selected>📌 ${escapeHtml(currentChar.name)} (current)</option>`);
                     }
                 }
 
@@ -1582,7 +1583,7 @@ async function populateSourceSelect(type) {
                 characters.forEach(char => {
                     // Skip if already added as current
                     if (char.avatar === context?.characterId) return;
-                    select.append(`<option value="${char.avatar}">${char.name}</option>`);
+                    select.append(`<option value="${escapeHtml(char.avatar)}">${escapeHtml(char.name)}</option>`);
                 });
             } else {
                 select.append('<option value="" disabled>No characters found</option>');
@@ -1984,7 +1985,7 @@ async function checkWikiPluginStatus() {
             <div class="vecthare-cv-wiki-plugin-warning">
                 <i class="fa-solid fa-exclamation-triangle" style="color: var(--vecthare-warning);"></i>
                 <span>Wiki scraping requires the Fandom Scraper plugin</span>
-                <a href="${type.sourceOptions.pluginUrl}" target="_blank" rel="noopener" class="vecthare-cv-plugin-link">
+                <a href="${escapeHtml(type.sourceOptions.pluginUrl)}" target="_blank" rel="noopener" class="vecthare-cv-plugin-link">
                     <i class="fa-solid fa-external-link"></i> Install Plugin
                 </a>
             </div>
@@ -2382,7 +2383,7 @@ function handleChatFileUpload(e) {
                     <span class="vecthare-cv-stat-label">Messages</span>
                 </div>
                 <div class="vecthare-cv-stat">
-                    <span class="vecthare-cv-stat-value">${characterName}</span>
+                    <span class="vecthare-cv-stat-value">${escapeHtml(characterName)}</span>
                     <span class="vecthare-cv-stat-label">Character</span>
                 </div>
                 <div class="vecthare-cv-stat">
@@ -2494,7 +2495,7 @@ async function previewChunks() {
         container.html(`
             <div class="vecthare-cv-preview-stats">
                 <span><strong>${chunks.length}</strong> chunks</span>
-                <span>~<strong>${avgChars}</strong> chars avg</span>
+                <span>~<strong>${escapeHtml(avgChars)}</strong> chars avg</span>
             </div>
             <div class="vecthare-cv-preview-list">
                 ${chunks.slice(0, 10).map((chunk, i) => {
@@ -2821,14 +2822,6 @@ async function startVectorization() {
     }
 }
 
-/**
- * Escapes HTML entities
- */
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
 
 // ============================================================================
 // TEXT CLEANING MANAGEMENT

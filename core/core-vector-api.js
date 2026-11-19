@@ -49,7 +49,7 @@ import { resolveCollectionOperationSettings, snapshotCollectionOperationSettings
     createInitialVectorizationConfig, readInitialVectorizationConfig,
     assertCollectionOperationSettingsStable,
     noteCollectionHashClaims, forgetCollectionHashClaims, hasSharedChunkRecords,
-    registryEntriesMissingHashClaims } from './collection-metadata.js';
+    registryEntriesMissingHashClaims, getCollectionMeta } from './collection-metadata.js';
 import { parseRegistryKey } from './collection-ids.js';
 import { resolveStorage, settingsForCollectionStorage, assertNoStorageConflict, assertStorageWritable,
     scopedTenancySupported } from './storage-resolver.js';
@@ -308,27 +308,35 @@ const RETRY_CONFIG = {
     delay: RETRY_INITIAL_DELAY_MS,
     maxDelay: RETRY_MAX_DELAY_MS,
     backoffFactor: RETRY_BACKOFF_MULTIPLIER,
-    shouldRetry: (error) => {
-        // R13: NEVER retry an abort - the user explicitly stopped the work
-        if (isAbortError(error)) return false;
-
-        // Retry on network errors and rate limits
-        const message = error?.message?.toLowerCase() || '';
-        const isRetryable =
-            message.includes('network') ||
-            message.includes('timeout') ||
-            message.includes('failed to fetch') ||
-            message.includes('fetch') ||
-            message.includes('suspended') ||
-            message.includes('429') ||
-            message.includes('rate limit') ||
-            message.includes('too many requests') ||
-            message.includes('502') ||
-            message.includes('503') ||
-            message.includes('504');
-        return isRetryable;
-    }
+    shouldRetry: (error) => isRetryableError(error),
 };
+
+const RETRYABLE_STATUS = new Set([408, 425, 429, 502, 503, 504]);
+const NETWORK_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'EPIPE', 'UND_ERR_SOCKET']);
+
+/**
+ * VH-069: whether a failed call is worth trying again. Decided on the HTTP
+ * status (or network error code) when the error carries one. Text is only
+ * used for the browser's own network failures and for a status code that
+ * stands on its own in a backend message ("...: 503 Service Unavailable") -
+ * never for digits or words inside a collection id or a refusal (it used to
+ * retry any message containing "503", "fetch" or "network").
+ * @param {any} error
+ * @returns {boolean}
+ */
+export function isRetryableError(error) {
+    // R13: NEVER retry an abort - the user explicitly stopped the work
+    if (isAbortError(error)) return false;
+    const status = Number(error?.status ?? error?.statusCode);
+    if (Number.isInteger(status) && status >= 100) return RETRYABLE_STATUS.has(status);
+    if (NETWORK_CODES.has(error?.code) || NETWORK_CODES.has(error?.cause?.code)) return true;
+    const message = String(error?.message || '').trim();
+    // Browsers' fetch() network failures (Chrome, Firefox, Safari).
+    if (/^(failed to fetch|load failed|networkerror when attempting to fetch resource\.?)$/i.test(message)) return true;
+    if (/\btimed out\b|\brate limit(ed)?\b|\btoo many requests\b/i.test(message)) return true;
+    // A status code on its own, as the backends print it: "...: 503 Service Unavailable".
+    return /(?:^|[\s:(])(429|502|503|504)(?=[\s).,:]|$)/.test(message);
+}
 
 /**
  * Strips HTML and Markdown formatting from text before embedding.
@@ -913,6 +921,10 @@ export async function getSavedHashes(collectionId, settings, includeMetadata = f
     }
 }
 
+// VH-077: Milvus VARCHAR limit for chunk text (characters)
+const MILVUS_TEXT_MAX = 65535;
+const milvusTooLongNoted = new Set();
+
 /**
  * Inserts vector items into a collection
  * Handles batching and rate limiting.
@@ -943,6 +955,23 @@ export async function insertVectorItems(collectionId, items, settings, onProgres
         }
         console.warn(`VectHare: Skipping ${dropped} item(s) with no text after cleaning`);
         items = embeddable;
+    }
+    // VH-077: Milvus stores chunk text in a VARCHAR(65535) field. A longer chunk
+    // can never be stored there; leave it out (before embedding) and say so once,
+    // instead of failing the whole batch on every Sync.
+    if ((settings?.vector_backend || '') === 'milvus') {
+        const tooLong = items.filter(item => typeof item?.text === 'string' && [...item.text].length > MILVUS_TEXT_MAX);
+        if (tooLong.length) {
+            items = items.filter(item => !tooLong.includes(item));
+            const fresh = tooLong.filter(item => !milvusTooLongNoted.has(`${collectionId}:${item.hash}`));
+            for (const item of tooLong) milvusTooLongNoted.add(`${collectionId}:${item.hash}`);
+            console.warn(`VectHare: ${tooLong.length} chunk(s) in ${collectionId} are longer than Milvus can store (${MILVUS_TEXT_MAX} characters) and were not stored`);
+            if (fresh.length && typeof toastr !== 'undefined') {
+                toastr.warning(`${fresh.length} message chunk(s) are longer than Milvus can store (${MILVUS_TEXT_MAX} characters) and are not kept as memories. ` +
+                    'Shorten those messages or use a smaller chunk size; everything else is stored.', 'VectHare', { timeOut: 15000 });
+            }
+            if (!items.length) return;
+        }
     }
     // C13 (detect only): two different texts with the same hash cannot both be
     // stored - the hash is the record's key, so the second would replace or be
@@ -1245,14 +1274,40 @@ export async function primeChunkHashClaims(settings) {
 // (unverified), but confirmed mismatches and unreadable records are excluded.
 const ragCompatibilityWarnings = new Set();
 async function getQueryCollectionSettings(collectionId, settings, issueSink = null) {
+    // VH-052: a collection on another backend/server is skipped with one notice
+    // per chat, instead of being searched where it does not exist.
+    try {
+        const { collectionLivesElsewhere, noteChatLivesElsewhere } = await import('./backend-elsewhere.js');
+        if (collectionLivesElsewhere(collectionId, settings).length) {
+            if (String(collectionId).includes('vecthare_chat_')) noteChatLivesElsewhere(collectionId, settings);
+            const key = `${collectionId}:elsewhere`;
+            if (!ragCompatibilityWarnings.has(key)) {
+                ragCompatibilityWarnings.add(key);
+                console.warn(`VectHare: RAG skipping ${collectionId}: its vectors are on another backend or server`);
+            }
+            return null;
+        }
+    } catch (error) {
+        console.debug(`VectHare: backend check for ${collectionId} failed: ${error.message}`);
+    }
+    // VH-044: the cached saved settings must notice changes another tab or
+    // device made (one small request, at most every 2 s).
+    await refreshStoreIfStale().catch(() => false);
     try {
         const result = await resolveCollectionOperationSettings(collectionId, settings, 'rag',
-            { pipeline: 'rag', strategy: 'query' }, { readOnly: true });
+            { pipeline: 'rag', strategy: 'query' }, { readOnly: true, ragCache: true }); // VH-044
         if (result.status === 'legacy_readonly') {
+            // VH-061: used only when nothing shows it was made differently.
+            const { legacyVerdict, noteLegacyNotUsed } = await import('./legacy-collections.js');
+            const verdict = await legacyVerdict(collectionId, result.settings || settings);
+            if (!verdict.usable) {
+                noteLegacyNotUsed(collectionId, getCollectionMeta(collectionId)?.displayName, verdict.reason);
+                return null;
+            }
             const key = `${collectionId}:legacy_readonly`;
             if (!ragCompatibilityWarnings.has(key)) {
                 ragCompatibilityWarnings.add(key);
-                console.warn(`VectHare: RAG using unverified legacy collection ${collectionId}`);
+                console.warn(`VectHare: RAG using unverified legacy collection ${collectionId} (needs re-vectorizing)`);
             }
         }
         return result.settings;
@@ -1851,6 +1906,49 @@ export async function purgeFileVectorIndex(collectionId, settings) {
 }
 
 /**
+ * VH-093: the same server written two ways ("localhost:6333/" vs
+ * "127.0.0.1:6333") is still the same server.
+ */
+function sameServerAddress(a, b) {
+    const norm = value => {
+        if (!value) return '';
+        try {
+            const text = String(value);
+            const url = new URL(text.includes('://') ? text : `http://${text}`);
+            let host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+            if (host === 'localhost' || host === '::1' || host === '0.0.0.0' || /^127\./.test(host)) host = '127.0.0.1';
+            const port = url.port || (url.protocol === 'https:' ? '443' : '80');
+            return `${url.protocol}//${host}:${port}${url.pathname.replace(/\/+$/, '')}`;
+        } catch {
+            return String(value).trim().toLowerCase();
+        }
+    };
+    return norm(a) === norm(b);
+}
+
+/**
+ * VH-093: whether a chat's recorded store destination names the same server as
+ * today's settings. Only the server counts here: the API-key fingerprint is a
+ * change detector, and where the collection lives on that server is checked
+ * separately.
+ */
+function sameStoreServer(backend, recorded, current) {
+    if (recorded === current) return true;
+    let r, c;
+    try { r = JSON.parse(recorded); c = JSON.parse(current); } catch { return false; }
+    if (!Array.isArray(r) || !Array.isArray(c)) return false;
+    if (backend === 'qdrant') {
+        if (Boolean(r[0]) !== Boolean(c[0])) return false;
+        return r[0] ? sameServerAddress(r[1], c[1]) : sameServerAddress(`${r[2] || 'localhost'}:${r[3] || 6333}`, `${c[2] || 'localhost'}:${c[3] || 6333}`);
+    }
+    if (backend === 'milvus') {
+        const addr = x => x[0] || `${x[1] || 'localhost'}:${x[2] || 19530}`;
+        return sameServerAddress(addr(r), addr(c));
+    }
+    return false;
+}
+
+/**
  * Purge registered VectHare-owned collections only. Never invoke a backend's
  * global purge, since those backends can share vanilla SillyTavern storage.
  * Fail closed (and keep VectHare settings) when a registered destination cannot
@@ -1864,12 +1962,24 @@ export async function purgeAllVectorIndexes(settings, options = {}) {
 }
 
 async function purgeAllVectorIndexesLeased(settings, options = {}) {
-    const { getCollectionRegistry } = await import('./collection-loader.js');
+    const { getCollectionRegistry, discoverExistingCollections } = await import('./collection-loader.js');
+    // VH-092: see what the servers hold now (as the Database Browser does), so
+    // found collections are purged too and every location that can be recorded is.
+    try { await discoverExistingCollections(settings); } catch (error) {
+        console.warn('VectHare: Purge could not refresh the collection list first:', error?.message || error);
+    }
     const { parseRegistryKey, getBoundChatDetails, chatStoreDestination } =
         await import('./collection-ids.js');
-    const { readInitialVectorizationConfig, createInitialVectorizationConfig } =
+    const { readInitialVectorizationConfig, createInitialVectorizationConfig,
+        locateQdrantCollectionByPresence, verifyPhysicalCollectionExistence } =
         await import('./collection-metadata.js');
-    const registry = [...new Set(getCollectionRegistry())];
+    // VH-028: a bare id next to its backend:source:id twin is the same collection
+    // (older builds registered both); purge it once, through the qualified key.
+    const fullRegistry = [...new Set(getCollectionRegistry())];
+    const qualifiedIds = new Set(fullRegistry.filter(key => parseRegistryKey(key).backend)
+        .map(key => parseRegistryKey(key).collectionId));
+    const aliases = fullRegistry.filter(key => !parseRegistryKey(key).backend && qualifiedIds.has(key));
+    const registry = fullRegistry.filter(key => !aliases.includes(key));
     const visited = new Set();
     let removed = 0;
     const skipped = [];
@@ -1894,8 +2004,17 @@ async function purgeAllVectorIndexesLeased(settings, options = {}) {
         vecthareState().chatCollectionBindings?.byCollection || {})) {
         for (const store of rec?.stores || []) {
             const name = store.backend === 'vectra' ? 'standard' : store.backend;
-            if (!knownDestinations.has(`${name}:${store.source}:${id}`)) {
-                skip(`unregistered:${name}:${store.source}:${id}`);
+            const destination = `${name}:${store.source}:${id}`;
+            if (knownDestinations.has(destination)) continue;
+            // VH-092: a chat binding whose store is missing from the registry is
+            // purged (or found already gone) like a registered one, instead of
+            // stopping the whole purge; its mapping is cleared only afterwards.
+            if (['standard', 'lancedb', 'qdrant', 'milvus'].includes(name) && store.source &&
+                /^vecthare_[A-Za-z0-9_.-]+$/.test(id)) {
+                registry.push(destination);
+                knownDestinations.add(destination);
+            } else {
+                skip(`unregistered:${destination}`);
             }
         }
     }
@@ -1914,21 +2033,38 @@ async function purgeAllVectorIndexesLeased(settings, options = {}) {
         catch { ignored.push(registryKey); continue; }
         if (!backendName || !source ||
             !['standard', 'lancedb', 'qdrant', 'milvus'].includes(backendName)) {
-            skip(registryKey);
+            skip(`${registryKey} (its entry does not say which backend and provider it is on)`);
             continue;
         }
         const destination = `${backendName}:${source}:${id}`;
         if (visited.has(destination)) continue;
         visited.add(destination);
+        // VH-092 (as VH-089): a Qdrant collection without a locator is looked up
+        // where it really is, not where today's multitenancy switch points.
+        if (backendName === 'qdrant') {
+            await locateQdrantCollectionByPresence(id, { ...settings, vector_backend: backendName, source }).catch(() => null);
+        }
         // 9b: storage switches describe this collection (its locator, or today's).
         const operationSettings = settingsForCollectionStorage(id, { ...settings, vector_backend: backendName, source });
+        // VH-092: confirmed absent at its own location = nothing left to purge.
+        // Only an explicit 'absent' counts (a shared old store answers 'unverified').
+        try {
+            const where = await verifyPhysicalCollectionExistence(id, operationSettings, { backend: backendName, source });
+            const locationKnown = !['qdrant', 'milvus'].includes(backendName) ||
+                resolveStorage(id, operationSettings, backendName).fromLocator === true;
+            if (where.existence === 'absent' && locationKnown) {
+                removed++;
+                continue;
+            }
+        } catch { /* checked again by the steps below */ }
         // Shared-store cleanup is unsafe unless the backend can prove scoped
         // deletion. Do not remove the Qdrant multitenancy or Milvus parent.
         // 9c (P7): lifted for the new layouts when the plugin scopes them.
         const storageNow = resolveStorage(id, operationSettings, backendName);
         if ((backendName === 'milvus' && !(storageNow.v2 && await scopedTenancySupported())) ||
             (backendName === 'qdrant' && storageNow.layout === 'legacy-mt')) {
-            skip(registryKey);
+            skip(`${registryKey} (it is in an older shared store that cannot remove one collection; ` +
+                'move it in Database Browser > Storage, or delete it there)');
             continue;
         }
         const binding = getBoundChatDetails(id);
@@ -1937,8 +2073,8 @@ async function purgeAllVectorIndexesLeased(settings, options = {}) {
             if (destinations.length && !destinations.some(store =>
                 (store.backend === backendName || (backendName === 'standard' && store.backend === 'vectra')) &&
                 store.source === source && store.destination &&
-                store.destination === chatStoreDestination(operationSettings, id))) {
-                skip(registryKey);
+                sameStoreServer(backendName, store.destination, chatStoreDestination(operationSettings, id)))) {
+                skip(`${registryKey} (its chat is linked to it on another server or backend)`);
                 continue;
             }
         }
@@ -1949,15 +2085,30 @@ async function purgeAllVectorIndexesLeased(settings, options = {}) {
                 { backend: backendName, source });
             const actual = createInitialVectorizationConfig(operationSettings,
                 { pipeline: 'rag', strategy: 'query' });
-            if (saved.status !== 'valid' || !actual ||
-                saved.config.embedding.provider !== source ||
-                JSON.stringify(saved.config.storage) !== JSON.stringify(actual.storage)) {
-                skip(registryKey);
+            // VH-093: what must match is the server (the address, however it is
+            // written) and the provider. Where it lives on that server (its own
+            // collection or a shared store) is established separately above.
+            let why = null;
+            if (saved.status !== 'valid') {
+                why = saved.status === 'missing'
+                    ? 'no saved VectHare settings were found for it on this server, so it cannot be confirmed as yours; delete it in the Database Browser if it is'
+                    : `its saved settings could not be read (${saved.status}${saved.reason ? `: ${saved.reason}` : ''})`;
+            } else if (!actual) {
+                why = 'the current settings could not be described';
+            } else if (saved.config.embedding?.provider !== source) {
+                why = `it was made with ${saved.config.embedding?.provider || 'another provider'}, but it is listed under ${source}`;
+            } else if (saved.config.storage?.backend !== actual.storage?.backend ||
+                !sameServerAddress(saved.config.storage?.address, actual.storage?.address)) {
+                why = `it was made on ${saved.config.storage?.address || 'another server'}, not on the server selected now (${actual.storage?.address || 'unknown'})`;
+            }
+            if (why) {
+                skip(`${registryKey} (${why})`);
                 continue;
             }
         }
-        if (!await purgeVectorIndex(id, operationSettings)) {
-            skip(registryKey);
+        const purgeDiagnostics = {};
+        if (!await purgeVectorIndex(id, operationSettings, { diagnostics: purgeDiagnostics })) {
+            skip(`${registryKey} (${purgeDiagnostics.reason || 'the backend did not confirm the delete'})`);
             continue;
         }
         // #27: an acknowledged purge is not proof of deletion, and the caller
@@ -1996,6 +2147,11 @@ async function purgeAllVectorIndexesLeased(settings, options = {}) {
  */
 export async function updateChunkText(collectionId, hash, newText, settings) {
     assertVectHareCollectionForWrite(collectionId);
+    // VH-034 / VH-039 (option C): a chat chunk's text follows its message; an
+    // edited copy would be re-added next to the original by the next Sync.
+    if (String(parseRegistryKey(collectionId).collectionId || collectionId).startsWith('vecthare_chat_')) {
+        throw new Error('Chat chunks follow the chat; edit the message instead.');
+    }
     assertNoStorageConflict(collectionId, settings?.vector_backend);
     await assertStorageWritable(collectionId, settings);
     settings = await resolveEmbeddingSettingsForEdit(collectionId, settings);
@@ -2008,6 +2164,41 @@ export async function updateChunkText(collectionId, hash, newText, settings) {
  * A confirmed mismatch or unreadable record blocks the edit; a legacy collection
  * with no record keeps its previous behaviour (nothing is assigned to it).
  */
+/**
+ * VH-048: on the Standard backend each embedding model keeps its own copy of a
+ * collection (one folder per model). Deleting a collection after the model was
+ * changed used today's model and so looked in the wrong folder. This answers
+ * the settings with the model the collection was made with, taken from its own
+ * saved settings, when those settings are on the same backend and provider.
+ * Anything else (another backend, no saved settings) is returned unchanged.
+ * @param {string} collectionId
+ * @param {object} settings Settings addressing the destination to delete
+ * @returns {Promise<object>}
+ */
+export async function withCollectionModelForStandard(collectionId, settings) {
+    const backend = settings?.vector_backend || 'standard';
+    if (!['standard', 'vectra'].includes(backend)) return settings;
+    const source = settings?.source || 'transformers';
+    const field = getModelField(source);
+    if (!field) return settings;
+    try {
+        // Only the model is needed, so the saved record is read directly (no
+        // model given: the plugin searches the model folders) rather than
+        // resolving the full embedding settings, which refuses when, say, the
+        // endpoint cannot be reproduced.
+        const saved = await readInitialVectorizationConfig(collectionId, settings, { backend, source });
+        const savedModel = saved?.status === 'valid' && saved.config?.embedding?.provider === source
+            ? saved.config.embedding.model : null;
+        if (typeof savedModel === 'string' && savedModel && savedModel !== settings[field]) {
+            vhLog(`VectHare: ${collectionId} was made with ${source} model "${savedModel}"; deleting that copy`);
+            return { ...settings, [field]: savedModel };
+        }
+    } catch (error) {
+        console.debug('VectHare: Could not read the saved model for delete:', error?.message || error);
+    }
+    return settings;
+}
+
 export async function resolveEmbeddingSettingsForEdit(collectionId, settings) {
     const result = await resolveCollectionOperationSettings(collectionId, settings, 'rag',
         { pipeline: 'rag', strategy: 'query' }, { readOnly: true });

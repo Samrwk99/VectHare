@@ -27,7 +27,7 @@ import { getStringHash } from '../../../../utils.js';
 
 // Test collection prefix using new vh: format for proper multitenancy parsing
 // Format: vh:{type}:{sourceId} - Qdrant backend parses this correctly
-const TEST_COLLECTION_PREFIX = 'vh:test:visualizer_';
+const TEST_COLLECTION_PREFIX = 'vecthare_diagtest_visualizer_'; // VH-041: an id VectHare may write
 
 /**
  * Full cleanup for test collections - purges vectors AND unregisters from registry
@@ -45,6 +45,7 @@ async function cleanupTestCollection(collectionId, settings) {
     const registryKey = `${settings.source}:${collectionId}`;
     unregisterCollection(registryKey);
     unregisterCollection(collectionId); // Also try without source prefix
+    unregisterCollection(`${settings.vector_backend || 'standard'}:${settings.source}:${collectionId}`); // qualified key (VH-028)
 }
 
 /**

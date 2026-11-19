@@ -129,7 +129,7 @@ Built-in diagnostic tool that checks everything and offers auto-fixes for common
 |---------|----------|------|------|
 | **Standard (Vectra)** | Getting started, small datasets | No dependencies, works out of box | Slower with large datasets |
 | **LanceDB** | Medium to large datasets | Handles millions of vectors, very fast | Requires Similharity plugin |
-| **Qdrant** | Production, cloud deployments | Enterprise-grade, advanced filtering | Requires running Qdrant server |
+| **Qdrant** | Production, cloud deployments | Enterprise-grade, advanced filtering | Requires a running Qdrant server, version 1.15 or newer |
 
 > 💡 **Need help choosing?** Start with Standard. Upgrade to LanceDB when you have 10k+ vectors.
 

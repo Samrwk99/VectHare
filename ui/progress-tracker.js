@@ -57,6 +57,7 @@ export class ProgressTracker {
      */
     setControls(controls) {
         this.controls = controls || null;
+        this.displacedPausedControls = null; // VH-073: a new chat run owns the panel now
         if (!this.elements) return;
         const { pauseBtn, resumeBtn, stopBtn } = this.elements;
         if (pauseBtn) pauseBtn.style.display = 'inline-block';
@@ -78,6 +79,7 @@ export class ProgressTracker {
      */
     openStatus() {
         if (!this.panel) this.createPanel();
+        this.restoreDisplacedPausedRun();
         // Keep real run controls/progress intact, including a paused run.
         if (!this.isPaused && (this.isComplete || !this.currentOperation)) {
             this.isDatabaseSnapshot = true;
@@ -127,7 +129,9 @@ export class ProgressTracker {
                     ? `${result.storedChunks} stored hash(es) reported; ` +
                       `no matching current group hashes found (${result.pending} pending)`
                     : `Saved group progress: ${done}/${total} groups · ${result.pending} pending`)
-                : 'No eligible message groups in this chat')
+                : 'No eligible message groups in this chat') +
+              // VH-061
+              (result.needsRevectorizing ? ' · needs re-vectorizing (made by an older VectHare; press Vectorize)' : '')
             : unavailableMessage;
         if (this.elements?.statLabel) this.elements.statLabel.textContent = result ? 'Message groups' : 'Progress';
         if (this.elements?.time) this.elements.time.textContent = '—';
@@ -152,6 +156,19 @@ export class ProgressTracker {
     /**
      * Hide all run-control buttons (used on completion/failure)
      */
+    /**
+     * VH-073: when another operation took the panel over from a PAUSED chat run
+     * and has since finished, give the paused run its Resume / Stop back, so it
+     * is never stranded without controls.
+     */
+    restoreDisplacedPausedRun() {
+        if (!this.displacedPausedControls || this.controls || !this.isComplete) return;
+        this.controls = this.displacedPausedControls;
+        this.displacedPausedControls = null;
+        this.isPaused = true;
+        this.terminalStatus = '⏸ A paused chat run is waiting - use Resume or Stop';
+    }
+
     hideControls() {
         if (!this.elements) return;
         const { pauseBtn, resumeBtn, stopBtn } = this.elements;
@@ -179,6 +196,13 @@ export class ProgressTracker {
         // S5: a queued bar range belongs to the chat Sync run only.
         const range = operation === 'Vectorizing Chat' ? this.pendingBarRange : null;
         if (range) this.pendingBarRange = null;
+        // VH-073: Pause / Resume / Stop belong to the run that wired them (the
+        // chat runs call setControls() right after show()). A new run starts
+        // without them, so a non-chat run never shows buttons that do nothing.
+        // A paused chat run that is being displaced keeps its controls aside
+        // so they can be given back (restoreDisplacedPausedRun).
+        if (this.controls && this.isPaused) this.displacedPausedControls = this.controls;
+        this.controls = null;
         this.currentOperation = operation;
         this.isDatabaseSnapshot = false;
         this.isComplete = false;
@@ -222,6 +246,11 @@ export class ProgressTracker {
         if (!this.panel) {
             this.createPanel();
         }
+        if (this.elements) {
+            for (const btn of [this.elements.pauseBtn, this.elements.resumeBtn, this.elements.stopBtn, this.elements.startBtn]) {
+                if (btn) btn.style.display = 'none';
+            }
+        }
         this.hideOldCollectionOffer();
 
         // Set the item label using cached element
@@ -258,6 +287,7 @@ export class ProgressTracker {
         this.oldCollectionDelete = onDelete;
         this.oldCollectionLabel = String(label || 'previous collection');
         els.oldCollectionText.textContent = `Old collection kept \u2014 ${this.oldCollectionLabel}`;
+        els.oldCollectionDelete.innerHTML = '<i class="fa-solid fa-trash"></i> Delete now';
         els.oldCollectionDelete.disabled = false;
         els.oldCollectionKeep.disabled = false;
         els.oldCollectionDelete.style.display = 'inline-block';
@@ -302,8 +332,14 @@ export class ProgressTracker {
         } else {
             const why = (result?.errors || []).join(', ') || 'not confirmed';
             els.oldCollectionText.textContent = `Old collection kept \u2014 delete failed: ${why}`;
+            // The failure must be visible: the same two buttons coming back looked like nothing happened.
+            els.oldCollectionDelete.innerHTML = '<i class="fa-solid fa-trash"></i> Try again';
             els.oldCollectionDelete.disabled = false;
             els.oldCollectionKeep.disabled = false;
+            if (typeof toastr !== 'undefined') {
+                toastr.warning(`The old collection "${this.oldCollectionLabel}" was not deleted: ${why}. ` +
+                    'It is kept; you can delete it later in the Database Browser.', 'VectHare', { timeOut: 15000 });
+            }
             this.log(`Old collection delete failed: ${why}`);
         }
     }
@@ -434,6 +470,7 @@ export class ProgressTracker {
             this.openStatus();
             return;
         }
+        this.restoreDisplacedPausedRun();
 
         // R16 FIX: a COMPLETED panel must never resurrect its run controls.
         // The previous logic inferred state from resumeBtn visibility, and
@@ -958,6 +995,7 @@ export class ProgressTracker {
         });
         this.elements.stopBtn?.addEventListener('click', () => {
             this.controls?.onStop?.();
+            this.displacedPausedControls = null;
         });
 
         // Start time update interval

@@ -67,7 +67,7 @@ export function reportDefaults(settings) {
  */
 export async function fetchStorageReport(settings, { signal } = {}) {
     if (!await storageReportSupported()) {
-        return { ok: false, reason: 'The installed Similharity plugin does not offer the storage report. Update the plugin (13.29 or later) and restart SillyTavern.' };
+        return { ok: false, reason: 'The installed Similharity plugin does not offer the storage report. Install the plugin that comes with this VectHare and restart SillyTavern.' };
     }
     let response;
     try {

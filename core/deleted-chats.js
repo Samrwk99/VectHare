@@ -14,15 +14,15 @@ import { vhLog } from '../utils/log.js';
  * see offerDeletedChatReattach() in chat-vectorization.js.
  */
 
-import { vecthareState, flushVectHareStore } from './vecthare-store.js';
+import { vecthareState, flushVectHareStore, saveVerifiedDeletion, storeNow } from './vecthare-store.js';
 import {
     chatFileExists, anotherChatClaimsCollection, releaseToQuarantine, removeChatBinding,
     isQuarantinedChatCollection, tryBeginChatCollectionDelete, endChatCollectionDelete,
     chatStoreDestination, parseRegistryKey, normChat,
 } from './collection-ids.js';
-import { getCollectionMeta, setCollectionMeta, deleteCollectionMeta } from './collection-metadata.js';
+import { getCollectionMeta, setCollectionMeta, deleteCollectionMeta, readInitialVectorizationConfig } from './collection-metadata.js';
 import { getCollectionRegistry, unregisterCollection } from './collection-loader.js';
-import { purgeVectorIndex } from './core-vector-api.js';
+import { purgeVectorIndex, withCollectionModelForStandard } from './core-vector-api.js';
 import { resolveStorage } from './storage-resolver.js';
 
 export const DELETED_CHAT_KEEP_DAYS = 7;
@@ -44,10 +44,16 @@ export function listDeletedChatCollections() {
     return [...ids].map(id => ({ id, info: getDeletedChatInfo(id) })).filter(entry => entry.info);
 }
 
-/** Whole days left before the automatic purge (0 = due). */
-export function deletedChatDaysLeft(info, now = Date.now()) {
+/**
+ * Whole days left before the automatic purge (0 = due). VH-065: measured on
+ * the server's clock (storeNow), so a device whose own clock runs ahead does
+ * not purge other devices' deleted chats early; a deletion time in the future
+ * (written by a device whose clock was ahead) counts as "just now".
+ */
+export function deletedChatDaysLeft(info, now = storeNow()) {
     if (!info) return 0;
-    return Math.max(0, Math.ceil((info.deletedAt + DELETED_CHAT_KEEP_DAYS * DAY_MS - now) / DAY_MS));
+    const deletedAt = Math.min(info.deletedAt, now);
+    return Math.max(0, Math.ceil((deletedAt + DELETED_CHAT_KEEP_DAYS * DAY_MS - now) / DAY_MS));
 }
 
 /**
@@ -63,7 +69,7 @@ export async function softDeleteChatCollection(collectionId, rec, filename) {
     setCollectionMeta(id, {
         deletedChat: {
             rec: saved,
-            deletedAt: Date.now(),
+            deletedAt: storeNow(), // VH-065: the server's clock
             filename: normChat(filename),
             ownerKey: saved.owner ? `${saved.owner.type}:${saved.owner.id}` : null,
         },
@@ -113,6 +119,17 @@ export async function purgeDeletedChatCollection(collectionId, settings, options
         const keys = getCollectionRegistry().filter(key => plainId(key) === id);
         let stores = [...(rec.stores || [])];
         if (!stores.length && keys.length) return kept('its storage backend is unknown');
+        // VH-053: old copies left by a storage move go first (while the current
+        // location is still recorded); if one cannot be deleted, nothing is.
+        if (getCollectionMeta(id)?.storageOldCopies?.length) {
+            try {
+                const { deleteAllOldStorageCopies } = await import('./storage-move.js');
+                const copies = await deleteAllOldStorageCopies(id, settings);
+                if (!copies.success) return kept(copies.reason);
+            } catch (error) {
+                return kept(`its old copy could not be deleted (${error.message})`);
+            }
+        }
         for (const store of [...stores]) {
             // Never purge a different Qdrant endpoint or tenant after settings
             // changes. Multitenancy purge has its own unresolved safety issue.
@@ -121,9 +138,22 @@ export async function purgeDeletedChatCollection(collectionId, settings, options
                 (store.backend === 'qdrant' && resolveStorage(id, settings, 'qdrant').layout === 'legacy-mt')) {
                 return kept('its storage destination could not be verified');
             }
-            const backendSettings = { ...settings, vector_backend: store.backend, source: store.source };
+            // VH-048: Standard keeps one copy per model - use the collection's own.
+            const backendSettings = await withCollectionModelForStandard(id,
+                { ...settings, vector_backend: store.backend, source: store.source });
             if (!await purgeVectorIndex(id, backendSettings)) {
                 return kept('the backend did not confirm the purge');
+            }
+            // VH-025 (#27): an acknowledged purge is not proof of deletion. The
+            // tracking is only removed once the store's saved settings are gone.
+            try {
+                const after = await readInitialVectorizationConfig(id, backendSettings,
+                    { backend: store.backend, source: store.source });
+                const gone = after.status === 'missing' &&
+                    (!['standard', 'vectra', 'lancedb'].includes(store.backend) || after.physicalAbsent !== false);
+                if (!gone) return kept('the purge could not be verified (the collection still answers)');
+            } catch (error) {
+                return kept(`the purge could not be verified (${error.message})`);
             }
             // Persist partial success, so a retry does not revisit a store
             // already purged. Registry/metadata remain until all finish.
@@ -133,6 +163,9 @@ export async function purgeDeletedChatCollection(collectionId, settings, options
         for (const key of keys) unregisterCollection(key);
         deleteCollectionMeta(id);
         removeChatBinding(id);
+        // VH-021: saved at once (strict, merged if another tab changed the file).
+        await saveVerifiedDeletion().catch(error =>
+            console.warn('VectHare: The purge is saved with the next change:', error?.message || error));
         vhLog('VectHare: Purged kept collection of deleted chat', id);
         return { success: true };
     } finally {

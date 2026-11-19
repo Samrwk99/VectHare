@@ -1,3 +1,6 @@
+import { itemMetadata } from './item-metadata.js';
+import { readInitResponse } from './init-response.js';
+import { setBackendWriteRefusal } from '../core/plugin-health.js';
 import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
@@ -116,7 +119,10 @@ export class QdrantBackend extends VectorBackend {
             vhLog('VectHare: Initializing local Qdrant:', `${config.host}:${config.port}`);
         }
 
-        vhLog('VectHare: Sending Qdrant config to Similharity plugin:', JSON.stringify(config));
+        // VH-024: never print a credential, even with debug logging on.
+        vhLog('VectHare: Sending Qdrant config to Similharity plugin:', JSON.stringify({
+            ...config, ...('apiKey' in config ? { apiKey: config.apiKey ? '(set)' : '(not set)' } : {}),
+        }));
 
         const response = await fetch('/api/plugins/similharity/backend/init/qdrant', {
             method: 'POST',
@@ -124,12 +130,8 @@ export class QdrantBackend extends VectorBackend {
             body: JSON.stringify(config),
         });
 
-        if (!response.ok) {
-            const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`[Qdrant] Failed to initialize Qdrant: ${response.status} ${response.statusText} - ${errorBody}`);
-        }
-
-        const responseData = await response.json().catch(() => ({}));
+        const responseData = await readInitResponse(response, 'Qdrant');
+        setBackendWriteRefusal('qdrant', responseData?.warning || null); // VH-015
         vhLog('VectHare: Qdrant initialization response:', responseData);
         vhLog('VectHare: Using Qdrant backend (production-grade vector search)');
     }
@@ -336,19 +338,7 @@ export class QdrantBackend extends VectorBackend {
                             textWithKeywords += ` [KEYWORDS: ${keywordTexts}]`;
                         }
 
-                        const metadata = {
-                            ...item.metadata,
-                            // Pass through VectHare-specific fields
-                            importance: item.importance,
-                            keywords: item.keywords,
-                            customWeights: item.customWeights,
-                            disabledKeywords: item.disabledKeywords,
-                            chunkGroup: item.chunkGroup,
-                            conditions: item.conditions,
-                            summary: item.summary,
-                            isSummaryChunk: item.isSummaryChunk,
-                            parentHash: item.parentHash,
-                        };
+                        const metadata = itemMetadata(item);
 
                         // Add content_type for multitenancy mode
                         if (isLegacyShared(storage)) {
@@ -400,13 +390,9 @@ export class QdrantBackend extends VectorBackend {
             }
             vhLog(`VectHare Qdrant: Batch ${batchNum}/${batches.length} completed (${batch.length} vectors)`);
         }
-        try {
-            // Dynamic import to avoid circular dependency
-            const { registerCollection } = await import('../core/collection-loader.js');
-            registerCollection(collectionId);
-        } catch (e) {
-            console.warn('VectHare: Failed to register collection after Qdrant insert:', e);
-        }
+        // VH-028/VH-029: the adapter does not register the collection (a bare key
+        // here made Purge All and "is this collection new?" go wrong); the callers
+        // register backend:source:id once the collection's saved settings exist.
 
         const mode = isLegacyShared(storage) ? 'multitenancy' : 'separate';
         vhLog(`VectHare Qdrant: Inserted ${items.length} vectors into ${actualCollectionId} (${mode} mode, content_type: ${strippedCollectionId})`);

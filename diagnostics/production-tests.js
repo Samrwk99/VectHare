@@ -16,6 +16,7 @@ import { getModelField, getProviderConfig } from '../core/providers.js';
 import { unregisterCollection } from '../core/collection-loader.js';
 import { reciprocalRankFusion, weightedCombination } from '../core/hybrid-search.js';
 import { applyKeywordBoost, extractTextKeywords, extractLorebookKeywords } from '../core/keyword-boost.js';
+import { savedHashesFor } from './configuration.js';
 
 /**
  * Full cleanup for test collections - purges vectors AND unregisters from registry
@@ -33,6 +34,7 @@ async function cleanupTestCollection(collectionId, settings) {
     const registryKey = `${settings.source}:${collectionId}`;
     unregisterCollection(registryKey);
     unregisterCollection(collectionId); // Also try without source prefix
+    unregisterCollection(`${settings.vector_backend || 'standard'}:${settings.source}:${collectionId}`); // qualified key (VH-028)
 }
 
 /**
@@ -164,7 +166,7 @@ export async function testEmbeddingGeneration(settings) {
  */
 export async function testVectorStorage(settings) {
     try {
-        const testCollectionId = `vh:test:storage_${Date.now()}`;
+        const testCollectionId = `vecthare_diagtest_storage_${Date.now()}`; // VH-041: an id VectHare may write
         const testHash = String(Math.floor(Math.random() * 1000000));
         const testText = 'VectHare storage test message';
         const backend = settings.vector_backend || 'standard';
@@ -190,6 +192,7 @@ export async function testVectorStorage(settings) {
 
         if (!insertResponse.ok) {
             const errorText = await insertResponse.text();
+            await cleanupTestCollection(testCollectionId, settings); // VH-041: never leave it behind
             return {
                 name: '[PROD] Vector Storage',
                 status: 'fail',
@@ -241,7 +244,7 @@ export async function testVectorRetrieval(settings) {
     }
 
     try {
-        const hashes = await getSavedHashes(collectionId, settings);
+        const hashes = await savedHashesFor(collectionId, settings);
 
         if (hashes.length === 0) {
             return {
@@ -252,28 +255,11 @@ export async function testVectorRetrieval(settings) {
             };
         }
 
-        const response = await fetch('/api/vector/query', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-            body: JSON.stringify({
-                collectionId: collectionId,
-                searchText: 'test query',
-                topK: 3,
-                source: settings.source,
-                ...getProviderBody(settings)
-            })
-        });
-
-        if (!response.ok) {
-            return {
-                name: '[PROD] Vector Retrieval',
-                status: 'fail',
-                message: `Query failed: ${response.status}`,
-                category: 'production'
-            };
-        }
-
-        const data = await response.json();
+        // VH-072: through VectHare's own query (its backend and the collection's
+        // saved settings), never SillyTavern's native /api/vector endpoints,
+        // which would test nothing on other backends and create an empty index.
+        const { queryCollection } = await import('../core/core-vector-api.js');
+        const data = await queryCollection(collectionId, 'test query', 3, settings);
 
         return {
             name: '[PROD] Vector Retrieval',
@@ -429,8 +415,8 @@ export async function testTemporalDecay(settings) {
         const { applyTemporalDecay, getDefaultDecaySettings } = await import('../core/temporal-decay.js');
         const { getDefaultDecayForType } = await import('../core/collection-metadata.js');
 
-        // Test with chat defaults (enabled by default)
-        const chatDecaySettings = getDefaultDecayForType('chat');
+        // VH-071: decay is off by default now; test the formula with it switched on.
+        const chatDecaySettings = { ...getDefaultDecayForType('chat'), enabled: true };
 
         const testScore = 0.85;
         const testAge = 50;
@@ -483,78 +469,35 @@ export async function testTemporalDecay(settings) {
 }
 
 /**
- * Test: Are local chunks in sync with server vectors?
- * Compares chunk hashes we have locally vs what's stored on the server
+ * Test: chunk notes whose chunk no longer exists (VH-055 tidy-up).
+ * Notes are kept per collection; every registered collection is read before
+ * anything is called unused, and the fix removes only those (VH-084: the old
+ * check compared every note with the current chat only and its fix deleted
+ * the notes of all other collections).
  */
-export async function testChunkServerSync(settings, collectionId) {
-    if (!collectionId) {
-        if (!getCurrentChatId()) {
-            return {
-                name: '[PROD] Chunk-Server Sync',
-                status: 'warning',
-                message: 'No collection selected - cannot test sync',
-                category: 'production'
-            };
-        }
-        collectionId = getChatCollectionId();
-        if (!collectionId) {
-            return {
-                name: '[PROD] Chunk-Server Sync',
-                status: 'warning',
-                message: 'Could not get collection ID',
-                category: 'production'
-            };
-        }
-    }
-
+export async function testChunkServerSync(settings) {
     try {
-        const { getAllChunkMetadata } = await import('../core/collection-metadata.js');
-
-        // Get server-side hashes
-        const serverHashes = await getSavedHashes(collectionId, settings);
-        const serverHashSet = new Set(serverHashes.map(h => String(h)));
-
-        // Get local metadata hashes (chunks we have customizations for)
-        const localMetadata = getAllChunkMetadata();
-        const localHashes = Object.keys(localMetadata);
-
-        // Find mismatches
-        const onlyOnServer = serverHashes.filter(h => !localHashes.includes(String(h)));
-        const onlyLocal = localHashes.filter(h => !serverHashSet.has(h));
-
-        const totalServer = serverHashes.length;
-        const totalLocal = localHashes.length;
-
-        if (onlyOnServer.length === 0 && onlyLocal.length === 0) {
+        const { findUnusedChunkNotes } = await import('../core/chunk-notes-tidy.js');
+        const found = await findUnusedChunkNotes(settings);
+        const unused = found.scoped.length + found.shared.length;
+        const skipped = found.unreadable.size;
+        const skippedText = skipped ? ` (${skipped} collection(s) could not be read and were left alone)` : '';
+        if (!unused) {
             return {
                 name: '[PROD] Chunk-Server Sync',
                 status: 'pass',
-                message: `In sync: ${totalServer} server vectors, ${totalLocal} local metadata entries`,
+                message: `No unused chunk notes${skippedText}`,
                 category: 'production',
-                data: { serverHashes, localHashes, collectionId }
             };
         }
-
-        // There are differences (not necessarily bad - local metadata is optional)
-        if (onlyLocal.length > 0) {
-            // Orphaned local metadata (vectors deleted from server but metadata remains)
-            return {
-                name: '[PROD] Chunk-Server Sync',
-                status: 'warning',
-                message: `${onlyLocal.length} orphaned local entries (vectors deleted from server)`,
-                category: 'production',
-                fixable: true,
-                fixAction: 'cleanOrphanedMetadata',
-                data: { orphanedHashes: onlyLocal, collectionId }
-            };
-        }
-
         return {
             name: '[PROD] Chunk-Server Sync',
-            status: 'pass',
-            message: `Server has ${onlyOnServer.length} vectors without local metadata (normal for new chunks)`,
+            status: 'warning',
+            message: `${unused} chunk note(s) belong to chunks that no longer exist${skippedText}`,
             category: 'production',
-            data: { serverHashes, localHashes, collectionId }
+            fixable: true,
+            fixAction: 'cleanOrphanedMetadata',
+            data: { unused },
         };
     } catch (error) {
         return {
@@ -567,22 +510,15 @@ export async function testChunkServerSync(settings, collectionId) {
 }
 
 /**
- * Fix: Clean orphaned local metadata entries
+ * Fix: remove chunk notes whose chunk no longer exists (re-checked at fix time).
  */
-export async function fixOrphanedMetadata(orphanedHashes) {
+export async function fixOrphanedMetadata(settings) {
     try {
-        const { deleteChunkMetadata } = await import('../core/collection-metadata.js');
-
-        let cleaned = 0;
-        for (const hash of orphanedHashes) {
-            deleteChunkMetadata(hash);
-            cleaned++;
-        }
-
-        return {
-            success: true,
-            message: `Cleaned ${cleaned} orphaned metadata entries`
-        };
+        const { removeUnusedChunkNotes } = await import('../core/chunk-notes-tidy.js');
+        const result = await removeUnusedChunkNotes(settings);
+        const skipped = result.skippedCollections.length
+            ? `; ${result.skippedCollections.length} collection(s) could not be read and were left alone` : '';
+        return { success: true, message: `Removed ${result.removed} unused chunk note(s)${skipped}` };
     } catch (error) {
         return {
             success: false,
@@ -621,7 +557,7 @@ export async function testDuplicateHashes(settings, collectionId) {
 
     try {
         // Get all hashes from the server
-        const serverHashes = await getSavedHashes(collectionId, settings);
+        const serverHashes = await savedHashesFor(collectionId, settings);
 
         if (serverHashes.length === 0) {
             return {
@@ -658,10 +594,10 @@ export async function testDuplicateHashes(settings, collectionId) {
         return {
             name: '[PROD] Duplicate Hash Check',
             status: 'warning',
-            message: `Found ${duplicates.length} duplicate hashes (${totalDupes} extra entries)`,
+            // VH-040: no automatic fix here (the old one deleted every copy and could
+            // put none back). The staged rebuild replaces the collection only after it succeeds.
+            message: `Found ${duplicates.length} duplicate hashes (${totalDupes} extra entries). To clean them up, re-vectorize this chat (Vectorize, then confirm the rebuild).`,
             category: 'production',
-            fixable: true,
-            fixAction: 'removeDuplicateHashes',
             data: { duplicates, collectionId, totalDuplicates: totalDupes }
         };
     } catch (error) {
@@ -675,97 +611,19 @@ export async function testDuplicateHashes(settings, collectionId) {
 }
 
 /**
- * Fix: Remove duplicate hash entries from vector store
- * Strategy: Query to get chunk text, delete all instances, re-insert one copy
- */
-export async function fixDuplicateHashes(duplicates, collectionId, settings) {
-    try {
-        const { deleteVectorItems, insertVectorItems, queryCollection } = await import('../core/core-vector-api.js');
-
-        let fixed = 0;
-        const chunksToReinsert = [];
-
-        // First, query to get the chunk data for each duplicate hash
-        // We query with minimal text to find chunks by hash
-        for (const { hash } of duplicates) {
-            try {
-                // Query with a broad search to find chunks - we'll filter by hash
-                const result = await queryCollection(collectionId, '', 1000, settings);
-
-                if (result?.metadata) {
-                    // Find chunk with this hash
-                    const chunk = result.metadata.find(m => String(m.hash) === String(hash));
-                    if (chunk) {
-                        chunksToReinsert.push({
-                            hash: chunk.hash,
-                            text: chunk.text,
-                            index: chunk.index || 0,
-                            metadata: {
-                                source: chunk.source,
-                                messageId: chunk.messageId,
-                                chunkIndex: chunk.chunkIndex,
-                                totalChunks: chunk.totalChunks,
-                                originalMessageHash: chunk.originalMessageHash
-                            }
-                        });
-                    }
-                }
-            } catch (e) {
-                console.warn(`VectHare: Failed to get data for hash ${hash}:`, e);
-            }
-        }
-
-        // Delete ALL instances of duplicate hashes
-        const hashesToDelete = duplicates.map(d => d.hash);
-        try {
-            await deleteVectorItems(collectionId, hashesToDelete, settings);
-            console.log(`VectHare: Deleted ${hashesToDelete.length} duplicate hashes`);
-        } catch (e) {
-            console.warn('VectHare: Delete failed:', e);
-            return {
-                success: false,
-                message: `Failed to delete duplicates: ${e.message}`
-            };
-        }
-
-        // Re-insert ONE copy of each
-        if (chunksToReinsert.length > 0) {
-            try {
-                await insertVectorItems(collectionId, chunksToReinsert, settings);
-                fixed = chunksToReinsert.length;
-                console.log(`VectHare: Re-inserted ${fixed} chunks (deduplicated)`);
-            } catch (e) {
-                console.warn('VectHare: Re-insert failed:', e);
-                return {
-                    success: false,
-                    message: `Deleted duplicates but failed to re-insert: ${e.message}. Re-vectorize chat to restore.`
-                };
-            }
-        }
-
-        return {
-            success: true,
-            message: `Fixed ${fixed} duplicate hashes (deleted extras, kept one copy each)`
-        };
-    } catch (error) {
-        return {
-            success: false,
-            message: `Failed to fix duplicates: ${error.message}`
-        };
-    }
-}
-
-/**
  * Test: Does temporally blind chunk immunity work?
  */
 export async function testTemporallyBlindChunks(settings) {
     try {
         const { applyDecayToResults } = await import('../core/temporal-decay.js');
-        const { setChunkTemporallyBlind, isChunkTemporallyBlind } = await import('../core/collection-metadata.js');
+        const { setChunkTemporallyBlind, isChunkTemporallyBlind, deleteChunkMetadata } = await import('../core/collection-metadata.js');
         const { getDefaultDecayForType } = await import('../core/collection-metadata.js');
 
         const testHash = `__test_blind_${Date.now()}__`;
-        const chatDecaySettings = getDefaultDecayForType('chat');
+        // The test's own note is removed whatever happens (it was left behind,
+        // and then reported as an unused chunk note).
+        try {
+        const chatDecaySettings = { ...getDefaultDecayForType('chat'), enabled: true }; // VH-071
 
         // Create test chunks
         const testChunks = [
@@ -794,9 +652,6 @@ export async function testTemporallyBlindChunks(settings) {
         const blindChunk = decayedChunks.find(c => c.hash === testHash);
         const normalChunk = decayedChunks.find(c => c.hash === 'normal_chunk');
 
-        // Cleanup
-        setChunkTemporallyBlind(testHash, false);
-
         // Blind chunk should keep original score
         if (blindChunk.score !== 0.9 || !blindChunk.temporallyBlind) {
             return {
@@ -823,6 +678,9 @@ export async function testTemporallyBlindChunks(settings) {
             message: `Blind: ${blindChunk.score.toFixed(2)} (immune), Normal: ${normalChunk.score.toFixed(2)} (decayed)`,
             category: 'production'
         };
+        } finally {
+            try { deleteChunkMetadata(testHash); } catch { /* best effort */ }
+        }
     } catch (error) {
         return {
             name: '[PROD] Temporally Blind Chunks',
@@ -853,7 +711,7 @@ export async function testPluginEmbeddingGeneration(settings) {
     }
 
     try {
-        const testCollectionId = `vh:test:embed_${Date.now()}`;
+        const testCollectionId = `vecthare_diagtest_embed_${Date.now()}`; // VH-041
         const testHash = String(Math.floor(Math.random() * 1000000));
         const testText = 'Plugin embedding generation test';
 
@@ -1271,7 +1129,9 @@ export async function testKeywordBoosting(settings) {
 
         // Query that matches keywords in doc1
         const query = 'wizard spell';
-        const boosted = applyKeywordBoost(results, query);
+        // VH-071: the expected 2.5x below is the plain multiplicative boost; the
+        // default now uses diminishing returns, so test the plain formula here.
+        const boosted = applyKeywordBoost(results, query, { diminishingReturns: false, perKeywordCap: false });
 
         // Validate results
         if (!Array.isArray(boosted) || boosted.length !== results.length) {
@@ -1305,16 +1165,20 @@ export async function testKeywordBoosting(settings) {
             };
         }
 
-        // Verify boost was applied correctly
-        // Expected boost: 1 + (2.0 - 1) + (1.5 - 1) = 2.5x
-        const expectedBoost = 2.5;
+        // Verify boost was applied correctly (VH-071: against the current formula).
+        // Raw boost: 1 + (2.0 - 1) + (1.5 - 1) = 2.5x; the applied boost is the raw
+        // boost scaled by the match-confidence factor (0.6..1.0).
+        const expectedRaw = 2.5;
+        const actualRaw = doc1Boosted.rawBoost;
+        const expectedApplied = 1 + (expectedRaw - 1) * doc1Boosted.keywordBoostConfidence;
         const actualBoost = doc1Boosted.keywordBoost;
 
-        if (Math.abs(actualBoost - expectedBoost) > 0.01) {
+        if (Math.abs(actualRaw - expectedRaw) > 0.01 || Math.abs(actualBoost - expectedApplied) > 0.01 ||
+            !(actualBoost > 1 && actualBoost <= expectedRaw)) {
             return {
                 name: '[PROD] Keyword Boosting',
                 status: 'fail',
-                message: `Expected boost ${expectedBoost}x, got ${actualBoost}x`,
+                message: `Expected raw boost ${expectedRaw}x (applied ${expectedApplied.toFixed(3)}x), got raw ${actualRaw}x, applied ${actualBoost}x`,
                 category: 'production'
             };
         }
@@ -1329,8 +1193,8 @@ export async function testKeywordBoosting(settings) {
             };
         }
 
-        // Verify new score is correct (0.70 * 2.5 = 1.75, but should be capped or not)
-        const expectedNewScore = 0.70 * 2.5;
+        // Verify new score: original × applied boost, capped at 1.0 (VH-071)
+        const expectedNewScore = Math.min(1.0, 0.70 * actualBoost);
         if (Math.abs(doc1Boosted.score - expectedNewScore) > 0.01) {
             return {
                 name: '[PROD] Keyword Boosting',

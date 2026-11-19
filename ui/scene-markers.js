@@ -21,7 +21,7 @@ import {
     getCurrentCollectionId,
     filterSceneChunks,
 } from '../core/scenes.js';
-import { getSavedHashes } from '../core/core-vector-api.js';
+import { getSavedHashes, resolveEmbeddingSettingsForEdit } from '../core/core-vector-api.js';
 import { eventSource, event_types } from '../../../../../script.js';
 import { getContext } from '../../../../extensions.js';
 
@@ -59,7 +59,9 @@ export async function refreshSceneCache(settings) {
     }
 
     try {
-        const result = await getSavedHashes(collectionId, currentSettings, true);
+        // VH-049: list the scenes from the collection's own store.
+        const listSettings = await resolveEmbeddingSettingsForEdit(collectionId, currentSettings);
+        const result = await getSavedHashes(collectionId, listSettings, true);
         if (result.metadata) {
             cachedSceneChunks = result.metadata
                 .filter(m => m.isScene === true)

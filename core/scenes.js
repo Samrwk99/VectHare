@@ -29,6 +29,7 @@ import {
     insertVectorItems,
     getSavedHashes,
     deleteVectorItems,
+    resolveEmbeddingSettingsForEdit,
 } from './core-vector-api.js';
 import { getChatCollectionId, getTextWithoutAttachments } from './chat-vectorization.js';
 import { ensureChatBinding, recordChatStore, beginChatCollectionWrite, endChatCollectionWrite } from './collection-ids.js';
@@ -44,6 +45,7 @@ import {
     assertCollectionOperationSettingsStable,
     getAnnotatedChunkHashes,
 } from './collection-metadata.js';
+import { vecthareState } from './vecthare-store.js';
 
 // ============================================================================
 // CONSTANTS
@@ -267,9 +269,12 @@ export async function deleteSceneChunk(sceneHash, containedHashes, settings) {
 
     try {
         // Delete scene chunk from vector DB (8C: under the chat's cross-tab lease)
+        // VH-049: delete from the store the chat's collection really uses (its
+        // saved settings), not from today's provider/model.
+        const collectionSettings = await resolveEmbeddingSettingsForEdit(collectionId, settings);
         const lease = await acquireLease(collectionId, { label: 'Scene' });
         try {
-            await deleteVectorItems(collectionId, [sceneHash], settings);
+            await deleteVectorItems(collectionId, [sceneHash], collectionSettings);
         } finally {
             await lease.release();
         }
@@ -286,6 +291,20 @@ export async function deleteSceneChunk(sceneHash, containedHashes, settings) {
                 }
             }
         }
+
+        // VH-082: also clear the note on chunks this scene covered that the caller
+        // no longer lists (e.g. a message edited since the scene was made).
+        let swept = 0;
+        for (const key of Object.keys(vecthareState().chunkMetadata || {})) {
+            const existing = getChunkMetadata(key, collectionId);
+            if (existing && String(existing.disabledByScene) === String(sceneHash)) {
+                const { disabledByScene, disabledAt, ...rest } = existing;
+                if (Object.keys(rest).length > 0) saveChunkMetadata(key, rest, collectionId);
+                else deleteChunkMetadata(key, collectionId);
+                swept++;
+            }
+        }
+        if (swept) vhLog(`VectHare Scenes: cleared the scene note on ${swept} more chunk(s)`);
 
         vhLog(`VectHare Scenes: Deleted scene chunk ${sceneHash}, re-enabled ${containedHashes.length} chunks`);
         return { success: true };

@@ -31,7 +31,7 @@ import {
     ensureChatBinding, chatFileExists, deletionCandidates, anotherChatClaimsCollection,
     removeChatBinding, releaseToQuarantine, onChatBindingRenamed, onCharacterBindingRenamed,
     isChatCollectionWriteActive, tryBeginChatCollectionDelete, endChatCollectionDelete, chatStoreDestination,
-    getChatOwner, normChat,
+    getChatOwner, normChat, requestFreshChatCollection,
 } from './core/collection-ids.js';
 import { purgeAllVectorIndexes, purgeVectorIndex } from './core/core-vector-api.js';
 import { getChatCollectionId } from './core/chat-vectorization.js';
@@ -39,6 +39,7 @@ import { getDefaultDecaySettings } from './core/temporal-decay.js';
 import { migrateOldEnabledKeys, deleteCollectionMeta, forgetAllLegacyCollectionKeys, renameChatPolicy, renameCharacterPolicies, fillStorageLocators } from './core/collection-metadata.js';
 import { getBackend as getBackendForLocators } from './backends/backend-manager.js';
 import { loadVectHareStore, vecthareState, storeStatus, flushVectHareStore, resetVectHareStore, refreshStoreIfStale } from './core/vecthare-store.js';
+import { escapeHtml } from './utils/html.js';
 import { migrateSecretsFromSettings } from './core/secret-store.js';
 import { clearCollectionRegistry, discoverExistingCollections, getCollectionRegistry, unregisterCollection, doesChatHaveVectors } from './core/collection-loader.js';
 import { softDeleteChatCollection, purgeDeletedChats, DELETED_CHAT_KEEP_DAYS } from './core/deleted-chats.js';
@@ -54,7 +55,7 @@ import { initializeSceneMarkers, updateAllMarkerStates, setSceneSettings } from 
 import { initializeWorldInfoIntegration } from './core/world-info-integration.js';
 
 // VectHare modules - Cotton-Tales Integration
-import './core/emotion-classifier.js'; // Exposes window.VectHareEmotionClassifier
+import { registerClassifierSettingsMirror } from './core/emotion-classifier.js'; // Exposes window.VectHareEmotionClassifier
 
 // Constants
 const MODULE_NAME = 'VectHare';
@@ -108,6 +109,7 @@ const defaultSettings = {
     protect: 5,
     insert: 3,
     min_chat_length: 0, // Minimum number of messages in chat before injection starts (0 = no minimum)
+    rag_timeout_seconds: 15, // VH-019: retrieval at generation gives up after this many seconds (0 = no limit)
     // Number of top results to retrieve from vector DB (top-K)
     top_k: 3,
     query: 2,
@@ -221,6 +223,63 @@ async function onRepairClick() {
 }
 
 /**
+ * VH-062 (user decision: start fresh, no backup copy): collections.json is
+ * damaged or missing. Asks once per page load; vectors are never touched.
+ */
+async function offerFreshVectHareStore(detail) {
+    const { callGenericPopup, POPUP_TYPE } = await import('../../../popup.js');
+    const confirmed = await callGenericPopup(
+        `<div style="text-align:left;">
+            <h3>VectHare's collection list is damaged</h3>
+            <p>${escapeHtml(detail)}.</p>
+            <p style="margin-top:10px;"><strong>Start fresh</strong> replaces it with an empty list. Your vectors are not touched:
+            collections are found again from your vector backends, and you can delete old ones in the Database Browser.
+            Collections in the shared stores of the current layout are found again too. Collections in the older shared
+            stores (Qdrant <code>vecthare_multitenancy</code>, Milvus <code>vecthare_main</code>) are not found again one by one;
+            their vectors stay in that store.</p>
+            <p style="margin-top:10px;">What is lost: which chat uses which collection (each chat is vectorized again into a new
+            collection the next time you use it), and per-chunk notes (keywords, conditions, disabled chunks).</p>
+        </div>`, POPUP_TYPE.CONFIRM, '', { okButton: 'Start fresh', cancelButton: 'Not now' });
+    if (!confirmed) return;
+    const { startFreshVectHareStore } = await import('./core/vecthare-store.js');
+    const result = await startFreshVectHareStore();
+    if (!result.success) {
+        toastr.error(`Could not start fresh: ${result.reason}`, 'VectHare', { timeOut: 15000 });
+        return;
+    }
+    toastr.clear?.();
+    toastr.success(result.reason || 'Started a fresh collection list. Finding your collections again…', 'VectHare');
+    try {
+        await discoverExistingCollections(settings);
+    } catch (error) {
+        console.warn('VectHare: rediscovery after a fresh start failed:', error);
+    }
+}
+
+/**
+ * VH-083: a chat whose saved claim names a character or chat file that no
+ * longer exists cannot be matched to its collection. Offer to start a new one
+ * (the old collection is kept untouched).
+ * @returns {Promise<boolean|null>} true: a new collection was chosen; false: declined; null: not such a chat
+ */
+async function offerFreshCollectionForUnverifiedChat(binding = null) {
+    binding ??= await ensureChatBinding(undefined, { create: false }).catch(() => null);
+    if (!binding?.unverifiedClaim) return null;
+    const { callGenericPopup, POPUP_TYPE } = await import('../../../popup.js');
+    const confirmed = await callGenericPopup(
+        `<div style="text-align:left;">
+            <h3>Start a new collection for this chat?</h3>
+            <p>This chat file names a character or chat file that no longer exists (for example after a rename
+            or an import), so VectHare cannot tell which vector collection belongs to it.</p>
+            <p style="margin-top:10px;">Starting a new collection vectorizes this chat from its messages.
+            Any old collection is kept untouched and can be deleted later in the Database Browser.</p>
+        </div>`, POPUP_TYPE.CONFIRM, '', { okButton: 'Start a new collection', cancelButton: 'Cancel' });
+    if (!confirmed) return false;
+    requestFreshChatCollection();
+    return true;
+}
+
+/**
  * Action: Vectorize. For a chat that already has a vector collection this is a
  * REBUILD, so it asks first and only then opens the normal vectorization setup;
  * pressing Vectorize there runs the staged, verify-before-switch replacement.
@@ -228,6 +287,7 @@ async function onRepairClick() {
  */
 async function onVectorizeContentClick() {
     const { openContentVectorizer } = await import('./ui/content-vectorizer.js');
+    if (await offerFreshCollectionForUnverifiedChat() === false) return; // VH-083
 
     let existing = null;
     try {
@@ -255,7 +315,10 @@ async function onVectorizeContentClick() {
     }
 
     const { callGenericPopup, POPUP_TYPE } = await import('../../../popup.js');
-    const chunks = existing.chunkCount
+    const chunks = existing.elsewhere
+        // VH-052
+        ? '<p>This chat\'s vector collection is on another vector backend or server. Rebuilding makes a new collection on the one selected now; the old one is kept where it is.</p>'
+        : existing.chunkCount
         ? `<p>This chat already has an existing vector collection (<strong>${existing.chunkCount}</strong> chunks).</p>`
         : '<p>This chat already has an existing vector collection.</p>';
     const disclosure = annotationCount
@@ -298,6 +361,13 @@ async function onVectorizeAllClick() {
             plan = { action: 'vectorize' }; // never block the normal path on a preflight bug
         }
 
+        if (plan.action === 'blocked' && plan.unverifiedClaim) {
+            // VH-083: offer a new collection, then vectorize into it.
+            if (await offerFreshCollectionForUnverifiedChat({ unverifiedClaim: true })) {
+                await vectorizeAll(settings, getBatchSize());
+            }
+            return;
+        }
         if (plan.action === 'blocked') {
             toastr.error(plan.reason, 'VectHare');
             return;
@@ -787,6 +857,8 @@ jQuery(async () => {
         toastr.error(`VectHare could not load its collection metadata: ${storeState.detail}. ` +
             'Operations that change collections are blocked until this is resolved.',
             'VectHare', { timeOut: 0, extendedTimeOut: 0 });
+        // VH-062: a damaged or missing file can be started fresh (confirmed).
+        if (storeState.canStartFresh) void offerFreshVectHareStore(storeState.detail);
     }
 
     // N2: collections of chats deleted more than DELETED_CHAT_KEEP_DAYS ago are
@@ -818,6 +890,9 @@ jQuery(async () => {
             ...vecthareState().collections
         }
     };
+
+    // VH-074: changes Cotton-Tales makes through the classifier API reach this object.
+    registerClassifierSettingsMirror(settings);
 
     // Migrate old scattered enabled keys to new collections structure
     const migrationResult = migrateOldEnabledKeys();

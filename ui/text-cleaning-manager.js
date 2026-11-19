@@ -10,6 +10,7 @@
  * ============================================================================
  */
 
+import { escapeHtml } from '../utils/html.js';
 import { saveSettingsDebounced } from '../../../../../script.js';
 import {
     BUILTIN_PATTERNS,
@@ -23,6 +24,7 @@ import {
     importPatterns,
     testPattern,
 } from '../core/text-cleaning.js';
+import { riskyRegexReason } from '../core/safe-regex.js';
 
 /**
  * Opens the Text Cleaning Manager modal
@@ -61,8 +63,8 @@ export function openTextCleaningManager() {
                         <div class="vecthare-tcm-preset-info">
                             <select id="vecthare_tcm_preset" class="vecthare-select">
                                 ${Object.entries(CLEANING_PRESETS).map(([id, preset]) => `
-                                    <option value="${id}" ${settings.selectedPreset === id ? 'selected' : ''}>
-                                        ${preset.name}
+                                    <option value="${escapeHtml(id)}" ${settings.selectedPreset === id ? 'selected' : ''}>
+                                        ${escapeHtml(preset.name)}
                                     </option>
                                 `).join('')}
                                 <option value="custom" ${settings.selectedPreset === 'custom' ? 'selected' : ''}>
@@ -70,7 +72,7 @@ export function openTextCleaningManager() {
                                 </option>
                             </select>
                             <span class="vecthare-tcm-preset-desc" id="vecthare_tcm_preset_desc">
-                                ${getPresetDescription(settings.selectedPreset)}
+                                ${escapeHtml(getPresetDescription(settings.selectedPreset))}
                             </span>
                         </div>
                     </div>
@@ -84,10 +86,10 @@ export function openTextCleaningManager() {
                         <div class="vecthare-tcm-patterns-grid" id="vecthare_tcm_builtin_patterns">
                             ${Object.values(BUILTIN_PATTERNS).map(p => `
                                 <label class="vecthare-tcm-pattern-item" title="${escapeHtml(p.pattern)}">
-                                    <input type="checkbox" data-id="${p.id}"
+                                    <input type="checkbox" data-id="${escapeHtml(p.id)}"
                                            ${settings.enabledBuiltins?.includes(p.id) ? 'checked' : ''}>
                                     <div class="vecthare-tcm-pattern-info">
-                                        <span class="vecthare-tcm-pattern-name">${p.name}</span>
+                                        <span class="vecthare-tcm-pattern-name">${escapeHtml(p.name)}</span>
                                         <code class="vecthare-tcm-pattern-regex">${escapeHtml(p.pattern.substring(0, 40))}${p.pattern.length > 40 ? '...' : ''}</code>
                                     </div>
                                 </label>
@@ -187,7 +189,7 @@ function renderCustomPatterns(patterns) {
         }
 
         return `
-            <div class="vecthare-tcm-custom-item" data-id="${p.id}">
+            <div class="vecthare-tcm-custom-item" data-id="${escapeHtml(p.id)}">
                 <input type="checkbox" class="vecthare-tcm-custom-enabled" ${p.enabled !== false ? 'checked' : ''} title="Enable/disable">
                 <input type="text" class="vecthare-tcm-custom-name" value="${escapeHtml(p.name)}" placeholder="Name">
                 <input type="text" class="vecthare-tcm-custom-pattern" value="${escapeHtml(displayPattern)}" placeholder="/pattern/gi">
@@ -200,15 +202,6 @@ function renderCustomPatterns(patterns) {
     }).join('');
 }
 
-/**
- * Escapes HTML entities
- */
-function escapeHtml(text) {
-    if (!text) return '';
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
 
 /**
  * Parses a regex string in /pattern/flags format (like ST's native regex)
@@ -238,6 +231,9 @@ function parseRegexString(input) {
 function validateRegex(pattern, flags) {
     try {
         new RegExp(pattern, flags);
+        // VH-043: refuse patterns that can freeze the page (nested repetition).
+        const risky = riskyRegexReason(pattern);
+        if (risky) return { valid: false, error: `This pattern can freeze the page: ${risky}.` };
         return { valid: true };
     } catch (e) {
         return { valid: false, error: e.message };

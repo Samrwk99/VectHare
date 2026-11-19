@@ -12,6 +12,7 @@
 
 import { extension_settings } from '../../../../extensions.js';
 import { uuidv4 } from '../../../../utils.js';
+import { timedCleaningReplace, riskyRegexReason } from './safe-regex.js';
 
 // ============================================================================
 // BUILT-IN PRESETS
@@ -210,7 +211,9 @@ export function getActivePatterns() {
 function applyPattern(text, pattern) {
     try {
         const regex = new RegExp(pattern.pattern, pattern.flags || 'g');
-        return text.replace(regex, pattern.replacement || '');
+        // VH-043: never skipped (that would change chunk text and hashes); a slow
+        // pattern is reported by name.
+        return timedCleaningReplace(regex, text, pattern.replacement || '', pattern.name || pattern.pattern);
     } catch (e) {
         console.warn(`VectHare: Invalid regex pattern "${pattern.name || pattern.pattern}":`, e.message);
         return text;
@@ -442,6 +445,9 @@ export function importPatterns(json) {
 export function testPattern(pattern, flags, replacement, sampleText) {
     try {
         const regex = new RegExp(pattern, flags || 'g');
+        // VH-043: testing a pattern that backtracks exponentially would freeze the page.
+        const risky = riskyRegexReason(pattern);
+        if (risky) return { success: false, error: `Not run: ${risky}.` };
         const result = sampleText.replace(regex, replacement || '');
         return { success: true, result };
     } catch (e) {

@@ -12,10 +12,10 @@ import AsyncUtils from '../utils/async-utils.js';
  */
 
 import { extension_settings } from '../../../../extensions.js';
-import { vecthareState, persistVectHareStore, assertStoreAuthoritative, flushVectHareStore } from './vecthare-store.js';
+import { vecthareState, persistVectHareStore, assertStoreAuthoritative, flushVectHareStore, saveVerifiedDeletion } from './vecthare-store.js';
 import { getContext } from '../../../../extensions.js';
 import { characters, substituteParams, getRequestHeaders, saveSettingsDebounced } from '../../../../../script.js';
-import { getSavedHashes, queryCollection } from './core-vector-api.js';
+import { getSavedHashes, queryCollection, withCollectionModelForStandard } from './core-vector-api.js';
 import { getStringHash } from '../../../../utils.js';
 import {
     isCollectionEnabled,
@@ -35,9 +35,10 @@ import {
     forgetLegacyCollectionKeys,
     hasLegacyCollectionKeys,
     getAnnotatedChunkHashes,
+    locateQdrantCollectionByPresence,
 } from './collection-metadata.js';
 import { purgeVectorIndex } from './core-vector-api.js';
-import { resolveStorage } from './storage-resolver.js';
+import { resolveStorage, getStorageLocator, locatorForPhysical, isV2Layout } from './storage-resolver.js';
 // Import from collection-ids.js - single source of truth for collection ID operations
 import {
     getChatUUID,
@@ -81,10 +82,25 @@ export function registerCollection(collectionId) {
         return;
     }
     const registry = getCollectionRegistry();
+    // VH-028: one entry per collection. A bare id is not added next to its
+    // backend:source:id twin, and a prefixed key replaces a bare twin.
+    const parsed = parseRegistryKey(collectionId);
+    if (!parsed.backend) {
+        if (registry.some(key => key !== collectionId && parseRegistryKey(key).backend &&
+            parseRegistryKey(key).collectionId === collectionId)) return;
+    } else if (parsed.collectionId && parsed.collectionId !== collectionId) {
+        const bare = registry.indexOf(parsed.collectionId);
+        if (bare !== -1) {
+            registry.splice(bare, 1);
+            vhLog(`VectHare: Registry: ${parsed.collectionId} replaced by ${collectionId}`);
+        }
+    }
     if (!registry.includes(collectionId)) {
         registry.push(collectionId);
         vhLog(`VectHare: Registered collection: ${collectionId}`);
         persistVectHareStore(); // Persist to collections.json
+    } else if (parsed.backend) {
+        persistVectHareStore();
     }
 }
 
@@ -174,12 +190,19 @@ export async function deleteCollection(collectionId, settings, registryKey = nul
 }
 
 async function deleteCollectionUnlocked(collectionId, settings, registryKey = null, options = {}) {
+    // VH-048: Standard keeps one copy per model; delete the one this collection
+    // was made with, not today's model.
+    settings = await withCollectionModelForStandard(parseRegistryKey(collectionId).collectionId || collectionId, settings);
     const errors = [];
     let vectorsDeleted = false;
     let registryDeleted = false;
     let metadataDeleted = false;
 
     vhLog(`VectHare: Deleting collection ${collectionId} (registry key: ${registryKey || collectionId})`);
+
+    // VH-089: a Qdrant collection without a locator is found where it really is,
+    // not where today's multitenancy switch points.
+    await locateQdrantCollectionByPresence(registryKey || collectionId, settings).catch(() => null);
 
     // Step 0: establish, at the recorded destination and right now, whether
     // this is an existing collection that holds no vectors. An empty
@@ -226,6 +249,22 @@ async function deleteCollectionUnlocked(collectionId, settings, registryKey = nu
             registryDeleted: false, metadataDeleted: false };
     }
 
+    // Step 0 (VH-053): old copies left by a storage move go first, while the
+    // collection's current location is still recorded. If one cannot be
+    // deleted, nothing else is, so the copy cannot be orphaned.
+    try {
+        const { deleteAllOldStorageCopies } = await import('./storage-move.js');
+        const copies = await deleteAllOldStorageCopies(collectionId, settings);
+        if (!copies.success) {
+            errors.push(`Old copy: ${copies.reason}. Nothing else was deleted.`);
+            return { success: false, errors, vectorsDeleted: false, registryDeleted: false, metadataDeleted: false };
+        }
+        errors.push(...copies.warnings);
+    } catch (error) {
+        errors.push(`Old copy: ${error.message}. Nothing else was deleted.`);
+        return { success: false, errors, vectorsDeleted: false, registryDeleted: false, metadataDeleted: false };
+    }
+
     // Step 1: Delete vectors from backend (most important - actual data)
     const purgeDiagnostics = {};
     try {
@@ -252,30 +291,42 @@ async function deleteCollectionUnlocked(collectionId, settings, registryKey = nu
             registryDeleted: false, metadataDeleted: false };
     }
 
-    // Step 2: Unregister from registry (try both formats)
-    try {
-        // Only after confirmed backend deletion; keep unrelated destinations.
-        unregisterCollectionDestination(collectionId, settings);
-        registryDeleted = true;
-        vhLog(`VectHare: ✓ Unregistered ${collectionId}`);
-    } catch (error) {
-        errors.push(`Registry: ${error.message}`);
-        console.warn(`VectHare: ✗ Failed to unregister ${collectionId}:`, error.message);
-    }
-
     // Step 3: confirm the physical collection is really gone, then remove the
     // same VectHare-owned state Delete Metadata removes, so a successful
     // deletion cannot leave a stale metadata-only record behind.
     let absenceVerified = false;
+    const notes = [];
     try {
-        const verified = await verifyPhysicalCollectionExistence(collectionId, settings);
+        const verified = await verifyPhysicalCollectionExistence(collectionId, settings, { afterDelete: true });
         absenceVerified = verified.existence === 'absent';
+        if (absenceVerified && verified.sharedLeftover) {
+            // VH-011 (option B): Milvus' older shared store.
+            notes.push(sharedLeftoverNote(verified.sharedLeftover));
+        }
         if (!absenceVerified) {
+            const standard = ['standard', 'vectra'].includes(settings?.vector_backend || 'standard');
             errors.push(`Deletion could not be verified (${verified.existence}` +
-                `${verified.reason ? `: ${verified.reason}` : ''}); metadata was kept.`);
+                `${verified.reason ? `: ${verified.reason}` : ''}); the collection's records were kept.` +
+                (standard && verified.existence === 'present'
+                    ? ' On the Standard backend each embedding model keeps its own copy: if this collection ' +
+                      'was made with another model, switch to that model and delete again.' : ''));
         }
     } catch (error) {
         errors.push(`Deletion verification: ${error.message}`);
+    }
+
+    // VH-048: unregister only once the collection is confirmed gone, so a
+    // deletion that could not be verified keeps its row and its records.
+    if (absenceVerified) {
+        try {
+            // Only after confirmed backend deletion; keep unrelated destinations.
+            unregisterCollectionDestination(collectionId, settings);
+            registryDeleted = true;
+            vhLog(`VectHare: ✓ Unregistered ${collectionId}`);
+        } catch (error) {
+            errors.push(`Registry: ${error.message}`);
+            console.warn(`VectHare: ✗ Failed to unregister ${collectionId}:`, error.message);
+        }
     }
 
     if (absenceVerified) {
@@ -310,6 +361,13 @@ async function deleteCollectionUnlocked(collectionId, settings, registryKey = nu
 
     const success = vectorsDeleted && absenceVerified && registryDeleted && metadataDeleted;
 
+    if (metadataDeleted) {
+        // VH-021: the deletion is saved at once, before any other tab's older
+        // copy of the record can be merged back in.
+        try { await saveVerifiedDeletion(); }
+        catch (error) { errors.push(`Saving the deletion: ${error.message} (it is saved with the next change)`); }
+    }
+
     if (success) {
         vhLog(`VectHare: ✓ Fully deleted collection ${collectionId}`);
     } else {
@@ -325,11 +383,23 @@ async function deleteCollectionUnlocked(collectionId, settings, registryKey = nu
     return {
         success,
         errors,
+        notes,
         vectorsDeleted,
         absenceVerified,
         registryDeleted,
         metadataDeleted,
     };
+}
+
+/**
+ * VH-011: what a user is told when rows had to stay in Milvus' older shared store.
+ * @param {number} count
+ * @returns {string}
+ */
+export function sharedLeftoverNote(count) {
+    return `${count} chunk(s) with exactly the same text as another chat's chunk were left in place: Milvus' ` +
+        'older shared storage keeps them under one key, so removing them would remove the other chat\'s too. ' +
+        'VectHare no longer uses them; they stay in that older store.';
 }
 
 /**
@@ -401,6 +471,8 @@ export async function deleteCollectionMetadataOnly(collectionId, settings, regis
     // where they are. Only the Metadata window's own Delete Metadata sets it,
     // after a confirmation that says what Regenerate can and cannot recover.
     if (options.verifiedAbsent !== true && options.allowWhilePresent !== true) {
+        // VH-089: absence counts only where the collection really is.
+        await locateQdrantCollectionByPresence(registryKey || collectionId, settings).catch(() => null);
         const verified = await verifyPhysicalCollectionExistence(collectionId, settings, {
             backend: settings.vector_backend,
             source: settings.source,
@@ -854,6 +926,69 @@ export function invalidateCollectionInventory(collectionId = null) {
  * @param {object} settings VectHare settings
  * @returns {Promise<string[]>} Array of discovered collection IDs
  */
+/**
+ * VH-085: a collection found in a v2 store (listed by the plugin for this user
+ * only, from the saved settings in that store) whose location VectHare does not
+ * know - e.g. after Start fresh - gets its location recorded, so reads and
+ * writes go to that store. Nothing is recorded when VectHare already has a
+ * location, or when the same collection was found in more than one place.
+ * @param {object[]} listed The plugin's collection list
+ */
+function recordDiscoveredV2Locations(listed) {
+    const byId = new Map();
+    for (const item of listed || []) {
+        const backend = item?.backend;
+        if (!['qdrant', 'milvus'].includes(backend) || typeof item.id !== 'string') continue;
+        const key = `${backend}\u0000${item.id}`;
+        const list = byId.get(key) || [];
+        list.push(item);
+        byId.set(key, list);
+    }
+    let recorded = 0;
+    for (const [key, items] of byId) {
+        const [backend, id] = key.split('\u0000');
+        const v2 = items.filter(item => item.storage?.physical);
+        if (v2.length !== 1 || items.length !== 1) continue; // none, or found in several places
+        if (getStorageLocator(id)) continue;
+        const { physical, dim } = v2[0].storage;
+        const locator = locatorForPhysical(id, backend, physical, Number.isSafeInteger(dim) ? dim : null);
+        if (!locator || !isV2Layout(backend, locator.layout)) continue;
+        setCollectionMeta(id, { storage: locator });
+        recorded++;
+    }
+    if (recorded) {
+        persistVectHareStore();
+        vhLog(`VectHare: Recorded where ${recorded} collection(s) in shared stores live (found again)`);
+    }
+}
+
+/**
+ * VH-089: Qdrant collections the server lists as collections of their own have
+ * no locator when VectHare holds no record for them (made while the
+ * multitenancy switch was off, by an older build, or before a Start fresh).
+ * Record where they are, so today's switch does not send every lookup and
+ * delete to the old shared store.
+ */
+async function recordDiscoveredOwnQdrantLocations(listed, settings) {
+    const counts = new Map();
+    for (const item of listed || []) {
+        if (item?.backend === 'qdrant' && typeof item.id === 'string') counts.set(item.id, (counts.get(item.id) || 0) + 1);
+    }
+    const queue = (listed || []).filter(item => item?.backend === 'qdrant' && typeof item.id === 'string' &&
+        !item.storage && counts.get(item.id) === 1 && item.id.startsWith('vecthare_') && !getStorageLocator(item.id));
+    let recorded = 0;
+    const worker = async () => {
+        while (queue.length) {
+            const item = queue.shift();
+            const result = await locateQdrantCollectionByPresence(item.id, { ...settings, vector_backend: 'qdrant' },
+                { ownPresent: true }).catch(() => null);
+            if (result?.status === 'recorded') recorded++;
+        }
+    };
+    await Promise.all([worker(), worker(), worker()]);
+    if (recorded) vhLog(`VectHare: Recorded where ${recorded} Qdrant collection(s) of their own live (found again)`);
+}
+
 async function discoverViaPlugin(settings, readOnly = false) {
     try {
         console.debug('🔍 VectHare: Requesting collection discovery from plugin...');
@@ -905,7 +1040,9 @@ async function discoverViaPlugin(settings, readOnly = false) {
                     source: collection.source,
                     backend: backend,
                     model: collection.model || '',  // Primary model path
-                    models: collection.models || []  // All available models
+                    models: collection.models || [],  // All available models
+                    // VH-085: where a v2 collection lives (shared or own v2 store).
+                    ...(collection.storage && typeof collection.storage === 'object' ? { storage: collection.storage } : {}),
                 };
 
                 // Cache by "backend:source:id" to uniquely identify each collection
@@ -978,8 +1115,14 @@ async function discoverViaPlugin(settings, readOnly = false) {
             // never covered a key's backend is not evidence about that key: an
             // unreachable or unconfigured backend reports nothing, and pruning
             // on that basis would silently drop a live collection's record.
+            // VH-008: and only a listing the plugin reports complete for that
+            // backend (older plugins do not report it: nothing is pruned).
+            const incompleteBackends = new Set(data.inventoryReport === 1 && Array.isArray(data.incompleteBackends)
+                ? data.incompleteBackends : ['vectra', 'standard', 'lancedb', 'qdrant', 'milvus']);
+            if (incompleteBackends.has('vectra')) incompleteBackends.add('standard');
             const inventoriedBackends = new Set(uniqueKeys
-                .map(key => parseRegistryKey(key).backend).filter(Boolean));
+                .map(key => parseRegistryKey(key).backend).filter(Boolean)
+                .filter(backend => !incompleteBackends.has(backend)));
             const updatedRegistry = getCollectionRegistry();
             const staleEntries = updatedRegistry.filter(key => {
                 if (pluginKeySet.has(key)) return false;
@@ -993,7 +1136,10 @@ async function discoverViaPlugin(settings, readOnly = false) {
                 const keyBackend = parsed.backend === 'vectra' ? 'standard' : (parsed.backend || settings?.vector_backend);
                 if (keyBackend === 'milvus') return false;
                 if (keyBackend === 'qdrant' && resolveStorage(parsed.collectionId, settings, 'qdrant').shared) return false;
-                return parsed.backend ? inventoriedBackends.has(parsed.backend) : true;
+                // A key without a backend belongs to today's backend (VH-008: pruned
+                // only when that backend's listing is complete).
+                return parsed.backend ? inventoriedBackends.has(parsed.backend)
+                    : inventoriedBackends.has(keyBackend) || (keyBackend === 'standard' && inventoriedBackends.has('vectra'));
             });
             if (staleEntries.length > 0) {
                 console.debug(`   🗑️  Removing ${staleEntries.length} stale registry entries:`);
@@ -1013,9 +1159,12 @@ async function discoverViaPlugin(settings, readOnly = false) {
                     console.debug(`   ⏭️  Already registered: ${key}`);
                 }
                 registerCollection(key);
-            }            if (newRegistrations > 0) {
+            }
+            if (newRegistrations > 0) {
                 vhLog(`   ✅ Registered ${newRegistrations} new collections`);
             }
+            recordDiscoveredV2Locations(data.collections);
+            await recordDiscoveredOwnQdrantLocations(data.collections, settings);
 
             vhLog(`   Final registry size: ${getCollectionRegistry().length}\n`);
 
@@ -1200,6 +1349,15 @@ export async function doesChatHaveVectors(settings, overrideChatId, overrideUUID
     if (!collectionId || isQuarantinedChatCollection(collectionId)) {
         return { hasVectors: false, collectionId: null, registryKey: null, chunkCount: 0, allMatches: [] };
     }
+    // VH-052: vectors on another backend/server still count, so Vectorize asks
+    // to re-vectorize (a new collection here) instead of starting a first run
+    // on a collection id whose saved settings are elsewhere.
+    if (!foreign) {
+        const { collectionLivesElsewhere } = await import('./backend-elsewhere.js');
+        if (collectionLivesElsewhere(collectionId, settings).length) {
+            return { hasVectors: true, collectionId, registryKey: null, chunkCount: 0, allMatches: [], elsewhere: true };
+        }
+    }
     await discoverExistingCollections(settings);
     const matches = getCollectionRegistry().filter(key =>
         parseRegistryKey(key).collectionId === collectionId);
@@ -1249,6 +1407,34 @@ export async function doesChatHaveVectors(settings, overrideChatId, overrideUUID
  * @param {boolean} autoDiscover If true, attempts to discover unregistered collections
  * @returns {Promise<object[]>} Array of collection objects
  */
+/**
+ * VH-064: recognises collections made by SillyTavern's own Vector Storage
+ * extension, by shape, so the Browser can label them "SillyTavern built-in
+ * vectors" instead of "SillyTavern itself or another extension".
+ *
+ * SillyTavern keeps its vectors in its own storage (VectHare's Standard
+ * backend) and names them:
+ *   - files and Data Bank attachments: file_<number>
+ *   - World Info: world_<number>
+ *   - chats: the chat's own id, which carries SillyTavern's date stamp
+ *     ("2025-11-18@12h30m05s", or the older "2025-11-18 @12h 30m 05s 123ms").
+ * Only collections with no VectHare marker are passed in. Anything else
+ * (another backend, another extension's prefix, a renamed chat) answers null
+ * and keeps the general wording.
+ *
+ * @param {string} collectionId Bare collection identifier
+ * @param {string} backend Backend the row was found in
+ * @returns {'file'|'world-info'|'chat'|null}
+ */
+export function sillyTavernBuiltInKind(collectionId, backend) {
+    if (!['standard', 'vectra'].includes(String(backend || 'standard'))) return null;
+    const id = String(collectionId || '');
+    if (/^file_-?\d+$/.test(id)) return 'file';
+    if (/^world_-?\d+$/.test(id)) return 'world-info';
+    if (/\d{4}-\d{1,2}-\d{1,2}\s?@\s?\d{1,2}h\s?\d{1,2}m\s?\d{1,2}s/.test(id)) return 'chat';
+    return null;
+}
+
 /**
  * Establishes whether a listed identity is backed by a real record in
  * VectHare's own metadata file, and whether that record is identifiably
@@ -1661,6 +1847,9 @@ export async function loadAllCollections(settings, autoDiscover = true, options 
                     malformed: identity.malformed === true,
                     ownershipValidated: identity.owned,
                     foreign: identity.foreign === true,
+                    // VH-064: SillyTavern's own Vector Storage collection, by shape.
+                    sillyTavernBuiltIn: identity.foreign === true
+                        ? sillyTavernBuiltInKind(collectionId, backend) : null,
                 },
                 destinationQualified,
                 destinationOrigin,
