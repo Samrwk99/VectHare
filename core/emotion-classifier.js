@@ -1,3 +1,4 @@
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * VECTHARE EMOTION CLASSIFIER
@@ -103,7 +104,7 @@ const CACHE_MAX_SIZE = 100;
  */
 export function clearClassifierCache() {
     classifierCache.clear();
-    console.log(`[${MODULE_NAME}] Classifier cache cleared`);
+    vhLog(`[${MODULE_NAME}] Classifier cache cleared`);
 }
 
 /**
@@ -168,7 +169,7 @@ export async function classifyEmotion(text, options = {}) {
         }
         classifierCache.set(cacheKey, result);
 
-        console.log(`[${MODULE_NAME}] Classified as "${result.label}" (${(result.score * 100).toFixed(1)}%)`);
+        vhLog(`[${MODULE_NAME}] Classified as "${result.label}" (${(result.score * 100).toFixed(1)}%)`);
         return result;
     } catch (error) {
         console.error(`[${MODULE_NAME}] Classification error:`, error);
@@ -303,7 +304,7 @@ export function updateClassifierSetting(key, value) {
         clearClassifierCache();
     }
 
-    console.log(`[${MODULE_NAME}] Setting ${settingKey} = ${value}`);
+    vhLog(`[${MODULE_NAME}] Setting ${settingKey} = ${value}`);
 }
 
 // =============================================================================

@@ -1,3 +1,4 @@
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * STANDARD BACKEND (Vectra - ST Native + Plugin)
@@ -35,10 +36,10 @@ export class StandardBackend extends VectorBackend {
 
     async initialize(settings) {
         // Check if plugin is available
-        console.log('VectHare DEBUG: Checking plugin availability...');
+        vhLog('VectHare DEBUG: Checking plugin availability...');
         try {
             const response = await fetch('/api/plugins/similharity/health');
-            console.log('VectHare DEBUG: Plugin health check response:', response.status, response.ok);
+            vhLog('VectHare DEBUG: Plugin health check response:', response.status, response.ok);
             this.pluginAvailable = response.ok;
 
             if (this.pluginAvailable) {
@@ -46,12 +47,12 @@ export class StandardBackend extends VectorBackend {
                     method: 'POST',
                     headers: getRequestHeaders(),
                 });
-                console.log('VectHare: Standard backend initialized (plugin available)');
+                vhLog('VectHare: Standard backend initialized (plugin available)');
             } else {
-                console.log('VectHare: Standard backend initialized (native ST API only - health check failed)');
+                vhLog('VectHare: Standard backend initialized (native ST API only - health check failed)');
             }
         } catch (e) {
-            console.log('VectHare: Standard backend initialized (native ST API only - error:', e.message, ')');
+            vhLog('VectHare: Standard backend initialized (native ST API only - error:', e.message, ')');
             this.pluginAvailable = false;
         }
         
@@ -132,12 +133,12 @@ export class StandardBackend extends VectorBackend {
         // Count how many chunks have keywords
         const chunksWithKeywords = items.filter(item => item.keywords && item.keywords.length > 0).length;
 
-        console.log(`VectHare: Embedding ${items.length} chunks (avg: ${avgLen} chars, max: ${maxLen} chars at index ${longestChunkIndex}) - ${chunksWithKeywords} chunks have keywords`);
+        vhLog(`VectHare: Embedding ${items.length} chunks (avg: ${avgLen} chars, max: ${maxLen} chars at index ${longestChunkIndex}) - ${chunksWithKeywords} chunks have keywords`);
 
         // Debug: Log first chunk's keywords if any
         if (chunksWithKeywords > 0) {
             const firstChunkWithKeywords = items.find(item => item.keywords && item.keywords.length > 0);
-            console.log(`VectHare DEBUG: First chunk keywords:`, firstChunkWithKeywords.keywords);
+            vhLog(`VectHare DEBUG: First chunk keywords:`, firstChunkWithKeywords.keywords);
         }
 
         // Warn if chunks are unusually large (potential OOM risk)
@@ -148,11 +149,11 @@ export class StandardBackend extends VectorBackend {
 
         try {
             // Try plugin API first (supports metadata) - fallback to native API if unavailable
-            console.log('VectHare DEBUG: this.pluginAvailable =', this.pluginAvailable);
+            vhLog('VectHare DEBUG: this.pluginAvailable =', this.pluginAvailable);
             let usePluginApi = this.pluginAvailable;
             let endpoint = usePluginApi ? '/api/plugins/similharity/chunks/insert' : '/api/vector/insert';
 
-            console.log(`VectHare DEBUG: Using ${usePluginApi ? 'PLUGIN' : 'NATIVE'} API for insertion (${endpoint})`);
+            vhLog(`VectHare DEBUG: Using ${usePluginApi ? 'PLUGIN' : 'NATIVE'} API for insertion (${endpoint})`);
             
             // Warn if keywords will be lost
             if (!usePluginApi && chunksWithKeywords > 0) {
@@ -189,7 +190,7 @@ export class StandardBackend extends VectorBackend {
                     };
                     // Debug: Log first item's metadata
                     if (item === items[0] && item.keywords?.length > 0) {
-                        console.log(`VectHare DEBUG: First item metadata being sent:`, mappedItem.metadata);
+                        vhLog(`VectHare DEBUG: First item metadata being sent:`, mappedItem.metadata);
                     }
                     return mappedItem;
                 }),
@@ -226,7 +227,7 @@ export class StandardBackend extends VectorBackend {
                     `Failed to insert vectors: ${response.status} - ${errorBody}`);
             }
 
-            console.log(`VectHare Standard: Inserted ${items.length} vectors into ${collectionId}`);
+            vhLog(`VectHare Standard: Inserted ${items.length} vectors into ${collectionId}`);
         } catch (error) {
             // Enhanced error logging for OOM debugging
             const isOOM = error.message?.includes('OrtRun') || error.message?.includes('error code = 6');
@@ -451,6 +452,32 @@ export class StandardBackend extends VectorBackend {
             items: hashes.map(hash => ({ hash, text: '', metadata: {} })),
             total: hashes.length,
         };
+    }
+
+    /**
+     * P5: stored records for the given hashes only (verification after writes).
+     * Returns null when the plugin cannot answer, so the caller reads in full.
+     */
+    async getChunksByHashes(collectionId, hashes, settings) {
+        if (!this.pluginAvailable) return null;
+        const response = await fetch('/api/plugins/similharity/chunks/get-by-hashes', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                backend: 'vectra',
+                collectionId: collectionId,
+                source: settings.source || 'transformers',
+                model: getModelFromSettings(settings),
+                hashes,
+            }),
+        });
+        if (response.status === 404) return null; // older plugin without this route
+        if (!response.ok) {
+            const errorBody = await response.text().catch(() => '');
+            throw new Error(`Reading chunks by hash failed: HTTP ${response.status} ${errorBody}`.trim());
+        }
+        const data = await response.json();
+        return data?.success === true && data.complete === true && Array.isArray(data.items) ? data : null;
     }
 
     /**

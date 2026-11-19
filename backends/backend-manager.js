@@ -1,3 +1,4 @@
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * BACKEND MANAGER
@@ -251,7 +252,7 @@ function evictLRUBackendIfNeeded() {
             }
         }
         if (oldestBackend) {
-            console.log(`VectHare: Evicting LRU backend from cache: ${oldestBackend}`);
+            vhLog(`VectHare: Evicting LRU backend from cache: ${oldestBackend}`);
             delete backendInstances[oldestBackend];
             delete backendHealthStatus[oldestBackend];
             delete backendAccessTimestamps[oldestBackend];
@@ -277,9 +278,11 @@ export async function initializeBackend(backendName, settings, throwOnFail = tru
     const key = JSON.stringify(name === 'qdrant' ? [
         snapshot.qdrant_use_cloud, snapshot.qdrant_url,
         snapshot.qdrant_host, snapshot.qdrant_port, snapshot.qdrant_api_key,
+        snapshot.qdrant_key_fingerprint,
     ] : name === 'milvus' ? [
         snapshot.milvus_address, snapshot.milvus_host, snapshot.milvus_port,
         snapshot.milvus_username, snapshot.milvus_password, snapshot.milvus_token,
+        snapshot.milvus_token_fingerprint, snapshot.milvus_password_fingerprint,
         snapshot.milvus_dimensions,
     ] : []);
     if (backendConfigKeys.get(name) !== key) {
@@ -327,7 +330,7 @@ async function initializeBackendOnce(backendName, settings, throwOnFail = true) 
     if (backendInstances[normalizedName] && backendHealthStatus[normalizedName]) {
         // If health cache is stale, re-verify health before returning
         if (isHealthCacheStale(normalizedName)) {
-            console.log(`VectHare: Health cache stale for ${normalizedName}, re-verifying...`);
+            vhLog(`VectHare: Health cache stale for ${normalizedName}, re-verifying...`);
             try {
                 const healthy = await backendInstances[normalizedName].healthCheck();
                 recordHealthCheck(normalizedName, healthy); // VEC-18: Record health check
@@ -369,7 +372,7 @@ async function initializeBackendOnce(backendName, settings, throwOnFail = true) 
         return null;
     }
 
-    console.log(`VectHare: Initializing ${normalizedName} backend${backendName !== normalizedName ? ` (from alias: ${backendName})` : ''}...`);
+    vhLog(`VectHare: Initializing ${normalizedName} backend${backendName !== normalizedName ? ` (from alias: ${backendName})` : ''}...`);
 
     try {
         // Create and initialize new backend
@@ -394,7 +397,7 @@ async function initializeBackendOnce(backendName, settings, throwOnFail = true) 
         backendAccessTimestamps[normalizedName] = Date.now(); // VEC-25: Track access time
         backendHealthTimestamps[normalizedName] = Date.now(); // VEC-33: Track health verification time
 
-        console.log(`VectHare: Successfully initialized ${normalizedName} backend`);
+        vhLog(`VectHare: Successfully initialized ${normalizedName} backend`);
         return backend;
     } catch (error) {
         backendHealthStatus[normalizedName] = false;
@@ -480,7 +483,7 @@ export function resetBackendHealth(backendName = null) {
         delete backendHealthStatus[normalizedName];
         delete backendInstances[normalizedName];
         delete backendHealthTimestamps[normalizedName]; // VEC-33
-        console.log(`VectHare: Reset backend health status for ${normalizedName}${backendName !== normalizedName ? ` (alias: ${backendName})` : ''}`);
+        vhLog(`VectHare: Reset backend health status for ${normalizedName}${backendName !== normalizedName ? ` (alias: ${backendName})` : ''}`);
     } else {
         // Reset all
         for (const name of Object.keys(backendHealthStatus)) {
@@ -488,7 +491,7 @@ export function resetBackendHealth(backendName = null) {
             delete backendInstances[name];
             delete backendHealthTimestamps[name]; // VEC-33
         }
-        console.log('VectHare: Reset backend health status for all backends');
+        vhLog('VectHare: Reset backend health status for all backends');
     }
 }
 

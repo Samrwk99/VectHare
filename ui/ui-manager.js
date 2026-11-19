@@ -1,3 +1,4 @@
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * VECTHARE UI MANAGER
@@ -23,10 +24,11 @@ import { openTextCleaningManager } from './text-cleaning-manager.js';
 import { resetBackendHealth } from '../backends/backend-manager.js';
 import { getHealthIndicatorHtml, getHealthModalHtml, initializeHealthDashboard, checkBackendHealth } from './health-dashboard.js';
 import { getChatCollectionId } from '../core/chat-vectorization.js';
-import { doesChatHaveVectors, getCollectionRegistry } from '../core/collection-loader.js';
+import { doesChatHaveVectors, getCollectionRegistry, invalidateCollectionInventory } from '../core/collection-loader.js';
 import { parseRegistryKey } from '../core/collection-ids.js';
 import { getModelField } from '../core/providers.js';
 import { getChunkingStrategies } from '../core/content-types.js';
+import { fetchSecretStatus, setSecret } from '../core/secret-store.js';
 
 /**
  * Applies the current settings snapshot without overwriting collection metadata
@@ -39,6 +41,92 @@ function applySettingsSnapshot(settingsSnapshot) {
 }
 
 /**
+ * Turns a password input into a key-store field: "Key set ✓ [Replace] [Remove]"
+ * when a key is stored, otherwise the input plus a Save button. The key itself
+ * is never read back into the page; it goes to the plugin's key store only.
+ * @param {string} inputSelector
+ * @param {string} name One of the key store names (qdrant_api_key, ...)
+ * @param {object} settings
+ */
+function bindSecretField(inputSelector, name, settings) {
+    const $input = $(inputSelector);
+    if (!$input.length) return;
+    const originalPlaceholder = $input.attr('placeholder') || '';
+    $input.val('');
+    const $row = $('<div class="vecthare-secret-row" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:4px;"></div>');
+    $input.after($row);
+
+    let state = { known: false, set: Boolean(settings[name]) };
+    let replacing = false;
+
+    const button = (label, handler) =>
+        $('<button type="button" class="vecthare-btn-secondary"></button>').text(label).on('click', handler);
+
+    const render = () => {
+        $row.empty();
+        if (!state.known && !settings[name]) {
+            // Plugin unreachable: the key cannot be stored, so do not pretend.
+            $input.hide();
+            $row.append($('<small></small>').text('Key store unavailable (Similharity plugin not reachable).'));
+            $row.append(button('Retry', refresh));
+            return;
+        }
+        if (state.set && !replacing) {
+            $input.hide();
+            $row.append($('<small></small>').text(
+                settings[name] ? 'Key set ✓ (moving to key store)' : 'Key set ✓'));
+            $row.append(button('Replace', () => { replacing = true; render(); $input.trigger('focus'); }));
+            $row.append(button('Remove', remove));
+            return;
+        }
+        $input.show().attr('placeholder', originalPlaceholder).val('');
+        $row.append(button('Save', save));
+        if (replacing) $row.append(button('Cancel', () => { replacing = false; render(); }));
+    };
+
+    const refresh = async () => {
+        const result = await fetchSecretStatus();
+        state = { known: result.ok, set: Boolean(result.status?.[name]) || Boolean(settings[name]) };
+        render();
+    };
+
+    const save = async () => {
+        const value = String($input.val()).trim();
+        if (!value) { toastr.warning('Enter a key first'); return; }
+        try {
+            await setSecret(name, value, settings);
+            $input.val('');
+            replacing = false;
+            state = { known: true, set: true };
+            resetBackendHealth();
+            invalidateCollectionInventory(); // K3
+            toastr.success('Key saved');
+        } catch (error) {
+            toastr.error(`Could not save the key: ${error.message}`);
+        }
+        render();
+    };
+
+    const remove = async () => {
+        try {
+            await setSecret(name, '', settings);
+            state = { known: true, set: false };
+            replacing = false;
+            resetBackendHealth();
+            invalidateCollectionInventory(); // K3
+            toastr.info('Key removed');
+        } catch (error) {
+            toastr.error(`Could not remove the key: ${error.message}`);
+        }
+        render();
+    };
+
+    $input.on('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); void save(); } });
+    render();
+    void refresh();
+}
+
+/**
  * Renders the VectHare settings UI
  * @param {string} containerId - The container element ID to render into
  * @param {object} settings - VectHare settings object
@@ -48,7 +136,7 @@ function applySettingsSnapshot(settingsSnapshot) {
  * @param {Function} callbacks.onRunDiagnostics - Called when "Run Diagnostics" is clicked
  */
 export function renderSettings(containerId, settings, callbacks) {
-    console.log('VectHare UI: Rendering settings...');
+    vhLog('VectHare UI: Rendering settings...');
 
     const html = `
         <div id="vecthare_settings">
@@ -128,8 +216,9 @@ export function renderSettings(containerId, settings, callbacks) {
                                         <span>Use Multitenancy (Single Collection)</span>
                                     </label>
                                     <small class="vecthare_hint" style="display: block; margin-top: 4px;">
-                                        <strong>Multitenancy ON:</strong> Single collection with filtering (saves resources)<br>
-                                        <strong>Multitenancy OFF:</strong> Separate collections per content type (better isolation)
+                                        <strong>Multitenancy ON:</strong> new collections share one Qdrant collection per vector size, separated server-side (with the 13.31 plugin; older plugins: the old shared collection)<br>
+                                        <strong>Multitenancy OFF:</strong> Separate collections per content type (better isolation)<br>
+                                        The switch decides where NEW collections go; existing ones stay where they are (see Database Browser &gt; Storage). Chats in the old shared store are read-only with the 13.31 plugin: Vectorize offers a rebuild that moves them.
                                     </small>
                                 </div>
                             </div>
@@ -167,6 +256,18 @@ export function renderSettings(containerId, settings, callbacks) {
                                 </label>
                                 <input type="password" id="vecthare_milvus_token" class="vecthare-input" placeholder="For cloud instances" />
 
+                                <div style="margin: 10px 0; padding: 8px; background: rgba(0,0,0,0.1); border-radius: 4px;">
+                                    <label class="checkbox_label" title="Where NEW Milvus collections go. Existing collections stay where they are.">
+                                        <input type="checkbox" id="vecthare_milvus_multitenancy" />
+                                        <span>Use Multitenancy (shared store per vector size)</span>
+                                    </label>
+                                    <small class="vecthare_hint" style="display: block; margin-top: 4px;">
+                                        <strong>ON (default):</strong> new collections share one Milvus collection per vector size, separated server-side (fits hosted Milvus collection limits)<br>
+                                        <strong>OFF:</strong> each new collection gets its own Milvus collection<br>
+                                        Needs the 13.31 Similharity plugin; existing collections stay where they are.
+                                    </small>
+                                </div>
+
                                 <label for="vecthare_milvus_dimensions">
                                     <small>Embedding Dimensions:</small>
                                 </label>
@@ -196,6 +297,7 @@ export function renderSettings(containerId, settings, callbacks) {
                             <option value="mistral">Mistral AI</option>
                             <option value="nomicai">Nomic AI</option>
                         </select>
+                            <small class="vecthare_hint">Changing the embedding provider, model or chunking settings applies to <b>new</b> collections only. Existing collections keep the settings they were created with.</small>
 
                         <!-- Provider-Specific Settings -->
                         <div id="vecthare_provider_settings">
@@ -404,7 +506,13 @@ export function renderSettings(containerId, settings, callbacks) {
                                 <small>Insert Batch Size: <span id="vecthare_insert_batch_size_value">50</span></small>
                             </label>
                             <input type="range" id="vecthare_insert_batch_size" class="vecthare-slider" min="1" max="100" step="1" />
-                            <small class="vecthare_hint">Chunks per insert batch (1-100; 50-100 recommended for faster bulk operations)</small>
+                            <small class="vecthare_hint">Chunks sent per embedding request (1-100). Once changed, chat Sync/Repair also take this many per pass (default 5, or 8 for local Transformers). Lower it if your embedding server rejects large requests.</small>
+
+                            <label class="checkbox_label" style="margin-top: 16px;">
+                                <input type="checkbox" id="vecthare_debug_logging" />
+                                <span>Debug logging</span>
+                            </label>
+                            <small class="vecthare_hint">Write VectHare's detailed progress lines to the browser console (off keeps the console quiet; warnings and errors are always shown)</small>
 
                             <label for="vecthare_min_chat_length" style="margin-top: 16px;">
                                 <small>Minimum Messages Before Injection</small>
@@ -890,45 +998,14 @@ export function renderSettings(containerId, settings, callbacks) {
             </div>
         </div>
 
-        <!-- Chunk Visualizer Modal -->
-        <div id="vecthare_visualizer_modal" class="vecthare-modal" style="display: none;">
-            <div class="vecthare-modal-overlay"></div>
-            <div class="vecthare-modal-content vecthare-visualizer-content">
-                <div class="vecthare-modal-header">
-                    <h3>
-                        <i class="fa-solid fa-cubes"></i>
-                        Chunk Visualizer
-                    </h3>
-                    <button class="vecthare-modal-close" id="vecthare_visualizer_close">
-                        <i class="fa-solid fa-times"></i>
-                    </button>
-                </div>
-                <div class="vecthare-visualizer-toolbar">
-                    <input type="text" id="vecthare_visualizer_search"
-                           class="vecthare-visualizer-search"
-                           placeholder="Search chunks by text, keywords, or name...">
-                    <div class="vecthare-visualizer-stats">
-                        <span id="vecthare_visualizer_count">0 chunks</span>
-                        <span id="vecthare_visualizer_tiers"></span>
-                    </div>
-                </div>
-                <div class="vecthare-modal-body">
-                    <div id="vecthare_visualizer_content"></div>
-                </div>
-                <div class="vecthare-modal-footer">
-                    <button class="vecthare-btn-secondary" id="vecthare_visualizer_done">Done</button>
-                </div>
-            </div>
-        </div>
-
         ${getHealthModalHtml()}
     `;
 
     // Sanity debug: confirm the generated HTML contains the lock button marker
     try {
-        console.log(`VectHare: renderSettings built HTML contains lock marker:`, String(html).indexOf('vecthare_lock_collection') >= 0);
+        vhLog(`VectHare: renderSettings built HTML contains lock marker:`, String(html).indexOf('vecthare_lock_collection') >= 0);
         const target = document.getElementById(containerId);
-        console.log(`VectHare: renderSettings target container exists:`, !!target, 'containerId=', containerId);
+        vhLog(`VectHare: renderSettings target container exists:`, !!target, 'containerId=', containerId);
     } catch (e) {
         console.warn('VectHare: renderSettings pre-append debug failed', e);
     }
@@ -937,13 +1014,13 @@ export function renderSettings(containerId, settings, callbacks) {
 
     // Debug: log presence of lock button after rendering and observe for later appearance
     try {
-        console.log(`VectHare: renderSettings appended to ${containerId}. lock button present:`, !!document.getElementById('vecthare_lock_collection'));
+        vhLog(`VectHare: renderSettings appended to ${containerId}. lock button present:`, !!document.getElementById('vecthare_lock_collection'));
         if (!document.getElementById('vecthare_lock_collection')) {
             const containerEl = document.getElementById(containerId);
             if (containerEl && window.MutationObserver) {
                 const mo = new MutationObserver((mutations, obs) => {
                     if (document.getElementById('vecthare_lock_collection')) {
-                        console.log('VectHare: lock button appeared in DOM');
+                        vhLog('VectHare: lock button appeared in DOM');
                         obs.disconnect();
                     }
                 });
@@ -966,7 +1043,7 @@ export function renderSettings(containerId, settings, callbacks) {
     // Initialize health dashboard
     initializeHealthDashboard();
 
-    console.log('VectHare UI: Settings rendered');
+    vhLog('VectHare UI: Settings rendered');
 }
 
 /**
@@ -1943,7 +2020,7 @@ function bindSettingsEvents(settings, callbacks) {
                     // Connect to selected collection
                     const selected = result.selectedCollection;
                     toastr.success(`Connected to collection with ${selected.chunkCount} chunks`, 'Auto-Sync Enabled');
-                    console.log(`VectHare: Auto-sync enabled - connected to ${selected.collectionId} (${selected.chunkCount} chunks)`);
+                    vhLog(`VectHare: Auto-sync enabled - connected to ${selected.collectionId} (${selected.chunkCount} chunks)`);
                 } else if (result.action === 'revectorize') {
                     // User wants to start fresh - open vectorizer
                     $checkbox.prop('checked', false);
@@ -1960,7 +2037,7 @@ function bindSettingsEvents(settings, callbacks) {
             } else {
                 toastr.success('Auto-sync enabled for this chat');
             }
-            console.log(`VectHare: Chat auto-sync for ${collectionId}: ${enabling ? 'enabled' : 'disabled'}`);
+            vhLog(`VectHare: Chat auto-sync for ${collectionId}: ${enabling ? 'enabled' : 'disabled'}`);
 
             // VectHare+: "Continue" = enable auto-sync, then run vectorization,
             // which resumes from the first missing group (DB is the checkpoint)
@@ -1995,6 +2072,8 @@ function bindSettingsEvents(settings, callbacks) {
             settings.vector_backend = String($(this).val());
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
+            // K3: drop the cached inventory so the Database Browser re-reads on next open
+            invalidateCollectionInventory();
 
             // Show/hide Qdrant settings
             if (settings.vector_backend === 'qdrant') {
@@ -2008,7 +2087,7 @@ function bindSettingsEvents(settings, callbacks) {
                 $('#vecthare_milvus_settings').hide();
             }
 
-            console.log(`VectHare: Vector backend changed to ${settings.vector_backend}`);
+            vhLog(`VectHare: Vector backend changed to ${settings.vector_backend}`);
             // Preserve existing invalidation and check the newly selected backend.
             resetBackendHealth();
             void checkBackendHealth(settings);
@@ -2032,7 +2111,7 @@ function bindSettingsEvents(settings, callbacks) {
             }
 
             // Reset backend health to force re-initialization with new config
-            console.log('VectHare: Qdrant mode changed, forcing re-initialization...');
+            vhLog('VectHare: Qdrant mode changed, forcing re-initialization...');
             resetBackendHealth('qdrant');
 
             // Only an actual mode change triggers reinitialization.
@@ -2082,10 +2161,13 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
         });
 
-    $('#vecthare_qdrant_api_key')
-        .val(settings.qdrant_api_key || '')
-        .on('input', function() {
-            settings.qdrant_api_key = String($(this).val());
+    bindSecretField('#vecthare_qdrant_api_key', 'qdrant_api_key', settings);
+
+    // 9c: Milvus multitenancy toggle (new collections only)
+    $('#vecthare_milvus_multitenancy')
+        .prop('checked', settings.milvus_multitenancy !== false)
+        .on('change', function() {
+            settings.milvus_multitenancy = $(this).prop('checked');
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
@@ -2130,21 +2212,8 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
         });
 
-    $('#vecthare_milvus_password')
-        .val(settings.milvus_password || '')
-        .on('input', function() {
-            settings.milvus_password = String($(this).val());
-            applySettingsSnapshot(settings);
-            saveSettingsDebounced();
-        });
-
-    $('#vecthare_milvus_token')
-        .val(settings.milvus_token || '')
-        .on('input', function() {
-            settings.milvus_token = String($(this).val());
-            applySettingsSnapshot(settings);
-            saveSettingsDebounced();
-        });
+    bindSecretField('#vecthare_milvus_password', 'milvus_password', settings);
+    bindSecretField('#vecthare_milvus_token', 'milvus_token', settings);
 
     $('#vecthare_milvus_dimensions')
         .val(settings.milvus_dimensions || '')
@@ -2176,11 +2245,17 @@ function bindSettingsEvents(settings, callbacks) {
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
             toggleProviderSettings(settings.source, settings);
-            console.log(`VectHare: Embedding provider changed to ${settings.source}`);
+            vhLog(`VectHare: Embedding provider changed to ${settings.source}`);
             // Keep existing cache reset and refresh the displayed health.
             resetBackendHealth();
+            invalidateCollectionInventory(); // K3
             void checkBackendHealth(settings);
         });
+
+    // K3: any embedding-model change also makes the cached Browser inventory stale
+    $(document).off('change.vecthareStale').on('change.vecthareStale',
+        '#vecthare_settings select[id$="_model"], #vecthare_settings input[id$="_model"]',
+        () => invalidateCollectionInventory());
 
     // Score threshold
     $('#vecthare_score_threshold')
@@ -2222,7 +2297,7 @@ function bindSettingsEvents(settings, callbacks) {
             } else {
                 $('#vecthare_bm25_params').hide();
             }
-            console.log(`VectHare: Keyword scoring method changed to ${settings.keyword_scoring_method}`);
+            vhLog(`VectHare: Keyword scoring method changed to ${settings.keyword_scoring_method}`);
         });
 
     // Show/hide BM25 params based on initial setting
@@ -2267,7 +2342,7 @@ function bindSettingsEvents(settings, callbacks) {
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
             $('#vecthare_hybrid_params').toggle(enabled);
-            console.log(`VectHare: Hybrid search ${enabled ? 'enabled' : 'disabled'}`);
+            vhLog(`VectHare: Hybrid search ${enabled ? 'enabled' : 'disabled'}`);
         });
     // Initialize visibility
     $('#vecthare_hybrid_params').toggle(settings.hybrid_search_enabled || false);
@@ -2283,7 +2358,7 @@ function bindSettingsEvents(settings, callbacks) {
             const isWeighted = settings.hybrid_fusion_method === 'weighted';
             $('#vecthare_hybrid_weights').toggle(isWeighted);
             $('#vecthare_hybrid_rrf_settings').toggle(!isWeighted);
-            console.log(`VectHare: Hybrid fusion method changed to ${settings.hybrid_fusion_method}`);
+            vhLog(`VectHare: Hybrid fusion method changed to ${settings.hybrid_fusion_method}`);
         });
     // Initialize visibility based on current method
     const isWeightedMethod = (settings.hybrid_fusion_method || 'rrf') === 'weighted';
@@ -2441,20 +2516,20 @@ function bindSettingsEvents(settings, callbacks) {
             const activeEntries = [];
             const cfg = window.extension_settings?.vecthare || settings;
 
-            console.log('VectHare: Running semantic WI test with messages:', recentMessages);
+            vhLog('VectHare: Running semantic WI test with messages:', recentMessages);
 
             // Primary: use initialized hooks if available
             if (window.VectHare_WorldInfo && typeof window.VectHare_WorldInfo.getSemanticEntries === 'function') {
                 const entries = await window.VectHare_WorldInfo.getSemanticEntries(recentMessages, activeEntries, cfg);
-                console.log('VectHare: Semantic WI test results (via window hooks):', entries);
+                vhLog('VectHare: Semantic WI test results (via window hooks):', entries);
                 toastr.info(`Semantic WI test completed - ${entries.length} entries (see console)`);
 
                 // If no entries found, provide extended diagnostics to help debug
                 if (!entries || entries.length === 0) {
                     try {
-                        console.log('VectHare: No semantic entries — dumping registry and per-collection query info...');
+                        vhLog('VectHare: No semantic entries — dumping registry and per-collection query info...');
                         const registry = vecthareState().registry || [];
-                        console.log('VectHare: Collection registry:', registry);
+                        vhLog('VectHare: Collection registry:', registry);
 
                         const coreApi = await import('../core/core-vector-api.js');
                         const metaMod = await import('../core/collection-metadata.js');
@@ -2463,13 +2538,13 @@ function bindSettingsEvents(settings, callbacks) {
                             try {
                                 if (!collKey.includes('lorebook')) continue; // focus on lorebooks
                                 const meta = metaMod.getCollectionMeta(collKey);
-                                console.log(`VectHare: Collection meta for ${collKey}:`, meta);
+                                vhLog(`VectHare: Collection meta for ${collKey}:`, meta);
 
                                 // Check saved hashes (true=include metadata)
                                 if (coreApi.getSavedHashes) {
                                     try {
                                         const saved = await coreApi.getSavedHashes(collKey, cfg, true);
-                                        console.log(`VectHare: getSavedHashes for ${collKey}:`, saved && saved.hashes ? saved.hashes.length + ' hashes' : saved);
+                                        vhLog(`VectHare: getSavedHashes for ${collKey}:`, saved && saved.hashes ? saved.hashes.length + ' hashes' : saved);
                                     } catch (hErr) {
                                         console.warn(`VectHare: getSavedHashes failed for ${collKey}:`, hErr.message);
                                     }
@@ -2478,7 +2553,7 @@ function bindSettingsEvents(settings, callbacks) {
                                 // Run a direct vector query against this collection
                                 try {
                                     const qres = await coreApi.queryCollection(collKey, recentMessages.join('\n'), cfg.world_info_top_k || 3, cfg);
-                                    console.log(`VectHare: queryCollection result for ${collKey}:`, qres);
+                                    vhLog(`VectHare: queryCollection result for ${collKey}:`, qres);
                                 } catch (qErr) {
                                     console.warn(`VectHare: queryCollection failed for ${collKey}:`, qErr.message);
                                 }
@@ -2505,7 +2580,7 @@ function bindSettingsEvents(settings, callbacks) {
                     throw new Error('WorldInfo module does not export a usable function');
                 }
                 const entries = await fn(recentMessages, activeEntries, cfg);
-                console.log('VectHare: Semantic WI test results (via dynamic import):', entries);
+                vhLog('VectHare: Semantic WI test results (via dynamic import):', entries);
                 toastr.info(`Semantic WI test completed - ${entries.length} entries (see console)`);
                 return;
             } catch (impErr) {
@@ -2523,7 +2598,7 @@ function bindSettingsEvents(settings, callbacks) {
     $('#vecthare_wi_dump_registry').on('click', function() {
         try {
             const registry = vecthareState().registry || [];
-            console.log('VectHare: Collection registry dump:', registry);
+            vhLog('VectHare: Collection registry dump:', registry);
             toastr.info(`Collection registry dumped to console (${registry.length} items)`);
         } catch (e) {
             console.error('VectHare: Failed to dump registry', e);
@@ -2550,7 +2625,7 @@ function bindSettingsEvents(settings, callbacks) {
             }
 
             const first = entries[0];
-            console.log('VectHare: Applying semantic WI entry:', first);
+            vhLog('VectHare: Applying semantic WI entry:', first);
 
             // Best-effort: try importing ST's world-info module and invoking common APIs
             let applied = false;
@@ -2562,7 +2637,7 @@ function bindSettingsEvents(settings, callbacks) {
                     if (worldInfo[name] && typeof worldInfo[name] === 'function') {
                         await worldInfo[name]([first]);
                         applied = true;
-                        console.log(`VectHare: Applied via world-info.${name}`);
+                        vhLog(`VectHare: Applied via world-info.${name}`);
                         break;
                     }
                 }
@@ -2582,7 +2657,7 @@ function bindSettingsEvents(settings, callbacks) {
                         try {
                             await fn([first]);
                             applied = true;
-                            console.log('VectHare: Applied via global fallback function');
+                            vhLog('VectHare: Applied via global fallback function');
                             break;
                         } catch (e) {
                             console.debug('VectHare: fallback apply failed', e);
@@ -2602,8 +2677,8 @@ function bindSettingsEvents(settings, callbacks) {
                 await navigator.clipboard.writeText(text);
                 toastr.info('Semantic entry copied to clipboard. Paste into World Info editor to activate.');
             } catch (e) {
-                console.log('VectHare: Clipboard write failed, showing content in console');
-                console.log('Semantic entry content:', text);
+                vhLog('VectHare: Clipboard write failed, showing content in console');
+                vhLog('Semantic entry content:', text);
                 toastr.info('Semantic entry logged to console. Paste into World Info editor to activate.');
             }
 
@@ -2791,6 +2866,15 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
         });
 
+    // U3: VectHare's console.log output is off unless this is on.
+    $('#vecthare_debug_logging')
+        .prop('checked', settings.debug_logging === true)
+        .on('input', function() {
+            settings.debug_logging = $(this).prop('checked');
+            applySettingsSnapshot(settings);
+            saveSettingsDebounced();
+        });
+
     $('#vecthare_ollama_keep')
         .prop('checked', settings.ollama_keep)
         .on('input', function() {
@@ -2887,6 +2971,11 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
         });
 
+    // Nomic key lives in SillyTavern's own API settings (not stored by VectHare)
+    $('#vecthare_nomicai_api_key').on('click', function() {
+        toastr.info('Set the Nomic API key in SillyTavern: API Connections > Nomic AI (text embeddings). VectHare reads it from there.', 'VectHare', { timeOut: 8000 });
+    });
+
     // OpenRouter model
     $('#vecthare_openrouter_model')
         .val(settings.openrouter_model)
@@ -2947,6 +3036,7 @@ function bindSettingsEvents(settings, callbacks) {
             const value = parseInt($(this).val());
             $('#vecthare_insert_batch_size_value').text(value);
             settings.insert_batch_size = value;
+            settings.insert_batch_size_set = true; // see getSyncBatchSize
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
@@ -3018,7 +3108,7 @@ async function initializeCottonTalesIntegration(settings) {
 
     if (cottonTalesInstalled) {
         $('#vecthare_cottontales_section').show();
-        console.log('VectHare: Cotton-Tales detected, showing emotion classification options');
+        vhLog('VectHare: Cotton-Tales detected, showing emotion classification options');
     } else {
         $('#vecthare_cottontales_section').hide();
         return;
@@ -3206,10 +3296,10 @@ function renderDiagnosticsContent(results, filter = 'all') {
     const output = $('#vecthare_diagnostics_content');
     output.empty();
 
-    console.log('VectHare UI: Rendering diagnostics with results:', results);
-    console.log('VectHare UI: Version data received:', results.version);
-    console.log('VectHare UI: Extension version:', results.version?.extension);
-    console.log('VectHare UI: Plugin version:', results.version?.plugin);
+    vhLog('VectHare UI: Rendering diagnostics with results:', results);
+    vhLog('VectHare UI: Version data received:', results.version);
+    vhLog('VectHare UI: Extension version:', results.version?.extension);
+    vhLog('VectHare UI: Plugin version:', results.version?.plugin);
 
     const statusIcons = {
         'pass': '<i class="fa-solid fa-circle-check" style="color: var(--vecthare-success);"></i>',
@@ -3740,8 +3830,8 @@ async function showQdrantDimensionFixDialog() {
             <div class="vecthare-dimension-options" style="display: flex; flex-direction: column; gap: 12px;">
                 <button id="vecthare_dim_fix_purge" class="vecthare-btn-danger" style="padding: 12px; text-align: left;">
                     <i class="fa-solid fa-trash"></i>
-                    <strong>Purge collection and start fresh</strong>
-                    <br><small style="opacity: 0.8;">Delete all ${pointsCount.toLocaleString()} vectors and re-vectorize with your current model</small>
+                    <strong>Start fresh</strong>
+                    <br><small style="opacity: 0.8;">How to remove the affected collections (${pointsCount.toLocaleString()} vectors) and re-vectorize with your current model</small>
                 </button>
 
                 <button id="vecthare_dim_fix_switch" class="vecthare-btn-secondary" style="padding: 12px; text-align: left;">
@@ -3770,43 +3860,14 @@ async function showQdrantDimensionFixDialog() {
     });
 
     // Bind button handlers
-    $('#vecthare_dim_fix_purge').off('click').on('click', async () => {
-        // Close popup
+    $('#vecthare_dim_fix_purge').off('click').on('click', () => {
+        // H2: VectHare never drops a shared Qdrant store. This button used to
+        // call a plugin route that does not exist (so it always failed); it now
+        // says how to start fresh safely instead.
         $('.popup-button-close').click();
-
-        // Show confirmation
-        const confirmHtml = `
-            <p><strong>Are you sure you want to purge the Qdrant collection?</strong></p>
-            <p>This will delete all <strong>${pointsCount.toLocaleString()}</strong> vectors permanently.</p>
-            <p>You'll need to re-vectorize all your chats, lorebooks, and documents.</p>
-        `;
-
-        const confirmed = await callGenericPopup(confirmHtml, POPUP_TYPE.CONFIRM, '', {
-            okButton: 'Yes, purge it',
-            cancelButton: 'Cancel',
-        });
-
-        if (confirmed) {
-            toastr.info('Purging Qdrant collection...');
-            try {
-                const { getRequestHeaders } = await import('../../../../../script.js');
-                const response = await fetch('/api/plugins/similharity/backend/qdrant/purge-collection', {
-                    method: 'POST',
-                    headers: getRequestHeaders(),
-                    body: JSON.stringify({ collectionName: 'vecthare_main' })
-                });
-
-                if (response.ok) {
-                    toastr.success('Qdrant collection purged! You can now re-vectorize your content.');
-                    closeDiagnosticsModal();
-                } else {
-                    const error = await response.text();
-                    toastr.error(`Failed to purge: ${error}`);
-                }
-            } catch (e) {
-                toastr.error(`Purge failed: ${e.message}`);
-            }
-        }
+        toastr.info('To start fresh: delete the affected collections in the Database Browser (or use Purge All), then re-vectorize. VectHare never deletes a shared store directly.',
+            'VectHare', { timeOut: 12000 });
+        closeDiagnosticsModal();
     });
 
     $('#vecthare_dim_fix_switch').off('click').on('click', () => {

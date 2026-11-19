@@ -1,3 +1,4 @@
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * MILVUS BACKEND (via Unified Plugin API)
@@ -6,7 +7,8 @@
  * Backend: Milvus (external vector database server)
  *
  * MULTITENANCY SUPPORT:
- * - Uses ONE collection ("vecthare_main") with payload filters
+ * - Step 9b: the physical store comes from the storage resolver; until 9c every
+ *   collection resolves to ONE shared collection ("vecthare_main") with payload filters
  * - Passes type and sourceId for data isolation
  * - Supports all VectHare features via payload metadata
  *
@@ -21,6 +23,7 @@ import { getRequestHeaders } from '../../../../../script.js';
 import { VectorBackend } from './backend-interface.js';
 import { getModelField, getValidProviderIds } from '../core/providers.js';
 import { VECTOR_LIST_LIMIT } from '../core/constants.js';
+import { resolveStorage, v2StorageParam, scopedTenancySupported, locatorForPhysical } from '../core/storage-resolver.js';
 
 const BACKEND_TYPE = 'milvus';
 
@@ -40,7 +43,7 @@ export class MilvusBackend extends VectorBackend {
             // Although WebLLM is client-side, we can't easily run it here without importing providers.
             // This is a best-effort for server-side providers (OpenAI, etc.) supported by Similharity.
             
-            console.log(`VectHare: Attempting to auto-detect embedding dimensions for ${settings.source}...`);
+            vhLog(`VectHare: Attempting to auto-detect embedding dimensions for ${settings.source}...`);
             
             const response = await fetch('/api/plugins/similharity/get-embedding', {
                 method: 'POST',
@@ -55,7 +58,7 @@ export class MilvusBackend extends VectorBackend {
             if (response.ok) {
                 const data = await response.json();
                 if (data.success && data.embedding && Array.isArray(data.embedding)) {
-                    console.log(`VectHare: Auto-detected dimension: ${data.embedding.length}`);
+                    vhLog(`VectHare: Auto-detected dimension: ${data.embedding.length}`);
                     return data.embedding.length;
                 }
             }
@@ -95,7 +98,7 @@ export class MilvusBackend extends VectorBackend {
             throw new Error(`[Milvus] Failed to initialize Milvus: ${response.status} ${response.statusText} - ${errorBody}`);
         }
 
-        console.log('VectHare: Using Milvus backend (production-grade vector search)');
+        vhLog('VectHare: Using Milvus backend (production-grade vector search)');
     }
 
     async healthCheck() {
@@ -129,7 +132,7 @@ export class MilvusBackend extends VectorBackend {
      */
     _parseCollectionId(collectionId) {
         if (!collectionId || typeof collectionId !== 'string') {
-            return { type: 'unknown', sourceId: 'unknown' };
+            return { type: 'unknown', sourceId: 'unknown', logicalId: null };
         }
 
         // Strip registry key prefix if present (backend:source:collectionId)
@@ -159,7 +162,8 @@ export class MilvusBackend extends VectorBackend {
         if (idParts.length >= 3 && idParts[0] === 'vh') {
             return {
                 type: idParts[1],
-                sourceId: idParts.slice(2).join(':') // Handle UUIDs that might have colons
+                sourceId: idParts.slice(2).join(':'), // Handle UUIDs that might have colons
+                logicalId: collectionId,
             };
         }
 
@@ -168,7 +172,8 @@ export class MilvusBackend extends VectorBackend {
         if (legacyParts.length >= 3 && legacyParts[0] === 'vecthare') {
             return {
                 type: legacyParts[1],
-                sourceId: legacyParts.slice(2).join('_')
+                sourceId: legacyParts.slice(2).join('_'),
+                logicalId: collectionId,
             };
         }
 
@@ -176,23 +181,56 @@ export class MilvusBackend extends VectorBackend {
         console.warn('VectHare: Unknown collection ID format:', collectionId);
         return {
             type: 'chat',
-            sourceId: collectionId
+            sourceId: collectionId,
+            // Not a VectHare id shape: the plugin cannot derive a scope from it
+            // and will refuse the call rather than guess.
+            logicalId: null,
         };
     }
 
+    /**
+     * Step 9b: the collection's tenant scope plus its physical store, taken
+     * from the storage resolver only (its locator, or today's rule: the shared
+     * `vecthare_main`).
+     */
+    _target(collectionId, settings) {
+        const parsed = this._parseCollectionId(collectionId);
+        const storage = resolveStorage(parsed.logicalId || collectionId, settings, BACKEND_TYPE);
+        // 9c: a v2 collection (vecthare_mt_<dim> or its own vh_ store) is named
+        // by its logical id plus its storage; the plugin derives the scope, so
+        // no client filters are sent. Legacy requests are unchanged.
+        const v2 = v2StorageParam(storage);
+        if (v2 && parsed.logicalId) {
+            return { ...parsed, physical: parsed.logicalId, layout: storage.layout, storage,
+                scopeFilters: undefined, tenantId: undefined, v2Extra: { storage: v2 } };
+        }
+        return { ...parsed, physical: storage.physical, layout: storage.layout, storage,
+            scopeFilters: { type: parsed.type, sourceId: parsed.sourceId }, tenantId: parsed.logicalId, v2Extra: {} };
+    }
+
+    /** Writes into a v2 collection need a plugin that scopes it. */
+    async _assertWritable(target) {
+        if (target.storage?.v2 && !await scopedTenancySupported()) {
+            throw new Error(`[Milvus] ${target.logicalId} uses a newer storage layout; update the Similharity plugin. Nothing was changed.`);
+        }
+    }
+
     async getSavedHashes(collectionId, settings) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+        const target = this._target(collectionId, settings);
+        const { type, sourceId, logicalId, physical, scopeFilters, tenantId, v2Extra } = target;
 
         const response = await fetch('/api/plugins/similharity/chunks/list', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({
                 backend: BACKEND_TYPE,
-                collectionId: 'vecthare_main', // Always use main collection
+                collectionId: physical,
+                ...v2Extra,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
                 limit: VECTOR_LIST_LIMIT,
-                filters: { type, sourceId }, // Filter by tenant
+                filters: scopeFilters, // Filter by tenant
+                tenantCollectionId: tenantId, // plugin derives the scope from this (client filters are not trusted)
             }),
         });
 
@@ -208,14 +246,17 @@ export class MilvusBackend extends VectorBackend {
     async insertVectorItems(collectionId, items, settings) {
         if (items.length === 0) return;
 
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+        const target = this._target(collectionId, settings);
+        await this._assertWritable(target);
+        const { type, sourceId, logicalId, physical, scopeFilters, tenantId, v2Extra } = target;
 
         const response = await fetch('/api/plugins/similharity/chunks/insert', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({
                 backend: BACKEND_TYPE,
-                collectionId: 'vecthare_main', // Always use main collection
+                collectionId: physical,
+                ...v2Extra,
                 items: items.map(item => ({
                     hash: item.hash,
                     text: item.text,
@@ -237,7 +278,8 @@ export class MilvusBackend extends VectorBackend {
                 })),
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                filters: { type, sourceId }, // Pass multitenancy info
+                filters: scopeFilters, // Pass multitenancy info
+                tenantCollectionId: tenantId, // plugin derives the scope from this (client filters are not trusted)
             }),
         });
 
@@ -246,22 +288,37 @@ export class MilvusBackend extends VectorBackend {
             throw new Error(`[Milvus] Failed to insert ${items.length} vectors into ${collectionId} (type: ${type}, sourceId: ${sourceId}): ${response.status} ${response.statusText} - ${errorBody}`);
         }
 
-        console.log(`VectHare Milvus: Inserted ${items.length} vectors (type: ${type}, sourceId: ${sourceId})`);
+        // 9c: a v2 insert says where the vectors went; record it once.
+        if (target.storage?.v2) {
+            const result = await response.json().catch(() => null);
+            const location = result?.storage;
+            if (location && typeof location.physical === 'string') {
+                const locator = locatorForPhysical(logicalId, BACKEND_TYPE, location.physical, location.dim ?? null);
+                if (locator) {
+                    const { recordStorageLocator } = await import('../core/collection-metadata.js');
+                    recordStorageLocator(logicalId, locator);
+                }
+            }
+        }
+        vhLog(`VectHare Milvus: Inserted ${items.length} vectors (type: ${type}, sourceId: ${sourceId})`);
     }
 
     async deleteVectorItems(collectionId, hashes, settings) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+        const target = this._target(collectionId, settings);
+        const { type, sourceId, logicalId, physical, scopeFilters, tenantId, v2Extra } = target;
 
         const response = await fetch('/api/plugins/similharity/chunks/delete', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({
                 backend: BACKEND_TYPE,
-                collectionId: 'vecthare_main',
+                collectionId: physical,
+                ...v2Extra,
                 hashes: hashes,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                filters: { type, sourceId },
+                filters: scopeFilters,
+                tenantCollectionId: tenantId, // plugin derives the scope from this (client filters are not trusted)
             }),
         });
 
@@ -272,14 +329,16 @@ export class MilvusBackend extends VectorBackend {
     }
 
     async queryCollection(collectionId, searchText, topK, settings, queryVector = null) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+        const target = this._target(collectionId, settings);
+        const { type, sourceId, logicalId, physical, scopeFilters, tenantId, v2Extra } = target;
 
         const response = await fetch('/api/plugins/similharity/chunks/query', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({
                 backend: BACKEND_TYPE,
-                collectionId: 'vecthare_main',
+                collectionId: physical,
+                ...v2Extra,
                 searchText: searchText,
                 // #52: reuse one query embedding across collections when given.
                 ...(Array.isArray(queryVector) && queryVector.length ? { queryVector } : {}),
@@ -287,7 +346,8 @@ export class MilvusBackend extends VectorBackend {
                 threshold: 0.0,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                filters: { type, sourceId },
+                filters: scopeFilters,
+                tenantCollectionId: tenantId, // plugin derives the scope from this (client filters are not trusted)
             }),
         });
 
@@ -315,14 +375,16 @@ export class MilvusBackend extends VectorBackend {
 
         for (const collectionId of collectionIds) {
             try {
-                const { type, sourceId } = this._parseCollectionId(collectionId);
+                const target = this._target(collectionId, settings);
+        const { type, sourceId, logicalId, physical, scopeFilters, tenantId, v2Extra } = target;
 
                 const response = await fetch('/api/plugins/similharity/chunks/query', {
                     method: 'POST',
                     headers: getRequestHeaders(),
                     body: JSON.stringify({
                         backend: BACKEND_TYPE,
-                        collectionId: 'vecthare_main',
+                        collectionId: physical,
+                ...v2Extra,
                         searchText: searchText,
                         // #52: reuse one query embedding across collections when given.
                         ...(Array.isArray(queryVector) && queryVector.length ? { queryVector } : {}),
@@ -330,7 +392,8 @@ export class MilvusBackend extends VectorBackend {
                         threshold: threshold,
                         source: settings.source || 'transformers',
                         model: getModelFromSettings(settings),
-                        filters: { type, sourceId },
+                        filters: scopeFilters,
+                        tenantCollectionId: tenantId, // plugin derives the scope from this (client filters are not trusted)
                     }),
                 });
 
@@ -361,17 +424,20 @@ export class MilvusBackend extends VectorBackend {
     }
 
     async purgeVectorIndex(collectionId, settings) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+        const target = this._target(collectionId, settings);
+        const { type, sourceId, logicalId, physical, scopeFilters, tenantId, v2Extra } = target;
 
         const response = await fetch('/api/plugins/similharity/chunks/purge', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({
                 backend: BACKEND_TYPE,
-                collectionId: 'vecthare_main',
+                collectionId: physical,
+                ...v2Extra,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                filters: { type, sourceId }, // Purge specific tenant
+                filters: scopeFilters, // Purge specific tenant
+                tenantCollectionId: tenantId, // plugin derives the scope from this (client filters are not trusted)
             }),
         });
 
@@ -380,7 +446,7 @@ export class MilvusBackend extends VectorBackend {
             throw new Error(`[Milvus] Failed to purge collection ${collectionId} (type: ${type}, sourceId: ${sourceId}): ${response.status} ${response.statusText} - ${errorBody}`);
         }
 
-        console.log(`VectHare Milvus: Purged (type: ${type}, sourceId: ${sourceId})`);
+        vhLog(`VectHare Milvus: Purged (type: ${type}, sourceId: ${sourceId})`);
     }
 
     async purgeFileVectorIndex(collectionId, settings) {
@@ -401,13 +467,20 @@ export class MilvusBackend extends VectorBackend {
      * Get a single chunk by hash
      */
     async getChunk(collectionId, hash, settings) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+        const target = this._target(collectionId, settings);
+        const { type, sourceId, logicalId, physical, scopeFilters, tenantId, v2Extra } = target;
 
         const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}?` + new URLSearchParams({
             backend: BACKEND_TYPE,
-            collectionId: 'vecthare_main',
+            collectionId: physical,
+            ...(v2Extra.storage ? { storage: JSON.stringify(v2Extra.storage) } : {}),
             source: settings.source || 'transformers',
-                model: getModelFromSettings(settings),
+            model: getModelFromSettings(settings),
+            // Without a scope the plugin refuses the lookup (it would otherwise
+            // return another collection's chunk with the same hash). 9c: a v2
+            // request is scoped by the plugin from its storage.
+            ...(v2Extra.storage ? {} : { filters: JSON.stringify({ type, sourceId }) }),
+            ...(logicalId && !v2Extra.storage ? { tenantCollectionId: logicalId } : {}),
         }), {
             headers: getRequestHeaders(),
         });
@@ -423,24 +496,59 @@ export class MilvusBackend extends VectorBackend {
     }
 
     /**
+     * P5: stored records of this collection for the given hashes only, read
+     * with a scoped hash query (verification after writes). Returns null when
+     * the plugin cannot answer, so the caller reads in full.
+     */
+    async getChunksByHashes(collectionId, hashes, settings) {
+        const target = this._target(collectionId, settings);
+        const { type, sourceId, logicalId, physical, scopeFilters, tenantId, v2Extra } = target;
+        if (!logicalId) return null;
+        const response = await fetch('/api/plugins/similharity/chunks/get-by-hashes', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                backend: BACKEND_TYPE,
+                collectionId: physical,
+                ...v2Extra,
+                source: settings.source || 'transformers',
+                model: getModelFromSettings(settings),
+                hashes,
+                filters: scopeFilters,
+                tenantCollectionId: tenantId,
+            }),
+        });
+        if (response.status === 404) return null; // older plugin without this route
+        if (!response.ok) {
+            const errorBody = await response.text().catch(() => '');
+            throw new Error(`Reading chunks by hash failed: HTTP ${response.status} ${errorBody}`.trim());
+        }
+        const data = await response.json();
+        return data?.success === true && data.complete === true && Array.isArray(data.items) ? data : null;
+    }
+
+    /**
      * List chunks with pagination
      */
     async listChunks(collectionId, settings, options = {}) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+        const target = this._target(collectionId, settings);
+        const { type, sourceId, logicalId, physical, scopeFilters, tenantId, v2Extra } = target;
 
         const response = await fetch('/api/plugins/similharity/chunks/list', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({
                 backend: BACKEND_TYPE,
-                collectionId: 'vecthare_main',
+                collectionId: physical,
+                ...v2Extra,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
                 offset: options.offset || 0,
                 limit: options.limit || 100,
                 includeVectors: options.includeVectors || false,
                 strictRead: options.strictRead === true,
-                filters: { type, sourceId },
+                filters: scopeFilters,
+                tenantCollectionId: tenantId, // plugin derives the scope from this (client filters are not trusted)
             }),
         });
 
@@ -456,18 +564,21 @@ export class MilvusBackend extends VectorBackend {
      * Update chunk text (triggers re-embedding)
      */
     async updateChunkText(collectionId, hash, newText, settings) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+        const target = this._target(collectionId, settings);
+        const { type, sourceId, logicalId, physical, scopeFilters, tenantId, v2Extra } = target;
 
         const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}/text`, {
             method: 'PATCH',
             headers: getRequestHeaders(),
             body: JSON.stringify({
                 backend: BACKEND_TYPE,
-                collectionId: 'vecthare_main',
+                collectionId: physical,
+                ...v2Extra,
                 text: newText,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                filters: { type, sourceId },
+                filters: scopeFilters,
+                tenantCollectionId: tenantId, // plugin derives the scope from this (client filters are not trusted)
             }),
         });
 
@@ -483,18 +594,21 @@ export class MilvusBackend extends VectorBackend {
      * Update chunk metadata (no re-embedding)
      */
     async updateChunkMetadata(collectionId, hash, metadata, settings) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+        const target = this._target(collectionId, settings);
+        const { type, sourceId, logicalId, physical, scopeFilters, tenantId, v2Extra } = target;
 
         const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}/metadata`, {
             method: 'PATCH',
             headers: getRequestHeaders(),
             body: JSON.stringify({
                 backend: BACKEND_TYPE,
-                collectionId: 'vecthare_main',
+                collectionId: physical,
+                ...v2Extra,
                 metadata: metadata,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                filters: { type, sourceId },
+                filters: scopeFilters,
+                tenantCollectionId: tenantId, // plugin derives the scope from this (client filters are not trusted)
             }),
         });
 
@@ -510,17 +624,20 @@ export class MilvusBackend extends VectorBackend {
      * Get collection statistics
      */
     async getStats(collectionId, settings) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+        const target = this._target(collectionId, settings);
+        const { type, sourceId, logicalId, physical, scopeFilters, tenantId, v2Extra } = target;
 
         const response = await fetch('/api/plugins/similharity/chunks/stats', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({
                 backend: BACKEND_TYPE,
-                collectionId: 'vecthare_main',
+                collectionId: physical,
+                ...v2Extra,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                filters: { type, sourceId },
+                filters: scopeFilters,
+                tenantCollectionId: tenantId, // plugin derives the scope from this (client filters are not trusted)
             }),
         });
 
@@ -566,11 +683,13 @@ export class MilvusBackend extends VectorBackend {
             queryVector = null
         } = hybridOptions;
 
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+        const target = this._target(collectionId, settings);
+        const { type, sourceId, logicalId, physical, scopeFilters, tenantId, v2Extra } = target;
 
         const body = {
             backend: BACKEND_TYPE,
-            collectionId: 'vecthare_main',
+            collectionId: physical,
+                ...v2Extra,
             searchText: searchText,
             // #11: the prepared query vector was accepted and then dropped, so
             // Milvus re-embedded the query (or failed when it could not).
@@ -579,7 +698,8 @@ export class MilvusBackend extends VectorBackend {
             threshold: 0.0,
             source: settings.source || 'transformers',
             model: getModelFromSettings(settings),
-            filters: { type, sourceId },
+            filters: scopeFilters,
+            tenantCollectionId: tenantId, // plugin derives the scope from this (client filters are not trusted)
             // Hybrid-specific parameters
             hybrid: true,
             hybridOptions: {
@@ -600,7 +720,7 @@ export class MilvusBackend extends VectorBackend {
 
             if (response.ok) {
                 const data = await response.json();
-                console.log(`[Milvus] Native hybrid search returned ${data.results?.length || 0} results`);
+                vhLog(`[Milvus] Native hybrid search returned ${data.results?.length || 0} results`);
 
                 return {
                     hashes: data.results.map(r => r.hash),
@@ -623,7 +743,8 @@ export class MilvusBackend extends VectorBackend {
             console.warn(`[Milvus] Hybrid search failed:`, error.message);
         }
 
-        // Fallback to regular vector search
-        return this.queryCollection(collectionId, searchText, topK, settings);
+        // Fallback to regular vector search (9b fix: with the prepared query
+        // vector, which used to be dropped here, so the query was embedded again)
+        return this.queryCollection(collectionId, searchText, topK, settings, queryVector);
     }
 }

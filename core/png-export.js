@@ -1,3 +1,4 @@
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * VECTHARE PNG EXPORT/IMPORT
@@ -346,7 +347,7 @@ async function createZTXtChunk(keyword, text) {
         data[keywordBytes.length + 1] = 0; // Compression method 0 = deflate
         data.set(compressed, keywordBytes.length + 2);
 
-        console.log(`VectHare PNG: Compressed ${textBytes.length} bytes to ${compressed.length} bytes (${Math.round(compressed.length / textBytes.length * 100)}%)`);
+        vhLog(`VectHare PNG: Compressed ${textBytes.length} bytes to ${compressed.length} bytes (${Math.round(compressed.length / textBytes.length * 100)}%)`);
 
         return createChunk('zTXt', data);
     } else {
@@ -541,7 +542,7 @@ export async function embedDataInPNG(exportData, pngData = null) {
     // Insert chunk into PNG
     const result = insertChunkBeforeIEND(pngData, textChunk);
 
-    console.log(`VectHare PNG: Created PNG export (${result.length} bytes, original JSON: ${jsonString.length} bytes)`);
+    vhLog(`VectHare PNG: Created PNG export (${result.length} bytes, original JSON: ${jsonString.length} bytes)`);
 
     return result;
 }
@@ -561,7 +562,7 @@ export async function extractDataFromPNG(pngData) {
                 const textData = await readTextChunk(chunk);
                 if (textData && textData.keyword === VECTHARE_KEYWORD) {
                     const exportData = JSON.parse(textData.text);
-                    console.log('VectHare PNG: Successfully extracted data from PNG');
+                    vhLog('VectHare PNG: Successfully extracted data from PNG');
                     return exportData;
                 }
             } catch (e) {
@@ -590,7 +591,7 @@ export function downloadPNG(pngData, filename) {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
 
-    console.log(`VectHare PNG: Downloaded ${a.download}`);
+    vhLog(`VectHare PNG: Downloaded ${a.download}`);
 }
 
 /**

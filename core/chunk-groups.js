@@ -1,3 +1,4 @@
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * CHUNK GROUPS SYSTEM
@@ -71,7 +72,7 @@ export function expandInclusiveGroups(groups, matchedHashes) {
             }
         }
 
-        console.log(`VectHare Groups: Inclusive group "${group.name}" triggered by ${matchedMembers.length} member(s), creating ${linkType} links to ${group.members.length - matchedMembers.length} other member(s)`);
+        vhLog(`VectHare Groups: Inclusive group "${group.name}" triggered by ${matchedMembers.length} member(s), creating ${linkType} links to ${group.members.length - matchedMembers.length} other member(s)`);
     }
 
     return virtualLinks;
@@ -122,7 +123,7 @@ export function applyExclusiveGroups(chunks, groups) {
             });
         }
 
-        console.log(`VectHare Groups: Exclusive group "${group.name}" - kept chunk ${String(winner.hash).substring(0, 8)}... (score: ${winner.score?.toFixed(3)}), excluded ${losers.length} lower-scoring member(s)`);
+        vhLog(`VectHare Groups: Exclusive group "${group.name}" - kept chunk ${String(winner.hash).substring(0, 8)}... (score: ${winner.score?.toFixed(3)}), excluded ${losers.length} lower-scoring member(s)`);
     }
 
     const filteredChunks = chunks.filter(c => !excludedHashes.has(String(c.hash)));
@@ -189,7 +190,7 @@ export function enforceMandatoryGroups(chunks, groups, allChunksMap) {
 
         resultHashes.add(String(chosen.hash));
 
-        console.log(`VectHare Groups: Mandatory group "${group.name}" - force-included chunk ${String(chosen.hash).substring(0, 8)}...`);
+        vhLog(`VectHare Groups: Mandatory group "${group.name}" - force-included chunk ${String(chosen.hash).substring(0, 8)}...`);
     }
 
     return {

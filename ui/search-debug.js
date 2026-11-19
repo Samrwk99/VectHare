@@ -1,3 +1,4 @@
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * VECTHARE SEARCH DEBUG MODAL
@@ -52,6 +53,10 @@ export function createDebugData() {
         collectionId: null,
         collectionsQueried: [],
         collectionDecisions: [],
+        // C10: collections skipped/failed during retrieval, with the reason
+        ragIssues: [],
+        // C9: chunks of this chat's collection dropped because their messages are gone
+        staleChunksDropped: 0,
         settings: {},
         stages: {
             initial: [],
@@ -147,7 +152,7 @@ export function setLastSearchDebug(data) {
         queryHistory.pop();
     }
 
-    console.log('VectHare Debug: Stored search debug data', {
+    vhLog('VectHare Debug: Stored search debug data', {
         query: data.query?.substring(0, 50) + '...',
         stages: {
             initial: data.stages.initial.length,
@@ -325,6 +330,7 @@ function createModalHtml(data, historyIndex = 0) {
                     </div>
 
                     ${createCollectionDecisionCard(data)}
+                    ${createRagIssuesCard(data)}
 
                     <!-- Chunks by Stage -->
                     <div class="vecthare-debug-card">
@@ -474,6 +480,50 @@ function createCollectionDecisionCard(data) {
             </div>
             <div class="vecthare-debug-card-body">
                 <div class="vecthare-debug-fate-list">${rows}</div>
+            </div>
+        </div>
+    `;
+}
+
+/**
+ * C10/C9: retrieval problems - collections that were skipped or failed (with the
+ * reason) and stale chat chunks that were dropped.
+ */
+function createRagIssuesCard(data) {
+    const issues = data.ragIssues || [];
+    const stale = data.staleChunksDropped || 0;
+    if (!issues.length && !stale) {
+        return '';
+    }
+
+    const rows = issues.map(issue => `
+        <div class="vecthare-debug-fate-entry">
+            <div class="vecthare-debug-fate-header">
+                <span class="vecthare-debug-hash">${escapeHtml(issue.label || issue.collectionId || 'unknown')}</span>
+                <span class="vecthare-debug-fate-result vecthare-fate-dropped">SKIPPED</span>
+            </div>
+            <div class="vecthare-debug-chunk-meta">
+                <span><strong>Reason:</strong> ${escapeHtml(issue.reason || 'Unknown')}</span>
+            </div>
+        </div>
+    `).join('');
+
+    const staleRow = stale ? `
+        <div class="vecthare-debug-fate-entry">
+            <div class="vecthare-debug-chunk-meta">
+                <span><strong>Stale chunks dropped:</strong> ${stale} (their messages are no longer in this chat)</span>
+            </div>
+        </div>
+    ` : '';
+
+    return `
+        <div class="vecthare-debug-card">
+            <div class="vecthare-debug-card-header">
+                <i class="fa-solid fa-triangle-exclamation"></i>
+                <span>Retrieval Problems</span>
+            </div>
+            <div class="vecthare-debug-card-body">
+                <div class="vecthare-debug-fate-list">${rows}${staleRow}</div>
             </div>
         </div>
     `;

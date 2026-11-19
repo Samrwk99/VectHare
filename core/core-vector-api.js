@@ -1,3 +1,4 @@
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * CORE VECTOR API CLIENT
@@ -24,7 +25,8 @@
 
 import { addInsertionProvenance } from './vector-provenance.js';
 import { getRequestHeaders } from '../../../../../script.js';
-import { vecthareState, assertStoreAuthoritative } from './vecthare-store.js';
+import { vecthareState, assertStoreAuthoritative, refreshStoreIfStale } from './vecthare-store.js';
+import { acquireLease, withLease } from './leases.js';
 import { extension_settings, modules } from '../../../../extensions.js';
 import { secret_state } from '../../../../secrets.js';
 import { textgen_types, textgenerationwebui_settings } from '../../../../textgen-settings.js';
@@ -45,7 +47,12 @@ import { applyBM25Scoring } from './bm25-scorer.js';
 import { hybridSearch } from './hybrid-search.js';
 import { resolveCollectionOperationSettings, snapshotCollectionOperationSettings,
     createInitialVectorizationConfig, readInitialVectorizationConfig,
-    assertCollectionOperationSettingsStable } from './collection-metadata.js';
+    assertCollectionOperationSettingsStable,
+    noteCollectionHashClaims, forgetCollectionHashClaims, hasSharedChunkRecords,
+    registryEntriesMissingHashClaims } from './collection-metadata.js';
+import { parseRegistryKey } from './collection-ids.js';
+import { resolveStorage, settingsForCollectionStorage, assertNoStorageConflict, assertStorageWritable,
+    scopedTenancySupported } from './storage-resolver.js';
 import AsyncUtils from '../utils/async-utils.js';
 import StringUtils from '../utils/string-utils.js';
 import {
@@ -71,6 +78,8 @@ export function assertVectHareCollectionForWrite(collectionId) {
 // Notify the Status UI only after a write has successfully reached the DB.
 // Window events keep the backend/API independent of the progress panel.
 function notifyDatabaseChanged(collectionId = null) {
+    // C12: a write changes which hashes a collection holds.
+    try { forgetCollectionHashClaims(collectionId || null); } catch { /* index is best-effort */ }
     if (typeof window !== 'undefined' && typeof CustomEvent !== 'undefined') {
         window.dispatchEvent(new CustomEvent('vecthare:database-changed', { detail: { collectionId } }));
     }
@@ -195,7 +204,7 @@ class DynamicRateLimiter {
             const waitTime = (oldest + intervalMs) - now;
 
             if (waitTime > 0) {
-                console.log(`VectHare: Rate limit reached. Waiting ${Math.round(waitTime / 1000)}s...`);
+                vhLog(`VectHare: Rate limit reached. Waiting ${Math.round(waitTime / 1000)}s...`);
                 await AsyncUtils.sleep(waitTime + 100); // Add small buffer
             }
 
@@ -372,7 +381,7 @@ export function getVectorsRequestBody(args = {}, settings) {
             break;
         case 'llamacpp':
             body.apiUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : textgenerationwebui_settings.server_urls[textgen_types.LLAMACPP];
-            console.log(`VectHare DEBUG llamacpp (core-vector-api): use_alt_endpoint=${settings.use_alt_endpoint}, alt_endpoint_url="${settings.alt_endpoint_url}", ST_url="${textgenerationwebui_settings.server_urls[textgen_types.LLAMACPP]}", final apiUrl="${body.apiUrl}"`);
+            vhLog(`VectHare DEBUG llamacpp (core-vector-api): use_alt_endpoint=${settings.use_alt_endpoint}, alt_endpoint_url="${settings.alt_endpoint_url}", ST_url="${textgenerationwebui_settings.server_urls[textgen_types.LLAMACPP]}", final apiUrl="${body.apiUrl}"`);
             break;
         case 'vllm':
             body.apiUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : textgenerationwebui_settings.server_urls[textgen_types.VLLM];
@@ -567,7 +576,7 @@ async function createKoboldCppEmbeddings(items, settings, onProgress = null, abo
         // Call progress callback after each batch
         const embeddedSoFar = Math.min(i + BATCH_SIZE, items.length);
         if (onProgress) {
-            console.log(`[KoboldCpp] Calling progress callback: ${embeddedSoFar}/${items.length}`);
+            vhLog(`[KoboldCpp] Calling progress callback: ${embeddedSoFar}/${items.length}`);
             onProgress(embeddedSoFar, items.length);
         }
     }
@@ -916,6 +925,10 @@ export async function getSavedHashes(collectionId, settings, includeMetadata = f
  */
 export async function insertVectorItems(collectionId, items, settings, onProgress = null, abortSignal = null) {
     assertVectHareCollectionForWrite(collectionId);
+    // 9b: saved settings found in more than one place -> no writes.
+    assertNoStorageConflict(collectionId, settings?.vector_backend);
+    // 9c: legacy Qdrant multitenancy is read-only (with a capable plugin).
+    await assertStorageWritable(collectionId, settings);
     // #49: an item whose text is empty (or only whitespace) after cleaning
     // cannot be embedded; providers either error or return nothing useful.
     // Previously such items were sent as a single space.
@@ -930,6 +943,35 @@ export async function insertVectorItems(collectionId, items, settings, onProgres
         }
         console.warn(`VectHare: Skipping ${dropped} item(s) with no text after cleaning`);
         items = embeddable;
+    }
+    // C13 (detect only): two different texts with the same hash cannot both be
+    // stored - the hash is the record's key, so the second would replace or be
+    // ignored by the backend without notice. Keep the first, skip the others,
+    // and say so. Identical texts are ordinary duplicates and are left alone.
+    {
+        const seenText = new Map();
+        const collisions = [];
+        const normalized = value => String(value ?? '').replace(/\s+/g, ' ').trim();
+        items = items.filter(item => {
+            if (!item || typeof item !== 'object' || item.hash === undefined || item.hash === null) return true;
+            const key = String(item.hash);
+            const text = normalized(item.text);
+            if (!seenText.has(key)) {
+                seenText.set(key, text);
+                return true;
+            }
+            if (seenText.get(key) === text) return true;
+            collisions.push(key);
+            return false;
+        });
+        if (collisions.length) {
+            console.warn(`VectHare: ${collisions.length} chunk(s) not stored in ${collectionId}: hash collision (different texts share hash ${[...new Set(collisions)].slice(0, 5).join(', ')})`);
+            if (typeof window !== 'undefined' && typeof CustomEvent !== 'undefined') {
+                window.dispatchEvent(new CustomEvent('vecthare:hash-collision', {
+                    detail: { collectionId, count: collisions.length, hashes: [...new Set(collisions)] },
+                }));
+            }
+        }
     }
     // Write-only, optional provenance. Existing hash keys, chunk order and
     // insert behavior are unchanged; no reader uses the new metadata yet.
@@ -963,7 +1005,7 @@ export async function insertVectorItems(collectionId, items, settings, onProgres
     try {
         // If source requires client-side embeddings, use streaming approach
         if (clientSideEmbeddingSources.includes(settings.source)) {
-            console.log(`VectHare: Streaming embeddings and writing for ${settings.source}...`);
+            vhLog(`VectHare: Streaming embeddings and writing for ${settings.source}...`);
 
             // Extract text strings - getAdditionalArgs expects string[], not objects
             const textStrings = items.map(item => {
@@ -985,7 +1027,7 @@ export async function insertVectorItems(collectionId, items, settings, onProgres
             const batches = chunkArray(items, BATCH_SIZE);
 
             const hasRateLimit = effectiveRateLimitCalls(settings) > 0;
-            console.log(`VectHare: Processing ${items.length} items in ${batches.length} batch(es) of up to ${BATCH_SIZE}${hasRateLimit ? ` with rate limit (Max ${settings.rate_limit_calls} calls / ${settings.rate_limit_interval}s)` : ''}`);
+            vhLog(`VectHare: Processing ${items.length} items in ${batches.length} batch(es) of up to ${BATCH_SIZE}${hasRateLimit ? ` with rate limit (Max ${settings.rate_limit_calls} calls / ${settings.rate_limit_interval}s)` : ''}`);
 
             for (let i = 0; i < batches.length; i++) {
                 assertSameEmbeddingIdentity();
@@ -1044,7 +1086,7 @@ async function streamEmbeddingsAndWrite(backend, collectionId, items, textString
     let totalProcessed = 0;
     const totalBatches = Math.ceil(textStrings.length / EMBEDDING_BATCH_SIZE);
 
-    console.log(`VectHare: Streaming ${items.length} items in ${totalBatches} batch(es) of up to ${EMBEDDING_BATCH_SIZE}`);
+    vhLog(`VectHare: Streaming ${items.length} items in ${totalBatches} batch(es) of up to ${EMBEDDING_BATCH_SIZE}`);
 
     // Process embeddings in batches
     for (let i = 0; i < textStrings.length; i += EMBEDDING_BATCH_SIZE) {
@@ -1054,7 +1096,7 @@ async function streamEmbeddingsAndWrite(backend, collectionId, items, textString
         const batchNum = Math.floor(i / EMBEDDING_BATCH_SIZE) + 1;
         assertSameEmbeddingIdentity?.(); // #21: same embedding space for the whole run
 
-        console.log(`VectHare: Embedding batch ${batchNum}/${totalBatches} (items ${i + 1}-${batchEnd})`);
+        vhLog(`VectHare: Embedding batch ${batchNum}/${totalBatches} (items ${i + 1}-${batchEnd})`);
         // #34: the phase is reported by whoever performs it, not guessed from a
         // percentage. Here embedding and writing really are separate steps.
         onProgress?.(totalProcessed, items.length, 'Embedding');
@@ -1103,7 +1145,7 @@ async function streamEmbeddingsAndWrite(backend, collectionId, items, textString
         }
 
         // VEC-6: Write batch to database with retry logic
-        console.log(`VectHare: Writing batch ${batchNum} to database (${itemsToWrite.length} items)`);
+        vhLog(`VectHare: Writing batch ${batchNum} to database (${itemsToWrite.length} items)`);
         onProgress?.(totalProcessed, items.length, 'Writing to database');
         try {
             // R13: abortable. R17: also timeout-bounded (was unbounded).
@@ -1124,12 +1166,12 @@ async function streamEmbeddingsAndWrite(backend, collectionId, items, textString
 
         // Update progress
         if (onProgress) {
-            console.log(`[Core Vector API] Streamed ${totalProcessed}/${items.length} (${Math.round((totalProcessed / items.length) * 100)}%)`);
+            vhLog(`[Core Vector API] Streamed ${totalProcessed}/${items.length} (${Math.round((totalProcessed / items.length) * 100)}%)`);
             onProgress(totalProcessed, items.length, 'Written');
         }
     }
 
-    console.log(`VectHare: Completed streaming ${totalProcessed} items to database`);
+    vhLog(`VectHare: Completed streaming ${totalProcessed} items to database`);
 }
 
 /**
@@ -1141,6 +1183,8 @@ async function streamEmbeddingsAndWrite(backend, collectionId, items, textString
  */
 export async function deleteVectorItems(collectionId, hashes, settings, abortSignal = null) {
     assertVectHareCollectionForWrite(collectionId);
+    assertNoStorageConflict(collectionId, settings?.vector_backend);
+    await assertStorageWritable(collectionId, settings);
     // R17: guarded - deletes during a run were unabortable+untimed awaits
     const backend = await withOpGuard(() => getBackend(settings), abortSignal, 'Backend initialization (delete)');
     try {
@@ -1164,10 +1208,43 @@ export async function deleteVectorItems(collectionId, hashes, settings, abortSig
     }
 }
 
+/**
+ * C12: reads the hash list of every registered collection that has not been
+ * read yet this session, so getChunkMetadata can tell whether a pre-#23 shared
+ * record belongs to exactly one collection. Does nothing when no shared record
+ * exists. A collection that cannot be read stays unproven, and the shared
+ * record is then not applied to any collection (fail closed).
+ * @param {object} settings VectHare settings
+ * @returns {Promise<number>} How many collections were newly read
+ */
+export async function primeChunkHashClaims(settings) {
+    let newlyRead = 0;
+    if (!hasSharedChunkRecords()) return newlyRead;
+    for (const entry of registryEntriesMissingHashClaims()) {
+        const parsed = parseRegistryKey(entry);
+        const collectionId = parsed.collectionId || entry;
+        // Only read collections that live in the backend/source being used;
+        // reading another backend's collection through these settings would
+        // return an empty list that looks like "holds nothing".
+        if ((parsed.backend && parsed.backend !== settings.vector_backend) ||
+            (parsed.source && settings.source && parsed.source !== settings.source)) continue;
+        try {
+            const hashes = await getSavedHashes(collectionId, settings);
+            if (Array.isArray(hashes)) {
+                noteCollectionHashClaims(collectionId, hashes);
+                newlyRead++;
+            }
+        } catch (error) {
+            console.debug(`VectHare: could not read hashes of ${collectionId} for annotation ownership: ${error.message}`);
+        }
+    }
+    return newlyRead;
+}
+
 // RAG is read-only: older collections without provenance may still be searched
 // (unverified), but confirmed mismatches and unreadable records are excluded.
 const ragCompatibilityWarnings = new Set();
-async function getQueryCollectionSettings(collectionId, settings) {
+async function getQueryCollectionSettings(collectionId, settings, issueSink = null) {
     try {
         const result = await resolveCollectionOperationSettings(collectionId, settings, 'rag',
             { pipeline: 'rag', strategy: 'query' }, { readOnly: true });
@@ -1185,6 +1262,9 @@ async function getQueryCollectionSettings(collectionId, settings) {
             ragCompatibilityWarnings.add(key);
             console.warn(`VectHare: RAG skipping collection ${collectionId}: ${error.message}`);
         }
+        // C10: the console warning above is once per session; the caller's
+        // sink gets every skip so the user can be told why memories are missing.
+        if (Array.isArray(issueSink)) issueSink.push({ collectionId, reason: String(error?.message || error) });
         return null;
     }
 }
@@ -1215,10 +1295,12 @@ async function groupQueryCollections(collectionIds, settings) {
  * @param {string} searchText - The text to query
  * @param {number} topK - The number of results to return
  * @param {object} settings VectHare settings object
+ * @param {Map|null} queryVectorCache Shared query-vector cache
+ * @param {Array|null} issueSink Optional array that receives {collectionId, reason} when the collection is skipped
  * @returns {Promise<{ hashes: number[], metadata: object[]}>} - Hashes and metadata of the results
  */
-export async function queryCollection(collectionId, searchText, topK, settings, queryVectorCache = null) {
-    const resolved = await getQueryCollectionSettings(collectionId, settings);
+export async function queryCollection(collectionId, searchText, topK, settings, queryVectorCache = null, issueSink = null) {
+    const resolved = await getQueryCollectionSettings(collectionId, settings, issueSink);
     if (!resolved) return { hashes: [], metadata: [] };
     settings = resolved;
     // #52: collections sharing one embedding configuration share one query
@@ -1267,7 +1349,7 @@ export async function queryCollection(collectionId, searchText, topK, settings, 
 
     // Check if hybrid search is enabled
     if (settings.hybrid_search_enabled) {
-        console.log('[VectHare] Hybrid search enabled, dispatching to hybrid search module');
+        vhLog('[VectHare] Hybrid search enabled, dispatching to hybrid search module');
         const queryStart = Date.now();
         try {
             const result = await hybridSearch(collectionId, searchText, topK, settings, { queryVector });
@@ -1431,7 +1513,7 @@ async function queryMultipleCollectionsForSettings(collectionIds, searchText, to
 
     // Check if hybrid search is enabled - process each collection with hybrid search
     if (settings.hybrid_search_enabled) {
-        console.log('[VectHare] Hybrid search enabled for multi-collection query');
+        vhLog('[VectHare] Hybrid search enabled for multi-collection query');
         const processedResults = {};
         for (const collectionId of collectionIds) {
             try {
@@ -1525,7 +1607,7 @@ export async function queryActiveCollections(collectionIds, searchText, topK, th
     const activeCollectionIds = await filterActiveCollections(collectionIds, context);
 
     if (activeCollectionIds.length === 0) {
-        console.log('VectHare: No collections passed activation conditions');
+        vhLog('VectHare: No collections passed activation conditions');
         return {};
     }
 
@@ -1558,6 +1640,38 @@ export async function purgeVectorIndex(collectionId, settings, options = {}) {
     // Phase 1: never purge while VectHare's own metadata is uncertain - the
     // destination and ownership checks below depend on it.
     assertStoreAuthoritative('Purging a collection');
+    // 8B: ownership/destination checks below must see other tabs' changes.
+    await refreshStoreIfStale({ minIntervalMs: 0 }).catch(() => false);
+    // H3: with Qdrant multitenancy every collection shares one store and the
+    // plugin cannot remove one of them on its own (its purge would target a
+    // collection name that does not exist there and report success while the
+    // vectors stay). Refuse up front; nothing is changed.
+    // 9b: the collection's own layout decides (its locator, or today's setting).
+    if ((settings?.vector_backend || 'standard') === 'qdrant' &&
+        resolveStorage(collectionId, settings, 'qdrant').layout === 'legacy-mt') {
+        const reason = 'Deleting a single collection is not available while Qdrant multitenancy is on ' +
+            '(all collections share one store). Nothing was changed.';
+        if (options.diagnostics && typeof options.diagnostics === 'object') options.diagnostics.reason = reason;
+        console.warn(`VectHare: ${reason} (${collectionId})`);
+        return false;
+    }
+    // 9c: a v2 collection can only be removed by a plugin that scopes it.
+    if (resolveStorage(collectionId, settings).v2 && !await scopedTenancySupported()) {
+        const reason = 'This collection uses a newer storage layout that the installed plugin does not support. ' +
+            'Update the plugin; nothing was changed.';
+        if (options.diagnostics && typeof options.diagnostics === 'object') options.diagnostics.reason = reason;
+        return false;
+    }
+    // 8C: no delete while another tab/device is working on this collection.
+    let purgeLease = null;
+    try {
+        purgeLease = await acquireLease(parseRegistryKey(collectionId).collectionId || collectionId, { label: 'Delete' });
+    } catch (error) {
+        if (error?.code !== 'VH_LEASE_HELD') throw error;
+        if (options.diagnostics && typeof options.diagnostics === 'object') options.diagnostics.reason = error.message;
+        console.warn(`VectHare: ${error.message} (${collectionId})`);
+        return false;
+    }
     try {
         // The name check is VectHare's standing protection for collections it
         // does not own. The single exception is a deletion the user explicitly
@@ -1581,7 +1695,7 @@ export async function purgeVectorIndex(collectionId, settings, options = {}) {
             const backend = await getBackend(settings);
             await backend.purgeVectorIndex(collectionId,
                 { ...settings, __vecthareConfirmUnowned: true });
-            console.log(`VectHare: Purged vector index for collection ${collectionId}`);
+            vhLog(`VectHare: Purged vector index for collection ${collectionId}`);
             notifyDatabaseChanged(collectionId);
             return true;
         }
@@ -1692,7 +1806,7 @@ export async function purgeVectorIndex(collectionId, settings, options = {}) {
             await backend.purgeVectorIndex(collectionId, options.userConfirmedUnownedDeletion === true
                 ? { ...settings, __vecthareConfirmUnowned: true } : settings);
         }
-        console.log(`VectHare: Purged vector index for collection ${collectionId}`);
+        vhLog(`VectHare: Purged vector index for collection ${collectionId}`);
         notifyDatabaseChanged(collectionId);
         return true;
     } catch (error) {
@@ -1705,6 +1819,8 @@ export async function purgeVectorIndex(collectionId, settings, options = {}) {
         }
         console.error('VectHare: Failed to purge', error);
         return false;
+    } finally {
+        await purgeLease?.release();
     }
 }
 
@@ -1715,12 +1831,17 @@ export async function purgeVectorIndex(collectionId, settings, options = {}) {
  * @returns {Promise<void>}
  */
 export async function purgeFileVectorIndex(collectionId, settings) {
+    if ((settings?.vector_backend || 'standard') === 'qdrant' &&
+        resolveStorage(collectionId, settings, 'qdrant').layout === 'legacy-mt') {
+        // H3: see purgeVectorIndex.
+        throw new Error('Deleting a single collection is not available while Qdrant multitenancy is on. Nothing was changed.');
+    }
     try {
         assertVectHareCollectionForWrite(collectionId);
-        console.log(`VectHare: Purging file vector index for collection ${collectionId}`);
+        vhLog(`VectHare: Purging file vector index for collection ${collectionId}`);
         const backend = await getBackend(settings);
         await backend.purgeFileVectorIndex(collectionId, settings);
-        console.log(`VectHare: Purged vector index for collection ${collectionId}`);
+        vhLog(`VectHare: Purged vector index for collection ${collectionId}`);
         notifyDatabaseChanged(collectionId);
     } catch (error) {
         // VEC-33: Invalidate health cache on operation error
@@ -1735,8 +1856,14 @@ export async function purgeFileVectorIndex(collectionId, settings) {
  * Fail closed (and keep VectHare settings) when a registered destination cannot
  * be verified; caller may retry after restoring the backend connection.
  */
-export async function purgeAllVectorIndexes(settings) {
+export async function purgeAllVectorIndexes(settings, options = {}) {
     assertStoreAuthoritative('Full Purge');
+    // 8C: Purge All runs alone - an exclusive lease, only granted while no other
+    // tab/device holds any lease, blocks all other work until it finishes.
+    return await withLease('*', () => purgeAllVectorIndexesLeased(settings, options), { label: 'Purge All' });
+}
+
+async function purgeAllVectorIndexesLeased(settings, options = {}) {
     const { getCollectionRegistry } = await import('./collection-loader.js');
     const { parseRegistryKey, getBoundChatDetails, chatStoreDestination } =
         await import('./collection-ids.js');
@@ -1747,6 +1874,8 @@ export async function purgeAllVectorIndexes(settings) {
     let removed = 0;
     const skipped = [];
     const ignored = [];
+    // S6: `onIssue` lets a caller list each kept/unverified entry in the panel.
+    const skip = text => { skipped.push(text); options.onIssue?.(text); };
     // A deleted/undiscovered registry entry must not make us discard the only
     // saved mapping to a collection that may still contain VectHare vectors.
     const knownDestinations = new Set(registry.map(key => {
@@ -1758,7 +1887,7 @@ export async function purgeAllVectorIndexes(settings) {
         const id = parseRegistryKey(key).collectionId;
         if (/^vecthare_[A-Za-z0-9_.-]+$/.test(id) && !registeredIds.has(id) &&
             (meta?.createdAt || Number(meta?.chunkCount) > 0)) {
-            skipped.push(`unregistered-metadata:${id}`);
+            skip(`unregistered-metadata:${id}`);
         }
     }
     for (const [id, rec] of Object.entries(
@@ -1766,11 +1895,15 @@ export async function purgeAllVectorIndexes(settings) {
         for (const store of rec?.stores || []) {
             const name = store.backend === 'vectra' ? 'standard' : store.backend;
             if (!knownDestinations.has(`${name}:${store.source}:${id}`)) {
-                skipped.push(`unregistered:${name}:${store.source}:${id}`);
+                skip(`unregistered:${name}:${store.source}:${id}`);
             }
         }
     }
+    let purgeStep = 0;
     for (const registryKey of registry) {
+        options.onProgress?.({ done: purgeStep, total: registry.length,
+            id: parseRegistryKey(registryKey).collectionId });
+        purgeStep++;
         const parsed = parseRegistryKey(registryKey);
         const id = parsed.collectionId;
         const backendName = parsed.backend === 'vectra' ? 'standard' : parsed.backend;
@@ -1781,18 +1914,21 @@ export async function purgeAllVectorIndexes(settings) {
         catch { ignored.push(registryKey); continue; }
         if (!backendName || !source ||
             !['standard', 'lancedb', 'qdrant', 'milvus'].includes(backendName)) {
-            skipped.push(registryKey);
+            skip(registryKey);
             continue;
         }
         const destination = `${backendName}:${source}:${id}`;
         if (visited.has(destination)) continue;
         visited.add(destination);
-        const operationSettings = { ...settings, vector_backend: backendName, source };
+        // 9b: storage switches describe this collection (its locator, or today's).
+        const operationSettings = settingsForCollectionStorage(id, { ...settings, vector_backend: backendName, source });
         // Shared-store cleanup is unsafe unless the backend can prove scoped
         // deletion. Do not remove the Qdrant multitenancy or Milvus parent.
-        if (backendName === 'milvus' ||
-            (backendName === 'qdrant' && operationSettings.qdrant_multitenancy)) {
-            skipped.push(registryKey);
+        // 9c (P7): lifted for the new layouts when the plugin scopes them.
+        const storageNow = resolveStorage(id, operationSettings, backendName);
+        if ((backendName === 'milvus' && !(storageNow.v2 && await scopedTenancySupported())) ||
+            (backendName === 'qdrant' && storageNow.layout === 'legacy-mt')) {
+            skip(registryKey);
             continue;
         }
         const binding = getBoundChatDetails(id);
@@ -1801,8 +1937,8 @@ export async function purgeAllVectorIndexes(settings) {
             if (destinations.length && !destinations.some(store =>
                 (store.backend === backendName || (backendName === 'standard' && store.backend === 'vectra')) &&
                 store.source === source && store.destination &&
-                store.destination === chatStoreDestination(operationSettings))) {
-                skipped.push(registryKey);
+                store.destination === chatStoreDestination(operationSettings, id))) {
+                skip(registryKey);
                 continue;
             }
         }
@@ -1816,12 +1952,12 @@ export async function purgeAllVectorIndexes(settings) {
             if (saved.status !== 'valid' || !actual ||
                 saved.config.embedding.provider !== source ||
                 JSON.stringify(saved.config.storage) !== JSON.stringify(actual.storage)) {
-                skipped.push(registryKey);
+                skip(registryKey);
                 continue;
             }
         }
         if (!await purgeVectorIndex(id, operationSettings)) {
-            skipped.push(registryKey);
+            skip(registryKey);
             continue;
         }
         // #27: an acknowledged purge is not proof of deletion, and the caller
@@ -1835,18 +1971,19 @@ export async function purgeAllVectorIndexes(settings) {
             const gone = after.status === 'missing' &&
                 (!['standard', 'lancedb'].includes(backendName) || after.physicalAbsent !== false);
             if (!gone) {
-                skipped.push(`unverified-deletion:${registryKey}`);
+                skip(`unverified-deletion:${registryKey}`);
                 continue;
             }
         } catch (error) {
             console.warn(`VectHare: Could not verify deletion of ${id}:`, error.message);
-            skipped.push(`unverified-deletion:${registryKey}`);
+            skip(`unverified-deletion:${registryKey}`);
             continue;
         }
         removed++;
     }
     // A fresh unregistered installation is empty, but any unknown registered
     // collection means we cannot truthfully report a complete purge.
+    options.onProgress?.({ done: registry.length, total: registry.length, id: null });
     return { success: skipped.length === 0, removed, skipped, ignored };
 }
 
@@ -1859,6 +1996,8 @@ export async function purgeAllVectorIndexes(settings) {
  */
 export async function updateChunkText(collectionId, hash, newText, settings) {
     assertVectHareCollectionForWrite(collectionId);
+    assertNoStorageConflict(collectionId, settings?.vector_backend);
+    await assertStorageWritable(collectionId, settings);
     settings = await resolveEmbeddingSettingsForEdit(collectionId, settings);
     const backend = await getBackend(settings);
     return await backend.updateChunkText(collectionId, hash, newText, settings);
@@ -1884,6 +2023,8 @@ export async function resolveEmbeddingSettingsForEdit(collectionId, settings) {
  */
 export async function updateChunkMetadata(collectionId, hash, metadata, settings) {
     assertVectHareCollectionForWrite(collectionId);
+    assertNoStorageConflict(collectionId, settings?.vector_backend);
+    await assertStorageWritable(collectionId, settings);
     const backend = await getBackend(settings);
     return await backend.updateChunkMetadata(collectionId, hash, metadata, settings);
 }

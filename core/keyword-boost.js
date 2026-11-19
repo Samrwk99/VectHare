@@ -1,3 +1,4 @@
+import { vhLog } from '../utils/log.js';
 import { porterStemmer } from './bm25-scorer.js';
 import { substituteParams } from '../../../../../script.js';
 
@@ -993,7 +994,7 @@ export function applyKeywordBoost(results, query, options = {}) {
     const queryNormalized = normalizeTokenBoundaries(queryLower);
     const queryTokens = extractQueryTokens(query);
 
-    console.log(`[VectHare Keyword Boost] Starting keyword boost for query: "${query}" (diminishing=${diminishingReturns}, cap=${perKeywordCap})`);
+    vhLog(`[VectHare Keyword Boost] Starting keyword boost for query: "${query}" (diminishing=${diminishingReturns}, cap=${perKeywordCap})`);
 
     const boosted = results.map(result => {
         const rawKeywords = result.keywords || result.metadata?.keywords || [];
@@ -1041,7 +1042,7 @@ export function applyKeywordBoost(results, query, options = {}) {
             const scaleInfo = diminishingReturns
                 ? ` (raw=${rawBoost.toFixed(2)}x, scale=${(MATCH_SCALING_FACTORS[Math.min(matchedKeywords.length, 3)] * 100).toFixed(0)}%)`
                 : '';
-            console.log(`[VectHare Keyword Boost] Result matched ${matchedKeywords.length} keyword(s): [${matchedKeywords.map(k => `${k.text}(${k.weight.toFixed(2)}x)`).join(', ')}] → boost: ${finalBoost.toFixed(2)}x${scaleInfo}, score: ${result.score.toFixed(4)} → ${(result.score * finalBoost).toFixed(4)}`);
+            vhLog(`[VectHare Keyword Boost] Result matched ${matchedKeywords.length} keyword(s): [${matchedKeywords.map(k => `${k.text}(${k.weight.toFixed(2)}x)`).join(', ')}] → boost: ${finalBoost.toFixed(2)}x${scaleInfo}, score: ${result.score.toFixed(4)} → ${(result.score * finalBoost).toFixed(4)}`);
         }
 
         return {
@@ -1063,7 +1064,7 @@ export function applyKeywordBoost(results, query, options = {}) {
     boosted.sort((a, b) => b.score - a.score);
 
     const boostedCount = boosted.filter(r => r.keywordBoosted).length;
-    console.log(`[VectHare Keyword Boost] Applied keyword boosts to ${boostedCount}/${boosted.length} results (diminishing=${diminishingReturns})`);
+    vhLog(`[VectHare Keyword Boost] Applied keyword boosts to ${boostedCount}/${boosted.length} results (diminishing=${diminishingReturns})`);
 
     return boosted;
 }

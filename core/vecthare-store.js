@@ -1,3 +1,4 @@
+import { vhLog } from '../utils/log.js';
 /**
  * VectHare Owned State Store
  *
@@ -152,11 +153,136 @@ async function requestState(action, body = {}) {
         headers: getRequestHeaders(),
         body: JSON.stringify(body),
     });
+    if (response.status === 409 && action === 'write') {
+        const body = await response.json().catch(() => null);
+        if (body?.conflict === true) return { conflict: true, ...body };
+    }
     if (!response.ok) {
         const detail = await response.text().catch(() => '');
         throw new Error(`owned-state/${action} failed: ${response.status} ${detail}`.trim());
     }
     return await response.json();
+}
+
+// ---------------------------------------------------------------------------
+// Step 8A: several tabs/devices on one server.
+// `base` is the document as last read from, or accepted by, the server, and
+// `baseToken` names that version. Writes say which version they are based on;
+// a plugin without tokens (older build) never returns one, and then writes
+// behave exactly as before (last writer wins).
+// ---------------------------------------------------------------------------
+let base = null;
+let baseToken = null;
+
+const clone = value => JSON.parse(JSON.stringify(value));
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+function documentOf(doc) {
+    return {
+        version: STORE_VERSION,
+        registry: doc.registry,
+        collections: doc.collections,
+        chatCollectionBindings: doc.chatCollectionBindings,
+        chatCollectionPolicies: doc.chatCollectionPolicies,
+        chunkMetadata: doc.chunkMetadata,
+        ...(doc.migratedFrom ? { migratedFrom: doc.migratedFrom } : {}),
+        ...(doc.migratedAt ? { migratedAt: doc.migratedAt } : {}),
+    };
+}
+
+/** Raised when a strict write finds the server changed; nothing was written. */
+export class StoreConflictError extends Error {
+    constructor(message = 'VectHare state changed in another tab') {
+        super(message);
+        this.code = 'VH_STORE_CONFLICT';
+    }
+}
+
+/**
+ * Three-way merge of routine changes: what THIS tab changed since `baseDoc`
+ * is applied on top of the server's current document, key by key.
+ * Rules (keep data on doubt):
+ *  - unchanged here -> server; changed here only -> ours;
+ *  - changed on both sides: collection records merge field by field (same
+ *    field on both -> server); every other section keeps the server's value;
+ *  - deleted here but changed on the server -> server's value is kept;
+ *  - registry: server + our additions - our removals.
+ * Chat bindings are never field-merged: structural binding changes go through
+ * strict writes (see commit() in collection-ids.js).
+ */
+export function mergeOwnedDocuments(baseDoc, localDoc, serverDoc, log = () => {}) {
+    const b = normalizeState(clone(baseDoc || emptyState()));
+    const l = normalizeState(clone(localDoc));
+    const sv = normalizeState(clone(serverDoc));
+    const out = normalizeState(clone(serverDoc));
+    const baseReg = new Set(b.registry), localReg = new Set(l.registry);
+    const added = l.registry.filter(id => !baseReg.has(id));
+    const removed = new Set(b.registry.filter(id => !localReg.has(id)));
+    out.registry = [...new Set([...sv.registry, ...added])].filter(id => !removed.has(id));
+
+    const mergeMap = (name, bMap, lMap, sMap, oMap, fieldMerge) => {
+        const keys = new Set([...Object.keys(bMap), ...Object.keys(lMap)]);
+        for (const key of keys) {
+            const bv = bMap[key], lv = lMap[key], svv = sMap[key];
+            if (same(lv, bv)) continue;                       // not changed here
+            if (same(svv, bv)) {                              // changed here only
+                if (lv === undefined) delete oMap[key]; else oMap[key] = lv;
+                continue;
+            }
+            if (lv === undefined) { log(`${name}.${key}: kept (changed elsewhere)`); continue; }
+            if (svv === undefined) { oMap[key] = lv; log(`${name}.${key}: kept ours (removed elsewhere)`); continue; }
+            if (fieldMerge && isPlainObject(lv) && isPlainObject(svv)) {
+                const merged = { ...svv };
+                const bo = isPlainObject(bv) ? bv : {};
+                for (const field of new Set([...Object.keys(bo), ...Object.keys(lv)])) {
+                    if (same(lv[field], bo[field])) continue;
+                    if (same(svv[field], bo[field])) {
+                        if (lv[field] === undefined) delete merged[field]; else merged[field] = lv[field];
+                    } else {
+                        log(`${name}.${key}.${field}: server value kept`);
+                    }
+                }
+                oMap[key] = merged;
+            } else {
+                log(`${name}.${key}: server value kept`);
+            }
+        }
+    };
+    mergeMap('collections', b.collections, l.collections, sv.collections, out.collections, true);
+    mergeMap('chatCollectionPolicies', b.chatCollectionPolicies, l.chatCollectionPolicies,
+        sv.chatCollectionPolicies, out.chatCollectionPolicies, false);
+    mergeMap('chunkMetadata', b.chunkMetadata, l.chunkMetadata, sv.chunkMetadata, out.chunkMetadata, false);
+    mergeMap('bindings', b.chatCollectionBindings.byCollection, l.chatCollectionBindings.byCollection,
+        sv.chatCollectionBindings.byCollection, out.chatCollectionBindings.byCollection, false);
+    return out;
+}
+
+/**
+ * Makes `target` equal to `source` WITHOUT replacing its objects, so code
+ * holding a reference to a section or a collection record keeps writing
+ * into the live document (R18).
+ */
+function applyInPlace(target, source) {
+    const patch = (t, src, depth) => {
+        for (const key of Object.keys(t)) if (!(key in src)) delete t[key];
+        for (const [key, value] of Object.entries(src)) {
+            if (depth > 0 && isPlainObject(t[key]) && isPlainObject(value)) patch(t[key], value, depth - 1);
+            else t[key] = value;
+        }
+    };
+    target.registry.splice(0, target.registry.length, ...source.registry);
+    patch(target.collections, source.collections, 1);
+    patch(target.chatCollectionPolicies, source.chatCollectionPolicies, 0);
+    patch(target.chunkMetadata, source.chunkMetadata, 0);
+    target.chatCollectionBindings.version = source.chatCollectionBindings.version;
+    patch(target.chatCollectionBindings.byCollection, source.chatCollectionBindings.byCollection, 1);
+    if (source.migratedFrom) target.migratedFrom = source.migratedFrom; else delete target.migratedFrom;
+    if (source.migratedAt) target.migratedAt = source.migratedAt; else delete target.migratedAt;
+}
+
+function adoptServerDocument(result) {
+    base = clone(documentOf(normalizeState(result.state)));
+    baseToken = typeof result.token === 'string' ? result.token : null;
 }
 
 /**
@@ -230,9 +356,10 @@ export function loadVectHareStore() {
 
             if (result.status === 'found') {
                 state = normalizeState(result.state);
+                adoptServerDocument(result);
                 status = 'ready';
                 statusDetail = '';
-                console.log(`VectHare: Loaded owned state (${state.registry.length} registered, ` +
+                vhLog(`VectHare: Loaded owned state (${state.registry.length} registered, ` +
                     `${Object.keys(state.collections).length} collection records)`);
                 return storeStatus();
             }
@@ -258,17 +385,22 @@ export function loadVectHareStore() {
             const { state: migrated, hadData } = collectLegacyState();
             migrated.migratedFrom = 'extension-settings';
             migrated.migratedAt = new Date().toISOString();
-            await requestState('write', { state: migrated });
+            // `missing` as the base token: if another tab created the file
+            // first, this write is refused and that file is used instead.
+            const created = await requestState('write', { state: migrated,
+                ...(result.token === 'missing' ? { baseToken: 'missing' } : {}) });
             // Make it authoritative only after reading back what was stored.
             const verification = await requestState('read');
             if (verification.status !== 'found') {
                 throw new Error(`verification read returned "${verification.status}"`);
             }
+            if (created?.conflict) vhLog('VectHare: Another tab created collections.json first; using it');
             state = normalizeState(verification.state);
+            adoptServerDocument(verification);
             status = 'ready';
             statusDetail = '';
             clearMigratedLegacyKeys();
-            console.log(hadData
+            vhLog(hadData
                 ? 'VectHare: Migrated collection metadata into collections.json'
                 : 'VectHare: Created collections.json (nothing to migrate)');
             return storeStatus();
@@ -314,7 +446,9 @@ export async function reloadVectHareStore() {
     }
 
     if (result.status === 'found') {
-        state = normalizeState(result.state);
+        // Applied in place (R18): references held elsewhere stay live.
+        applyInPlace(state, normalizeState(result.state));
+        adoptServerDocument(result);
         console.debug(`VectHare: Reloaded owned state (${state.registry.length} registered, ` +
             `${Object.keys(state.collections).length} collection records)`);
         return { ...storeStatus(), reloaded: true };
@@ -328,29 +462,46 @@ export async function reloadVectHareStore() {
             : `collections.json could not be read ("${result.status}")` };
 }
 
-async function writeNow() {
+async function writeNow(options = {}) {
     if (!state || status !== 'ready') return;
     dirty = false;
-    const snapshot = JSON.parse(JSON.stringify({
-        version: STORE_VERSION,
-        registry: state.registry,
-        collections: state.collections,
-        chatCollectionBindings: state.chatCollectionBindings,
-        chatCollectionPolicies: state.chatCollectionPolicies,
-        chunkMetadata: state.chunkMetadata,
-        ...(state.migratedFrom ? { migratedFrom: state.migratedFrom } : {}),
-        ...(state.migratedAt ? { migratedAt: state.migratedAt } : {}),
-    }));
-    try {
-        await requestState('write', { state: snapshot });
-        lastWriteError = null;
-    } catch (error) {
-        lastWriteError = error;
-        dirty = true; // keep the pending change so a later flush retries it
-        console.error('VectHare: Failed to persist collection metadata:', error);
-        throw error;
+    for (let attempt = 0; ; attempt++) {
+        const snapshot = clone(documentOf(state));
+        let result;
+        try {
+            result = await requestState('write', { state: snapshot, ...(baseToken ? { baseToken } : {}) });
+        } catch (error) {
+            lastWriteError = error;
+            dirty = true; // keep the pending change so a later flush retries it
+            console.error('VectHare: Failed to persist collection metadata:', error);
+            throw error;
+        }
+        if (!result?.conflict) {
+            base = snapshot;
+            if (typeof result?.token === 'string') baseToken = result.token;
+            lastWriteError = null;
+            return;
+        }
+        // Another tab/device changed the file since this tab last read it.
+        if (options.strict || attempt >= 2 || result.status !== 'found' || !result.state) {
+            dirty = true;
+            const error = new StoreConflictError(result.status !== 'found'
+                ? `collections.json is ${result.status} on the server; not overwritten`
+                : 'VectHare state changed in another tab; this change was not written');
+            lastWriteError = error;
+            if (!options.strict && !conflictWarned) {
+                conflictWarned = true;
+                toastr.warning('VectHare metadata was changed in another tab and could not be merged yet; it will be retried.', 'VectHare');
+            }
+            throw error;
+        }
+        const merged = mergeOwnedDocuments(base, documentOf(state), result.state,
+            line => console.info(`VectHare: merge with another tab - ${line}`));
+        applyInPlace(state, merged);
+        adoptServerDocument(result);
     }
 }
+let conflictWarned = false;
 
 /**
  * Queues a debounced, serialized write of the working copy. Safe to call from
@@ -395,8 +546,16 @@ export async function resetVectHareStore() {
     state.chatCollectionBindings = { version: 1, byCollection: {} };
     dirty = true;
     try {
-        await flushVectHareStore();
+        // A reset must be exact: never merged with another tab's changes.
+        await flushVectHareStore({ strict: true });
     } catch (error) {
+        if (error?.code === 'VH_STORE_CONFLICT') {
+            // Nothing was written. Show the server's document again rather
+            // than letting a later routine save merge our emptied copy in.
+            await discardLocalAndReload().catch(() => {});
+            return { success: false, verified: false,
+                reason: 'VectHare state was changed in another tab; nothing was reset. Reload and run it again.' };
+        }
         return { success: false, verified: false, reason: error.message };
     }
     // Read back what is now stored rather than trusting the write.
@@ -413,7 +572,7 @@ export async function resetVectHareStore() {
         Object.keys(stored.chunkMetadata).length === 0 &&
         Object.keys(stored.chatCollectionBindings.byCollection).length === 0 &&
         Object.keys(stored.chatCollectionPolicies).length === 0;
-    console.log('VectHare: Reset owned metadata ' +
+    vhLog('VectHare: Reset owned metadata ' +
         `(was ${before.registry} registered, ${before.collections} records, ` +
         `${before.annotations} annotated chunks, ${before.bindings} bindings, ` +
         `${before.policies} policies)`);
@@ -425,11 +584,71 @@ export async function resetVectHareStore() {
                 : 'the stored document still holds entries' };
 }
 
-export async function flushVectHareStore() {
+/**
+ * Drops this tab's unsaved changes and shows the server's document (applied
+ * in place). Only for a strict write that was refused.
+ */
+export async function discardLocalAndReload() {
+    if (status !== 'ready') return;
+    if (writeTimer) { clearTimeout(writeTimer); writeTimer = null; }
+    await writeChain;
+    const result = await requestState('read');
+    if (result.status !== 'found') throw new Error(`collections.json could not be read ("${result.status}")`);
+    applyInPlace(state, normalizeState(result.state));
+    adoptServerDocument(result);
+    dirty = false;
+}
+
+export async function flushVectHareStore(options = {}) {
     if (writeTimer) {
         clearTimeout(writeTimer);
         writeTimer = null;
     }
-    if (dirty) writeChain = writeChain.then(() => writeNow());
-    await writeChain.catch(error => { throw error; });
+    if (dirty || options.strict) {
+        const run = writeChain.then(() => writeNow(options));
+        writeChain = run.catch(() => {});
+        await run;
+        return;
+    }
+    await writeChain;
+}
+
+/** Step 8B: the server's current token, or null when the plugin has none. */
+export async function fetchStoreToken() {
+    if (!baseToken) return null;
+    const response = await fetch('/api/plugins/similharity/owned-state/token', {
+        method: 'POST', headers: getRequestHeaders(), body: JSON.stringify({}),
+    });
+    if (!response.ok) return null;
+    const data = await response.json().catch(() => null);
+    return typeof data?.token === 'string' ? data.token : null;
+}
+
+let lastFreshCheck = 0;
+/**
+ * Step 8B (stale tab): asks the server for the current version and, if
+ * another tab changed collections.json since this tab last read or wrote it,
+ * re-reads it in place (pending local changes are saved/merged first).
+ * Cheap: one tiny request, at most every `minIntervalMs`. Without plugin
+ * tokens it does nothing.
+ * @returns {Promise<boolean>} true when the document was reloaded
+ */
+export async function refreshStoreIfStale({ minIntervalMs = 2000 } = {}) {
+    if (status !== 'ready' || !baseToken) return false;
+    const now = Date.now();
+    if (now - lastFreshCheck < minIntervalMs) return false;
+    lastFreshCheck = now;
+    let token;
+    try { token = await fetchStoreToken(); } catch { return false; }
+    if (!token || token === baseToken) return false;
+    const result = await reloadVectHareStore();
+    if (result.reloaded) {
+        try { window.dispatchEvent(new CustomEvent('vecthare:store-reloaded')); } catch { /* optional */ }
+    }
+    return Boolean(result.reloaded);
+}
+
+/** Step 8B: this tab's view of the server version (null without tokens). */
+export function storeBaseToken() {
+    return baseToken;
 }

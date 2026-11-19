@@ -1,3 +1,5 @@
+import { acquireLease } from './leases.js';
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * VECTHARE CONTENT VECTORIZATION
@@ -10,7 +12,7 @@
  * ============================================================================
  */
 
-import { getContentType, getContentTypeDefaults, hasFeature } from './content-types.js';
+import { getContentType, getContentTypeDefaults, hasFeature, LIVE_CHAT_STRATEGIES } from './content-types.js';
 import { chunkText } from './chunking.js';
 import { DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP } from './constants.js';
 import { insertVectorItems, getSavedHashes, purgeVectorIndex } from './core-vector-api.js';
@@ -82,11 +84,23 @@ export async function vectorizeContent({ contentType, source, settings }) {
         throw new Error(`Unknown content type: ${contentType}`);
     }
 
+    // C14: the live chat may only be written by the Sync pipeline, whose ledger
+    // tracks every record. 'adaptive' and 'per_scene' bypass it and used to put
+    // un-ledgered records into the chat's own collection (or create it with a
+    // saved config Sync cannot use), so they are refused for the live chat.
+    // Uploaded transcripts keep every strategy.
+    if (contentType === 'chat' && source?.type === 'current' &&
+        !LIVE_CHAT_STRATEGIES.includes(settings.strategy || type.defaultStrategy)) {
+        throw new Error(`The "${settings.strategy || type.defaultStrategy}" strategy cannot be used on the ` +
+            'live chat because Sync Chat could not track those records. Choose Per Message, ' +
+            'Conversation Turns or Message Batch, or upload the chat as a transcript to use this strategy.');
+    }
+
     // A live chat must use precisely the same text/hash/group/UID pipeline as
     // Sync Chat and Repair. Uploaded chat transcripts are NOT the live chat;
     // they keep their independent Content Vectorizer pipeline and provenance.
     if (contentType === 'chat' && source.type === 'current' &&
-        ['per_message', 'conversation_turns', 'message_batch'].includes(settings.strategy || type.defaultStrategy)) {
+        LIVE_CHAT_STRATEGIES.includes(settings.strategy || type.defaultStrategy)) {
         if (source.content !== getContext()?.chat) {
             throw new Error('The selected chat changed; live chat vectorization cancelled');
         }
@@ -97,6 +111,11 @@ export async function vectorizeContent({ contentType, source, settings }) {
         if (liveSettings.chunking_strategy === 'message_batch') {
             liveSettings.batch_size = settings.batchSize || liveSettings.batch_size || 4;
         }
+        // N2: before a new collection is created, offer a deleted copy's memories.
+        if (settings.rebuildChatCollection !== true) {
+            const { offerDeletedChatReattach } = await import('./chat-vectorization.js');
+            await offerDeletedChatReattach(vecthareSettings);
+        }
         const binding = await ensureChatBinding();
         if (!binding?.writable || !binding.collectionId || source.content !== getContext()?.chat) {
             throw new Error('The selected chat identity changed; live chat vectorization cancelled');
@@ -106,8 +125,8 @@ export async function vectorizeContent({ contentType, source, settings }) {
         // failure leaves the existing collection in use.
         if (settings.rebuildChatCollection === true) {
             const { rebuildChatCollection } = await import('./chat-vectorization.js');
-            const rebuild = await rebuildChatCollection(liveSettings,
-                liveSettings.embedding_batch_size || 5);
+            const { getSyncBatchSize } = await import('./chat-vectorization.js');
+            const rebuild = await rebuildChatCollection(liveSettings, getSyncBatchSize(liveSettings));
             if (!rebuild.success) throw new Error(rebuild.reason || 'The rebuild did not complete.');
             if (source.content !== getContext()?.chat || String(source.id) !== String(getContext()?.chatId)) {
                 // The vectors and the binding are already committed and
@@ -136,8 +155,8 @@ export async function vectorizeContent({ contentType, source, settings }) {
                 chunkCount: rebuild.chunkCount };
         }
 
-        const { vectorizeAll } = await import('./chat-vectorization.js');
-        const result = await vectorizeAll(liveSettings, liveSettings.embedding_batch_size || 5, true);
+        const { vectorizeAll, getSyncBatchSize } = await import('./chat-vectorization.js');
+        const result = await vectorizeAll(liveSettings, getSyncBatchSize(liveSettings), true);
         if (!result?.success) throw new Error('Live chat Sync was stopped or could not complete');
         if (source.content !== getContext()?.chat || String(source.id) !== String(getContext()?.chatId)) {
             throw new Error('The selected chat changed; collection metadata was not updated');
@@ -226,7 +245,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
         const chunkLengths = chunks.map(c => (typeof c === 'string' ? c : c.text || '').length);
         const maxChunkLen = Math.max(...chunkLengths);
         const avgChunkLen = Math.round(chunkLengths.reduce((a, b) => a + b, 0) / chunkLengths.length);
-        console.log(`VectHare: Chunked "${sourceName}" into ${chunks.length} chunks (avg: ${avgChunkLen} chars, max: ${maxChunkLen} chars)`);
+        vhLog(`VectHare: Chunked "${sourceName}" into ${chunks.length} chunks (avg: ${avgChunkLen} chars, max: ${maxChunkLen} chars)`);
 
         progressTracker.updateChunks(chunks.length);
 
@@ -299,6 +318,8 @@ export async function vectorizeContent({ contentType, source, settings }) {
             }
         };
 
+        // 8C: one tab/device at a time writes into this collection.
+        const contentLease = await acquireLease(collectionId, { label: 'Content Vectorizer' });
         try {
             if (liveChatSource) {
                 // #9: the chat can change while content is prepared and embedded.
@@ -318,7 +339,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
             // the original settings even if a later batch fails or is stopped.
             if (embedded > 0) recordFirstWrite();
             // Update progress with streaming count
-            console.log(`[Content Vectorization] Processing progress callback: ${embedded}/${total}`);
+            vhLog(`[Content Vectorization] Processing progress callback: ${embedded}/${total}`);
             progressTracker.updateEmbeddingProgress(embedded, total);
 
             // Streaming approach: embedding and writing happen together
@@ -339,6 +360,8 @@ export async function vectorizeContent({ contentType, source, settings }) {
             } catch (_) {}
             // Re-throw so outer handler records completion state and any callers can react
             throw error;
+        } finally {
+            await contentLease.release();
         }
 
         // Also cover backends that return success without a progress callback.
@@ -370,7 +393,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
             ? `${vecthareSettings.vector_backend || 'standard'}:${vecthareSettings.source || 'transformers'}:${collectionId}`
             : collectionId;
         registerCollection(registryKey);
-        console.log(`VectHare: Registered collection ${registryKey}`);
+        vhLog(`VectHare: Registered collection ${registryKey}`);
 
         progressTracker.updateProgress(4, 'Finalizing...');
         progressTracker.complete(true, `Vectorized ${hashedChunks.length} chunks`, panelRunId);
@@ -518,7 +541,7 @@ async function loadLorebookContent(lorebookName, context) {
 
         const entries = Object.values(data.entries).filter(e => e.content);
 
-        console.log(`VectHare: Loaded lorebook "${lorebookName}" with ${entries.length} entries`);
+        vhLog(`VectHare: Loaded lorebook "${lorebookName}" with ${entries.length} entries`);
 
         return {
             content: entries,
@@ -600,8 +623,9 @@ function prepareLorebookContent(rawContent, settings) {
     }
 
     // Filter to entries that have content, and apply text cleaning
+    // World Info marks turned-off entries with disable: true; skip them unless asked
     const validEntries = entries
-        .filter(e => e && e.content)
+        .filter(e => e && e.content && (settings.includeDisabled || !e.disable))
         .map(e => ({ ...e, content: cleanText(e.content, settings.__collectionCleaningPatterns) }));
 
     if (settings.strategy === 'per_entry') {
@@ -642,12 +666,30 @@ function prepareCharacterContent(rawContent, settings) {
         creator_notes: { key: 'creator_notes', label: 'Creator Notes' },
     };
 
+    // Embedded lorebook (card V2/V3 data.character_book): entries as text; disabled entries skipped
+    const embeddedBookText = () => {
+        const entries = character?.data?.character_book?.entries;
+        const list = Array.isArray(entries) ? entries : (entries && typeof entries === 'object' ? Object.values(entries) : []);
+        return list
+            .filter(e => e && e.content && (settings.includeDisabled || (e.enabled !== false && !e.disable)))
+            .map(e => {
+                const header = e.comment || e.name || (Array.isArray(e.keys) ? e.keys[0] : '') || '';
+                const body = cleanText(e.content, settings.__collectionCleaningPatterns);
+                return header ? `${header}: ${body}` : body;
+            })
+            .join('\n\n');
+    };
+
     // For per_field strategy
     if (settings.strategy === 'per_field') {
         const fields = {};
         for (const [fieldId, enabled] of Object.entries(selectedFields)) {
             if (enabled && FIELD_MAP[fieldId] && character[FIELD_MAP[fieldId].key]) {
                 fields[FIELD_MAP[fieldId].label] = cleanText(character[FIELD_MAP[fieldId].key], settings.__collectionCleaningPatterns);
+            }
+            if (enabled && fieldId === 'character_book') {
+                const book = embeddedBookText();
+                if (book) fields['Embedded Lorebook'] = book;
             }
         }
         return { text: fields, type: 'fields', character: character };
@@ -660,6 +702,10 @@ function prepareCharacterContent(rawContent, settings) {
             const field = FIELD_MAP[fieldId];
             if (field && character[field.key]) {
                 return `## ${field.label}\n${cleanText(character[field.key], settings.__collectionCleaningPatterns)}`;
+            }
+            if (fieldId === 'character_book') {
+                const book = embeddedBookText();
+                return book ? `## Embedded Lorebook\n${book}` : null;
             }
             return null;
         })
@@ -1019,5 +1065,5 @@ export async function deleteContentCollection(collectionId) {
             throw new Error('Backend did not confirm collection purge');
         }
     });
-    console.log(`VectHare: Deleted collection: ${collectionId}`);
+    vhLog(`VectHare: Deleted collection: ${collectionId}`);
 }

@@ -1,3 +1,4 @@
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * VECTHARE PROGRESS TRACKER
@@ -47,6 +48,7 @@ export class ProgressTracker {
             lastBatchStartTime: null,
             errors: [],
         };
+        this.pendingBarRange = null; // S5: consumed by the next show()
     }
 
     /**
@@ -174,6 +176,9 @@ export class ProgressTracker {
         if (!this.isComplete && this.currentOperation && this.currentOperation !== operation) {
             console.warn(`VectHare: progress panel taken over by "${operation}" while "${this.currentOperation}" was still reporting`);
         }
+        // S5: a queued bar range belongs to the chat Sync run only.
+        const range = operation === 'Vectorizing Chat' ? this.pendingBarRange : null;
+        if (range) this.pendingBarRange = null;
         this.currentOperation = operation;
         this.isDatabaseSnapshot = false;
         this.isComplete = false;
@@ -201,12 +206,23 @@ export class ProgressTracker {
             lastBatchStartTime: Date.now(),
             groupsCompletedThisRun: 0, embeddingBasePercent: 0, lastPercent: 0,
             databaseResultUnknown: false, storedChunkCountKnown: false,
+            hashCollisions: 0,
+            // S1-S5: phase-aware progress.
+            itemLabel,
+            partialUnits: 0,          // fraction of the current batch already embedded
+            weightedPercent: null,    // when set, the bar follows this (Repair, rebuild)
+            monotonic: false,         // true: the bar never moves backwards within a run
+            barStart: range?.start ?? 0,
+            barSpan: range?.span ?? 100,
+            embedMs: 0, embedStartedAt: null, embedBatches: 0, // S4: embedding time only
             errors: [],
         };
+        this.labelOverridden = false;
 
         if (!this.panel) {
             this.createPanel();
         }
+        this.hideOldCollectionOffer();
 
         // Set the item label using cached element
         if (this.elements?.statLabel) {
@@ -229,6 +245,81 @@ export class ProgressTracker {
      * with a counter so a per-chunk narration cannot flood the panel.
      * @param {string} text Line to record
      */
+    /**
+     * K2: after a verified rebuild the previous collection is kept. Offer the
+     * user "Delete now" / "Keep" in the panel. Nothing is deleted automatically.
+     * @param {string} label Name of the kept collection
+     * @param {() => Promise<{success: boolean, errors?: string[]}>} onDelete Verified delete
+     */
+    offerOldCollection(label, onDelete) {
+        if (!this.panel) this.createPanel();
+        const els = this.elements;
+        if (!els?.oldCollection || typeof onDelete !== 'function') return;
+        this.oldCollectionDelete = onDelete;
+        this.oldCollectionLabel = String(label || 'previous collection');
+        els.oldCollectionText.textContent = `Old collection kept \u2014 ${this.oldCollectionLabel}`;
+        els.oldCollectionDelete.disabled = false;
+        els.oldCollectionKeep.disabled = false;
+        els.oldCollectionDelete.style.display = 'inline-block';
+        els.oldCollectionKeep.style.display = 'inline-block';
+        els.oldCollection.style.display = 'block';
+    }
+
+    hideOldCollectionOffer() {
+        this.oldCollectionDelete = null;
+        if (this.elements?.oldCollection) this.elements.oldCollection.style.display = 'none';
+    }
+
+    onOldCollectionKeep() {
+        if (!this.oldCollectionDelete) return;
+        this.log(`Old collection kept: ${this.oldCollectionLabel} (still in Database Browser)`);
+        this.hideOldCollectionOffer();
+    }
+
+    async onOldCollectionDelete() {
+        const remove = this.oldCollectionDelete;
+        const els = this.elements;
+        if (!remove || !els) return;
+        if (typeof confirm === 'function' &&
+            !confirm(`Delete the old collection "${this.oldCollectionLabel}"?\n\nThe chat already uses the rebuilt collection. This cannot be undone.`)) {
+            return;
+        }
+        els.oldCollectionDelete.disabled = true;
+        els.oldCollectionKeep.disabled = true;
+        els.oldCollectionText.textContent = `Deleting old collection \u2014 ${this.oldCollectionLabel}\u2026`;
+        let result;
+        try {
+            result = await remove();
+        } catch (error) {
+            result = { success: false, errors: [error?.message || String(error)] };
+        }
+        if (result?.success) {
+            this.oldCollectionDelete = null;
+            els.oldCollectionText.textContent = `Old collection deleted \u2014 ${this.oldCollectionLabel}`;
+            els.oldCollectionDelete.style.display = 'none';
+            els.oldCollectionKeep.style.display = 'none';
+            this.log(`Old collection deleted: ${this.oldCollectionLabel}`);
+        } else {
+            const why = (result?.errors || []).join(', ') || 'not confirmed';
+            els.oldCollectionText.textContent = `Old collection kept \u2014 delete failed: ${why}`;
+            els.oldCollectionDelete.disabled = false;
+            els.oldCollectionKeep.disabled = false;
+            this.log(`Old collection delete failed: ${why}`);
+        }
+    }
+
+    /**
+     * C13: chunks the insert layer refused because a different text already
+     * used the same hash. Shown in the run log and appended to the final line.
+     * @param {number} count Chunks not stored
+     */
+    noteHashCollisions(count) {
+        const n = Number(count) || 0;
+        if (n <= 0 || !this.stats) return;
+        this.stats.hashCollisions = (this.stats.hashCollisions || 0) + n;
+        this.log(`${n} chunk${n === 1 ? '' : 's'} not stored: hash collision`);
+    }
+
     log(text) {
         const line = String(text ?? '').trim();
         if (!line) return;
@@ -404,7 +495,7 @@ export class ProgressTracker {
      * @param {number} totalChunksToEmbed - Total chunks to embed
      */
     updateEmbeddingProgress(embeddedChunks, totalChunksToEmbed) {
-        console.log(`[ProgressTracker] updateEmbeddingProgress: ${embeddedChunks}/${totalChunksToEmbed}`);
+        vhLog(`[ProgressTracker] updateEmbeddingProgress: ${embeddedChunks}/${totalChunksToEmbed}`);
 
         // Track batch timing for speed calculation
         const previousEmbedded = this.stats.embeddedChunks || 0;
@@ -415,12 +506,148 @@ export class ProgressTracker {
             this.stats.lastBatchTime = now - this.stats.lastBatchStartTime;
             this.stats.lastBatchSize = batchSize;
             this.stats.lastBatchStartTime = now; // Reset for next batch
-            console.log(`[ProgressTracker] Batch completed: ${batchSize} chunks in ${this.stats.lastBatchTime}ms`);
+            vhLog(`[ProgressTracker] Batch completed: ${batchSize} chunks in ${this.stats.lastBatchTime}ms`);
         }
 
         this.stats.embeddedChunks = embeddedChunks;
         this.stats.totalChunksToEmbed = totalChunksToEmbed;
+        this.stats.partialUnits = 0; // the finished batch is now counted in full
         this.updateDisplay();
+    }
+
+    /**
+     * S1/S3/S5: sets the status line to the phase the run is in, shown as
+     * `Phase` or `Phase · n/N`. `log: false` is for per-chunk updates, which
+     * would otherwise flood the run log (the first line of a phase is logged).
+     * @param {string} text Phase text, usually built with phaseText()
+     * @param {{log?: boolean}} [options]
+     */
+    setPhase(text, { log = true } = {}) {
+        const line = String(text ?? '').trim();
+        if (!line || this.isComplete) return;
+        this.currentStatus = line;
+        if (log) this.log(line);
+        this.updateDisplay(line);
+    }
+
+    /**
+     * S2: units (groups) of the current batch that are already embedded, so the
+     * bar moves inside a batch and not only once per batch.
+     * @param {number} units Fractional units finished in this batch
+     */
+    setPartialUnits(units) {
+        const value = Number(units);
+        this.stats.partialUnits = Number.isFinite(value) && value > 0 ? value : 0;
+        this.updateDisplay();
+    }
+
+    /**
+     * S3/S5: drives the bar from the run's own weighted phases (0-100). The bar
+     * never moves backwards within a run.
+     * @param {number} percent Overall percentage
+     */
+    setWeightedPercent(percent) {
+        const value = Number(percent);
+        if (!Number.isFinite(value)) return;
+        this.stats.weightedPercent = Math.min(100, Math.max(value, this.stats.weightedPercent ?? 0, 0));
+        this.stats.monotonic = true;
+        this.updateDisplay();
+    }
+
+    /**
+     * S5: the next show() maps its own 0-100% onto `start..start+span`, leaving
+     * room for later phases of the same operation (verify, switch, carry over).
+     */
+    queueBarRange(start, span) {
+        this.pendingBarRange = { start: Number(start) || 0, span: Number(span) || 100 };
+    }
+
+    /** Drops a queued range that no run consumed. */
+    clearBarRange() {
+        this.pendingBarRange = null;
+    }
+
+    /**
+     * S4: wrap the embedding/insert request so speed and ETA use embedding time
+     * only (planning, saving and paused intervals are not counted).
+     */
+    beginEmbedTiming() {
+        if (this.stats && !this.stats.embedStartedAt) this.stats.embedStartedAt = Date.now();
+    }
+
+    endEmbedTiming() {
+        const s = this.stats;
+        if (!s || !s.embedStartedAt) return;
+        s.embedMs = (s.embedMs || 0) + (Date.now() - s.embedStartedAt);
+        s.embedStartedAt = null;
+        s.embedBatches = (s.embedBatches || 0) + 1;
+    }
+
+    /**
+     * S6: starts a simple counted operation (Purge All, deleting several
+     * collections, Resync) in the Status panel. Returns null when another run
+     * owns the panel; the caller then keeps its toast-only behaviour.
+     * @returns {number|null} run id for countedStep()/complete()
+     */
+    beginCounted(operation, total, unitLabel = 'Collections') {
+        if (!this.isFree()) return null;
+        const runId = this.show(operation, total, unitLabel);
+        this.stats.monotonic = true;
+        return runId;
+    }
+
+    /**
+     * S6: one step of a counted operation, shown as `Phase · n/N`. `done` is
+     * how many are finished; while one is being worked on, n is done + 1.
+     */
+    countedStep(runId, phase, done, total, working = true) {
+        if (runId == null || !this.isCurrentRun(runId)) return;
+        this.stats.totalItems = total;
+        this.stats.processedItems = Math.min(done, total);
+        this.setPhase(phaseText(phase, working ? done + 1 : done, total), { log: false });
+    }
+
+    /** True when no run owns the panel (no active, no paused run). */
+    isFree() {
+        return !this.isPaused && !(this.currentOperation && !this.isComplete && !this.isDatabaseSnapshot);
+    }
+
+    /**
+     * S3: a later part of the same run needs a different total/label without
+     * resetting the run (log, timer, run id).
+     */
+    retarget(totalItems, itemLabel) {
+        this.stats.totalItems = totalItems;
+        if (itemLabel) {
+            this.stats.itemLabel = itemLabel;
+            if (this.elements?.statLabel && !this.labelOverridden) this.elements.statLabel.textContent = itemLabel;
+        }
+        this.updateDisplay();
+    }
+
+    /**
+     * S5: re-opens a run that its embedding part just finished, for the steps
+     * after it (verify, switch, carry over). Keeps the log and the run clock.
+     * @param {string} firstPhase Status line to start with
+     * @param {number} [percent] Bar position to hold at
+     * @returns {number|null} The run id to pass to complete()
+     */
+    beginFollowUp(firstPhase, percent = null) {
+        if (!this.panel || this.isDatabaseSnapshot) return null;
+        this.isComplete = false;
+        this.isPaused = false;
+        this.isStopping = false;
+        this.terminalStatus = '';
+        this.currentEta = '';
+        for (const key of ['pauseBtn', 'resumeBtn', 'stopBtn', 'startBtn']) {
+            if (this.elements?.[key]) this.elements[key].style.display = 'none';
+        }
+        if (percent != null) this.stats.weightedPercent = percent;
+        this.stats.monotonic = true;
+        this.startTimeUpdater();
+        this.currentStatus = '';
+        this.setPhase(firstPhase);
+        return this.runId;
     }
 
     /**
@@ -489,6 +716,7 @@ export class ProgressTracker {
             return;
         }
         this.log(`${success ? 'Finished' : 'Ended'}${message ? `: ${message}` : ''}`);
+        if (success === true && this.stats.weightedPercent != null) this.stats.weightedPercent = 100;
         this.isComplete = true;
         this.isPaused = false;
         this.isStopping = false; // R10: drain finished - no lingering "stopping…" state
@@ -516,7 +744,10 @@ export class ProgressTracker {
                 ? `✅ ${message || 'Operation completed successfully'} (${seconds}s)`
                 : `❌ ${message || 'Operation failed'} (${seconds}s)`;
 
-        this.terminalStatus = completionMessage;
+        const collisions = this.stats?.hashCollisions || 0;
+        this.terminalStatus = collisions > 0
+            ? `${completionMessage} \u2014 ${collisions} chunk${collisions === 1 ? '' : 's'} not stored: hash collision`
+            : completionMessage;
         this.updateDisplay();
 
         // Don't auto-hide - let user close manually
@@ -572,6 +803,21 @@ export class ProgressTracker {
                             class="menu_button" style="display: none;">
                             <i class="fa-solid fa-stop"></i> Stop
                         </button>
+                    </div>
+
+                    <!-- K2: a rebuild keeps the previous collection; the user decides -->
+                    <div id="vecthare_progress_oldcollection" class="vecthare-progress-current" style="display: none;">
+                        <span id="vecthare_progress_oldcollection_text"></span>
+                        <div style="margin-top: 6px;">
+                            <button id="vecthare_progress_oldcollection_delete" class="menu_button"
+                                title="Delete the previous collection now (verified delete)">
+                                <i class="fa-solid fa-trash"></i> Delete now
+                            </button>
+                            <button id="vecthare_progress_oldcollection_keep" class="menu_button"
+                                title="Keep the previous collection; it stays in Database Browser">
+                                <i class="fa-solid fa-box-archive"></i> Keep
+                            </button>
+                        </div>
                     </div>
 
                     <!-- Stats Grid -->
@@ -638,6 +884,9 @@ export class ProgressTracker {
 
         this.modal = document.getElementById('vecthare_progress_modal');
         this.panel = document.getElementById('vecthare_progress_panel');
+        // S6: operations started from the Database Browser report here, so the
+        // panel must stack above the Browser however the two were created.
+        this.modal.style.zIndex = '10001';
 
         // PERF: Cache all DOM element references to avoid repeated getElementById calls
         this.elements = {
@@ -665,6 +914,10 @@ export class ProgressTracker {
             pauseBtn: document.getElementById('vecthare_progress_pause'),
             resumeBtn: document.getElementById('vecthare_progress_resume'),
             stopBtn: document.getElementById('vecthare_progress_stop'),
+            oldCollection: document.getElementById('vecthare_progress_oldcollection'),
+            oldCollectionText: document.getElementById('vecthare_progress_oldcollection_text'),
+            oldCollectionDelete: document.getElementById('vecthare_progress_oldcollection_delete'),
+            oldCollectionKeep: document.getElementById('vecthare_progress_oldcollection_keep'),
         };
 
         // Bind close button
@@ -681,6 +934,8 @@ export class ProgressTracker {
             if (e.key === 'Escape') this.hide();
         });
         this.elements.startBtn?.addEventListener('click', () => this.startCallback?.());
+        this.elements.oldCollectionDelete?.addEventListener('click', () => this.onOldCollectionDelete());
+        this.elements.oldCollectionKeep?.addEventListener('click', () => this.onOldCollectionKeep());
 
         document.getElementById('vecthare_progress_log_copy')?.addEventListener('click', async () => {
             const text = (this.runLog || []).map(entry => `${entry.at}  ${entry.text}`).join('\n');
@@ -719,15 +974,28 @@ export class ProgressTracker {
         // Calculate progress percentage
         // Prioritize embedding progress if available, otherwise use processed items
         let percent = 0;
-        if (this.stats.totalChunksToEmbed > 0 && this.stats.embeddedChunks >= 0) {
-            const base = Math.min(Math.max(this.stats.embeddingBasePercent || 0, 0), 99);
-            const ratio = Math.min(this.stats.embeddedChunks / this.stats.totalChunksToEmbed, 1);
-            percent = Math.round(base + (100 - base) * ratio);
-        } else if (this.stats.totalItems > 0) {
-            percent = Math.round((this.stats.processedItems / this.stats.totalItems) * 100);
+        if (this.stats.weightedPercent != null) {
+            // S3/S5: the run supplies its own weighted bar.
+            percent = Math.round(Math.min(100, Math.max(this.stats.weightedPercent, 0)));
+        } else {
+            if (this.stats.totalChunksToEmbed > 0 && this.stats.embeddedChunks >= 0) {
+                const base = Math.min(Math.max(this.stats.embeddingBasePercent || 0, 0), 99);
+                // S2: groups of the current batch that are already embedded count too.
+                const embeddedNow = Math.min(this.stats.embeddedChunks + (this.stats.partialUnits || 0),
+                    this.stats.totalChunksToEmbed);
+                const ratio = Math.min(embeddedNow / this.stats.totalChunksToEmbed, 1);
+                percent = Math.round(base + (100 - base) * ratio);
+            } else if (this.stats.totalItems > 0) {
+                percent = Math.round((this.stats.processedItems / this.stats.totalItems) * 100);
+            }
+            // S5: leave room for later phases of the same operation.
+            if ((this.stats.barSpan ?? 100) !== 100 || this.stats.barStart) {
+                percent = Math.round((this.stats.barStart || 0) + percent * (this.stats.barSpan ?? 100) / 100);
+            }
         }
-        // Keep Content Vectorizer progress monotonic without masking chat sync recalculations.
-        if (!this.isDatabaseSnapshot && this.stats.embeddingBasePercent > 0) {
+        // Keep progress monotonic within a run (Content Vectorizer, Sync and the
+        // weighted runs). A snapshot of the saved database is not a run.
+        if (!this.isDatabaseSnapshot && (this.stats.embeddingBasePercent > 0 || this.stats.monotonic)) {
             percent = Math.max(percent, this.stats.lastPercent || 0);
             this.stats.lastPercent = percent;
         }
@@ -753,8 +1021,24 @@ export class ProgressTracker {
         if (els.percent) els.percent.textContent = unknownSnapshot ? '—' : `${percent}%`;
         if (els.bar) els.bar.style.width = `${unknownSnapshot ? 0 : percent}%`;
         if (els.processed) {
-            els.processed.textContent = unknownSnapshot ? '—' :
-                `${this.stats.processedItems} / ${this.stats.totalItems}`;
+            // S7: while chunks are being embedded the counter shows chunks, not
+            // the coarse step number ("3 / 4 Steps" stayed on screen for the
+            // whole embedding). The bar keeps its own step-to-percent mapping.
+            const embeddingChunks = !this.isDatabaseSnapshot && !this.isComplete &&
+                this.currentOperation !== 'Vectorizing Chat' && this.stats.embeddingBasePercent > 0 &&
+                this.stats.totalChunksToEmbed > 0;
+            if (embeddingChunks) {
+                if (els.statLabel) els.statLabel.textContent = 'Chunks';
+                this.labelOverridden = true;
+                els.processed.textContent = `${this.stats.embeddedChunks} / ${this.stats.totalChunksToEmbed}`;
+            } else {
+                if (this.labelOverridden && els.statLabel) {
+                    els.statLabel.textContent = this.stats.itemLabel || 'Progress';
+                }
+                this.labelOverridden = false;
+                els.processed.textContent = unknownSnapshot ? '—' :
+                    `${this.stats.processedItems} / ${this.stats.totalItems}`;
+            }
         }
 
         // Chat progress is in groups; this line counts writes from this run.
@@ -781,8 +1065,10 @@ export class ProgressTracker {
         // Chat speed is based on chunks written during this run.
         let speed = '0.0';
         if (this.currentOperation === 'Vectorizing Chat' && this.stats.startTime) {
-            const elapsed = (Date.now() - this.stats.startTime) / 1000;
-            speed = elapsed > 0 ? (this.stats.totalChunks / elapsed).toFixed(1) : '0.0';
+            // S4: embedding time only, so planning, saving and pauses do not
+            // drag the rate down.
+            const embedSec = this.embeddingSeconds();
+            speed = embedSec > 0 ? (this.stats.totalChunks / embedSec).toFixed(1) : '0.0';
         } else if (this.stats.lastBatchTime && this.stats.lastBatchSize > 0) {
             // Use last batch performance for real-time speed
             const batchSpeed = (this.stats.lastBatchSize / (this.stats.lastBatchTime / 1000)).toFixed(1);
@@ -810,10 +1096,30 @@ export class ProgressTracker {
                 ? this.stats.totalChunksToEmbed
                 : this.stats.totalItems;
             const elapsedSec = this.stats.startTime ? (Date.now() - this.stats.startTime) / 1000 : 0;
-            const completedForEta = this.currentOperation === 'Vectorizing Chat'
-                ? this.stats.groupsCompletedThisRun || 0 : done;
-            if (completedForEta > 0 && totalUnits > done && elapsedSec > 2) {
-                const etaSec = Math.round((elapsedSec / completedForEta) * (totalUnits - done));
+            let etaSec = null;
+            if (this.currentOperation === 'Vectorizing Chat') {
+                // S4: rate over embedding time only; no ETA before two batches
+                // have been embedded (one batch is not a rate). The rate uses
+                // FINISHED batches only, and the time already spent on the
+                // batch in flight is taken off the estimate. Before, the running
+                // batch's time was added to the rate while its groups were not
+                // counted yet, so the ETA rose during every batch instead of
+                // counting down (most visibly on the last one).
+                const s = this.stats;
+                const finishedSec = (s.embedMs || 0) / 1000;
+                const groups = s.groupsCompletedThisRun || 0;
+                if ((s.embedBatches || 0) >= 2 && groups > 0 && finishedSec > 0 && totalUnits > done) {
+                    const inFlightSec = s.embedStartedAt ? (Date.now() - s.embedStartedAt) / 1000 : 0;
+                    etaSec = Math.max(0, Math.round((finishedSec / groups) * (totalUnits - done) - inFlightSec));
+                }
+            } else if (done > 0 && totalUnits > done && elapsedSec > 2) {
+                etaSec = Math.round((elapsedSec / done) * (totalUnits - done));
+            }
+            if (etaSec === 0 && this.currentOperation === 'Vectorizing Chat') {
+                // The running batch is taking longer than the average: say so
+                // rather than showing a frozen or negative countdown.
+                this.currentEta = ' · finishing…';
+            } else if (etaSec != null) {
                 const mins = Math.floor(etaSec / 60);
                 const secs = etaSec % 60;
                 this.currentEta = ` · ETA ${mins > 0 ? `${mins}m ` : ''}${secs}s`;
@@ -835,6 +1141,12 @@ export class ProgressTracker {
             this.updateErrorsList();
             if (els.errors) els.errors.style.display = 'block';
         }
+    }
+
+    /** S4: seconds spent embedding in this run (excludes planning, saving and pauses). */
+    embeddingSeconds() {
+        const s = this.stats || {};
+        return ((s.embedMs || 0) + (s.embedStartedAt ? Date.now() - s.embedStartedAt : 0)) / 1000;
     }
 
     /**
@@ -921,6 +1233,19 @@ export class ProgressTracker {
     }
 }
 
+/**
+ * S1/S3/S5: the shared phase format, `Phase · n/N` (or just `Phase`).
+ * @param {string} phase Phase name
+ * @param {number} [n] Items done / current item
+ * @param {number} [total] Total items
+ * @returns {string}
+ */
+export function phaseText(phase, n, total) {
+    return Number.isFinite(n) && Number.isFinite(total) && total > 0
+        ? `${phase} · ${Math.min(Math.max(n, 0), total)}/${total}`
+        : String(phase);
+}
+
 // Export singleton instance
 /**
  * Summarizes the settings a run is ACTUALLY using, for the status window.
@@ -957,7 +1282,18 @@ export function describeEffectiveSettings(settings, extra = {}) {
     if (settings.chunk_size) out['Chunk size'] = settings.chunk_size;
     out['Text cleaning'] = cleaning;
     if (settings.embedding_batch_size) out['Embedding batch'] = settings.embedding_batch_size;
+    else if (settings.insert_batch_size_set === true || (settings.insert_batch_size && settings.insert_batch_size !== 50)) {
+        out['Embedding batch'] = Math.min(Number(settings.insert_batch_size) || 0, 100) || undefined;
+    }
     return { ...out, ...extra };
 }
 
 export const progressTracker = new ProgressTracker();
+
+// C13: the insert layer reports hash collisions as an event so it does not
+// depend on this panel.
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    window.addEventListener('vecthare:hash-collision', event => {
+        progressTracker.noteHashCollisions(event?.detail?.count);
+    });
+}

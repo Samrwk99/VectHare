@@ -13,9 +13,10 @@
 
 import { getContext, extension_settings } from '../../../../extensions.js';
 import { getValidProviderIds } from './providers.js';
-import { vecthareState, persistVectHareStore } from './vecthare-store.js';
+import { vecthareState, persistVectHareStore, flushVectHareStore, reloadVectHareStore, refreshStoreIfStale } from './vecthare-store.js';
 import { getCurrentChatId, chat_metadata, getRequestHeaders, saveSettingsDebounced } from '../../../../../script.js';
-import { getStringHash } from '../../../../utils.js';
+import { keyFingerprint } from './secret-store.js';
+import { resolveStorage } from './storage-resolver.js';
 
 // ============================================================================
 // CONSTANTS
@@ -478,6 +479,34 @@ export async function adoptChatCollection(collectionId, retireId = null, ctx = g
     }, retireId, true);
 }
 
+/**
+ * N2: re-attaches a deleted chat's kept collection to the current chat, after
+ * the user confirmed it. Same owner only; the current chat must have no
+ * binding and the collection must be released (quarantined).
+ * @param {string} collectionId Kept collection
+ * @param {object} savedRec Binding record as it was when the chat was deleted
+ */
+export async function reattachChatCollection(collectionId, savedRec, ctx = getContext()) {
+    const snap = currentSnapshot(ctx);
+    if (!snap.owner || !snap.chat || !isVectHareChatCollection(collectionId)) {
+        return { state: 'unbound', writable: false };
+    }
+    if (!sameOwner(savedRec?.owner, snap.owner)) return { state: 'conflict', writable: false };
+    const existing = bindingStore().byCollection[collectionId];
+    if (!existing || existing.status !== 'quarantined') return { state: 'conflict', writable: false };
+    if (findBound(snap.owner, snap.chat).length) return { state: 'conflict', writable: false };
+    return await commit(snap, collectionId, {
+        owner: snap.owner,
+        chat: snap.chat,
+        origin: savedRec.origin || existing.origin || 'created',
+        status: 'active',
+        createdAt: savedRec.createdAt || existing.createdAt || Date.now(),
+        stores: savedRec.stores || existing.stores || [],
+        reattachedFrom: savedRec.chat || null,
+        reattachedAt: Date.now(),
+    }, null, true);
+}
+
 const isVectHareChatCollection = id =>
     typeof id === 'string' && id.startsWith(COLLECTION_PREFIXES.VECTHARE_CHAT);
 
@@ -495,7 +524,10 @@ export function ensureChatBinding(ctx = getContext(), opts = {}) {
         return inflight.get(key).then(result =>
             create && result.state === 'unbound' ? ensureChatBinding(ctx, { create: true }) : result);
     }
-    const promise = resolveChatBinding(snap, { create }).finally(() => inflight.delete(key));
+    // 8B: resolve the chat's collection from fresh metadata, so a tab left
+    // open never writes into a collection another tab rebuilt or deleted.
+    const promise = refreshStoreIfStale().catch(() => false)
+        .then(() => resolveChatBinding(snap, { create })).finally(() => inflight.delete(key));
     inflight.set(key, promise);
     return promise;
 }
@@ -506,35 +538,80 @@ export function ensureChatBinding(ctx = getContext(), opts = {}) {
  * vecthare_binding claims are read-only evidence for legacy recovery.
  */
 async function commit(snap, id, rec, retireId = null, allowCopiedClaim = false) {
-    if (!liveSnapshotMatches(snap)) return { state: 'changed', writable: false };
-    try {
-        // A conflicting legacy claim is evidence of a copied/imported file,
-        // not permission to overwrite its original collection binding.
-        const copiedClaim = snap.claim && !claimMatchesRecord(snap.claim, id, rec);
-        if (copiedClaim && !allowCopiedClaim) {
+    // Step 8A: a binding change is a strict commit. It is applied to the
+    // freshest state and written only if nobody changed the file meanwhile;
+    // on a conflict it is undone, the state re-read, its conditions checked
+    // again, and retried. It is never merged field by field.
+    for (let attempt = 0; attempt < 3; attempt++) {
+        if (!liveSnapshotMatches(snap)) return { state: 'changed', writable: false };
+        if (attempt > 0) {
+            // Another tab committed first. A chat that is already bound
+            // elsewhere now keeps that binding.
+            const others = findBound(snap.owner, snap.chat)
+                .filter(([otherId]) => otherId !== id && otherId !== retireId);
+            if (others.length === 1 && rec.origin === 'created' && !retireId) {
+                return { state: 'active', collectionId: others[0][0], writable: true };
+            }
+            if (others.length) return { state: 'conflict', writable: false };
+            const current = bindingStore().byCollection[id];
+            if (current?.status === 'active' && !sameOwner(current.owner, snap.owner)) {
+                return { state: 'conflict', writable: false };
+            }
+        }
+        let rollback = null;
+        try {
+            // A conflicting legacy claim is evidence of a copied/imported file,
+            // not permission to overwrite its original collection binding.
+            const copiedClaim = snap.claim && !claimMatchesRecord(snap.claim, id, rec);
+            if (copiedClaim && !allowCopiedClaim) {
+                return { state: 'provisional', writable: false };
+            }
+            // Routine pending changes go first (they may merge); the binding
+            // itself is then written strictly on top of the current file.
+            await flushVectHareStore();
+            const byCollection = bindingStore().byCollection;
+            const hadPrevious = Object.prototype.hasOwnProperty.call(byCollection, id);
+            const previousRecord = byCollection[id];
+            const previousRetired = retireId ? byCollection[retireId] : undefined;
+            rollback = () => {
+                if (hadPrevious) byCollection[id] = previousRecord; else delete byCollection[id];
+                if (retireId && previousRetired !== undefined) byCollection[retireId] = previousRetired;
+            };
+            if (retireId && byCollection[retireId]) {
+                const old = byCollection[retireId];
+                byCollection[retireId] = { ...old, owner: null, chat: null, status: 'quarantined' };
+            }
+            byCollection[id] = {
+                ...rec, bindingKind: 'vecthare-settings', uuid: snap.uuid,
+                // When a copied branch retains its parent's old ST claim, record
+                // that header as read-only evidence for THIS new VectHare binding.
+                ...(copiedClaim ? {
+                    sourceClaimId: snap.claim.collectionId,
+                    sourceClaimOwner: claimOwnerKey(snap.claim),
+                    sourceClaimChat: normChat(snap.claim.chat),
+                } : {}),
+            };
+            persistVectHareStore();
+            // The binding must be durable BEFORE any vector is written under it:
+            // a debounced save lost to a browser close left those vectors in a
+            // collection no chat pointed at, and the next load created a second one.
+            await flushVectHareStore({ strict: true });
+            return { state: 'active', collectionId: id, writable: true };
+        } catch (error) {
+            // Not durable: undo it in memory too, so no later lookup treats an
+            // unsaved binding as real; the next attempt commits it again.
+            try { rollback?.(); } catch { /* keep the original error */ }
+            if (error?.code === 'VH_STORE_CONFLICT' && attempt < 2) {
+                try {
+                    const reloaded = await reloadVectHareStore();
+                    if (reloaded.reloaded) continue;
+                } catch { /* fall through */ }
+            }
+            console.warn('VectHare: Could not persist its own chat binding:', error);
             return { state: 'provisional', writable: false };
         }
-        const byCollection = bindingStore().byCollection;
-        if (retireId && byCollection[retireId]) {
-            const old = byCollection[retireId];
-            byCollection[retireId] = { ...old, owner: null, chat: null, status: 'quarantined' };
-        }
-        byCollection[id] = {
-            ...rec, bindingKind: 'vecthare-settings', uuid: snap.uuid,
-            // When a copied branch retains its parent's old ST claim, record
-            // that header as read-only evidence for THIS new VectHare binding.
-            ...(copiedClaim ? {
-                sourceClaimId: snap.claim.collectionId,
-                sourceClaimOwner: claimOwnerKey(snap.claim),
-                sourceClaimChat: normChat(snap.claim.chat),
-            } : {}),
-        };
-        persistVectHareStore();
-        return { state: 'active', collectionId: id, writable: true };
-    } catch (error) {
-        console.warn('VectHare: Could not persist its own chat binding:', error);
-        return { state: 'provisional', writable: false };
     }
+    return { state: 'provisional', writable: false };
 }
 
 // Read-only discovery: never alter persisted registry during identity checks.
@@ -783,22 +860,35 @@ export async function withChatCollectionWriteGuard(id, task) {
     finally { endChatCollectionWrite(id); }
 }
 
-/** Identifies the configured destination; does not store Qdrant credentials. */
-export function chatStoreDestination(settings) {
+/**
+ * Identifies the configured destination; does not store Qdrant credentials.
+ * 9b (R13): with a collection id, the multitenancy part is that collection's
+ * own layout (its locator, or today's setting when it has none), so toggling
+ * the checkbox no longer makes its recorded destination look foreign.
+ */
+export function chatStoreDestination(settings, collectionId = null) {
     const backend = settings.vector_backend || 'standard';
     if (backend === 'qdrant') {
+        // Legacy strings are unchanged (true/false); 9c's v2 layout names itself.
+        const layout = resolveStorage(collectionId || '', settings, 'qdrant').layout;
+        const shared = layout === 'legacy-mt' ? true : layout === 'per-collection' ? false : layout;
         return JSON.stringify([
             settings.qdrant_use_cloud, settings.qdrant_url || '',
             settings.qdrant_host || '', settings.qdrant_port || '',
             // Deterministic change detector, not an authentication mechanism.
-            getStringHash(String(settings.qdrant_api_key || '')),
-            Boolean(settings.qdrant_multitenancy),
+            keyFingerprint(settings, 'qdrant_api_key'),
+            shared,
         ]);
     }
-    if (backend === 'milvus') return JSON.stringify([
-        settings.milvus_address || '', settings.milvus_host || '', settings.milvus_port || '',
-        settings.milvus_username || '', getStringHash(String(settings.milvus_token || '')),
-    ]);
+    if (backend === 'milvus') {
+        const layout = collectionId ? resolveStorage(collectionId, settings, 'milvus').layout : 'legacy-shared';
+        return JSON.stringify([
+            settings.milvus_address || '', settings.milvus_host || '', settings.milvus_port || '',
+            settings.milvus_username || '', keyFingerprint(settings, 'milvus_token'),
+            // 9c: only the new layouts add their name (legacy strings unchanged).
+            ...(layout === 'legacy-shared' ? [] : [layout]),
+        ]);
+    }
     return backend;
 }
 
@@ -808,7 +898,7 @@ export function recordChatStore(id, settings) {
     if (!rec || rec.status !== 'active') return;
     const backend = settings.vector_backend || 'standard';
     const source = settings.source || 'transformers';
-    const destination = chatStoreDestination(settings);
+    const destination = chatStoreDestination(settings, id);
     rec.stores ??= [];
     if (!rec.stores.some(s => s.backend === backend && s.source === source && s.destination === destination)) {
         rec.stores.push({ backend, source, destination });

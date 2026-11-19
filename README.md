@@ -224,9 +224,7 @@ Restart SillyTavern.
 
 ## 🔄 Auto-Updates
 
-VectHare has `auto_update: true` in its manifest. If you installed via `git clone`, SillyTavern will automatically check for and apply updates!
-
-Look for the update notification in the Extensions panel, or manually check with the "Check for Updates" button.
+This fork ships with `auto_update: false` in its manifest, so SillyTavern will not replace it with the upstream VectHare on an extension update (which would silently remove this fork's fixes). Update it by replacing the extension folder yourself.
 
 ---
 

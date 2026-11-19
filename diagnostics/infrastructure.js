@@ -10,6 +10,7 @@
  */
 
 import { getRequestHeaders } from '../../../../../script.js';
+import { isSecretAvailable } from '../core/secret-store.js';
 import { secret_state } from '../../../../secrets.js';
 import { textgen_types, textgenerationwebui_settings } from '../../../../textgen-settings.js';
 import {
@@ -411,7 +412,8 @@ export async function checkQdrantBackend(settings) {
                 category: 'infrastructure'
             };
         }
-        if (!settings.qdrant_api_key) {
+        // The key may live in the VectHare key store rather than in settings.
+        if (!(await isSecretAvailable(settings, 'qdrant_api_key'))) {
             return {
                 name: backendName,
                 status: 'fail',

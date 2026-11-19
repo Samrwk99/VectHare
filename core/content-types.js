@@ -269,6 +269,7 @@ export const CONTENT_TYPES = {
                 system_prompt: true,
                 post_history_instructions: true,
                 creator_notes: false,
+                character_book: false,
             },
         },
 
@@ -458,6 +459,13 @@ export const SCOPE_OPTIONS = [
 ];
 
 /**
+ * Chat strategies the LIVE chat may use: exactly the ones Sync Chat / Repair
+ * track in their ledger. 'adaptive' and 'per_scene' are for uploaded
+ * transcripts only (C14).
+ */
+export const LIVE_CHAT_STRATEGIES = ['per_message', 'conversation_turns', 'message_batch'];
+
+/**
  * Character card fields that can be vectorized
  */
 export const CHARACTER_FIELDS = [
@@ -469,4 +477,5 @@ export const CHARACTER_FIELDS = [
     { id: 'system_prompt', name: 'System Prompt', description: 'System instructions' },
     { id: 'post_history_instructions', name: 'Jailbreak/NSFW', description: 'Post-history instructions' },
     { id: 'creator_notes', name: 'Creator Notes', description: 'Notes from card creator' },
+    { id: 'character_book', name: 'Embedded Lorebook', description: "Entries of the lorebook embedded in the card (disabled entries skipped)" },
 ];

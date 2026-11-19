@@ -1,3 +1,4 @@
+import { vhLog } from './utils/log.js';
 /**
  * ============================================================================
  * VECTHARE - ADVANCED RAG SYSTEM
@@ -25,7 +26,7 @@ import { debounce } from '../../../utils.js';
 import { debounce_timeout } from '../../../constants.js';
 
 // VectHare modules - Core
-import { synchronizeChat, rearrangeChat, vectorizeAll, repairChatVectors, checkUnfinishedVectorization, isVectorizationActive, isChatSynchronizationActive, consumeWasLastRunStoppedByUser, flagImmediateReverseSync, parseRegistryKey, noteChatSwitch, planChatVectorizationRebuild } from './core/chat-vectorization.js';
+import { synchronizeChat, rearrangeChat, vectorizeAll, repairChatVectors, checkUnfinishedVectorization, isVectorizationActive, isChatSynchronizationActive, consumeWasLastRunStoppedByUser, flagImmediateReverseSync, parseRegistryKey, noteChatSwitch, planChatVectorizationRebuild, getSyncBatchSize } from './core/chat-vectorization.js';
 import {
     ensureChatBinding, chatFileExists, deletionCandidates, anotherChatClaimsCollection,
     removeChatBinding, releaseToQuarantine, onChatBindingRenamed, onCharacterBindingRenamed,
@@ -35,9 +36,12 @@ import {
 import { purgeAllVectorIndexes, purgeVectorIndex } from './core/core-vector-api.js';
 import { getChatCollectionId } from './core/chat-vectorization.js';
 import { getDefaultDecaySettings } from './core/temporal-decay.js';
-import { migrateOldEnabledKeys, deleteCollectionMeta, forgetAllLegacyCollectionKeys } from './core/collection-metadata.js';
-import { loadVectHareStore, vecthareState, storeStatus, flushVectHareStore, resetVectHareStore } from './core/vecthare-store.js';
+import { migrateOldEnabledKeys, deleteCollectionMeta, forgetAllLegacyCollectionKeys, renameChatPolicy, renameCharacterPolicies, fillStorageLocators } from './core/collection-metadata.js';
+import { getBackend as getBackendForLocators } from './backends/backend-manager.js';
+import { loadVectHareStore, vecthareState, storeStatus, flushVectHareStore, resetVectHareStore, refreshStoreIfStale } from './core/vecthare-store.js';
+import { migrateSecretsFromSettings } from './core/secret-store.js';
 import { clearCollectionRegistry, discoverExistingCollections, getCollectionRegistry, unregisterCollection, doesChatHaveVectors } from './core/collection-loader.js';
+import { softDeleteChatCollection, purgeDeletedChats, DELETED_CHAT_KEEP_DAYS } from './core/deleted-chats.js';
 import AsyncUtils from './utils/async-utils.js';
 
 // VectHare modules - UI
@@ -66,6 +70,7 @@ const defaultSettings = {
     qdrant_api_key: '',
     qdrant_use_cloud: false,
     qdrant_multitenancy: false, // Use single collection with content_type field instead of separate collections
+    milvus_multitenancy: true, // 9c: new Milvus collections share one store per vector size (off: one store each)
     milvus_host: 'localhost',
     milvus_port: 19530,
     milvus_username: '',
@@ -79,6 +84,7 @@ const defaultSettings = {
 
     // VEC-6: Batch insert optimization
     insert_batch_size: 50, // Chunks per insert batch (50-100 recommended)
+    debug_logging: false, // U3: VectHare's informational console output (warnings/errors always shown)
     togetherai_model: 'togethercomputer/m2-bert-80M-32k-retrieval',
     openai_model: 'text-embedding-ada-002',
     electronhub_model: 'text-embedding-3-small',
@@ -172,7 +178,8 @@ let settings = { ...defaultSettings };
 const moduleWorker = new ModuleWorkerWrapper(() => synchronizeChat(settings, getBatchSize()));
 
 // Batch size based on provider
-const getBatchSize = () => settings.source === 'transformers' ? 1 : 5;
+// P2: one source of truth for the per-pass batch (see getSyncBatchSize).
+const getBatchSize = () => getSyncBatchSize(settings);
 
 // Chat event handler (debounced)
 const onChatEvent = debounce(async () => await moduleWorker.update(), debounce_timeout.relaxed);
@@ -196,6 +203,17 @@ async function onRepairClick() {
     invalidateSavedVectorizationStatus();
     try {
         await repairChatVectors(settings, getBatchSize());
+        // F8: Repair never retires scenes either; mark the ones whose messages changed.
+        try {
+            const { refreshSceneStaleness } = await import('./core/scenes.js');
+            const scenes = await refreshSceneStaleness(settings);
+            if (scenes.outdated) {
+                toastr.warning(`${scenes.outdated} scene(s) are outdated because their messages changed. ` +
+                    'They are not used until re-created (chunk browser \u2192 Scenes).', 'VectHare', { timeOut: 10000 });
+            }
+        } catch (error) {
+            console.debug('VectHare: Scene staleness check skipped:', error.message);
+        }
     } finally {
         invalidateSavedVectorizationStatus();
         void offerResumeOfUnfinishedVectorization(); // refresh status line + button
@@ -612,7 +630,7 @@ async function offerResumeOfUnfinishedVectorization() {
                 // affordance). Flag is consume-on-read so later natural checks toast.
                 const justStoppedByUser = consumeWasLastRunStoppedByUser();
                 if (result.pending > 0 && !isAnyOperationActive() && !justStoppedByUser) {
-                    console.log(`VectHare: Unfinished vectorization detected (${result.pending}/${result.total} pending)`);
+                    vhLog(`VectHare: Unfinished vectorization detected (${result.pending}/${result.total} pending)`);
                     showResumeToast(result.pending, result.total);
                 }
                 return;
@@ -669,9 +687,15 @@ async function onPurgeClick() {
         return;
     }
 
+    // S6: progress in the Status panel when no other run owns it.
+    const purgeRun = progressTracker.beginCounted('Purging VectHare', 0, 'Collections');
     try {
         // Delete only VectHare-owned collections, never ST's shared folder.
-        const result = await purgeAllVectorIndexes(settings);
+        const result = await purgeAllVectorIndexes(settings, {
+            onProgress: ({ done, total, id }) =>
+                progressTracker.countedStep(purgeRun, 'Purging collections', done, total, id != null),
+            onIssue: text => { if (purgeRun != null) progressTracker.addError(`Kept: ${text}`); },
+        });
         if (!result.success) {
             throw new Error(`Some collections could not be safely purged (${result.skipped.length} unverified/failed). ` +
                 'Nothing was removed from VectHare\'s metadata or settings, so this can be retried.');
@@ -680,6 +704,9 @@ async function onPurgeClick() {
         // Only now, with the purge confirmed complete, clear VectHare's own
         // metadata document: registry, collection records, chunk annotations,
         // chat bindings and policies. Without this a purge left ghost rows.
+        if (purgeRun != null && progressTracker.isCurrentRun(purgeRun)) {
+            progressTracker.setPhase('Clearing VectHare metadata…');
+        }
         const reset = await resetVectHareStore();
         if (!reset.success) {
             throw new Error(`Vectors were purged, but VectHare's metadata could not be cleared: ${reset.reason}`);
@@ -707,9 +734,14 @@ async function onPurgeClick() {
             legacy.length ? `${legacy.length} obsolete key(s) removed` : '',
             choice === 'all' ? 'settings reset to defaults' : 'settings kept',
         ].filter(Boolean).join(' · ');
+        if (purgeRun != null) progressTracker.complete(true, detail, purgeRun);
         toastr.success(detail, 'Purge Complete', { timeOut: 12000 });
 
     } catch (error) {
+        if (purgeRun != null) {
+            progressTracker.addError(error.message);
+            progressTracker.complete(false, 'Purge did not finish - nothing was reset', purgeRun);
+        }
         console.error('VectHare: Purge failed:', error);
         toastr.error('Purge failed: ' + error.message, 'VectHare',
             { timeOut: 0, extendedTimeOut: 0 });
@@ -729,9 +761,16 @@ function onRunDiagnosticsClick() {
 // Phase 1: a debounced metadata write must not be lost when the tab closes.
 // Best effort only - the store is also flushed after runs and before commits.
 window.addEventListener('beforeunload', () => { void flushVectHareStore(); });
+// A request started while the page is merely hidden (tab switch, app switch,
+// closing on mobile) is far more likely to complete than one at unload.
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') void flushVectHareStore().catch(() => {});
+    // 8B: back in a tab that sat in the background - pick up other tabs' changes.
+    else void refreshStoreIfStale({ minIntervalMs: 0 }).catch(() => {});
+});
 
 jQuery(async () => {
-    console.log('VectHare: Initializing...');
+    vhLog('VectHare: Initializing...');
 
     // Load saved settings
     if (!extension_settings.vecthare) {
@@ -748,6 +787,22 @@ jQuery(async () => {
         toastr.error(`VectHare could not load its collection metadata: ${storeState.detail}. ` +
             'Operations that change collections are blocked until this is resolved.',
             'VectHare', { timeOut: 0, extendedTimeOut: 0 });
+    }
+
+    // N2: collections of chats deleted more than DELETED_CHAT_KEEP_DAYS ago are
+    // purged through the verified path. Delayed so the plugin and backends are
+    // reachable; anything uncertain is kept and retried at the next startup.
+    if (storeState.status === 'ready') {
+        setTimeout(() => {
+            void purgeDeletedChats(settings, {
+                onlyExpired: true,
+                isBusy: () => isChatSynchronizationActive() || isVectorizationActive(),
+            }).then(results => {
+                const purged = results.filter(r => r.success).length;
+                const keptCount = results.length - purged;
+                if (results.length) vhLog(`VectHare: Deleted-chat cleanup: ${purged} purged, ${keptCount} kept`, results);
+            }).catch(error => console.warn('VectHare: Deleted-chat cleanup skipped:', error.message));
+        }, 30000);
     }
 
     // Merge saved settings with defaults
@@ -767,7 +822,16 @@ jQuery(async () => {
     // Migrate old scattered enabled keys to new collections structure
     const migrationResult = migrateOldEnabledKeys();
     if (migrationResult.migrated > 0) {
-        console.log(`VectHare: Migrated ${migrationResult.migrated} old collection enabled keys`);
+        vhLog(`VectHare: Migrated ${migrationResult.migrated} old collection enabled keys`);
+    }
+
+    // U1: move Qdrant/Milvus credentials out of settings.json into the plugin's
+    // key store. Per key: store -> confirm -> blank; on any failure the key stays
+    // where it was. Done before the UI renders so the fields show the right state.
+    try {
+        await migrateSecretsFromSettings(settings);
+    } catch (error) {
+        console.warn('VectHare: Credential migration skipped:', error.message);
     }
 
     // Render UI
@@ -799,7 +863,7 @@ jQuery(async () => {
         '#vecthare_vector_backend', '#vecthare_source',
         '#vecthare_qdrant_use_cloud', '#vecthare_qdrant_host',
         '#vecthare_qdrant_port', '#vecthare_qdrant_url',
-        '#vecthare_qdrant_api_key', '#vecthare_qdrant_multitenancy'
+        '#vecthare_qdrant_api_key', '#vecthare_qdrant_multitenancy', '#vecthare_milvus_multitenancy'
     ].join(', ');
     jQuery(document).off('.vecthareSavedStatus').on(
         'input.vecthareSavedStatus change.vecthareSavedStatus',
@@ -808,7 +872,28 @@ jQuery(async () => {
     // Fresh check on page load; no health cache is trusted for the indicator.
     void checkBackendHealth(settings);
 
+    // 9b: record where this backend's existing collections are (read-only
+    // probes, a pointer per collection), so later toggles of the multitenancy
+    // switch keep them where they are. Delayed and in the background; nothing
+    // is recorded for a collection found in no place or in more than one.
+    if (storeState.status === 'ready' && ['qdrant', 'milvus'].includes(settings.vector_backend)) {
+        setTimeout(async () => {
+            try {
+                await getBackendForLocators(settings);
+                const result = await fillStorageLocators(settings);
+                if (result.checked) vhLog(`VectHare: Storage locations: ${result.recorded} recorded, ${result.checked} checked`, result);
+                if (result.conflicts.length) {
+                    console.warn(`VectHare: ${result.conflicts.length} collection(s) have saved settings in more than one place; writes to them are blocked`, result.conflicts);
+                }
+            } catch (error) {
+                console.warn('VectHare: Recording storage locations skipped:', error.message);
+            }
+        }, 20000);
+    }
+
     progressTracker.setStartCallback(onVectorizeAllClick);
+    // 8B: another tab changed VectHare's metadata; cached status may be stale.
+    window.addEventListener('vecthare:store-reloaded', () => invalidateSavedVectorizationStatus());
     window.addEventListener('vecthare:database-changed', event => {
         const collectionId = event.detail?.collectionId;
         if (!collectionId || collectionId === getChatCollectionId()) scheduleSavedDatabaseRefresh();
@@ -851,7 +936,7 @@ jQuery(async () => {
                 }
             );
             if (collections.length > 0) {
-                console.log(`VectHare: Discovered ${collections.length} existing collections`);
+                vhLog(`VectHare: Discovered ${collections.length} existing collections`);
             }
         } catch (err) {
             console.error('VectHare: Collection discovery failed after retries:', err.message);
@@ -902,7 +987,7 @@ jQuery(async () => {
         // Legacy collections may contain memories from other historical chats.
         if (rec.origin !== 'created') {
             releaseToQuarantine(id);
-            console.log('VectHare: Legacy collection preserved unassigned', id);
+            vhLog('VectHare: Legacy collection preserved unassigned', id);
             return;
         }
         // Inspect every character/group chat file, including unopened copies.
@@ -910,34 +995,12 @@ jQuery(async () => {
             console.warn('VectHare: Competing claim or incomplete scan; deletion skipped', id);
             return;
         }
-        const keys = getCollectionRegistry().filter(key => parseRegistryKey(key).collectionId === id);
-        if (!rec.stores?.length && keys.length) {
-            console.warn('VectHare: Collection has unknown backend; deletion skipped', id);
-            return;
-        }
-        for (const store of [...(rec.stores || [])]) {
-            // Do not purge a different Qdrant endpoint or tenant after settings
-            // changes. Multitenancy purge has its own unresolved safety issue.
-            const destination = chatStoreDestination({ ...settings, vector_backend: store.backend });
-            if (!store.destination || destination !== store.destination ||
-                (store.backend === 'qdrant' && settings.qdrant_multitenancy)) {
-                console.warn('VectHare: Backend destination unverified; deletion skipped', id);
-                return;
-            }
-            const backendSettings = { ...settings, vector_backend: store.backend, source: store.source };
-            if (!await purgeVectorIndex(id, backendSettings)) {
-                console.warn('VectHare: Backend did not confirm purge; binding retained', id);
-                return;
-            }
-            // Persist partial success, so a retry does not need to revisit a
-            // store already deleted. Registry/metadata remain until all finish.
-            rec.stores = rec.stores.filter(item => item !== store);
-            saveSettingsDebounced();
-        }
-        for (const key of keys) unregisterCollection(key);
-        deleteCollectionMeta(id);
-        removeChatBinding(id);
-        console.log('VectHare: Deleted verified exclusive chat collection', id);
+        // N2: no immediate purge. The binding is released (the collection is no
+        // longer used by RAG) and kept for DELETED_CHAT_KEEP_DAYS, so a chat
+        // deleted by mistake or re-imported can get its memories back. The
+        // verified purge runs from "Empty deleted" or after the keep period.
+        await softDeleteChatCollection(id, rec, filename);
+        vhLog(`VectHare: Chat deleted; its collection is kept for ${DELETED_CHAT_KEEP_DAYS} days`, id);
         } finally {
             endChatCollectionDelete(id);
         }
@@ -954,6 +1017,7 @@ jQuery(async () => {
     // remain read-only; no new claims are written to SillyTavern chats.
     eventSource.on(event_types.CHAT_RENAMED, payload => {
         onChatBindingRenamed(payload);
+        try { renameChatPolicy(payload); } catch (error) { console.warn('VectHare: chat policy rename failed', error); }
         invalidateSavedVectorizationStatus();
         void ensureChatBinding(undefined, { create: false }).then(result => {
             if (result.state === 'active') {
@@ -962,13 +1026,15 @@ jQuery(async () => {
             }
         }).catch(error => console.warn('VectHare: Rename binding could not be reconciled', error));
     });
-    eventSource.on(event_types.CHARACTER_RENAMED,
-        (oldAvatar, newAvatar) => onCharacterBindingRenamed(oldAvatar, newAvatar));
+    eventSource.on(event_types.CHARACTER_RENAMED, (oldAvatar, newAvatar) => {
+        onCharacterBindingRenamed(oldAvatar, newAvatar);
+        try { renameCharacterPolicies(oldAvatar, newAvatar); } catch (error) { console.warn('VectHare: chat policy rename failed', error); }
+    });
 
     // When WebLLM extension is loaded, refresh the model list
     eventSource.on(event_types.EXTENSION_SETTINGS_LOADED, async (manifest) => {
         if (settings.source === 'webllm' && manifest?.display_name === 'WebLLM') {
-            console.log('VectHare: WebLLM extension loaded, refreshing models...');
+            vhLog('VectHare: WebLLM extension loaded, refreshing models...');
             updateWebLlmStatus();
             await loadWebLlmModels(settings);
         }
@@ -986,7 +1052,7 @@ jQuery(async () => {
         void ensureChatBinding(undefined, { create: false }).then(result => {
             if (result.state === 'active') { refreshAutoSyncCheckbox(settings); scheduleSavedDatabaseRefresh(); }
         }).catch(error => console.warn('VectHare: Chat binding not resolved', error));
-        console.log('VectHare: Chat changed, refreshing UI state');
+        vhLog('VectHare: Chat changed, refreshing UI state');
         refreshAutoSyncCheckbox(settings);
         scheduleSavedDatabaseRefresh();
         // VectHare+: check for interrupted vectorization on the loaded chat
@@ -1002,5 +1068,5 @@ jQuery(async () => {
     setTimeout(offerResumeOfUnfinishedVectorization, 5000);
     setTimeout(scheduleSavedDatabaseRefresh, 5000);
 
-    console.log('VectHare: ✅ Initialized successfully');
+    vhLog('VectHare: ✅ Initialized successfully');
 });

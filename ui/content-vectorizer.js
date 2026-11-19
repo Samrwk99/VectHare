@@ -23,9 +23,10 @@ import {
     hasFeature,
     SCOPE_OPTIONS,
     CHARACTER_FIELDS,
+    LIVE_CHAT_STRATEGIES,
 } from '../core/content-types.js';
 import { extension_settings, getContext } from '../../../../extensions.js';
-import { saveSettingsDebounced } from '../../../../../script.js';
+import { saveSettingsDebounced, getRequestHeaders } from '../../../../../script.js';
 import { getChatUUID } from '../core/chat-vectorization.js';
 import { callGenericPopup, POPUP_TYPE } from '../../../../popup.js';
 import { openTextCleaningManager } from './text-cleaning-manager.js';
@@ -352,6 +353,7 @@ function renderUrlSource(type) {
                 </div>
                 <div class="vecthare-cv-url-preview-stats">
                     <span><strong id="vecthare_cv_url_chars">0</strong> characters</span>
+                    <span>~<strong id="vecthare_cv_url_chunks">0</strong> chunks (est.)</span>
                 </div>
             </div>
         </div>
@@ -721,9 +723,21 @@ function renderYouTubeSource(type) {
 /**
  * Updates chunking strategy section
  */
+/** True while the Content Vectorizer is pointed at the live chat (C14). */
+function isLiveChatSelected(typeId = currentContentType) {
+    return typeId === 'chat' &&
+        $('.vecthare-cv-chat-source .vecthare-cv-source-tab.active').data('source') === 'current';
+}
+
 function updateChunkingSection(type) {
-    const strategies = getChunkingStrategies(type.id);
+    // C14: the live chat can only use the strategies Sync Chat tracks; the
+    // others stay available for uploaded transcripts.
+    const strategies = getChunkingStrategies(type.id)
+        .filter(s => !isLiveChatSelected(type.id) || LIVE_CHAT_STRATEGIES.includes(s.id));
     const defaults = getContentTypeDefaults(type.id);
+    if (isLiveChatSelected(type.id) && !LIVE_CHAT_STRATEGIES.includes(currentSettings.strategy || type.defaultStrategy)) {
+        currentSettings.strategy = type.defaultStrategy;
+    }
     const selectedStrategyId = currentSettings.strategy || type.defaultStrategy;
 
     const strategySelect = $('#vecthare_cv_strategy');
@@ -777,7 +791,9 @@ function updateSizeControlsVisibility() {
     $('#vecthare_cv_overlap_row').toggle(needsOverlap);
 
     // Update description when strategy changes
-    $('#vecthare_cv_strategy_desc').text(strategy?.description || '');
+    $('#vecthare_cv_strategy_desc').text(
+        (strategy?.description || '') +
+        (strategyId === 'per_scene' ? ' Needs scenes already marked in the chat; with none marked, nothing is vectorized.' : ''));
 }
 
 /**
@@ -855,7 +871,7 @@ function updateOptionsSection(type) {
                 <label class="vecthare-cv-toggle-label">
                     <span>Include Disabled Entries</span>
                     <label class="vecthare-toggle-switch">
-                        <input type="checkbox" id="vecthare_cv_include_disabled">
+                        <input type="checkbox" id="vecthare_cv_include_disabled" ${currentSettings.includeDisabled ? 'checked' : ''}>
                         <span class="vecthare-toggle-slider"></span>
                     </label>
                 </label>
@@ -951,7 +967,7 @@ function renderFieldSelection() {
                     <label class="vecthare-cv-field-option">
                         <input type="checkbox" name="vecthare_cv_field"
                                value="${field.id}"
-                               ${defaults.fields?.[field.id] ? 'checked' : ''}>
+                               ${(currentSettings.fields ?? defaults.fields)?.[field.id] ? 'checked' : ''}>
                         <span class="vecthare-cv-field-name">${field.name}</span>
                     </label>
                 `).join('')}
@@ -1211,6 +1227,20 @@ function bindEvents() {
         $(this).closest('.vecthare-cv-scope-option').addClass('selected');
     });
 
+    // Character: field checkboxes (were rendered but never read)
+    $(document).on('change', 'input[name="vecthare_cv_field"]', function() {
+        const fields = {};
+        $('input[name="vecthare_cv_field"]').each(function() {
+            fields[String($(this).val())] = $(this).is(':checked');
+        });
+        currentSettings.fields = fields;
+    });
+
+    // Lorebook: include entries disabled in World Info (default off)
+    $(document).on('change', '#vecthare_cv_include_disabled', function() {
+        currentSettings.includeDisabled = $(this).is(':checked');
+    });
+
     // Keyword level dropdown
     $(document).on('change', '#vecthare_cv_keyword_level', function() {
         currentSettings.keywordLevel = $(this).val();
@@ -1333,6 +1363,12 @@ function bindSourceEvents(type) {
 
         // Clear sourceData when switching tabs
         sourceData = null;
+
+        // C14: the strategy list depends on live chat vs uploaded transcript.
+        if (currentContentType === 'chat') {
+            const chatType = getContentType('chat');
+            if (chatType) updateChunkingSection(chatType);
+        }
     });
 
     // Input method tabs (for document type)
@@ -1719,63 +1755,68 @@ function extractCharaFromPng(bytes) {
         }
     }
 
-    // Read chunks
-    let offset = 8; // Skip signature
+    const found = {}; // keyword -> text payload (base64 string)
+    let offset = 8;
 
-    while (offset < bytes.length) {
-        // Read chunk length (4 bytes, big endian)
-        const length = (bytes[offset] << 24) | (bytes[offset + 1] << 16) |
-                       (bytes[offset + 2] << 8) | bytes[offset + 3];
+    while (offset + 8 <= bytes.length) {
+        const length = ((bytes[offset] << 24) | (bytes[offset + 1] << 16) |
+                        (bytes[offset + 2] << 8) | bytes[offset + 3]) >>> 0;
+        offset += 4;
+        const type = String.fromCharCode(bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]);
         offset += 4;
 
-        // Read chunk type (4 bytes ASCII)
-        const type = String.fromCharCode(bytes[offset], bytes[offset + 1],
-                                         bytes[offset + 2], bytes[offset + 3]);
-        offset += 4;
+        const dataStart = offset;
+        const dataEnd = Math.min(offset + length, bytes.length);
 
-        if (type === 'tEXt') {
-            // tEXt chunk: keyword (null-terminated) + text data
-            const dataStart = offset;
-            const dataEnd = offset + length;
-
-            // Find null terminator for keyword
+        if (type === 'tEXt' || type === 'iTXt') {
             let nullPos = dataStart;
-            while (nullPos < dataEnd && bytes[nullPos] !== 0) {
-                nullPos++;
-            }
+            while (nullPos < dataEnd && bytes[nullPos] !== 0) nullPos++;
+            const keyword = new TextDecoder('latin1').decode(bytes.subarray(dataStart, nullPos));
 
-            const keyword = new TextDecoder().decode(bytes.slice(dataStart, nullPos));
-
-            if (keyword === 'chara') {
-                // Get the base64 data after the null terminator
-                const base64Data = new TextDecoder().decode(bytes.slice(nullPos + 1, dataEnd));
-
-                // Decode base64 to JSON
-                try {
-                    const jsonStr = atob(base64Data);
-                    const charData = JSON.parse(jsonStr);
-
-                    // Handle V2 format (data wrapped in 'data' object)
-                    if (charData.spec === 'chara_card_v2' && charData.data) {
-                        return charData.data;
+            if (keyword === 'chara' || keyword === 'ccv3') {
+                let textStart = nullPos + 1;
+                if (type === 'iTXt') {
+                    // keyword\0 compFlag compMethod lang\0 translatedKeyword\0 text
+                    const compFlag = bytes[textStart];
+                    if (compFlag === 1) {
+                        throw new Error('Compressed iTXt character data is not supported');
                     }
-
-                    return charData;
-                } catch (e) {
-                    console.error('VectHare: Failed to decode character data:', e);
-                    throw new Error('Invalid character data in PNG');
+                    textStart += 2;
+                    while (textStart < dataEnd && bytes[textStart] !== 0) textStart++;
+                    textStart++;
+                    while (textStart < dataEnd && bytes[textStart] !== 0) textStart++;
+                    textStart++;
+                }
+                if (!(keyword in found)) {
+                    found[keyword] = new TextDecoder('latin1').decode(bytes.subarray(textStart, dataEnd)).trim();
                 }
             }
         }
 
-        // Skip chunk data and CRC (4 bytes)
-        offset += length + 4;
-
-        // Safety check for IEND
+        offset = dataEnd + 4; // skip data + CRC
         if (type === 'IEND') break;
     }
 
-    return null;
+    // Prefer V3 (ccv3) over V2 (chara)
+    const keyword = ('ccv3' in found) ? 'ccv3' : (('chara' in found) ? 'chara' : null);
+    if (!keyword) return null;
+
+    try {
+        // base64 -> bytes -> UTF-8 (atob alone yields latin1 and mangles non-ASCII text)
+        const bin = atob(found[keyword]);
+        const raw = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) raw[i] = bin.charCodeAt(i);
+        const charData = JSON.parse(new TextDecoder('utf-8').decode(raw));
+
+        // V2 / V3 wrap the fields in a 'data' object
+        if ((charData.spec === 'chara_card_v2' || charData.spec === 'chara_card_v3') && charData.data) {
+            return charData.data;
+        }
+        return charData;
+    } catch (e) {
+        console.error('VectHare: Failed to decode character data:', e);
+        throw new Error('Invalid character data in PNG');
+    }
 }
 
 /**
@@ -1786,6 +1827,32 @@ function clearUpload() {
     $('#vecthare_cv_upload_zone').show();
     $('#vecthare_cv_upload_info').hide();
     $('#vecthare_cv_file_input, #vecthare_cv_doc_file_input').val('');
+}
+
+/**
+ * Rough chunk (= embedding call) estimate from text length and the current chunk size.
+ * Only an estimate: the real count depends on the chosen strategy.
+ */
+function estimateChunkCount(charCount) {
+    const type = getContentType(currentContentType);
+    const size = Number(currentSettings.chunkSize || type?.defaults?.chunkSize) || 500;
+    return Math.max(1, Math.ceil(charCount / Math.max(50, size)));
+}
+
+/**
+ * Converts an HTML page to readable plain text (scripts/styles/nav removed).
+ * Uses DOMParser, which never executes scripts or loads resources.
+ * @param {string} html
+ * @returns {{text: string, title: string}}
+ */
+export function htmlToText(html) {
+    const doc = new DOMParser().parseFromString(String(html), 'text/html');
+    const title = (doc.querySelector('title')?.textContent || '').trim();
+    doc.querySelectorAll('script, style, noscript, template, iframe, svg, nav, footer, header, form').forEach(el => el.remove());
+    const root = doc.querySelector('article, main') || doc.body || doc.documentElement;
+    let text = (root?.innerText ?? root?.textContent ?? '');
+    text = text.replace(/\u00a0/g, ' ').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+    return { text, title };
 }
 
 /**
@@ -1812,19 +1879,46 @@ async function fetchUrl() {
     preview.hide();
 
     try {
-        // Use ST's readability endpoint if available
-        const response = await fetch('/api/serpapi/visit', {
+        // Current ST route is /api/search/visit (returns raw HTML); older builds used /api/serpapi/visit.
+        // Both need ST's CSRF headers (getRequestHeaders).
+        let response = await fetch('/api/search/visit', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url }),
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ url, html: true }),
         });
+        if (response.status === 404) {
+            response = await fetch('/api/serpapi/visit', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                body: JSON.stringify({ url }),
+            });
+        }
 
         if (!response.ok) {
+            if (response.status === 404) {
+                throw new Error('This SillyTavern has no web-visit route (enable the Web Search / server plugins)');
+            }
+            if (response.status === 401 || response.status === 403) {
+                throw new Error(`Blocked by SillyTavern security (HTTP ${response.status}) - reload the page and try again`);
+            }
             throw new Error(`HTTP ${response.status}`);
         }
 
-        const data = await response.json();
-        const content = data.content || data.text || '';
+        const rawBody = await response.text();
+        let data = null;
+        try { data = JSON.parse(rawBody); } catch { /* raw HTML/text body */ }
+        let content = '';
+        let pageTitle = '';
+        if (data && typeof data === 'object') {
+            content = data.content || data.text || '';
+        } else {
+            content = rawBody;
+        }
+        if (/<\s*(html|body|head|div|p|article|section|script)[\s>]/i.test(content)) {
+            const parsed = htmlToText(content);
+            content = parsed.text;
+            pageTitle = parsed.title;
+        }
 
         if (!content || content.length < 50) {
             throw new Error('No meaningful content found on page');
@@ -1834,7 +1928,7 @@ async function fetchUrl() {
             type: 'url',
             url: url,
             content: content,
-            title: data.title || url,
+            title: (data && data.title) || pageTitle || url,
         };
 
         status.html('');
@@ -1842,6 +1936,7 @@ async function fetchUrl() {
         // Show preview
         $('#vecthare_cv_url_title').text(sourceData.title);
         $('#vecthare_cv_url_chars').text(content.length.toLocaleString());
+        $('#vecthare_cv_url_chunks').text(estimateChunkCount(content.length).toLocaleString());
         preview.show();
 
         toastr.success(`Fetched ${content.length.toLocaleString()} characters`, 'VectHare');
@@ -1875,6 +1970,14 @@ async function checkWikiPluginStatus() {
             <span>${wikiType === 'fandom' ? 'Fandom' : 'MediaWiki'} scraper ready</span>
         `);
         scrapeBtn.prop('disabled', false);
+    } else if (wikiProbeBlocked) {
+        statusEl.html(`
+            <div class="vecthare-cv-wiki-plugin-warning">
+                <i class="fa-solid fa-exclamation-triangle" style="color: var(--vecthare-warning);"></i>
+                <span>SillyTavern blocked the plugin check - reload the page and try again</span>
+            </div>
+        `);
+        scrapeBtn.prop('disabled', true);
     } else {
         const type = getContentType('wiki');
         statusEl.html(`
@@ -1893,6 +1996,7 @@ async function checkWikiPluginStatus() {
 /**
  * Checks if the wiki plugin is available via probe endpoint
  */
+let wikiProbeBlocked = false;
 async function isWikiPluginAvailable(wikiType) {
     try {
         const endpoint = wikiType === 'fandom'
@@ -1901,9 +2005,16 @@ async function isWikiPluginAvailable(wikiType) {
 
         const response = await fetch(endpoint, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getRequestHeaders(),
+            body: JSON.stringify({}),
         });
 
+        // 404 = plugin not installed; 401/403 = ST blocked the request (CSRF/auth), not "missing"
+        if (response.status === 401 || response.status === 403) {
+            wikiProbeBlocked = true;
+        } else {
+            wikiProbeBlocked = false;
+        }
         return response.ok;
     } catch (error) {
         console.debug('VectHare: Wiki plugin probe failed:', error);
@@ -1949,11 +2060,17 @@ async function scrapeWiki() {
 
         const response = await fetch(endpoint, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getRequestHeaders(),
             body: JSON.stringify(requestBody),
         });
 
         if (!response.ok) {
+            if (response.status === 404) {
+                throw new Error('Wiki scraper plugin is not installed on this SillyTavern');
+            }
+            if (response.status === 401 || response.status === 403) {
+                throw new Error(`Blocked by SillyTavern security (HTTP ${response.status}) - reload the page and try again`);
+            }
             const error = await response.text();
             throw new Error(error || `HTTP ${response.status}`);
         }
@@ -2060,11 +2177,14 @@ async function fetchYouTubeTranscript() {
     try {
         const response = await fetch('/api/search/transcript', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getRequestHeaders(),
             body: JSON.stringify({ id: videoId, lang: lang || undefined }),
         });
 
         if (!response.ok) {
+            if (response.status === 401 || response.status === 403) {
+                throw new Error(`Blocked by SillyTavern security (HTTP ${response.status}) - reload the page and try again`);
+            }
             const error = await response.text();
             throw new Error(error || `HTTP ${response.status}`);
         }
@@ -2329,7 +2449,7 @@ async function previewChunks() {
 
         let chunks, totalChars;
         if (currentContentType === 'chat' && source.type === 'current' &&
-            ['per_message', 'conversation_turns', 'message_batch'].includes(currentSettings.strategy || type.defaultStrategy)) {
+            LIVE_CHAT_STRATEGIES.includes(currentSettings.strategy || type.defaultStrategy)) {
             if (source.content !== getContext()?.chat) throw new Error('Selected chat changed during preview');
             const { previewSyncChatGroups } = await import('../core/chat-vectorization.js');
             const liveSettings = {
@@ -2502,6 +2622,40 @@ function getSourceData() {
 }
 
 /**
+ * K2: shows "Old collection kept - Delete now / Keep" in the Status panel after
+ * a verified rebuild. Deletion uses the verified deleteCollection() at the
+ * collection's own registered destination; a doubt keeps the collection.
+ * @param {string} previousCollectionId Collection the chat no longer uses
+ */
+async function offerKeptCollectionDelete(previousCollectionId) {
+    if (!previousCollectionId) return;
+    const { progressTracker } = await import('./progress-tracker.js');
+    const { getCollectionRegistry, deleteCollection } = await import('../core/collection-loader.js');
+    const { parseRegistryKey, getBoundChatDetails, peekChatCollectionId } = await import('../core/collection-ids.js');
+    const { getCollectionMeta } = await import('../core/collection-metadata.js');
+    const target = parseRegistryKey(previousCollectionId).collectionId || previousCollectionId;
+    const keys = getCollectionRegistry().filter(key => (parseRegistryKey(key).collectionId || key) === target);
+    const meta = getCollectionMeta(target);
+    const label = meta.displayName || meta.sourceName || target;
+    progressTracker.offerOldCollection(label, async () => {
+        // Never delete what a chat still uses.
+        if (getBoundChatDetails(target) || peekChatCollectionId() === target) {
+            return { success: false, errors: ['a chat is bound to this collection again'] };
+        }
+        if (keys.length > 1) {
+            return { success: false, errors: ['it is registered in more than one destination; delete it in Database Browser'] };
+        }
+        const parsed = keys.length ? parseRegistryKey(keys[0]) : { backend: null, source: null };
+        const deleteSettings = {
+            ...extension_settings.vecthare,
+            ...(parsed.backend ? { vector_backend: parsed.backend } : {}),
+            ...(parsed.source ? { source: parsed.source } : {}),
+        };
+        return deleteCollection(target, deleteSettings, keys[0] || null);
+    });
+}
+
+/**
  * Starts the vectorization process
  */
 async function startVectorization() {
@@ -2525,7 +2679,7 @@ async function startVectorization() {
     // A confirmed rebuild uses the staged replacement path instead: a new
     // collection is written and verified before the chat is switched to it,
     // and nothing is purged first. The old Replace All purge is skipped.
-    const rebuildingThisChat = rebuildChatRequested &&
+    let rebuildingThisChat = rebuildChatRequested &&
         currentContentType === 'chat' && source.type === 'current';
 
     if (!rebuildingThisChat && currentContentType === 'chat' && source.type === 'current') {
@@ -2556,81 +2710,11 @@ async function startVectorization() {
                     return;
                 }
 
-                // Replace All is an explicit rebuild: changed settings must not
-                // prevent it. Freeze the destination before any asynchronous purge.
-                const { snapshotCollectionOperationSettings, readInitialVectorizationConfig,
-                    createInitialVectorizationConfig } = await import('../core/collection-metadata.js');
-                const backendSettings = snapshotCollectionOperationSettings(extension_settings.vecthare);
-                // Shared physical collections retain provenance after a logical
-                // purge; Qdrant multitenancy purge can also affect other chats.
-                if (backendSettings.vector_backend === 'milvus' ||
-                    (backendSettings.vector_backend === 'qdrant' && backendSettings.qdrant_multitenancy)) {
-                    throw new Error('Replace All cannot safely reset collection settings in shared storage.');
-                }
-                const sameBackend = name => name === 'vectra' ? 'standard' : name;
-                if (existing.backend && sameBackend(existing.backend) !==
-                    sameBackend(backendSettings.vector_backend || 'standard')) {
-                    throw new Error('The existing collection uses a different storage backend.');
-                }
-                // #20: this chat's vectors can exist under more than one
-                // provider/backend destination. Replacing only the largest would
-                // silently leave the others behind, so refuse instead of guessing.
-                if (existing.allMatches?.length > 1) {
-                    throw new Error(`This chat has vectors in ${existing.allMatches.length} destinations (${existing.allMatches.map(m => `${m.backend}:${m.source}`).join(', ')}). Remove the ones you do not want in Database Browser first.`);
-                }
-                const stored = await readInitialVectorizationConfig(existing.collectionId, backendSettings);
-                if (stored.status === 'valid') {
-                    const originalStorage = stored.config.storage;
-                    const currentStorage = createInitialVectorizationConfig(backendSettings, {
-                        pipeline: 'scene-markers', strategy: 'per_scene',
-                    })?.storage;
-                    if (!currentStorage || sameBackend(originalStorage.backend) !==
-                        sameBackend(currentStorage.backend) ||
-                        (originalStorage.address != null && originalStorage.address !== currentStorage.address) ||
-                        (originalStorage.backend === 'qdrant' && originalStorage.multitenancy)) {
-                        throw new Error('Original collection storage does not match the selected destination.');
-                    }
-                    // Purge the ORIGINAL provider/model destination, not the
-                    // user's newly selected embedding settings. The new first
-                    // write will use those new settings after confirmed purge.
-                    // #20: every backend addresses its physical destination by
-                    // provider (Vectra model folder, Qdrant/LanceDB collection
-                    // prefix), so the original provider always decides the target.
-                    backendSettings.source = stored.config.embedding.provider;
-                    if (['standard', 'vectra'].includes(currentStorage.backend)) {
-                        const { getModelField } = await import('../core/providers.js');
-                        const modelField = getModelField(backendSettings.source);
-                        if (modelField) backendSettings[modelField] = stored.config.embedding.model || '';
-                    }
-                } else if (stored.status === 'missing') {
-                    // A legacy collection may have no provenance, but its single
-                    // registered destination still identifies the provider (#20).
-                    if (existing.source) backendSettings.source = existing.source;
-                } else {
-                    throw new Error(`Cannot verify collection before replacement: ${stored.status}`);
-                }
-
-                // User wants to replace - purge existing first
-                const { purgeVectorIndex } = await import('../core/core-vector-api.js');
-                const { unregisterCollectionDestination } = await import('../core/collection-loader.js');
-                const { withChatCollectionPurgeGuard } = await import('../core/collection-ids.js');
-                const { snapshotCollectionForReplace } = await import('../core/collection-export.js');
-                const snapshot = await snapshotCollectionForReplace(existing.collectionId, backendSettings);
-                await withChatCollectionPurgeGuard(existing.collectionId, async () => {
-                    if (!await purgeVectorIndex(existing.collectionId, backendSettings)) {
-                        throw new Error('Existing vectors could not be purged; replacement cancelled');
-                    }
-                    // Confirmed purge means a new physical collection can now be
-                    // created; don't carry old createdAt/chunkCount into its identity.
-                    unregisterCollectionDestination(existing.collectionId, backendSettings);
-                    const { recordVerifiedCollectionDeletion } = await import('../core/collection-metadata.js');
-                    // This marker authorizes the NEXT first write, so bind it to
-                    // the selected destination, not the old index just purged.
-                    recordVerifiedCollectionDeletion(existing.collectionId, extension_settings.vecthare);
-                });
-                replaceRollback = snapshot;
-                replaceRollbackSettings = { collectionId: existing.collectionId, settings: backendSettings };
-                toastr.info('Cleared existing vectors', 'VectHare');
+                // K1: Replace All no longer purges first. It runs the staged
+                // rebuild: a NEW collection is written and verified, the chat is
+                // switched to it, and the old collection is kept until the user
+                // deletes it (K2). A failure at any point leaves the old one in use.
+                rebuildingThisChat = true;
             }
         } catch (e) {
             console.warn('VectHare: Could not safely check/replace existing vectors:', e);
@@ -2676,6 +2760,12 @@ async function startVectorization() {
                 `${notes.length ? ` - ${notes.join('; ')}` : ''}. ` +
                 'The previous collection was kept in Database Browser.',
                 'VectHare', { timeOut: 12000 });
+            // K2: offer Delete now / Keep for the kept collection in Status.
+            try {
+                await offerKeptCollectionDelete(result.previousCollectionId);
+            } catch (error) {
+                console.warn('VectHare: Could not offer deletion of the previous collection:', error);
+            }
             // The chat is now bound to a different collection: refresh the
             // read-only configuration display and the cached status.
             try {

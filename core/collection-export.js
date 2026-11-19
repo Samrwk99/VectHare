@@ -1,3 +1,4 @@
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * VECTHARE COLLECTION EXPORT/IMPORT
@@ -27,6 +28,7 @@ import {
     getChunkMetadata,
     saveChunkMetadata,
     getAllChunkMetadata,
+    prepareNewCollectionStorage,
 } from './collection-metadata.js';
 import {
     registerCollection,
@@ -36,6 +38,8 @@ import { progressTracker } from '../ui/progress-tracker.js';
 import { getStringHash } from '../../../../utils.js';
 import { withChatCollectionPurgeGuard, withChatCollectionWriteGuard } from './collection-ids.js';
 import { getModelField } from './providers.js';
+import { getBackend } from '../backends/backend-manager.js';
+import { assertStorageWritable } from './storage-resolver.js';
 
 // #25: `settings.model` does not exist - each provider stores its model in its
 // own field. Comparing or sending an undefined model made export/import treat
@@ -78,10 +82,28 @@ async function fetchChunksWithVectors(collectionId, settings) {
     const pageSize = 50000;
     const items = [];
     let expected = null;
+    // 9c: Qdrant/Milvus collections are read through their adapter, which takes
+    // the physical store and scope from the storage resolver. This read went to
+    // a store named after the logical id (empty under Qdrant multitenancy,
+    // refused by Milvus).
+    const adapter = ['qdrant', 'milvus'].includes(backendName) ? await getBackend(settings) : null;
     // #73: one page is not a collection. Follow pagination and require the
     // backend's own reported total, so a truncated listing can never pass as
     // a complete export (or as a complete pre-replacement snapshot, #19).
     for (let page = 0; ; page++) {
+        if (adapter) {
+            const data = await adapter.listChunks(collectionId, settings,
+                { offset: items.length, limit: pageSize, includeVectors: true, strictRead: true });
+            if (!data?.success || !Array.isArray(data.items)) throw new Error('Invalid response from chunks API');
+            const total = Number(data.total);
+            if (!Number.isSafeInteger(total) || total < 0) throw new Error('Chunk listing did not report a usable collection total');
+            if (expected === null) expected = total;
+            else if (expected !== total) throw new Error('The collection changed while it was being read; listing abandoned');
+            items.push(...data.items);
+            if (items.length >= expected) break;
+            if (data.items.length === 0) throw new Error(`Chunk listing stopped at ${items.length}/${expected} records`);
+            continue;
+        }
         const response = await fetch('/api/plugins/similharity/chunks/list', {
             method: 'POST',
             headers: getRequestHeaders(),
@@ -145,7 +167,7 @@ export async function snapshotCollectionForReplace(collectionId, settings) {
         const { vector: _v, ...metadata } = item.metadata || {};
         return { hash: item.hash ?? getStringHash(text), text, index: item.index ?? 0, vector, metadata };
     });
-    console.log(`VectHare: Snapshotted ${snapshot.length} chunk(s) of ${collectionId} before replacement`);
+    vhLog(`VectHare: Snapshotted ${snapshot.length} chunk(s) of ${collectionId} before replacement`);
     return snapshot;
 }
 
@@ -158,7 +180,7 @@ export async function restoreCollectionSnapshot(collectionId, snapshot, settings
     if (!snapshot?.length) return true;
     try {
         await insertChunksWithVectors(collectionId, snapshot, settings);
-        console.log(`VectHare: Restored ${snapshot.length} chunk(s) of ${collectionId} after a failed replacement`);
+        vhLog(`VectHare: Restored ${snapshot.length} chunk(s) of ${collectionId} after a failed replacement`);
         return true;
     } catch (error) {
         console.error(`VectHare: Could not restore ${collectionId} after a failed replacement:`, error);
@@ -472,7 +494,7 @@ export function downloadExport(exportData, filename = null) {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
 
-    console.log(`VectHare Export: Downloaded ${finalFilename}`);
+    vhLog(`VectHare Export: Downloaded ${finalFilename}`);
 }
 
 // ============================================================================
@@ -568,6 +590,15 @@ export function validateImportData(data, currentSettings = {}) {
 async function insertChunksWithVectors(collectionId, chunks, settings) {
     assertVectHareCollectionForWrite(collectionId);
     const backendName = settings.vector_backend || 'standard';
+    if (['qdrant', 'milvus'].includes(backendName)) {
+        // 9c: through the adapter (resolver + scope), with the vectors as they are.
+        await assertStorageWritable(collectionId, settings);
+        const adapter = await getBackend(settings);
+        await adapter.insertVectorItems(collectionId, chunks.map(c => ({
+            hash: c.hash, text: c.text, index: c.index, vector: c.vector, metadata: c.metadata || {},
+        })), settings);
+        return { success: true };
+    }
     const response = await fetch('/api/plugins/similharity/chunks/insert', {
         method: 'POST',
         headers: getRequestHeaders(),
@@ -620,6 +651,9 @@ async function importCollectionUnlocked(exportData, settings, options = {}) {
         throw new Error('No collection ID specified');
     }
 
+    // 9c: an import into a collection that exists nowhere yet goes to the
+    // layout today's switches choose for new collections.
+    if (!options.overwrite) settings = await prepareNewCollectionStorage(collectionId, settings);
     const chunks = exportData.chunks || [];
     const validChunks = chunks.filter(c => c.text && c.text.trim());
 
@@ -657,7 +691,7 @@ async function importCollectionUnlocked(exportData, settings, options = {}) {
             if (!await purgeVectorIndex(collectionId, settings)) {
                 throw new Error(`VectHare Import: Could not safely purge ${collectionId}`);
             }
-            console.log(`VectHare Import: Purged existing collection ${collectionId}`);
+            vhLog(`VectHare Import: Purged existing collection ${collectionId}`);
         }
 
         // Step 2: Prepare chunks
@@ -682,7 +716,7 @@ async function importCollectionUnlocked(exportData, settings, options = {}) {
             progressTracker.updateProgress(3, `Inserting ${provenanceChunks.length} chunks (using existing vectors)...`);
             try {
                 await insertChunksWithVectors(collectionId, provenanceChunks, settings);
-                console.log(`VectHare Import: Inserted ${provenanceChunks.length} chunks with pre-computed vectors`);
+                vhLog(`VectHare Import: Inserted ${provenanceChunks.length} chunks with pre-computed vectors`);
             } catch (error) {
                 throw new Error(`Failed to insert chunks: ${error.message}`);
             }
@@ -691,7 +725,7 @@ async function importCollectionUnlocked(exportData, settings, options = {}) {
             progressTracker.updateProgress(3, `Embedding ${provenanceChunks.length} chunks...`);
             try {
                 await insertVectorItems(collectionId, provenanceChunks, settings);
-                console.log(`VectHare Import: Embedded and inserted ${provenanceChunks.length} chunks`);
+                vhLog(`VectHare Import: Embedded and inserted ${provenanceChunks.length} chunks`);
             } catch (error) {
                 throw new Error(`Failed to embed chunks: ${error.message}`);
             }
@@ -845,6 +879,9 @@ async function importCollectionSilentUnlocked(exportData, settings, options = {}
         throw new Error('No collection ID specified');
     }
 
+    // 9c: an import into a collection that exists nowhere yet goes to the
+    // layout today's switches choose for new collections.
+    if (!options.overwrite) settings = await prepareNewCollectionStorage(collectionId, settings);
     const chunks = exportData.chunks || [];
     const validChunks = chunks.filter(c => c.text && c.text.trim());
 

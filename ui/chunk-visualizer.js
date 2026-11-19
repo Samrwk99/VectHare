@@ -1,3 +1,4 @@
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * VECTHARE CHUNK VISUALIZER
@@ -26,15 +27,21 @@ import {
     updateChunkText,
     resolveEmbeddingSettingsForEdit,
     updateChunkMetadata,
+    primeChunkHashClaims,
 } from '../core/core-vector-api.js';
 import { getStringHash } from '../../../../utils.js';
 import { noteManualVectorChange } from '../core/chat-vectorization.js';
+import { withLease } from '../core/leases.js';
+import { parseRegistryKey } from '../core/collection-ids.js';
+// 8C: edits here take the collection's cross-tab lease, like Sync and Repair.
+const leaseIdOf = id => parseRegistryKey(id).collectionId || id;
 import {
     filterSceneChunks,
     filterNonSceneChunks,
     deleteSceneChunk,
     updateSceneChunkMetadata,
     getPendingScene,
+    recreateScene,
 } from '../core/scenes.js';
 import {
     createGroup,
@@ -169,6 +176,7 @@ async function saveAllChanges() {
     }
 
     try {
+      await withLease(leaseIdOf(currentCollectionId), async () => {
         for (const [hash, updates] of pendingChanges) {
             // Check what kind of update is needed
             if (updates.text) {
@@ -229,6 +237,7 @@ async function saveAllChanges() {
             }
         }
 
+      }, { label: 'Chunk edits' });
         pendingChanges.clear();
         hasUnsavedChanges = false;
         toastr.success(`Saved changes to ${count} chunk(s)`, 'VectHare');
@@ -285,6 +294,18 @@ export function openVisualizer(results, collectionId, settings) {
     bindEvents();
 
     $('#vecthare_visualizer_modal').fadeIn(200);
+
+    // C12: older shared annotations are only shown for the one collection that
+    // holds the chunk; learn which collections hold what, then refresh the list.
+    if (settings) {
+        primeChunkHashClaims(settings).then(newlyRead => {
+            if (!newlyRead || currentCollectionId !== collectionId || hasUnsavedChanges) return;
+            allChunks = allChunks.map(chunk => ({ ...chunk, data: getChunkData(chunk) }));
+            allChunksMap = new Map(allChunks.map(c => [c.uniqueId, c]));
+            renderChunkList();
+            renderDetailPanel();
+        }).catch(error => console.debug('VectHare: annotation ownership check skipped:', error.message));
+    }
 }
 
 export function closeVisualizer() {
@@ -587,6 +608,8 @@ function renderSceneList() {
                     <span class="vecthare-scene-item-range">#${start} - #${end}</span>
                     <span class="vecthare-scene-item-badge closed">${msgCount} msgs</span>
                     <span class="vecthare-scene-item-badge vectorized">${containedCount} chunks</span>
+                    ${getChunkMetadata(scene.hash, currentCollectionId)?.sceneOutdated === true
+                        ? '<span class="vecthare-scene-item-badge" title="Its messages changed since the scene was made. It is not used until re-created.">Outdated</span>' : ''}
                 </div>
                 ${preview ? `<div class="vecthare-scene-item-preview">${escapeHtml(preview)}</div>` : ''}
             </div>
@@ -705,6 +728,11 @@ function renderSceneDetailPanel() {
                     <button class="vecthare-scene-action-btn" id="vecthare_scene_jump">
                         <i class="fa-solid fa-arrow-up-right-from-square"></i> Jump to Scene
                     </button>
+                    ${stored.sceneOutdated === true ? `
+                    <button class="vecthare-scene-action-btn" id="vecthare_scene_recreate"
+                            title="Its messages changed since the scene was made. Re-create it from the messages as they are now (title, summary and keywords are kept).">
+                        <i class="fa-solid fa-rotate"></i> Re-create scene
+                    </button>` : ''}
                 </div>
             </div>
         </div>
@@ -723,7 +751,7 @@ function bindScenesTabEvents() {
         e.preventDefault();
         e.stopPropagation();
         const hash = $(this).data('scene-hash');
-        console.log('VectHare: Clicked scene with hash:', hash);
+        vhLog('VectHare: Clicked scene with hash:', hash);
         if (!hash) {
             console.error('VectHare: No scene-hash found on clicked element');
             return;
@@ -737,6 +765,20 @@ function bindScenesTabEvents() {
 function bindSceneDetailEvents() {
     const scene = getSelectedScene();
     if (!scene) return;
+
+    // F8: replace an outdated scene with one built from the current messages.
+    $('#vecthare_scene_recreate').off('click').on('click', async function() {
+        if (!confirm('Re-create this scene from its messages as they are now?\n\nThe old scene vector is replaced; title, summary and keywords are kept.')) return;
+        $(this).prop('disabled', true);
+        try {
+            const result = await recreateScene(scene, currentSettings, currentCollectionId);
+            if (!result.success) throw new Error(result.error || 'not completed');
+            toastr.success('Scene re-created. Reopen the chunk browser to see it.', 'VectHare');
+        } catch (error) {
+            toastr.error(`Could not re-create the scene: ${error.message}`, 'VectHare');
+            $(this).prop('disabled', false);
+        }
+    });
 
     const meta = scene.metadata || {};
 
@@ -1696,7 +1738,7 @@ function bindEvents() {
         e.preventDefault();
         e.stopPropagation();
         const uid = $(this).attr('data-uid');
-        console.log('VectHare: Clicked chunk with uniqueId:', uid);
+        vhLog('VectHare: Clicked chunk with uniqueId:', uid);
         if (!uid) {
             console.error('VectHare: No uniqueId found on clicked element');
             return;
@@ -1740,15 +1782,17 @@ async function replaceChunkText(chunk, newText) {
     if (String(newHash) === String(chunk.hash)) return newHash;
     const { text, hash, vecthareProvenance, vecthareImportedProvenance, ...carried } = chunk.metadata || {};
     const editSettings = await resolveEmbeddingSettingsForEdit(currentCollectionId, currentSettings);
-    await noteManualVectorChange(currentCollectionId, currentSettings, [chunk.hash]);
-    await insertVectorItems(currentCollectionId, [{
-        hash: newHash, // keep as number for Qdrant compatibility
-        text: newText,
-        index: chunk.index,
-        metadata: carried,
-        __vecthareProvenanceHint: { writer: 'chunk-visualizer', sourceType: 'manual-edit' },
-    }], editSettings);
-    await deleteVectorItems(currentCollectionId, [chunk.hash], editSettings);
+    await withLease(leaseIdOf(currentCollectionId), async () => {
+        await noteManualVectorChange(currentCollectionId, currentSettings, [chunk.hash]);
+        await insertVectorItems(currentCollectionId, [{
+            hash: newHash, // keep as number for Qdrant compatibility
+            text: newText,
+            index: chunk.index,
+            metadata: carried,
+            __vecthareProvenanceHint: { writer: 'chunk-visualizer', sourceType: 'manual-edit' },
+        }], editSettings);
+        await deleteVectorItems(currentCollectionId, [chunk.hash], editSettings);
+    }, { label: 'Chunk edit' });
     return newHash;
 }
 
@@ -1758,6 +1802,18 @@ function bindDetailEvents() {
     if (!chunk) return;
 
     const originalText = chunk.data.text;
+
+    // Copy hash to clipboard
+    $('#vecthare_copy_hash').off('click').on('click', function() {
+        const hash = String(chunk.hash);
+        const done = () => toastr.info('Hash copied to clipboard');
+        const fail = () => toastr.warning(`Could not copy automatically. Hash: ${hash}`);
+        try {
+            navigator.clipboard.writeText(hash).then(done, fail);
+        } catch {
+            fail();
+        }
+    });
 
     // Chunk name input
     $('#vecthare_chunk_name').on('input', debounce(function() {
@@ -2244,8 +2300,10 @@ async function deleteChunk(chunk) {
     if (!confirm(`Delete chunk #${chunk.index}?`)) return;
 
     try {
-        await noteManualVectorChange(currentCollectionId, currentSettings, [chunk.hash]);
-        await deleteVectorItems(currentCollectionId, [chunk.hash], currentSettings);
+        await withLease(leaseIdOf(currentCollectionId), async () => {
+            await noteManualVectorChange(currentCollectionId, currentSettings, [chunk.hash]);
+            await deleteVectorItems(currentCollectionId, [chunk.hash], currentSettings);
+        }, { label: 'Chunk delete' });
         deleteChunkMetadata(chunk.hash, currentCollectionId);
 
         // Remove from local state by uniqueId
@@ -2305,7 +2363,7 @@ function debounce(func, wait) {
  * Called from index.js on extension load
  */
 export function initializeVisualizer() {
-    console.log('VectHare: Chunk visualizer initialized');
+    vhLog('VectHare: Chunk visualizer initialized');
     // No DOM setup needed - modal is created dynamically when opened
 }
 

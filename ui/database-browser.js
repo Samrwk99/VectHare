@@ -1,3 +1,5 @@
+import { vhLog } from '../utils/log.js';
+import { progressTracker } from './progress-tracker.js';
 /**
  * ============================================================================
  * VECTHARE DATABASE BROWSER
@@ -22,8 +24,15 @@ import {
   getCollectionRegistry,
   invalidateCollectionInventory,
 } from "../core/collection-loader.js";
-import { parseRegistryKey } from "../core/collection-ids.js";
+import { parseRegistryKey, getBoundChatDetails } from "../core/collection-ids.js";
+import {
+  getDeletedChatInfo,
+  listDeletedChatCollections,
+  deletedChatDaysLeft,
+  purgeDeletedChats,
+} from "../core/deleted-chats.js";
 import { storeStatus, reloadVectHareStore } from "../core/vecthare-store.js";
+import { planStorageMove, moveCollectionStorage, deleteOldStorageCopy } from "../core/storage-move.js";
 import {
   purgeVectorIndex,
   queryMultipleCollections,
@@ -67,6 +76,7 @@ import {
   getAllChunkMetadata,
   getAnnotatedChunkHashes,
   readInitialVectorizationConfig,
+  fillStorageLocators,
 } from "../core/collection-metadata.js";
 import { getContext } from "../../../../extensions.js";
 import {
@@ -86,6 +96,12 @@ import {
   validateImportData,
   getExportInfo,
 } from "../core/collection-export.js";
+import {
+  fetchStorageReport,
+  summarizeStorageReport,
+  LAYOUT_LABELS,
+  CONFIG_LABELS,
+} from "../core/storage-report.js";
 import {
   embedDataInPNG,
   extractDataFromPNG,
@@ -159,7 +175,7 @@ function getChatChunkSourceIndex(item, fallback) {
  */
 export function initializeDatabaseBrowser(settings) {
   browserState.settings = settings;
-  console.log("VectHare Database Browser: Initialized");
+  vhLog("VectHare Database Browser: Initialized");
 }
 
 /**
@@ -167,7 +183,7 @@ export function initializeDatabaseBrowser(settings) {
  */
 export async function openDatabaseBrowser() {
   if (browserState.isOpen) {
-    console.log("VectHare Database Browser: Already open");
+    vhLog("VectHare Database Browser: Already open");
     return;
   }
 
@@ -189,7 +205,7 @@ export async function openDatabaseBrowser() {
 
   // Show modal
   $("#vecthare_database_browser_modal").fadeIn(200);
-  console.log("VectHare Database Browser: Opened");
+  vhLog("VectHare Database Browser: Opened");
 }
 
 /**
@@ -212,7 +228,7 @@ export function closeDatabaseBrowser() {
   browserState.isOpen = false;
   // Reset event bound flags for clean rebind on next open
   resetEventFlags();
-  console.log("VectHare Database Browser: Closed");
+  vhLog("VectHare Database Browser: Closed");
 }
 
 /**
@@ -259,6 +275,9 @@ function createBrowserModal() {
                     <button class="vecthare-tab-btn" data-tab="bulk">
                         ${icons.listChecks(16)} Bulk Operations
                     </button>
+                    <button class="vecthare-tab-btn" data-tab="storage" title="Read-only report: where each collection is physically stored">
+                        ${icons.database(16)} Storage
+                    </button>
                 </div>
 
                 <!-- Tab Content -->
@@ -271,6 +290,8 @@ function createBrowserModal() {
                             <button class="vecthare-scope-filter" data-scope="global" title="Global = collections set to 'Always Active'">Global</button>
                             <button class="vecthare-scope-filter" data-scope="character" title="Character = collections locked to at least one character">Character</button>
                             <button class="vecthare-scope-filter" data-scope="chat" title="Chat = collections locked to at least one chat">Chat</button>
+                            <button class="vecthare-scope-filter" data-scope="unbound" title="Chat collections no chat is bound to: deleted chats, kept old collections after a rebuild, unassigned legacy collections. Select them in Bulk Operations to delete several at once.">Not bound to a chat</button>
+                            <button id="vecthare_empty_deleted" class="vecthare-btn vecthare-btn-sm vecthare-btn-danger" style="display: none;" title="Purge the vectors of every deleted chat's kept collection now (verified delete)">Empty deleted</button>
 
                             <!-- Small badge and hint describing current scope filter -->
                         </div>
@@ -416,6 +437,7 @@ function createBrowserModal() {
                                         <option value="all">All Collections</option>
                                         <option value="enabled">Enabled Only</option>
                                         <option value="disabled">Disabled Only</option>
+                                        <option value="unbound">Not bound to a chat</option>
                                     </select>
                                 </div>
                             </div>
@@ -439,6 +461,36 @@ function createBrowserModal() {
                             <!-- Collection List with Checkboxes -->
                             <div id="vecthare_bulk_list" class="vecthare-bulk-list">
                                 <div class="vecthare-loading">Loading collections...</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Storage Tab (Step 9a: read-only storage report) -->
+                    <div id="vecthare_tab_storage" class="vecthare-tab-content">
+                        <div class="vecthare-bulk-panel vecthare-storage-panel">
+                            <div class="vecthare-bulk-header">
+                                <span class="vecthare-storage-intro">Read-only. Shows where each collection's vectors and saved original settings are, as the server sees them. Changes nothing.</span>
+                                <div class="vecthare-bulk-actions">
+                                    <select id="vecthare_storage_filter" title="Which collections to list">
+                                        <option value="all">All collections</option>
+                                        <option value="attention">Needs attention</option>
+                                    </select>
+                                    <button id="vecthare_storage_run" class="vecthare-btn vecthare-btn-sm vecthare-btn-primary">
+                                        ${icons.database(16)} Run report
+                                    </button>
+                                    <button id="vecthare_storage_locate" class="vecthare-btn vecthare-btn-sm" title="Read-only check of where each Qdrant/Milvus collection of the selected backend is, and record it (a pointer in VectHare's metadata). Collections found in no place or in more than one are left alone.">
+                                        ${icons.target(16)} Record locations
+                                    </button>
+                                    <button id="vecthare_storage_copy" class="vecthare-btn vecthare-btn-sm" disabled title="Copy the full report as JSON (to keep as a baseline or share it)">
+                                        ${icons.download(16)} Copy as JSON
+                                    </button>
+                                </div>
+                            </div>
+                            <div id="vecthare_storage_output" class="vecthare-storage-output">
+                                <div class="vecthare-search-empty">
+                                    ${icons.database(48)}
+                                    <p>Run the report to see where your collections are stored. It only reads.</p>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -496,6 +548,54 @@ function bindBrowserEvents() {
     renderCollections();
   });
 
+  // N2: purge every deleted chat's kept collection now (verified path).
+  $("#vecthare_empty_deleted").on("click", async function (e) {
+    e.stopPropagation();
+    e.preventDefault();
+    const count = listDeletedChatCollections().length;
+    if (!count) return;
+    if (!confirm(`Purge the vectors of ${count} deleted chat(s)?\n\nThey are not used by any chat. This cannot be undone.`)) return;
+    const button = $(this);
+    button.prop("disabled", true);
+    // S6: show the purge in the Status panel when no other run owns it.
+    const panelRun = progressTracker.beginCounted("Purging Deleted Chats", count, "Collections");
+    try {
+      const { isChatSynchronizationActive, isVectorizationActive } = await import("../core/chat-vectorization.js");
+      const results = await purgeDeletedChats(browserState.settings, {
+        isBusy: () => isChatSynchronizationActive() || isVectorizationActive(),
+        onProgress: ({ done, total, id }) =>
+          progressTracker.countedStep(panelRun, "Purging collections", done, total, id != null),
+      });
+      if (panelRun != null && progressTracker.isCurrentRun(panelRun)) progressTracker.setPhase("Refreshing the list…");
+      await refreshCollections({ reloadStore: true, invalidateInventory: true });
+      const purged = results.filter((r) => r.success).length;
+      const keptResults = results.filter((r) => !r.success);
+      if (panelRun != null) {
+        for (const r of keptResults) progressTracker.addError(`Kept ${r.id}: ${r.reason || "not confirmed"}`);
+        progressTracker.complete(keptResults.length === 0,
+          `Purged ${purged}${keptResults.length ? `; kept ${keptResults.length}` : ""}`, panelRun);
+      }
+      if (keptResults.length) {
+        toastr.warning(
+          `Purged ${purged}; kept ${keptResults.length}: ` +
+            keptResults.map((r) => r.reason).filter(Boolean).slice(0, 3).join("; "),
+          "VectHare",
+          { timeOut: 15000 },
+        );
+      } else {
+        toastr.success(`Purged ${purged} deleted chat collection(s)`, "VectHare");
+      }
+    } catch (error) {
+      if (panelRun != null) {
+        progressTracker.addError(error.message);
+        progressTracker.complete(false, "Empty deleted failed", panelRun);
+      }
+      toastr.error(`Empty deleted failed: ${error.message}`, "VectHare");
+    } finally {
+      button.prop("disabled", false);
+    }
+  });
+
   // Type filters
   $('input[name="vecthare_type_filter"]').on("change", function (e) {
     e.stopPropagation();
@@ -527,8 +627,15 @@ function bindBrowserEvents() {
     const original = button.html();
     button.prop("disabled", true).html('<i class="fa-solid fa-arrows-rotate fa-spin"></i> Resyncing');
 
+    // S6: shown in the Status panel when no other run owns it.
+    const panelRun = progressTracker.beginCounted("Resyncing Collections", 0, "Collections");
     try {
-      await refreshCollections({ reloadStore: true, invalidateInventory: true });
+      await refreshCollections({
+        reloadStore: true, invalidateInventory: true,
+        onPhase: (text) => { if (panelRun != null && progressTracker.isCurrentRun(panelRun)) progressTracker.setPhase(text); },
+        onProgress: ({ done, total }) =>
+          progressTracker.countedStep(panelRun, "Checking collections", done, total, done < total),
+      });
 
       const rows = browserState.collections || [];
       const physical = rows.filter((c) => c.existence === "present").length;
@@ -536,6 +643,20 @@ function bindBrowserEvents() {
       const unresolved = rows.length - physical - metadataOnly;
       // Same buckets as the footer, so the message and the counts agree.
       const reload = browserState.lastStoreReload;
+      const resyncClean = !(reload && reload.reloaded === false && reload.reason);
+      if (panelRun != null) {
+        if (!resyncClean) progressTracker.addError(`VectHare's metadata file was not re-read: ${reload.reason}`);
+        progressTracker.complete(resyncClean,
+          `${physical} collection(s), ${metadataOnly} metadata-only${unresolved ? `, ${unresolved} unresolved` : ""}`,
+          panelRun);
+        // A clean read-only refresh needs no attention: close its panel again.
+        if (resyncClean) {
+          setTimeout(() => {
+            if (progressTracker.isCurrentRun(panelRun) && progressTracker.isComplete &&
+                !progressTracker.isPaused) progressTracker.hide();
+          }, 1500);
+        }
+      }
 
       if (reload && reload.reloaded === false && reload.reason) {
         // The list is still rebuilt from the working copy, but say plainly
@@ -554,6 +675,10 @@ function bindBrowserEvents() {
       }
     } catch (error) {
       console.error("VectHare: Failed to resync", error);
+      if (panelRun != null) {
+        progressTracker.addError(error.message);
+        progressTracker.complete(false, "Resync failed", panelRun);
+      }
       toastr.error(`Failed to resync: ${error.message}`, "VectHare");
     } finally {
       button.prop("disabled", false).html(original);
@@ -691,7 +816,245 @@ function switchTab(tabName) {
     bindBulkEvents();
   } else if (tabName === "search") {
     bindSearchEvents();
+  } else if (tabName === "storage") {
+    bindStorageEvents();
   }
+}
+
+// ============================================================================
+// STORAGE TAB (Step 9a / P1) - read-only storage report
+// ============================================================================
+
+let storageReportState = { report: null, running: false };
+
+function bindStorageEvents() {
+  $("#vecthare_storage_run").off("click.vhStorage").on("click.vhStorage", async function (e) {
+    e.stopPropagation();
+    e.preventDefault();
+    if (storageReportState.running) return;
+    storageReportState.running = true;
+    const button = $(this);
+    button.prop("disabled", true);
+    $("#vecthare_storage_output").html('<div class="vecthare-loading">Reading every backend… (large shared stores take a while)</div>');
+    try {
+      const result = await fetchStorageReport(browserState.settings);
+      if (!result.ok) {
+        storageReportState.report = null;
+        $("#vecthare_storage_copy").prop("disabled", true);
+        $("#vecthare_storage_output").html(`<div class="vecthare-error">${escapeHtml(result.reason)}</div>`);
+        return;
+      }
+      storageReportState.report = result.report;
+      $("#vecthare_storage_copy").prop("disabled", false);
+      renderStorageReport();
+    } finally {
+      storageReportState.running = false;
+      button.prop("disabled", false);
+    }
+  });
+  $("#vecthare_storage_locate").off("click.vhStorage").on("click.vhStorage", async function (e) {
+    e.stopPropagation();
+    e.preventDefault();
+    if (storageReportState.running) return;
+    const backend = browserState.settings?.vector_backend || "standard";
+    if (!["qdrant", "milvus"].includes(backend)) {
+      toastr.info("Only Qdrant and Milvus collections have more than one possible location. Select that backend first.", "VectHare");
+      return;
+    }
+    storageReportState.running = true;
+    const button = $(this);
+    button.prop("disabled", true);
+    try {
+      const result = await fillStorageLocators(browserState.settings);
+      const parts = [`${result.recorded} recorded`, `${result.checked} checked`];
+      if (result.unavailable) parts.push(`${result.unavailable} could not be read`);
+      if (result.conflicts.length) parts.push(`${result.conflicts.length} found in more than one place (writes blocked)`);
+      (result.conflicts.length || result.unavailable ? toastr.warning : toastr.success)(
+        `Storage locations: ${parts.join(", ")}`, "VectHare", { timeOut: 8000 });
+    } catch (error) {
+      toastr.error(`Recording locations failed: ${error.message}`, "VectHare");
+    } finally {
+      storageReportState.running = false;
+      button.prop("disabled", false);
+    }
+    $("#vecthare_storage_run").trigger("click");
+  });
+  $("#vecthare_storage_filter").off("change.vhStorage").on("change.vhStorage", function (e) {
+    e.stopPropagation();
+    if (storageReportState.report) renderStorageReport();
+  });
+  $("#vecthare_storage_copy").off("click.vhStorage").on("click.vhStorage", async function (e) {
+    e.stopPropagation();
+    e.preventDefault();
+    const report = storageReportState.report;
+    if (!report) return;
+    const text = JSON.stringify(report, null, 2);
+    try {
+      await navigator.clipboard.writeText(text);
+      toastr.success("Storage report copied as JSON", "VectHare");
+    } catch {
+      // Clipboard can be unavailable (http, permissions): offer it as a file.
+      const blob = new Blob([text], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `vecthare-storage-report-${report.generatedAt?.replace(/[:.]/g, "-") || "now"}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+  });
+}
+
+function storageRowNeedsAttention(row) {
+  return ["conflict", "not-found", "unknown"].includes(row.layout) ||
+    (row.savedConfig && row.savedConfig.status !== "found") ||
+    (row.todayRule?.agrees === false && !row.locatorAgrees) ||
+    (row.locator && !row.locatorAgrees);
+}
+
+function formatStorageCount(row) {
+  if (Number.isSafeInteger(row.count)) return `${row.count}${row.countNote ? ` (${row.countNote})` : ""}`;
+  return "?";
+}
+
+function renderStorageReport() {
+  const report = storageReportState.report;
+  if (!report) return;
+  const filter = $("#vecthare_storage_filter").val();
+  const rows = (report.collections || []).filter((r) => filter !== "attention" || storageRowNeedsAttention(r));
+  const summary = summarizeStorageReport(report)
+    .map((line) => `<div>${escapeHtml(line)}</div>`).join("");
+  const warnings = (report.warnings || []).map((w) => `<div class="vecthare-error">${escapeHtml(w)}</div>`).join("");
+  const backendErrors = Object.entries(report.backends || {})
+    .filter(([, b]) => b.error)
+    .map(([name, b]) => `<div class="vecthare-error">${escapeHtml(name)}: ${escapeHtml(b.error)}</div>`).join("");
+
+  const rowHtml = rows.map((r) => {
+    const cfg = r.savedConfig || {};
+    const where = cfg.location || (cfg.locations || []).join(", ");
+    const physical = r.physical || (r.locations || []).map((l) => l.physical).join(", ") || "—";
+    const notes = [
+      ...(r.notes || []),
+      ...(r.error ? [r.error] : []),
+      ...(r.assumedBackend ? ["no backend recorded: checked on today's backend"] : []),
+      ...(r.todayRule?.agrees === false
+        ? [r.locatorAgrees ? `today's switch points elsewhere (${r.todayRule.physical}); the recorded location is used`
+          : `today's settings would look in ${r.todayRule.physical || r.todayRule.source}`] : []),
+      ...(r.locator ? [r.locatorAgrees ? "location recorded" : `recorded location (${r.locator.physical}) does not match`]
+        : (["qdrant", "milvus"].includes(r.backend) && r.physical ? ["location not recorded yet"] : [])),
+      ...(cfg.reason && cfg.status !== "found" ? [cfg.reason] : []),
+    ];
+    return `
+      <tr class="${storageRowNeedsAttention(r) ? "vecthare-storage-attention" : ""}">
+        <td title="${escapeHtml((r.hints || []).join(", ")).replace(/"/g, "&quot;")}">${escapeHtml(r.collectionId)}</td>
+        <td>${escapeHtml(r.backend)}</td>
+        <td>${escapeHtml(LAYOUT_LABELS[r.layout] || r.layout)}</td>
+        <td>${escapeHtml(physical)}${Number.isSafeInteger(r.dim) ? ` <small>(${r.dim}-dim)</small>` : ""}</td>
+        <td>${escapeHtml(formatStorageCount(r))}</td>
+        <td>${escapeHtml(CONFIG_LABELS[cfg.status] || cfg.status || "?")}${where ? ` <small>${escapeHtml(where)}</small>` : ""}</td>
+        <td><small>${escapeHtml(notes.join("; "))}</small></td>
+      </tr>${(r.oldCopies || []).map((copy) => `
+      <tr class="vecthare-storage-oldcopy">
+        <td><small>↳ old copy (moved)</small></td>
+        <td>${escapeHtml(copy.backend || r.backend)}</td>
+        <td>${escapeHtml(LAYOUT_LABELS[copy.layout] || copy.layout)}</td>
+        <td>${escapeHtml(copy.physical)}</td>
+        <td>${escapeHtml(formatStorageCount(copy))}</td>
+        <td>${copy.config ? escapeHtml(CONFIG_LABELS[copy.config.status] || copy.config.status || "") : ""}</td>
+        <td><small>${escapeHtml([copy.movedAt ? `moved ${new Date(copy.movedAt).toLocaleString()}` : "", copy.note || "",
+          copy.foreignOwner ? `owner stamp: ${copy.foreignOwner}` : ""].filter(Boolean).join("; "))}</small>
+          <button class="vecthare-btn-sm vecthare-btn-danger vecthare-storage-delete-old"
+                  data-collection-id="${escapeHtml(r.collectionId).replace(/"/g, "&quot;")}"
+                  data-backend="${escapeHtml(copy.backend || r.backend)}"
+                  data-layout="${escapeHtml(copy.layout)}"
+                  data-physical="${escapeHtml(copy.physical).replace(/"/g, "&quot;")}">Delete old copy</button></td>
+      </tr>`).join("")}`;
+  }).join("");
+
+  const sharedHtml = (report.sharedStores || []).map((s) => {
+    const parts = [];
+    if (s.error) parts.push(`error: ${s.error}`);
+    if (Number.isSafeInteger(s.total)) parts.push(`${s.total} vectors`);
+    if (s.dim) parts.push(`${s.dim}-dim`);
+    if (Number.isSafeInteger(s.withoutContentType)) parts.push(`${s.withoutContentType} without a collection tag`);
+    if (Number.isSafeInteger(s.notAttributed)) parts.push(`${s.notAttributed} not attributed to your records`);
+    if (s.hidden) parts.push(`${s.hidden.contentTypes} other collection(s) / ${s.hidden.points} vectors hidden (other users)`);
+    if (s.truncated) parts.push("scan capped");
+    const types = (s.byContentType || []).map((t) =>
+      `<li>${escapeHtml(t.contentType)}: ${Number(t.count) || 0}${t.recorded ? "" : " <small>(no VectHare record)</small>"}</li>`).join("");
+    return `<div class="vecthare-bulk-item vecthare-storage-store">
+        <div class="vecthare-bulk-item-info">
+          <div class="vecthare-bulk-item-name">${escapeHtml(s.backend)}: ${escapeHtml(s.name)} <small>(kept: shared store)</small></div>
+          <div class="vecthare-bulk-item-meta">${escapeHtml(parts.join(" · "))}</div>
+          ${types ? `<details><summary>Per collection</summary><ul>${types}</ul></details>` : ""}
+        </div>
+      </div>`;
+  }).join("");
+
+  const hiddenUnref = Object.entries(report.unreferencedHidden || {}).map(([b, n]) => `${n} on ${b}`).join(", ");
+  const unrefHtml = (report.unreferenced || []).map((u) =>
+    `<li>${escapeHtml(u.backend)}: ${escapeHtml(u.name)}${Number.isSafeInteger(u.count) ? ` (${u.count})` : ""}</li>`).join("");
+
+  $("#vecthare_storage_output").html(`
+    <div class="vecthare-search-summary">${summary}
+      <div><small>Generated ${escapeHtml(new Date(report.generatedAt).toLocaleString())}. Metadata file: ${escapeHtml(report.state?.status || "?")}${report.state?.token ? ` (${escapeHtml(report.state.token)})` : ""}.</small></div>
+    </div>
+    ${warnings}${backendErrors}
+    ${rows.length ? `
+    <div class="vecthare-storage-table-wrap">
+      <table class="vecthare-storage-table">
+        <thead><tr><th>Collection</th><th>Backend</th><th>Layout</th><th>Physical store</th><th>Vectors</th><th>Saved settings</th><th>Notes</th></tr></thead>
+        <tbody>${rowHtml}</tbody>
+      </table>
+    </div>` : `<div class="vecthare-empty-state"><p>${filter === "attention" ? "Nothing needs attention." : "No collections recorded."}</p></div>`}
+    ${sharedHtml ? `<h4>Shared stores</h4>${sharedHtml}` : ""}
+    ${unrefHtml || hiddenUnref ? `<h4>Physical stores no VectHare record points at</h4><ul>${unrefHtml}</ul>${hiddenUnref ? `<small>Hidden (may belong to other users): ${escapeHtml(hiddenUnref)}</small>` : ""}` : ""}
+  `);
+  $("#vecthare_storage_output .vecthare-storage-delete-old").off("click.vhStorage").on("click.vhStorage", async function (e) {
+    e.stopPropagation();
+    e.preventDefault();
+    const button = $(this);
+    const collectionId = String(button.data("collection-id"));
+    const which = { layout: String(button.data("layout")), physical: String(button.data("physical")) };
+    const backend = String(button.data("backend"));
+    if (!confirm(`Delete the old copy of "${collectionId}" in ${LAYOUT_LABELS[which.layout] || which.layout} (${which.physical})?\n\n` +
+      "The collection itself is not affected: it now lives elsewhere. This removes the old copy's vectors and saved settings and cannot be undone.")) return;
+    button.prop("disabled", true);
+    const result = await deleteOldStorageCopy(collectionId, { ...browserState.settings, vector_backend: backend }, which);
+    if (result.success) {
+      toastr.success(`Old copy in ${which.physical} deleted.${result.warnings.length ? ` ${result.warnings.join(" ")}` : ""}`, "VectHare");
+      $("#vecthare_storage_run").trigger("click");
+    } else {
+      toastr.warning(result.reason, "VectHare: Delete old copy", { timeOut: 10000 });
+      button.prop("disabled", false);
+    }
+  });
+}
+
+/**
+ * 9c: lists a collection's chunks for display. Qdrant/Milvus go through their
+ * adapter (storage resolver + scope): a direct call named the logical id as the
+ * physical store, which is empty under Qdrant multitenancy and refused by
+ * Milvus. Local backends keep the direct call (it addresses the exact model
+ * folder the Browser discovered).
+ */
+async function listCollectionChunksForBrowser(collection, collectionSettings, requestBody) {
+  if (["qdrant", "milvus"].includes(collection.backend)) {
+    const { getBackend } = await import("../backends/backend-manager.js");
+    const adapter = await getBackend(collectionSettings);
+    return await adapter.listChunks(collection.id, collectionSettings, { offset: 0, limit: requestBody.limit });
+  }
+  const response = await fetch("/api/plugins/similharity/chunks/list", {
+    method: "POST",
+    headers: getRequestHeaders(),
+    body: JSON.stringify(requestBody),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to list chunks: ${response.statusText}`);
+  }
+  return await response.json();
 }
 
 /**
@@ -706,6 +1069,7 @@ async function refreshCollections(options = {}) {
     // are read-only with respect to stored state.
     if (options.invalidateInventory) invalidateCollectionInventory();
     if (options.reloadStore) {
+      options.onPhase?.("Reading VectHare metadata…");
       const reload = await reloadVectHareStore();
       browserState.lastStoreReload = reload;
       if (!reload.reloaded && reload.reason) {
@@ -716,8 +1080,9 @@ async function refreshCollections(options = {}) {
     // Read-only: a Browser refresh (and Resync) reports what the backends
     // hold and what VectHare has stored, and writes nothing - no registry
     // pruning, no re-registration, no metadata cleanup.
+    options.onPhase?.("Discovering collections…");
     browserState.collections = await loadAllCollections(browserState.settings, true,
-        { readOnly: true });
+        { readOnly: true, onProgress: options.onProgress });
 
     // Phase 2: refreshing the Browser no longer deletes "orphaned" metadata.
     // A backend error or an incomplete listing must never be read as absence,
@@ -737,10 +1102,38 @@ async function refreshCollections(options = {}) {
 }
 
 /**
+ * U4: a chat collection no chat is bound to (deleted chat, kept old collection
+ * after a rebuild, unassigned legacy collection). A rebuild still staging is
+ * not listed: it is about to be bound.
+ */
+function isUnboundChatCollection(c) {
+  const id = parseRegistryKey(c.id).collectionId || c.id;
+  if (!String(id).startsWith("vecthare_chat_")) return false;
+  if (getBoundChatDetails(id)) return false;
+  return getCollectionMeta(id)?.rebuildState !== "staging";
+}
+
+/** Bulk-tab filter, shared by the list and "Select All Visible". */
+function applyBulkFilter(collections) {
+  const filter = browserState.bulkFilter;
+  if (filter === "enabled") return collections.filter((c) => c.enabled);
+  if (filter === "disabled") return collections.filter((c) => !c.enabled);
+  if (filter === "unbound") return collections.filter((c) => isUnboundChatCollection(c));
+  return collections;
+}
+
+/**
  * Renders collections list based on current filters
  */
 function renderCollections() {
   const container = $("#vecthare_collections_list");
+  // N2: "Empty deleted" only when deleted chats' collections are kept.
+  try {
+    const deletedCount = listDeletedChatCollections().length;
+    $("#vecthare_empty_deleted")
+      .toggle(deletedCount > 0)
+      .text(deletedCount > 0 ? `Empty deleted (${deletedCount})` : "Empty deleted");
+  } catch { /* button is optional */ }
 
     // Apply filters
     let filtered = browserState.collections.filter(c => {
@@ -760,6 +1153,8 @@ function renderCollections() {
                 if (getCollectionLockCount(c.id) <= 0) return false;
             } else if (scopeFilter === 'character') {
                 if (getCollectionCharacterLockCount(c.id) <= 0) return false;
+            } else if (scopeFilter === 'unbound') {
+                if (!isUnboundChatCollection(c)) return false;
             } else {
                 if (c.scope !== scopeFilter) return false;
             }
@@ -850,6 +1245,13 @@ function renderCollectionCard(collection) {
   const statusBadge = collection.enabled
     ? '<span class="vecthare-badge vecthare-badge-success">Active</span>'
     : '<span class="vecthare-badge vecthare-badge-muted">Paused</span>';
+
+  // N2: a deleted chat's collection is kept for a while and not used by RAG.
+  const deletedInfo = getDeletedChatInfo(collection.id);
+  const deletedDays = deletedInfo ? deletedChatDaysLeft(deletedInfo) : 0;
+  const deletedBadge = deletedInfo
+    ? `<span class="vecthare-badge vecthare-badge-muted" title="The chat this collection belonged to was deleted${deletedInfo.filename ? ` (${escapeHtml(deletedInfo.filename)})` : ""}. Its memories are not used. Re-importing the chat offers to re-use them; otherwise they are purged ${deletedDays ? `in ${deletedDays} day(s)` : "at the next startup"}, or now with Empty deleted.">Deleted chat — kept ${deletedDays} day${deletedDays === 1 ? "" : "s"}</span>`
+    : "";
 
   // What an explicit existence check at the recorded destination established.
   const presence = collection.presence || "unverified";
@@ -968,6 +1370,7 @@ function renderCollectionCard(collection) {
                     ${typeIcon} ${collection.name}
                 </span>
                 <div class="vecthare-collection-badges">
+                    ${deletedBadge}
                     ${presenceBadge}
                     ${scopeBadge}
                     ${backendBadge}
@@ -1035,6 +1438,19 @@ function renderCollectionCard(collection) {
                         data-source="${collection.source || "transformers"}"
                         title="Open this collection's folder in your file explorer">
                     ${icons.folderOpen(16)} Open Folder
+                </button>
+                `
+                    : ""
+                }
+                ${
+                  // 9d: Qdrant/Milvus collections can move between the layouts
+                  // of their backend (same server; the switch picks the target).
+                  ["qdrant", "milvus"].includes(collection.backend)
+                    ? `
+                <button class="vecthare-btn-sm vecthare-action-move-storage"
+                        data-collection-key="${uniqueKey}"
+                        title="Move this collection to the storage layout the multitenancy switch selects for new collections (same server; the old copy is kept until you delete it in the Storage tab)">
+                    <i class="fa-solid fa-right-left"></i> Move storage…
                 </button>
                 `
                     : ""
@@ -1899,6 +2315,52 @@ function bindCollectionCardEvents() {
     });
 
   // Open folder
+  // 9d / P6: move a collection to the other layout of its backend.
+  $(".vecthare-action-move-storage")
+    .off("click")
+    .on("click", async function (e) {
+      e.stopPropagation();
+      const collection = findCollectionByKey($(this).data("collection-key"));
+      if (!collection) return;
+      const button = $(this);
+      const collectionSettings = { ...browserState.settings, vector_backend: collection.backend, source: collection.source };
+      button.prop("disabled", true);
+      try {
+        const plan = await planStorageMove(collection.id, collectionSettings);
+        if (!plan.ok) {
+          toastr.info(plan.reason, "VectHare: Move storage", { timeOut: 10000 });
+          return;
+        }
+        const label = (layout) => LAYOUT_LABELS[layout] || layout;
+        const confirmed = confirm(
+          `Move "${collection.name}" from ${label(plan.from.layout)} (${plan.from.physical}) ` +
+            `to ${label(plan.to)}?\n\n` +
+            "The vectors are copied as they are (no re-embedding) on the same server, checked, and only then " +
+            "does VectHare switch over. The old copy is kept until you delete it in the Storage tab.\n\n" +
+            "Do not vectorize this chat in another tab meanwhile; reload other open tabs afterwards.",
+        );
+        if (!confirmed) return;
+        const toast = toastr.info("Moving…", "VectHare: Move storage", { timeOut: 0, extendedTimeOut: 0 });
+        const result = await moveCollectionStorage(collection.id, collectionSettings, {
+          onPhase: (phase) => toast?.find?.(".toast-message").text(phase),
+        });
+        toastr.clear(toast);
+        if (result.success) {
+          toastr.success(`Moved ${result.copied} vectors to ${result.to.physical}. The old copy is listed in the Storage tab.` +
+            (result.warnings.length ? ` ${result.warnings.join(" ")}` : ""), "VectHare: Move storage", { timeOut: 12000 });
+        } else {
+          (result.uncertain ? toastr.error : toastr.warning)(result.reason +
+            (result.warnings.length ? ` ${result.warnings.join(" ")}` : ""), "VectHare: Move storage",
+            { timeOut: 0, extendedTimeOut: 0 });
+        }
+        await refreshCollections({ reloadStore: true, invalidateInventory: true });
+      } catch (error) {
+        toastr.error(error.message, "VectHare: Move storage");
+      } finally {
+        button.prop("disabled", false);
+      }
+    });
+
   $(".vecthare-action-open-folder")
     .off("click")
     .on("click", async function (e) {
@@ -1937,7 +2399,7 @@ function bindCollectionCardEvents() {
   $(".vecthare-action-visualize")
     .off("click")
     .on("click", async function (e) {
-      console.log("test");
+      vhLog("test");
       e.stopPropagation();
       const collectionKey = $(this).data("collection-key");
       const collection = findCollectionByKey(collectionKey);
@@ -1972,19 +2434,9 @@ function bindCollectionCardEvents() {
           limit: 1000, // Get first 1000 chunks
         };
 
-        console.log("VectHare DB Browser: Requesting chunks with:", requestBody);
+        vhLog("VectHare DB Browser: Requesting chunks with:", requestBody);
 
-        const response = await fetch("/api/plugins/similharity/chunks/list", {
-          method: "POST",
-          headers: getRequestHeaders(),
-          body: JSON.stringify(requestBody),
-        });
-
-        if (!response.ok) {
-          throw new Error(`Failed to list chunks: ${response.statusText}`);
-        }
-
-        const data = await response.json();
+        const data = await listCollectionChunksForBrowser(collection, collectionSettings, requestBody);
         // Support all plugin response shapes: items (new), chunks/results (older/backends)
         const results = data.items || data.chunks || data.results || [];
 
@@ -3833,21 +4285,17 @@ async function scanKeywords() {
 
     for (const collection of collectionsToScan) {
       try {
-        const response = await fetch("/api/plugins/similharity/chunks/list", {
-          method: "POST",
-          headers: getRequestHeaders(),
-          body: JSON.stringify({
+        let data;
+        try {
+          data = await listCollectionChunksForBrowser(collection,
+            { ...browserState.settings, vector_backend: collection.backend }, {
             backend: collection.backend || "vectra",
             collectionId: collection.id,
             source: collection.source || "transformers",
             model: collection.model || "",
             limit: 500,
-          }),
-        });
-
-        if (!response.ok) continue;
-
-        const data = await response.json();
+          });
+        } catch { continue; }
         const items = data.items || [];
 
         for (const item of items) {
@@ -4205,7 +4653,7 @@ function renderSearchResults(results, query, originalResults = null) {
   $(".vecthare-action-visualize")
     .off("click")
     .on("click", async function (e) {
-      console.log("test");
+      vhLog("test");
       e.stopPropagation();
       const collectionKey = $(this).data("collection-key");
       const collection = findCollectionByKey(collectionKey);
@@ -4231,24 +4679,14 @@ function renderSearchResults(results, query, originalResults = null) {
           vector_backend: collection.backend,
         };
 
-        // Use unified plugin endpoint
-        const response = await fetch("/api/plugins/similharity/chunks/list", {
-          method: "POST",
-          headers: getRequestHeaders(),
-          body: JSON.stringify({
+        // Use unified plugin endpoint (9c: Qdrant/Milvus through their adapter)
+        const data = await listCollectionChunksForBrowser(collection, collectionSettings, {
             backend: collection.backend || "vectra",
             collectionId: collection.id,
             source: collection.source || "transformers",
             model: collection.model || "",
             limit: 1000, // Get first 1000 chunks
-          }),
         });
-
-        if (!response.ok) {
-          throw new Error(`Failed to list chunks: ${response.statusText}`);
-        }
-
-        const data = await response.json();
         const results = data.items || [];
 
         if (!results || results.length === 0) {
@@ -4291,15 +4729,7 @@ function renderSearchResults(results, query, originalResults = null) {
  * Renders bulk operations list
  */
 function renderBulkList() {
-  const filter = browserState.bulkFilter;
-  let collections = [...browserState.collections];
-
-  // Apply filter
-  if (filter === "enabled") {
-    collections = collections.filter((c) => c.enabled);
-  } else if (filter === "disabled") {
-    collections = collections.filter((c) => !c.enabled);
-  }
+  const collections = applyBulkFilter([...browserState.collections]);
 
   if (collections.length === 0) {
     $("#vecthare_bulk_list").html(`
@@ -4357,14 +4787,7 @@ function bindBulkEvents() {
     .off("change")
     .on("change", function () {
       const isChecked = $(this).is(":checked");
-      const filter = browserState.bulkFilter;
-      let collections = [...browserState.collections];
-
-      if (filter === "enabled") {
-        collections = collections.filter((c) => c.enabled);
-      } else if (filter === "disabled") {
-        collections = collections.filter((c) => !c.enabled);
-      }
+      const collections = applyBulkFilter([...browserState.collections]);
 
       browserState.bulkSelected.clear();
       if (isChecked) {
@@ -4508,7 +4931,13 @@ function bindBulkEvents() {
 
       let successCount = 0;
       let partialCount = 0;
-      for (const key of browserState.bulkSelected) {
+      // S6: progress in the Status panel when no other run owns it.
+      const selectedKeys = [...browserState.bulkSelected];
+      const panelRun = progressTracker.beginCounted("Deleting Collections", selectedKeys.length, "Collections");
+      let stepIndex = 0;
+      for (const key of selectedKeys) {
+        progressTracker.countedStep(panelRun, "Deleting collections", stepIndex, selectedKeys.length);
+        stepIndex++;
         const collection = browserState.collections.find(
           (c) => (c.registryKey || c.id) === key,
         );
@@ -4529,15 +4958,25 @@ function bindBulkEvents() {
             successCount++;
           } else {
             partialCount++;
+            if (panelRun != null) {
+              progressTracker.addError(`${collection.name || collection.id}: ` +
+                `${(result.errors || []).join(", ") || "not fully deleted"}`);
+            }
           }
         } catch (error) {
           console.error(`VectHare: Failed to delete ${collection.id}`, error);
+          if (panelRun != null) progressTracker.addError(`${collection.name || collection.id}: ${error.message}`);
         }
       }
 
       browserState.bulkSelected.clear();
+      progressTracker.countedStep(panelRun, "Refreshing the list", selectedKeys.length, selectedKeys.length, false);
       await refreshCollections();
       renderBulkList();
+      if (panelRun != null) {
+        progressTracker.complete(partialCount === 0 && successCount === selectedKeys.length,
+          `Deleted ${successCount} of ${selectedKeys.length}${partialCount ? `, ${partialCount} partial` : ""}`, panelRun);
+      }
 
       if (partialCount > 0) {
         toastr.warning(

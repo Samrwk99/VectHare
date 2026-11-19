@@ -1,3 +1,5 @@
+import { vhLog } from '../utils/log.js';
+import AsyncUtils from '../utils/async-utils.js';
 /**
  * ============================================================================
  * VECTHARE CHAT VECTORIZATION
@@ -23,6 +25,7 @@ import {
     deleteVectorItems,
     purgeVectorIndex,
     throwIfSourceInvalid,
+    primeChunkHashClaims,
 } from './core-vector-api.js';
 import { isBackendAvailable, getBackend } from '../backends/backend-manager.js';
 import { applyDecayToResults, applySceneAwareDecay } from './temporal-decay.js';
@@ -45,7 +48,7 @@ import {
     transferCollectionAnnotations,
     getAnnotatedChunkHashes,
 } from './collection-metadata.js';
-import { progressTracker, describeEffectiveSettings } from '../ui/progress-tracker.js';
+import { progressTracker, describeEffectiveSettings, phaseText } from '../ui/progress-tracker.js';
 import { sha256Text } from './vector-provenance.js';
 // VectHare+: run control (pause / resume / stop) for vectorization jobs
 import {
@@ -59,7 +62,9 @@ import {
 } from './vectorization-control.js';
 import { buildSearchContext, filterChunksByConditions, processChunkLinks } from './conditional-activation.js';
 import { getChunkMetadata, getCollectionMeta, setCollectionMeta } from './collection-metadata.js';
-import { flushVectHareStore, persistVectHareStore, assertStoreAuthoritative } from './vecthare-store.js';
+import { flushVectHareStore, persistVectHareStore, assertStoreAuthoritative, refreshStoreIfStale } from './vecthare-store.js';
+import { acquireLease } from './leases.js';
+import { resolveStorage, settingsForCollectionStorage, scopedTenancySupported } from './storage-resolver.js';
 import { processChunkGroups, mergeVirtualLinks } from './chunk-groups.js';
 import { createDebugData, setLastSearchDebug, addTrace, recordChunkFate } from '../ui/search-debug.js';
 import { getSemanticWorldInfoEntries } from './world-info-integration.js';
@@ -86,7 +91,10 @@ import {
     beginChatCollectionRebuild,
     endChatCollectionRebuild,
     adoptChatCollection,
+    reattachChatCollection,
+    chatStoreDestination,
 } from './collection-ids.js';
+import { listDeletedChatCollections, clearDeletedChatInfo } from './deleted-chats.js';
 
 // Hash cache for performance
 const hashCache = new LRUCache(HASH_CACHE_SIZE);
@@ -126,6 +134,11 @@ function isChatTargetCurrent(target, collectionId = null) {
     return reason === null;
 }
 
+// K6/U8: an unresolved identity is never guessed at; the user's way to clear
+// it is a full rebuild of this chat's vectors.
+const UNRESOLVED_ACTION_HINT = n =>
+    `Vectorize \u2192 Re-vectorize this chat clears ${n === 1 ? 'it' : `these ${n}`}`;
+
 const syncDeferred = () => ({ remaining: -1, messagesProcessed: 0, chunksCreated: 0 });
 const validatedManualSync = Symbol('validated-manual-sync');
 
@@ -158,7 +171,11 @@ let autoSyncFingerprintWarned = false;
  * MESSAGE_DELETED so edited/removed messages get repaired on the very next
  * sync rather than up to 5 minutes later.
  */
+// P1: bumped on every message edit/delete/swipe; a Sync run's cached plan is
+// only reused while this is unchanged.
+let chatMutationCounter = 0;
 export function flagImmediateReverseSync() {
+    chatMutationCounter++;
     const id = getChatCollectionId();
     if (!id) return;
     lastReverseSyncByCollection.delete(id);
@@ -664,6 +681,18 @@ function hasUnchangedMemberMessages(meta, chat) {
  * ledger source identity that `item` would have written? Used to rebuild a
  * missing ledger and to verify Repair replacements beyond hash presence (#57).
  */
+// The Qdrant adapter stores chunk text with its keywords appended
+// (backends/qdrant.js: `text [KEYWORDS: a b]`). A stored record matches its
+// intended text exactly, or exactly with that one adapter-generated suffix built
+// from the item's own keywords - nothing looser.
+function storedTextMatches(storedText, item) {
+    if (typeof storedText !== 'string' || typeof item?.text !== 'string') return false;
+    if (storedText === item.text) return true;
+    const keywords = item.keywords;
+    if (!Array.isArray(keywords) || !keywords.length) return false;
+    return storedText === `${item.text} [KEYWORDS: ${keywords.map(kw => kw?.text || kw).join(' ')}]`;
+}
+
 function chatRecordMatchesItem(meta, item, collectionId, textFingerprint, requireLedger = true, verifyContent = false) {
     const p = meta?.vecthareProvenance;
     const ids = extractMessageIds(item.metadata);
@@ -683,7 +712,7 @@ function chatRecordMatchesItem(meta, item, collectionId, textFingerprint, requir
     // text and source UID tuple and be an ordinary Sync Chat record - a matching
     // fingerprint or well-formed UIDs alone do not prove that.
     const contentOk = !verifyContent || (!isProtectedChatRecordMeta(meta) &&
-        typeof meta.text === 'string' && meta.text === item.text &&
+        storedTextMatches(meta.text, item) &&
         (!requireLedger || (Array.isArray(item.metadata?.messageUids) &&
             item.metadata.messageUids.length === uids?.length &&
             item.metadata.messageUids.every((uid, j) => uid === uids[j]))));
@@ -765,9 +794,34 @@ export async function planChatVectorizationRebuild(settings) {
         return { action: 'blocked', reason: `The original configuration could not be read: ${error.message}` };
     }
 
+    if (saved.status === 'valid' && saved.config?.chunking?.pipeline === 'scene-markers') {
+        // A scene marked before the chat's first Sync recorded the collection's
+        // write-once settings as a scene collection, so Sync can never use it.
+        // The staged rebuild makes a proper chat collection; the old one (with
+        // its scenes) is kept and can be deleted later.
+        return {
+            action: 'rebuild', collectionId, chunkCount, differences: [],
+            annotationCount: getAnnotatedChunkHashes(collectionId).length,
+            reason: 'This chat\'s collection was started by a scene marker before the chat was synced, so Sync cannot use it. ' +
+                'Rebuilding creates a proper chat collection; the old one (with its scenes) is kept.',
+        };
+    }
+    // 9c: legacy Qdrant multitenancy is read-only once the plugin offers the
+    // new layouts; re-vectorizing (the staged rebuild) moves the chat.
+    if (saved.status === 'valid' && resolveStorage(collectionId, settings).layout === 'legacy-mt' &&
+        await scopedTenancySupported()) {
+        return {
+            action: 'rebuild', collectionId, chunkCount, differences: [],
+            annotationCount: getAnnotatedChunkHashes(collectionId).length,
+            reason: 'This chat is stored in the old shared Qdrant store (multitenancy), which is read-only now. ' +
+                'Rebuilding re-vectorizes it into the new store; the old copy is kept until you delete it.',
+        };
+    }
     if (saved.status === 'valid') {
+        // 9b/9c: compare against THIS collection's storage (its recorded
+        // location), not today's switch, which only decides new collections.
         const comparison = compareInitialVectorizationConfig(saved.config,
-            createInitialVectorizationConfig(settings, chunking), 'sync-chat');
+            createInitialVectorizationConfig(settingsForCollectionStorage(collectionId, settings), chunking), 'sync-chat');
         if (comparison.status === 'incompatible') {
             return {
                 action: 'rebuild', collectionId, chunkCount,
@@ -815,6 +869,28 @@ export async function planChatVectorizationRebuild(settings) {
  */
 export async function rebuildChatCollection(settings, batchSize) {
     assertStoreAuthoritative('Rebuilding a chat collection');
+    // 8C: the chat's current collection stays leased for the whole rebuild,
+    // so another tab cannot sync into it or delete it meanwhile (the new
+    // collection is leased by the Sync run that fills it).
+    await refreshStoreIfStale({ minIntervalMs: 0 }).catch(() => false);
+    const currentId = peekChatCollectionId();
+    let lease = null;
+    if (currentId) {
+        try {
+            lease = await acquireLease(currentId, { label: 'Rebuild', isPaused: isVectorizationPaused });
+        } catch (error) {
+            if (error?.code === 'VH_LEASE_HELD') return { success: false, reason: error.message };
+            throw error;
+        }
+    }
+    try {
+        return await rebuildChatCollectionLeased(settings, batchSize);
+    } finally {
+        await lease?.release();
+    }
+}
+
+async function rebuildChatCollectionLeased(settings, batchSize) {
     const target = captureChatTarget();
     if (!target) return { success: false, reason: 'No chat is open.' };
 
@@ -843,9 +919,13 @@ export async function rebuildChatCollection(settings, batchSize) {
     if (!beginChatCollectionRebuild(stagedCollectionId)) {
         return { success: false, reason: 'The rebuild destination could not be bound to this chat.' };
     }
+    // S5: the embedding part uses the first 85% of the bar; verifying, switching
+    // and carrying over use the rest, so the bar does not reach 100% early.
+    progressTracker.queueBarRange(0, 85);
     try {
         result = await vectorizeAll(settings, batchSize, true);
     } catch (error) {
+        progressTracker.clearBarRange();
         endChatCollectionRebuild();
         setCollectionMeta(stagedCollectionId, { rebuildState: 'failed', rebuildError: error.message });
         persistVectHareStore();
@@ -853,13 +933,26 @@ export async function rebuildChatCollection(settings, batchSize) {
             reason: `Embedding into the replacement collection failed: ${error.message}` };
     }
 
+    progressTracker.clearBarRange();
     // Verify the replacement on its own terms before anything is switched.
     let verification = null;
     let carried = [];
     let annotations = { transferred: 0, skipped: 0 };
     let transferError = null;
+    let followRun = null;
+    const followPhase = (text, percent) => {
+        if (followRun == null || !progressTracker.isCurrentRun(followRun)) return;
+        progressTracker.setPhase(text);
+        progressTracker.setWeightedPercent(percent);
+    };
+    const followEnd = (success, message) => {
+        if (followRun != null && progressTracker.isCurrentRun(followRun)) {
+            progressTracker.complete(success, message, followRun);
+        }
+    };
     try {
         if (!result?.success) throw new Error('vectorization did not complete');
+        followRun = progressTracker.beginFollowUp(phaseText('Verifying new collection', 1, 3), 85);
         if (!isChatTargetCurrent(target, stagedCollectionId)) {
             throw new Error('the chat changed during the rebuild');
         }
@@ -870,14 +963,19 @@ export async function rebuildChatCollection(settings, batchSize) {
         if (savedConfig.status !== 'valid') {
             throw new Error(`the replacement has no verifiable configuration (${savedConfig.status})`);
         }
+        // 9c: compare with the replacement's own storage (a new collection may be
+        // in the new layout, which today's switch alone does not describe).
         const comparison = compareInitialVectorizationConfig(savedConfig.config,
-            createInitialVectorizationConfig(settings, chatConfigChunking(settings)), 'sync-chat');
+            createInitialVectorizationConfig(settingsForCollectionStorage(stagedCollectionId, settings),
+                chatConfigChunking(settings)), 'sync-chat');
         if (comparison.status === 'incompatible') {
             throw new Error('the replacement was not stored with the selected settings');
         }
         verification = { stored, hashes: Array.isArray(hashes) ? hashes.map(String) : [],
             identityLedger: savedConfig.config.identityLedger === 1 };
+        progressTracker.log(`Verified: ${stored} chunk(s) stored with the selected settings`);
     } catch (error) {
+        followEnd(false, `Replacement not verified - your previous collection is still in use`);
         endChatCollectionRebuild();
         setCollectionMeta(stagedCollectionId, { rebuildState: 'unverified', rebuildError: error.message });
         persistVectHareStore();
@@ -890,6 +988,7 @@ export async function rebuildChatCollection(settings, batchSize) {
     // Commit: the chat adopts the verified replacement and the old collection
     // is preserved, not deleted.
     try {
+        followPhase(phaseText('Switching chat to new collection', 2, 3), 90);
         const adopted = await adoptChatCollection(stagedCollectionId, previousCollectionId);
         if (adopted.state !== 'active') {
             throw new Error(`binding state "${adopted.state}"`);
@@ -905,15 +1004,19 @@ export async function rebuildChatCollection(settings, batchSize) {
         // The rebuild is already committed at this point, so a transfer problem
         // is reported, never mistaken for a failed switch.
         try {
+            followPhase(phaseText('Carrying annotations', 3, 3), 95);
             carried = carryOverCollectionPreferences(previousCollectionId, stagedCollectionId);
             annotations = transferCollectionAnnotations(previousCollectionId, stagedCollectionId,
                 verification.hashes);
+            progressTracker.log(`Carried ${annotations.transferred} annotation(s)` +
+                `${annotations.skipped ? `, ${annotations.skipped} not carried` : ''}`);
         } catch (error) {
             transferError = error.message;
             console.warn(`VectHare: Rebuilt collection settings could not be carried over: ${error.message}`);
         }
         await flushVectHareStore();
     } catch (error) {
+        followEnd(false, 'Could not switch the chat - your previous collection is still in use');
         setCollectionMeta(stagedCollectionId, { rebuildState: 'verified_uncommitted', rebuildError: error.message });
         persistVectHareStore();
         return { success: false, collectionId: stagedCollectionId, previousCollectionId,
@@ -923,12 +1026,119 @@ export async function rebuildChatCollection(settings, batchSize) {
         endChatCollectionRebuild();
     }
 
-    console.log(`VectHare: Rebuilt ${previousCollectionId} as ${stagedCollectionId} ` +
+    followEnd(true, `Rebuilt ${verification.stored} chunks \u2014 old collection kept: ${previousCollectionId}` +
+        `${transferError ? ' (settings/annotations not fully carried over)' : ''}`);
+    vhLog(`VectHare: Rebuilt ${previousCollectionId} as ${stagedCollectionId} ` +
         `(${verification.stored} chunks, ledger ${verification.identityLedger ? 'enabled' : 'not used'})`);
     return { success: true, committed: true, collectionId: stagedCollectionId,
         previousCollectionId, chunkCount: verification.stored,
         carriedFields: carried, annotationsTransferred: annotations.transferred,
         annotationsNotTransferred: annotations.skipped, transferError };
+}
+
+// ---------------------------------------------------------------------------
+// N2: re-attach a deleted chat's kept collection
+// ---------------------------------------------------------------------------
+export const REATTACH_MIN_RATIO = 0.6;
+const REATTACH_MIN_MATCHES = 2;
+
+/** Share of a ledger's unique message keys that appear in the current chat. */
+export async function scoreDeletedChatLedger(ledger, chat) {
+    const previous = (ledger?.messages || []).filter(msg => msg && msg.active !== false);
+    const current = await describeIdentityMessages(chat);
+    const fp = msg => `${msg.role}:${msg.name}:${msg.fingerprint}`;
+    const uniqueOf = (items, keyOf) => {
+        const counts = new Map();
+        for (const item of items) {
+            const key = keyOf(item);
+            if (key) counts.set(key, (counts.get(key) || 0) + 1);
+        }
+        return new Set([...counts].filter(([, n]) => n === 1).map(([key]) => key));
+    };
+    const score = (keyOf) => {
+        const wanted = uniqueOf(previous, keyOf);
+        const present = new Set(current.map(keyOf).filter(Boolean));
+        const matched = [...wanted].filter(key => present.has(key)).length;
+        return { matched, total: wanted.size, ratio: wanted.size ? matched / wanted.size : 0 };
+    };
+    const bySource = score(msg => msg.sourceKey || null);
+    const byFingerprint = score(msg => (msg.fingerprint ? fp(msg) : null));
+    const best = bySource.ratio >= byFingerprint.ratio ? bySource : byFingerprint;
+    return { ...best, bySource, byFingerprint,
+        qualifies: best.ratio >= REATTACH_MIN_RATIO && best.matched >= REATTACH_MIN_MATCHES };
+}
+
+/**
+ * Before a chat without a binding gets a NEW collection, look for a kept
+ * collection of a deleted chat of the same owner whose identity ledger matches
+ * this chat (>= 60% of its unique send-date keys or fingerprints). Exactly one
+ * candidate -> ask the user. Yes re-binds it to this chat, and the next Sync's
+ * normal reconcile treats the differences as edits/inserts/deletes. No, an
+ * ambiguous match, or any read failure -> nothing happens (a new collection is
+ * created as before).
+ * @param {object} settings VectHare settings
+ * @returns {Promise<{reattached: boolean, collectionId?: string}>}
+ */
+export async function offerDeletedChatReattach(settings, { confirmReattach = null } = {}) {
+    try {
+        const target = captureChatTarget();
+        if (!target) return { reattached: false };
+        const existing = await ensureChatBinding(undefined, { create: false });
+        if (existing?.state !== 'unbound') return { reattached: false };
+        const owner = getChatOwner();
+        const candidates = listDeletedChatCollections().filter(({ info }) =>
+            info.rec?.owner && owner && info.rec.owner.type === owner.type &&
+            String(info.rec.owner.id) === String(owner.id));
+        if (!candidates.length) return { reattached: false };
+
+        const qualified = [];
+        for (const { id, info } of candidates) {
+            const stores = (info.rec.stores || []).filter(store => store.destination &&
+                chatStoreDestination({ ...settings, vector_backend: store.backend }, id) === store.destination);
+            if (stores.length !== 1) continue;
+            const storeSettings = { ...settings, vector_backend: stores[0].backend, source: stores[0].source };
+            const saved = await readInitialVectorizationConfig(id, storeSettings);
+            if (saved.status !== 'valid' || saved.config?.identityLedger !== 1) continue;
+            let ledger;
+            try {
+                const read = await identityLedgerRequest('read', id, identityBinding(storeSettings, saved.config));
+                if (read.status !== 'found') continue;
+                ledger = read.ledger;
+            } catch { continue; }
+            if (!isChatTargetCurrent(target)) return { reattached: false };
+            const score = await scoreDeletedChatLedger(ledger, target.messages);
+            if (score.qualifies) qualified.push({ id, info, score });
+        }
+        // Ambiguous -> ask nothing, create new.
+        if (qualified.length !== 1) return { reattached: false };
+        const [{ id, info, score }] = qualified;
+
+        const ask = confirmReattach || (async () => {
+            const { callGenericPopup, POPUP_TYPE } = await import('../../../../popup.js');
+            return callGenericPopup(
+                `<div style="text-align:left;">
+                    <h3>Re-use memories of a deleted chat?</h3>
+                    <p>This looks like a chat you deleted (<strong>${score.matched} of ${score.total}</strong> messages match).</p>
+                    <p style="margin-top:10px;">Re-use its memories? Only the differences are vectorized again.
+                    Choosing No creates a new collection; the deleted chat's collection stays in Database Browser.</p>
+                </div>`,
+                POPUP_TYPE.CONFIRM, '', { okButton: 'Yes, re-use', cancelButton: 'No, start new' });
+        });
+        const accepted = await ask({ collectionId: id, matched: score.matched, total: score.total });
+        if (!accepted || !isChatTargetCurrent(target)) return { reattached: false };
+        const result = await reattachChatCollection(id, info.rec);
+        if (result?.state !== 'active') {
+            toastr.warning('The deleted chat\'s memories could not be re-attached; a new collection will be used.', 'VectHare');
+            return { reattached: false };
+        }
+        clearDeletedChatInfo(id);
+        try { await flushVectHareStore(); } catch { /* saved with the next write */ }
+        toastr.success(`Re-attached the deleted chat's memories (${score.matched} of ${score.total} messages matched).`, 'VectHare');
+        return { reattached: true, collectionId: id };
+    } catch (error) {
+        console.warn('VectHare: Deleted-chat re-attach check skipped:', error.message);
+        return { reattached: false };
+    }
 }
 
 /**
@@ -962,13 +1172,36 @@ function identityBinding(settings, config) {
     };
 }
 
-async function identityLedgerRequest(action, collectionId, binding, ledger = undefined) {
+// Step 8B: a ledger object carries the file version it was read as, or last
+// saved as, in `__token` (copied along by `{ ...ledger }`, never sent as part
+// of the ledger). A save names that version; the plugin refuses it with 409 if
+// another tab changed the file in between.
+export class LedgerConflictError extends Error {
+    constructor() {
+        super('Another tab is updating this chat\'s vectors - this pass stopped before changing anything it had not confirmed');
+        this.code = 'VH_LEDGER_CONFLICT';
+    }
+}
+const ledgerTokensSeen = { value: false }; // true once the plugin returned a ledger token
+const stripLedgerToken = ledger => {
+    if (!ledger || typeof ledger !== 'object') return ledger;
+    const { __token, ...rest } = ledger;
+    return rest;
+};
+
+async function identityLedgerRequest(action, collectionId, binding, ledger = undefined, baseToken = undefined) {
     const response = await fetch(`/api/plugins/similharity/identity-ledger/${action}`, {
         method: 'POST', headers: getRequestHeaders(),
         // Reads honor Stop; a save is never abandoned half-way (outcome unknown).
         ...(action === 'read' ? { signal: getStopSignal() } : {}),
-        body: JSON.stringify({ collectionId, binding, ...(ledger !== undefined ? { ledger } : {}) }),
+        body: JSON.stringify({ collectionId, binding,
+            ...(ledger !== undefined ? { ledger: stripLedgerToken(ledger) } : {}),
+            ...(baseToken !== undefined ? { baseToken } : {}) }),
     });
+    if (response.status === 409 && action === 'save') {
+        const body = await response.json().catch(() => null);
+        if (body?.conflict === true) throw new LedgerConflictError();
+    }
     if (!response.ok) {
         const error = new Error(`Identity ledger ${action}: HTTP ${response.status}`);
         error.status = response.status;
@@ -976,7 +1209,20 @@ async function identityLedgerRequest(action, collectionId, binding, ledger = und
     }
     const result = await response.json();
     if (result.success !== true) throw new Error('Identity ledger operation was not confirmed');
+    if (typeof result.token === 'string') ledgerTokensSeen.value = true;
     return result;
+}
+
+/** Saves `ledger` based on the version it carries, then records the new one on it. */
+async function saveLedgerVersioned(ledger, baseToken = ledger?.__token) {
+    if (ledgerTokensSeen.value && baseToken === undefined) {
+        // Every save must say which version it replaces; a missing token is a
+        // bug that would silently bypass the protection, so it fails closed.
+        throw new Error('Identity ledger save without a version; blocked');
+    }
+    const result = await identityLedgerRequest('save', ledger.collectionId, ledger.binding, ledger, baseToken);
+    if (typeof result.token === 'string') ledger.__token = result.token;
+    return ledger;
 }
 
 const emptyIdentityLedger = (collectionId, binding) => ({
@@ -992,19 +1238,25 @@ async function readChatIdentityLedger(collectionId, settings, config, creating =
     }
     const binding = identityBinding(settings, config);
     const result = await identityLedgerRequest('read', collectionId, binding);
-    if (result.status === 'found') return result.ledger;
+    if (result.status === 'found') {
+        const ledger = result.ledger;
+        if (typeof result.token === 'string') ledger.__token = result.token;
+        return ledger;
+    }
     if (creating && result.status === 'missing') {
         const ledger = emptyIdentityLedger(collectionId, binding);
-        await identityLedgerRequest('save', collectionId, binding, ledger);
+        // Another tab creating the same ledger first makes this a conflict.
+        await saveLedgerVersioned(ledger, typeof result.token === 'string' ? result.token : undefined);
         return ledger;
     }
     const error = new Error(`Identity ledger ${result.status || 'unavailable'}; destructive actions blocked`);
     error.ledgerStatus = result.status;
+    error.ledgerToken = result.token;
     throw error;
 }
 
 async function saveChatIdentityLedger(ledger) {
-    await identityLedgerRequest('save', ledger.collectionId, ledger.binding, ledger);
+    await saveLedgerVersioned(ledger);
 }
 
 // A match fingerprint includes speaker identity but no stored message text.
@@ -1181,7 +1433,15 @@ async function reconcileIdentityMessages(chat, ledger) {
             !activeSourceKeys.has(previous[i].sourceKey);
         const uniqueRetiredText = !hasUnmatchedNew && !activeKeys.has(matches(previous[i])) &&
             previousKeyCounts.get(matches(previous[i])) === 1;
-        if ((interior || first || last) && (uniqueRetiredSource || uniqueRetiredText)) {
+        // A unique read-only source key (ST's send_date + role + name) that no
+        // longer exists anywhere in the chat, held by a message that was not
+        // matched by text either, is gone: deleted, or replaced in place by a
+        // swipe (which carries its own send_date). Requiring adjacent
+        // neighbours as well left such vectors stored forever whenever a new
+        // message sat next to the gap (every swipe did), so RAG kept returning
+        // abandoned swipes. A hash still used by a current group is never
+        // deleted (keep-set), so this only retires the stale occurrence.
+        if (uniqueRetiredSource || ((interior || first || last) && uniqueRetiredText)) {
             confidentDeleted.add(previous[i].uid);
         }
     }
@@ -1419,6 +1679,52 @@ async function readIdentityInventory(collectionId, settings) {
     return byHash;
 }
 
+/**
+ * P5: the stored records for just these hashes (every physical copy), shaped
+ * like readIdentityInventory(). Uses the plugin's get-by-hashes read; when it
+ * is unavailable (older plugin, Qdrant multitenancy) or its answer is not
+ * complete and well-formed, falls back to the full inventory read.
+ * Only for lookups of these hashes - never for "everything stored".
+ */
+async function readInventoryForHashes(collectionId, settings, hashes, fallback = null) {
+    const wanted = [...new Set((hashes || []).map(String))];
+    if (!wanted.length) return new Map();
+    let result = null;
+    try {
+        const backend = await getBackend(settings);
+        if (typeof backend.getChunksByHashes === 'function') {
+            result = await backend.getChunksByHashes(collectionId, wanted, settings);
+        }
+    } catch (error) {
+        console.debug(`VectHare: hash read unavailable for ${collectionId}, reading in full: ${error.message}`);
+        result = null;
+    }
+    if (result?.complete === true && Array.isArray(result.items)) {
+        const want = new Set(wanted);
+        const byHash = new Map();
+        let wellFormed = true;
+        for (const item of result.items) {
+            const meta = item?.metadata;
+            const hash = item?.hash ?? meta?.hash;
+            const text = item?.text ?? meta?.text;
+            if (!meta || typeof meta !== 'object' || Array.isArray(meta) ||
+                !['number', 'string'].includes(typeof hash) || typeof text !== 'string' ||
+                (item.hash != null && meta.hash != null && String(item.hash) !== String(meta.hash)) ||
+                (item.text != null && meta.text != null && item.text !== meta.text) ||
+                !want.has(String(hash))) {
+                wellFormed = false;
+                break;
+            }
+            const key = String(hash);
+            const records = byHash.get(key) || [];
+            records.push({ ...meta, hash, text });
+            byHash.set(key, records);
+        }
+        if (wellFormed) return byHash;
+    }
+    return fallback ? fallback() : readIdentityInventory(collectionId, settings);
+}
+
 // A missing ledger can be reconstructed only for current groups whose exact
 // source indices, message hashes, original submitted text, and source UIDs
 // are still attested by the backend. Stale/ambiguous historical vectors stay
@@ -1471,7 +1777,8 @@ async function rebuildMissingIdentityLedger(collectionId, settings, config, chat
     if (!trusted.every(group => verifiedGroupHash(ledger, group, inventory))) {
         throw new Error('Backend identity evidence changed; ledger rebuild blocked');
     }
-    await identityLedgerRequest('save', collectionId, binding, ledger);
+    // Rebuilt only when the read found no ledger: it must still be missing.
+    await saveLedgerVersioned(ledger, ledgerTokensSeen.value ? 'missing' : undefined);
     console.info(`VectHare: Rebuilt ${trusted.length} verified groups for the current chat; unverified vectors retained`);
     return ledger;
 }
@@ -1598,6 +1905,7 @@ async function finishIdentityLedger(ledger, reconciliation, currentGroups, inven
  * the obsolete association and the next Sync/Repair re-verifies from the backend.
  */
 export async function noteManualVectorChange(collectionId, settings, hashes) {
+    await refreshStoreIfStale({ minIntervalMs: 0 }).catch(() => false); // 8B
     const logicalId = parseRegistryKey(collectionId).collectionId || collectionId;
     const saved = await readInitialVectorizationConfig(logicalId, settings);
     if (saved.status !== 'valid' || saved.config.identityLedger !== 1) return;
@@ -1664,6 +1972,9 @@ async function assertEmptyFirstInsertCollection(collectionId, settings, saved, r
 // with a matching VectHare ledger and a complete, empty backend inventory.
 // This does not make other legacy/unverified collections writable.
 async function recoverEmptyFirstSyncPreflight(collectionId, settings) {
+    // 9c: an interrupted first insert into a new-layout collection staged its
+    // ledger with that layout; describe the collection by its own storage.
+    settings = settingsForCollectionStorage(collectionId, settings);
     if (!canRecordInitialVectorizationConfig(collectionId, settings)) return null;
     const saved = await readInitialVectorizationConfig(collectionId, settings);
     if (saved.status !== 'missing' || saved.physicalAbsent) return null;
@@ -1711,7 +2022,7 @@ function filterSceneDisabledChunks(chunks) {
     });
 
     if (filtered.length !== chunks.length) {
-        console.log(`VectHare: Scene filtering: ${chunks.length} → ${filtered.length} chunks (${chunks.length - filtered.length} disabled by scenes)`);
+        vhLog(`VectHare: Scene filtering: ${chunks.length} → ${filtered.length} chunks (${chunks.length - filtered.length} disabled by scenes)`);
     }
 
     return filtered;
@@ -1762,7 +2073,7 @@ async function applyChunkConditions(chunks, chat, settings) {
         }
     });
 
-    console.log(`VectHare: Chunk conditions filtered ${filtered.length} → ${conditionFilteredChunks.length}`);
+    vhLog(`VectHare: Chunk conditions filtered ${filtered.length} → ${conditionFilteredChunks.length}`);
     return conditionFilteredChunks;
 }
 
@@ -1829,7 +2140,7 @@ async function rerankWithBananaBread(query, chunks, settings) {
             return chunk;
         });
 
-        console.log(`VectHare: Reranked ${rerankedChunks.length} chunks with BananaBread`);
+        vhLog(`VectHare: Reranked ${rerankedChunks.length} chunks with BananaBread`);
         return rerankedChunks;
     } catch (error) {
         console.warn('VectHare: Reranking error:', error.message);
@@ -1851,7 +2162,7 @@ async function rerankWithBananaBread(query, chunks, settings) {
  * @returns {Promise<object>} Progress info
  */
 export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = false, validationToken = null,
-    verifiedConfig = null) {
+    verifiedConfig = null, runCache = null) {
     settings = snapshotCollectionOperationSettings(settings);
     const callerSettings = settings; // Repair resolves its own saved-settings snapshot
     let capturedConfig = validationToken === validatedManualSync ? verifiedConfig : null;
@@ -1871,9 +2182,9 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
     if (!isChatTargetCurrent(target)) return syncDeferred();
     const collectionId = binding.writable ? binding.collectionId : null;
     if (collectionId && !isChatTargetCurrent(target, collectionId)) return syncDeferred();
-    console.log(`🔍 VectHare DEBUG: getChatCollectionId() returned: "${collectionId}"`);
-    console.log(`🔍 VectHare DEBUG: settings.vector_backend = "${settings.vector_backend}"`);
-    console.log(`🔍 VectHare DEBUG: settings.source = "${settings.source}"`);
+    vhLog(`🔍 VectHare DEBUG: getChatCollectionId() returned: "${collectionId}"`);
+    vhLog(`🔍 VectHare DEBUG: settings.vector_backend = "${settings.vector_backend}"`);
+    vhLog(`🔍 VectHare DEBUG: settings.source = "${settings.source}"`);
     if (!collectionId) {
         return { remaining: -1, messagesProcessed: 0, chunksCreated: 0 };
     }
@@ -1883,6 +2194,19 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
     catch (error) {
         console.warn('VectHare: Sync skipped during collection deletion', error.message);
         return { remaining: -1, messagesProcessed: 0, chunksCreated: 0 };
+    }
+    // 8C: another tab/device working on this chat makes this pass wait (an
+    // auto-sync just skips; the next chat event tries again).
+    let syncLease = null;
+    try {
+        syncLease = await acquireLease(collectionId, { label: 'Sync', isPaused: isVectorizationPaused });
+    } catch (error) {
+        endChatCollectionWrite(collectionId);
+        if (error?.code === 'VH_LEASE_HELD') {
+            console.info('VectHare: Sync pass skipped - another tab is working on this chat');
+            return syncDeferred();
+        }
+        throw error;
     }
     try {
 
@@ -2032,23 +2356,55 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                 msg.is_user !== groupedChatState[i][2] || msg.name !== groupedChatState[i][3] ||
                 msg.send_date !== groupedChatState[i][4] ||
                 getTextWithoutAttachments(msg) !== groupedChatState[i][5]);
-        let groupedItems = collectGroupedItems(target.messages, settings);
+        // P1: a manual run (vectorizeAll) plans once and reuses the plan for
+        // its later batches while nothing changed. Any doubt -> full re-plan.
+        const planGeneration = chatSwitchGeneration;
+        const planMutation = chatMutationCounter;
+        const planConfigKey = JSON.stringify(capturedConfig ?? null);
+        const previousPlan = runCache?.plan || null;
+        const cachedPlan = previousPlan &&
+            previousPlan.collectionId === collectionId &&
+            previousPlan.generation === planGeneration &&
+            previousPlan.mutation === planMutation &&
+            previousPlan.messages === target.messages &&
+            previousPlan.length === target.messages.length &&
+            previousPlan.configKey === planConfigKey &&
+            previousPlan.unchanged() &&
+            !(previousPlan.existingHashes.size > 0 && reconciliationDue(collectionId,
+                lastReverseSyncByCollection.get(collectionId) ?? 0, 5 * 60 * 1000)) &&
+            (!previousPlan.identityLedger ||
+                (previousPlan.identityLedger.state === 'clean' && previousPlan.inventory instanceof Map))
+            ? previousPlan : null;
+        // Consumed: only a pass that finishes cleanly stores a plan again.
+        if (runCache) runCache.plan = null;
+
+        // S1: only a manual run (Sync Chat) owns the Status panel; automatic
+        // background sync stays silent.
+        const manualPanel = bypassAutoSync && progressTracker.currentOperation === 'Vectorizing Chat'
+            ? progressTracker : null;
+        const manualPanelRunId = manualPanel ? manualPanel.runId : null;
+        let groupedItems = cachedPlan ? cachedPlan.groupedItems : collectGroupedItems(target.messages, settings);
         // NOTE: Registration happens AFTER first successful insert to prevent ghosts.
         let isRegistered = false;
         let initialConfigRecorded = false;
-        const existingHashes = new Set(
+        if (!cachedPlan) manualPanel?.setPhase('Checking collection…');
+        const existingHashes = cachedPlan ? cachedPlan.existingHashes : new Set(
             (await getSavedHashes(collectionId, settings, false, getStopSignal())).map(hash => String(hash))
         );
         if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
         let identityLedger = null, identityReconciliation = null, identityGroups = [];
+        if (cachedPlan) {
+            ({ identityLedger, identityReconciliation, identityGroups } = cachedPlan);
+        }
         const identityRequired = capturedConfig?.identityLedger === 1;
         const identityNew = wasUnregistered && existingHashes.size === 0 && !identityRequired;
         // Only genuinely empty collections initialize tracking. An existing
         // unrecorded collection is legacy even when registry state is missing.
-        if (identityNew || identityRequired) {
+        if (!cachedPlan && (identityNew || identityRequired)) {
             const config = identityNew ? initialConfig : capturedConfig;
             if (!config) throw new Error('Collection identity configuration unavailable');
             try {
+                manualPanel?.setPhase('Comparing with chat…');
                 identityLedger = await readChatIdentityLedger(collectionId, settings, config, identityNew);
                 if (identityNew && (identityLedger.messages.length || identityLedger.groups.length ||
                     identityLedger.state !== 'clean')) {
@@ -2063,7 +2419,8 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                     }
                     const saved = await readInitialVectorizationConfig(collectionId, settings);
                     await assertEmptyFirstInsertCollection(collectionId, settings, saved);
-                    identityLedger = emptyIdentityLedger(collectionId, identityLedger.binding);
+                    identityLedger = { ...emptyIdentityLedger(collectionId, identityLedger.binding),
+                        __token: identityLedger.__token };
                     await saveChatIdentityLedger(identityLedger);
                 }
                 identityReconciliation = await reconcileIdentityMessages(target.messages, identityLedger);
@@ -2136,12 +2493,14 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
 
                 // Compare to the state used to plan groups, including changes
                 // before this inventory read as well as while it was pending.
+                manualPanel?.setPhase('Checking collection…');
                 const collectionData = await getSavedHashes(collectionId, settings, true, getStopSignal(), Boolean(identityLedger) || settings.vector_backend === 'qdrant');
                 if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
                 if (!groupedChatUnchanged()) {
                     console.info('VectHare: Chat changed after Sync grouping; reverse cleanup deferred');
                     return syncDeferred();
                 }
+                manualPanel?.setPhase('Comparing with chat…');
                 const keepHashes = new Set(groupedItems.map(item => String(item.hash)));
                 const allStoredHashes = Array.isArray(collectionData) ? collectionData : (collectionData?.hashes || []);
 
@@ -2272,7 +2631,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                                 throw new Error('Reverse-sync deletion not verified; forward writes blocked');
                             }
                         }
-                        console.log(`VectHare: Reverse sync removed ${ghostHashes.length} obsolete vector(s) (changed/deleted sources)`);
+                        vhLog(`VectHare: Reverse sync removed ${ghostHashes.length} obsolete vector(s) (changed/deleted sources)`);
                         // VectHare+ FIX: do NOT deleteChunkMetadata(ghost) here.
                         // Chunk metadata is stored GLOBALLY by hash (shared across
                         // ALL collections), so a hash removed from this collection
@@ -2333,13 +2692,18 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
         }
 
         // Show existing saved groups before processing new ones.
-        if (bypassAutoSync && progressTracker.currentOperation === 'Vectorizing Chat') {
-            const done = groupedItems.length - queue.size;
+        const groupsDoneAtStart = groupedItems.length - queue.size;
+        if (manualPanel) {
             progressTracker.stats.totalItems = groupedItems.length;
-            progressTracker.stats.embeddedChunks = done;
+            progressTracker.stats.embeddedChunks = groupsDoneAtStart;
             progressTracker.stats.totalChunksToEmbed = groupedItems.length;
-            progressTracker.updateProgress(done,
-                queue.size > 0 ? `${queue.size} ${strategy === 'per_message' ? 'messages' : 'message groups'} remaining` : 'Finalizing...');
+            progressTracker.stats.partialUnits = 0;
+            progressTracker.stats.processedItems = groupsDoneAtStart;
+            // The end of each batch logs its own line; log this one only for the
+            // first pass so consecutive passes do not repeat it.
+            progressTracker.setPhase(
+                queue.size > 0 ? phaseText('Embedding', groupsDoneAtStart, groupedItems.length) : 'Finalizing...',
+                { log: (progressTracker.stats.embedBatches || 0) === 0 });
         }
 
         if (queue.isEmpty()) {
@@ -2359,6 +2723,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
         let chunksCreated = 0;
         let groupsCompleted = 0;
         let itemsFailed = 0;
+        const attemptedHashes = []; // P1: verified after the batch
         const label = strategy === 'per_message' ? 'Message' : 'Group';
 
         while (!queue.isEmpty() && itemsProcessed < batchSize) {
@@ -2367,7 +2732,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
             // queue is left untouched (nothing lost) and every already-successful
             // item is already persisted, so any later run continues seamlessly.
             if (isVectorizationStopped() || isVectorizationPaused()) {
-                console.log(`VectHare: Sync ${isVectorizationStopped() ? 'stopped' : 'paused'} by user with ${queue.size} item(s) still pending (completed work kept)`);
+                vhLog(`VectHare: Sync ${isVectorizationStopped() ? 'stopped' : 'paused'} by user with ${queue.size} item(s) still pending (completed work kept)`);
                 if (isVectorizationStopped()) requireReconciliationAfterStop(collectionId);
                 break;
             }
@@ -2380,6 +2745,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                 Number(settings.insert_batch_size) || 50, batchSize - itemsProcessed));
             const slot = [];
             while (slot.length < slotSize && !queue.isEmpty()) slot.push(queue.dequeue());
+            for (const queued of slot) attemptedHashes.push(String(queued.hash));
 
             try {
                 // Prepare items for insertion (add source metadata)
@@ -2399,17 +2765,31 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                     if (!isChatTargetCurrent(target, collectionId)) return syncDeferred();
                     assertCollectionOperationSettingsStable(capturedConfig, settings, chatConfigChunking(settings));
                     recordChatStore(collectionId, settings);
-                    await insertVectorItems(collectionId, chunks, settings, (embedded, total, phase) => {
-                        // R7 FIX: vectorizeAll feeds the panel collection-wide
-                        // totals; this callback only updates the current-item line.
-                        console.log(`[Chat Vectorization] Embedding progress callback: ${embedded}/${total}`);
+                    manualPanel?.beginEmbedTiming(); // S4
+                    try {
+                        await insertVectorItems(collectionId, chunks, settings, (embedded, total, phase) => {
+                            // R7 FIX: vectorizeAll feeds the panel collection-wide
+                            // totals; this callback only updates the current-item line.
+                            vhLog(`[Chat Vectorization] Embedding progress callback: ${embedded}/${total}`);
 
-                        // #34: the insert layer reports which phase it is in;
-                        // inferring it from a percentage was a guess.
-                        const span = slot.length > 1
-                            ? `${itemsProcessed + 1}-${itemsProcessed + slot.length}` : `${itemsProcessed + 1}`;
-                        progressTracker.updateCurrentItem(`${label} ${span}/${batchSize} - ${phase || 'Processing'}: ${embedded}/${total} chunks`);
-                    }, getStopSignal());
+                            // #34: the insert layer reports which phase it is in;
+                            // inferring it from a percentage was a guess.
+                            const span = slot.length > 1
+                                ? `${itemsProcessed + 1}-${itemsProcessed + slot.length}` : `${itemsProcessed + 1}`;
+                            progressTracker.updateCurrentItem(`${label} ${span}/${batchSize} - ${phase || 'Processing'}: ${embedded}/${total} chunks`);
+                            if (manualPanel && manualPanel.isCurrentRun(manualPanelRunId)) {
+                                // S2: the bar moves inside the batch, and the status
+                                // line counts groups, not only whole batches.
+                                const fraction = total > 0 ? Math.min(Math.max(embedded / total, 0), 1) : 0;
+                                const partial = groupsCompleted + fraction * slot.length;
+                                manualPanel.setPartialUnits(partial);
+                                manualPanel.setPhase(phaseText('Embedding',
+                                    Math.floor(groupsDoneAtStart + partial), groupedItems.length), { log: false });
+                            }
+                        }, getStopSignal());
+                    } finally {
+                        manualPanel?.endEmbedTiming();
+                    }
                     chunksCreated += chunks.length;
                     // Only an empty collection can receive a first-vectorization record.
                     // Existing/legacy collections must not be assigned today's settings.
@@ -2431,7 +2811,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                         const registryKey = `${backend}:${source}:${collectionId}`;
                         registerCollection(registryKey);
                         isRegistered = true;
-                        console.log(`VectHare: Registered collection ${registryKey} after first successful insert`);
+                        vhLog(`VectHare: Registered collection ${registryKey} after first successful insert`);
                     }
                     // An in-flight insert can finish after switching chats. Keep
                     // its original collection registered, then stop this sync.
@@ -2463,12 +2843,74 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
         }
 
         progressTracker.updateCurrentItem(null);
+        let batchInventory = null;
+        let ledgerFinished = true;
         if (identityLedger) {
+            if (manualPanel && manualPanel.isCurrentRun(manualPanelRunId)) manualPanel.setPhase('Saving…');
             // A partial batch remains dirty unless all planned writes can be
             // confirmed. Never save optimistic `indexed:true` records.
-            const inventory = await readIdentityInventory(collectionId, settings);
-            if (!await finishIdentityLedger(identityLedger, identityReconciliation, identityGroups, inventory)) {
+            // P1: with a cached plan, the inventory is the previous one plus a
+            // read-back of this batch's hashes (nothing else writes during a
+            // manual run); without one, or when that read is unavailable, the
+            // full inventory is read as before.
+            if (cachedPlan?.inventory instanceof Map) {
+                let full = null;
+                const delta = await readInventoryForHashes(collectionId, settings, attemptedHashes,
+                    async () => (full = await readIdentityInventory(collectionId, settings)));
+                if (full) {
+                    batchInventory = full;
+                } else {
+                    batchInventory = new Map(cachedPlan.inventory);
+                    for (const hash of attemptedHashes) {
+                        if (delta.has(hash)) batchInventory.set(hash, delta.get(hash));
+                        else batchInventory.delete(hash);
+                    }
+                }
+            } else {
+                batchInventory = await readIdentityInventory(collectionId, settings);
+            }
+            ledgerFinished = await finishIdentityLedger(identityLedger, identityReconciliation, identityGroups, batchInventory);
+            if (!ledgerFinished) {
                 console.warn('VectHare: Identity ledger remains dirty; incomplete indexed evidence');
+            } else if (chunksCreated > 0) {
+                // A group written this pass can supersede an indexed one (appended
+                // messages re-open the last batch/turn). Its old vector is removed by
+                // the reverse cleanup, which is otherwise throttled to every 5 min;
+                // mark the collection so the next pass cleans it straight away
+                // instead of leaving those messages stored twice meanwhile.
+                const currentHashes = new Set(identityGroups.map(group => String(group.hash)));
+                if (identityLedger.groups.some(group => group.indexed && !currentHashes.has(String(group.hash)))) {
+                    try {
+                        setCollectionMeta(collectionId, { needsReconciliation: true });
+                    } catch (error) {
+                        console.debug('VectHare: Could not mark collection for cleanup:', error.message);
+                    }
+                }
+            }
+        }
+
+        // P1: keep the plan for the run's next batch only after a clean batch
+        // whose every written hash is confirmed stored.
+        if (runCache && itemsFailed === 0 && ledgerFinished && !isVectorizationStopped() &&
+            isChatTargetCurrent(target, collectionId) && groupedChatUnchanged()) {
+            try {
+                const present = identityLedger ? batchInventory
+                    : await readInventoryForHashes(collectionId, settings, attemptedHashes, async () => {
+                        const saved = await getSavedHashes(collectionId, settings, false, getStopSignal());
+                        return new Map(saved.map(hash => [String(hash), []]));
+                    });
+                if (attemptedHashes.every(hash => present.has(hash))) {
+                    for (const hash of attemptedHashes) existingHashes.add(hash);
+                    runCache.plan = {
+                        collectionId, generation: planGeneration, mutation: planMutation,
+                        messages: target.messages, length: target.messages.length,
+                        configKey: planConfigKey, unchanged: groupedChatUnchanged,
+                        existingHashes, groupedItems, identityLedger, identityReconciliation, identityGroups,
+                        inventory: identityLedger ? batchInventory : null,
+                    };
+                }
+            } catch (error) {
+                console.debug('VectHare: Sync plan not kept for the next batch:', error.message);
             }
         }
 
@@ -2485,6 +2927,12 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
             total: groupedItems.length // R7: whole-collection group count for progress display
         };
     } catch (error) {
+        if (error?.code === 'VH_LEDGER_CONFLICT') {
+            // 8B: another tab staged this chat's ledger first. Nothing this pass
+            // had not confirmed was changed; the next pass re-reads and goes on.
+            console.info('VectHare: Another tab is updating this chat; this Sync pass was deferred');
+            return syncDeferred();
+        }
         console.error('VectHare: Sync failed', error);
         throw error;
     } finally {
@@ -2492,6 +2940,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
     }
     } finally {
         endChatCollectionWrite(collectionId);
+        await syncLease?.release();
     }
 }
 
@@ -2579,6 +3028,63 @@ function getRecentMessagesForDedup(chat, settings) {
     return depth > 0 && depth < chat.length ? chat.slice(-depth) : chat;
 }
 
+const RAG_QUERY_CONCURRENCY = 4;
+
+/**
+ * P2: the one source of truth for how many items a Sync/Repair pass takes,
+ * used by Sync Chat, Repair, auto-sync and Content Vectorizer alike.
+ * `embedding_batch_size` when set; otherwise 8 for local transformers, 5 else.
+ * (Transformers still embeds one item per request inside insertVectorItems.)
+ * @param {object} settings VectHare settings
+ * @returns {number}
+ */
+export function getSyncBatchSize(settings) {
+    const configured = Number(settings?.embedding_batch_size);
+    if (Number.isSafeInteger(configured) && configured > 0) return Math.min(configured, 100);
+    // The "Insert Batch Size" slider is the only batch control in the UI. It
+    // already sized each request inside insertVectorItems, but a Sync pass only
+    // ever handed over 5 (or 8) items, so setting it had no visible effect on
+    // chat Sync. Once the user has changed it (flag, or any value other than the
+    // factory 50), the pass uses it too; untouched installs keep 5 / 8.
+    const insert = Number(settings?.insert_batch_size);
+    if (Number.isSafeInteger(insert) && insert > 0 &&
+        (settings?.insert_batch_size_set === true || insert !== 50)) {
+        return Math.min(insert, 100);
+    }
+    return (settings?.source || 'transformers') === 'transformers' ? 8 : 5;
+}
+
+// C10: tell the user once per chat per reason when memories are skipped.
+// The console keeps the details; the toast is the visible hint.
+const toastedRagIssues = new Set();
+function reportRagIssues(issues, debugData) {
+    if (!Array.isArray(issues) || issues.length === 0) return;
+    debugData.ragIssues = issues.map(issue => ({
+        collectionId: issue.collectionId,
+        label: getCollectionMeta(issue.collectionId)?.displayName || issue.collectionId,
+        // The message usually starts with "Collection <id>: "; the label already says which.
+        reason: String(issue.reason || 'unknown reason').replace(/^Collection \S+: /, ''),
+    }));
+    let chatKey = '';
+    try { chatKey = String(getCurrentChatId() ?? ''); } catch { chatKey = ''; }
+    const byReason = new Map();
+    for (const issue of debugData.ragIssues) {
+        if (!byReason.has(issue.reason)) byReason.set(issue.reason, []);
+        const labels = byReason.get(issue.reason);
+        if (!labels.includes(issue.label)) labels.push(issue.label);
+    }
+    for (const [reason, labels] of byReason) {
+        const key = JSON.stringify([chatKey, reason]);
+        if (toastedRagIssues.has(key)) continue;
+        if (toastedRagIssues.size >= 200) toastedRagIssues.clear();
+        toastedRagIssues.add(key);
+        try {
+            toastr.warning(`Memories skipped: ${labels.join(', ')} \u2014 ${reason}. Open VectHare \u2192 Database Browser`,
+                'VectHare', { timeOut: 10000 });
+        } catch { /* toast is a hint only */ }
+    }
+}
+
 /**
  * Stage 3: Query all active collections and merge results
  * @param {string[]} activeCollections Collections that passed activation filters
@@ -2611,10 +3117,21 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
     // instead of one per collection.
     const queryVectorCache = new Map();
 
-    for (const collectionId of activeCollections) {
+    // C10: collections that return nothing because they were skipped or failed.
+    const ragIssues = [];
+    // C9: message hashes that exist in the current chat, and which collection
+    // is this chat's own (only that one is checked for stale chunks).
+    const chatHashKeys = new Set([...chatHashMap.keys()].map(String));
+    let ownChatCollectionId = null;
+    try { ownChatCollectionId = peekChatCollectionId(); } catch { ownChatCollectionId = null; }
+    const isOwnChatCollection = id => !!ownChatCollectionId &&
+        (parseRegistryKey(id).collectionId || id) === ownChatCollectionId;
+    let staleChunksDropped = 0;
+
+    const queryOne = async (collectionId) => {
         try {
             const queryResults = await queryCollection(collectionId, queryText, candidateTopK,
-                settings, queryVectorCache);
+                settings, queryVectorCache, ragIssues);
 
             // TRACE: Vector query results for this collection
             addTrace(debugData, 'vector_search', `Query completed for ${collectionId}`, {
@@ -2629,7 +3146,7 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
                 }))
             });
 
-            console.log(`VectHare: Retrieved ${queryResults.hashes.length} chunks from ${collectionId}`);
+            vhLog(`VectHare: Retrieved ${queryResults.hashes.length} chunks from ${collectionId}`);
 
             // Build chunks with text for visualizer
             const collectionChunks = queryResults.metadata.map((meta, idx) => {
@@ -2684,14 +3201,48 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
                 };
             });
 
-            chunksForVisualizer.push(...collectionChunks);
+            // C9: a chunk of this chat's own collection whose messages are all gone
+            // from the chat (deleted/edited since it was stored) must not be injected.
+            // Other collections (lorebooks, documents, other chats) are untouched.
+            const liveChunks = !isOwnChatCollection(collectionId) ? collectionChunks : collectionChunks.filter(chunk => {
+                const members = chunk.metadata?.messageHashes;
+                if (!Array.isArray(members) || members.length === 0) return true;
+                if (members.some(hash => chatHashKeys.has(String(hash)))) return true;
+                staleChunksDropped++;
+                recordChunkFate(debugData, chunk.hash, 'stale_chunk', 'dropped',
+                    'None of the messages this chunk was made from exist in the chat any more',
+                    { collectionId });
+                return false;
+            });
+
+            return liveChunks;
         } catch (error) {
             console.warn(`VectHare: Failed to query collection ${collectionId}:`, error.message);
             addTrace(debugData, 'vector_search', `Query failed for ${collectionId}`, {
                 error: error.message
             });
+            ragIssues.push({ collectionId, reason: String(error?.message || error) });
+            return [];
         }
+    };
+
+    // P3: collections are queried 4 at a time. The first runs alone so the
+    // shared query-vector cache is filled once before the others reuse it.
+    // Results keep the collection order.
+    const perCollection = [];
+    if (activeCollections.length) {
+        perCollection.push(await queryOne(activeCollections[0]));
+        perCollection.push(...await AsyncUtils.parallel(
+            activeCollections.slice(1).map(collectionId => () => queryOne(collectionId)),
+            RAG_QUERY_CONCURRENCY));
     }
+    for (const list of perCollection) chunksForVisualizer.push(...list);
+
+    debugData.staleChunksDropped = staleChunksDropped;
+    if (staleChunksDropped > 0) {
+        addTrace(debugData, 'stale_chunk', 'Dropped chunks whose source messages are gone', { dropped: staleChunksDropped });
+    }
+    reportRagIssues(ragIssues, debugData);
 
     // Filter exact recent-message duplicates before the global top-K.
     // Stage 9 remains authoritative after summary/group/link processing.
@@ -2703,7 +3254,9 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
     const recentHashKeys = new Set([...recentHashes].map(String));
     const fullyInRecentContext = chunk => {
         const members = chunk.metadata?.messageHashes ?? chunk.messageHashes;
-        return Array.isArray(members) && members.length > 1 &&
+        // Any size: a one-message group of a grouped strategy hashes its
+        // speaker-labelled text, so only its member hash shows it is in context.
+        return Array.isArray(members) && members.length > 0 &&
             members.every(hash => recentHashKeys.has(String(hash)));
     };
     chunksForVisualizer = chunksForVisualizer.filter(chunk =>
@@ -2948,15 +3501,15 @@ function applyTemporalDecayStage(chunks, chat, settings, threshold, debugData) {
         if (scenes.length > 0) {
             decayedChunks = applySceneAwareDecay(chunksWithScores, currentMessageId, scenes, settings.temporal_decay);
             decayType = 'scene_aware';
-            console.log('VectHare: Applied scene-aware temporal decay to search results');
+            vhLog('VectHare: Applied scene-aware temporal decay to search results');
         } else {
             decayedChunks = applyDecayToResults(chunksWithScores, currentMessageId, settings.temporal_decay);
             decayType = 'standard_no_scenes';
-            console.log('VectHare: Applied temporal decay to search results (no scenes marked)');
+            vhLog('VectHare: Applied temporal decay to search results (no scenes marked)');
         }
     } else {
         decayedChunks = applyDecayToResults(chunksWithScores, currentMessageId, settings.temporal_decay);
-        console.log('VectHare: Applied temporal decay to search results');
+        vhLog('VectHare: Applied temporal decay to search results');
     }
 
     decayedChunks.sort((a, b) => b.score - a.score);
@@ -3278,8 +3831,8 @@ function deduplicateChunks(chunks, chat, settings, debugData) {
     // Use the exact same depth semantics as the early top-K candidate filter.
     const recentMessages = getRecentMessagesForDedup(chat, settings);
 
-    console.log(`[VectHare Dedup] Building hash set from ${recentMessages.length} recent messages (depth: ${deduplicationDepth})`);
-    console.log(`[VectHare Dedup] Total chat length: ${chat.length}, checking duplicates in last ${recentMessages.length} messages`);
+    vhLog(`[VectHare Dedup] Building hash set from ${recentMessages.length} recent messages (depth: ${deduplicationDepth})`);
+    vhLog(`[VectHare Dedup] Total chat length: ${chat.length}, checking duplicates in last ${recentMessages.length} messages`);
 
     // Build set of hashes currently in chat context
     const currentChatHashes = new Set();
@@ -3306,7 +3859,7 @@ function deduplicateChunks(chunks, chat, settings, debugData) {
         }
     });
 
-    console.log(`[VectHare Dedup] Built hash set with ${currentChatHashes.size} unique message hashes from recent context`);
+    vhLog(`[VectHare Dedup] Built hash set with ${currentChatHashes.size} unique message hashes from recent context`);
 
     // #12: a grouped chunk is hashed over its combined text, so its hash never
     // equals a single message's hash. It is still redundant when every message
@@ -3315,7 +3868,7 @@ function deduplicateChunks(chunks, chat, settings, debugData) {
     const currentChatHashKeys = new Set([...currentChatHashes].map(String));
     const groupMemberHashes = chunk => {
         const stored = chunk.metadata?.messageHashes ?? chunk.messageHashes;
-        return Array.isArray(stored) && stored.length > 1 ? stored.map(String) : null;
+        return Array.isArray(stored) && stored.length > 0 ? stored.map(String) : null;
     };
 
     const toInject = [];
@@ -3359,7 +3912,7 @@ function deduplicateChunks(chunks, chat, settings, debugData) {
         skippedDuplicates: skipped.length
     });
 
-    console.log(`[VectHare Dedup] FINAL: ${toInject.length} will inject, ${skipped.length} skipped as duplicates`);
+    vhLog(`[VectHare Dedup] FINAL: ${toInject.length} will inject, ${skipped.length} skipped as duplicates`);
 
     return { toInject, skipped };
 }
@@ -3519,26 +4072,26 @@ function resolveChunkInjectionPosition(chunk, settings) {
  */
 function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
     // Control print: Log chunks QUEUED for injection (not yet injected)
-    console.log(`[VectHare Injection Control] Preparing to inject ${chunksToInject.length} chunks`);
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    vhLog(`[VectHare Injection Control] Preparing to inject ${chunksToInject.length} chunks`);
+    vhLog('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     let emptyTextCount = 0;
     chunksToInject.forEach((chunk, idx) => {
         const textLength = chunk.text?.length || 0;
         const hasValidText = textLength > 0 && chunk.text !== '(text not found)' && chunk.text !== '(text not available)';
         if (!hasValidText) emptyTextCount++;
 
-        console.log(`  [${idx + 1}/${chunksToInject.length}] CHUNK QUEUED FOR INJECTION ${!hasValidText ? '⚠️ EMPTY/INVALID TEXT' : ''}`);
-        console.log(`      Hash: ${chunk.hash}`);
-        console.log(`      Score: ${chunk.score?.toFixed(4)}`);
-        console.log(`      Collection: ${chunk.collectionId}`);
-        console.log(`      Text length: ${textLength} chars ${!hasValidText ? '⚠️' : '✓'}`);
-        console.log(`      Text preview: "${chunk.text?.substring(0, 120)}${textLength > 120 ? '...' : ''}"`);
-        console.log('      ─────────────────────────────────────────────────────────────────');
+        vhLog(`  [${idx + 1}/${chunksToInject.length}] CHUNK QUEUED FOR INJECTION ${!hasValidText ? '⚠️ EMPTY/INVALID TEXT' : ''}`);
+        vhLog(`      Hash: ${chunk.hash}`);
+        vhLog(`      Score: ${chunk.score?.toFixed(4)}`);
+        vhLog(`      Collection: ${chunk.collectionId}`);
+        vhLog(`      Text length: ${textLength} chars ${!hasValidText ? '⚠️' : '✓'}`);
+        vhLog(`      Text preview: "${chunk.text?.substring(0, 120)}${textLength > 120 ? '...' : ''}"`);
+        vhLog('      ─────────────────────────────────────────────────────────────────');
     });
     if (emptyTextCount > 0) {
         console.warn(`[VectHare Injection Control] ⚠️ WARNING: ${emptyTextCount}/${chunksToInject.length} chunks have empty or placeholder text!`);
     }
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    vhLog('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
     // Group chunks by resolved injection position+depth
     const positionGroups = new Map(); // "position:depth" → chunks[]
@@ -3558,8 +4111,8 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
         const [_, group] = [...positionGroups.entries()][0];
         const insertedText = buildNestedInjectionText(group.chunks, settings);
 
-        console.log(`[VectHare Injection Control] Single position injection: position="${group.position}", depth=${group.depth}, chunks=${group.chunks.length}, textLength=${insertedText.length}`);
-        console.log(`[VectHare Injection Control] Injection text preview: "${insertedText.substring(0, 200)}${insertedText.length > 200 ? '...' : ''}"`);
+        vhLog(`[VectHare Injection Control] Single position injection: position="${group.position}", depth=${group.depth}, chunks=${group.chunks.length}, textLength=${insertedText.length}`);
+        vhLog(`[VectHare Injection Control] Injection text preview: "${insertedText.substring(0, 200)}${insertedText.length > 200 ? '...' : ''}"`);
 
         setExtensionPrompt(EXTENSION_PROMPT_TAG, insertedText, group.position, group.depth, false);
 
@@ -3567,8 +4120,8 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
         const verifiedPrompt = extension_prompts[EXTENSION_PROMPT_TAG];
         const injectionVerified = verifiedPrompt && verifiedPrompt.value === insertedText;
 
-        console.log(`[VectHare Injection Control] Injection verification: ${injectionVerified ? '✓ PASSED' : '✗ FAILED'}`);
-        console.log(`[VectHare Injection Control] extension_prompts[${EXTENSION_PROMPT_TAG}]:`, {
+        vhLog(`[VectHare Injection Control] Injection verification: ${injectionVerified ? '✓ PASSED' : '✗ FAILED'}`);
+        vhLog(`[VectHare Injection Control] extension_prompts[${EXTENSION_PROMPT_TAG}]:`, {
             exists: !!verifiedPrompt,
             valueLength: verifiedPrompt?.value?.length,
             position: verifiedPrompt?.position,
@@ -3596,7 +4149,7 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
     }
 
     // Multiple injection positions - create separate extension prompts for each
-    console.log(`[VectHare Injection Control] Multiple position injection: ${positionGroups.size} different positions`);
+    vhLog(`[VectHare Injection Control] Multiple position injection: ${positionGroups.size} different positions`);
 
     // Clear the main tag first (will be unused when multi-position)
     setExtensionPrompt(EXTENSION_PROMPT_TAG, '', settings.position, settings.depth, false);
@@ -3610,9 +4163,9 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
         const groupSettings = { ...settings, rag_context: '', rag_xml_tag: '' };
         const groupText = buildNestedInjectionText(group.chunks, groupSettings);
 
-        console.log(`[VectHare Injection Control] Position group ${groupIndex + 1}/${positionGroups.size}: key="${key}", chunks=${group.chunks.length}, textLength=${groupText.length}`);
+        vhLog(`[VectHare Injection Control] Position group ${groupIndex + 1}/${positionGroups.size}: key="${key}", chunks=${group.chunks.length}, textLength=${groupText.length}`);
         group.chunks.forEach((chunk, idx) => {
-            console.log(`    [${idx + 1}/${group.chunks.length}] Hash: ${chunk.hash}, Score: ${chunk.score?.toFixed(4)}`);
+            vhLog(`    [${idx + 1}/${group.chunks.length}] Hash: ${chunk.hash}, Score: ${chunk.score?.toFixed(4)}`);
         });
 
         // Use unique tag per position group
@@ -3624,7 +4177,7 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
         const verifiedPrompt = extension_prompts[tag];
         const verified = verifiedPrompt && verifiedPrompt.value === groupText;
 
-        console.log(`[VectHare Injection Control] Position group ${groupIndex + 1} verification: ${verified ? '✓ PASSED' : '✗ FAILED'}`);
+        vhLog(`[VectHare Injection Control] Position group ${groupIndex + 1} verification: ${verified ? '✓ PASSED' : '✗ FAILED'}`);
 
         if (!verified) {
             console.warn(`VectHare: ⚠️ Injection verification failed for position ${key}`, {
@@ -3649,7 +4202,7 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
         groupIndex++;
     }
 
-    console.log(`[VectHare Injection Control] Injection complete: ${allVerified ? '✓ All verified' : '✗ Some failed'}, ${allTexts.length} groups`);
+    vhLog(`[VectHare Injection Control] Injection complete: ${allVerified ? '✓ All verified' : '✗ Some failed'}, ${allTexts.length} groups`);
 
     return {
         verified: allVerified,
@@ -3671,7 +4224,7 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
  * @param {string} type Generation type
  */
 export async function rearrangeChat(chat, settings, type) {
-    console.log(`🐰 VectHare: rearrangeChat called (type: ${type}, chat length: ${chat?.length || 0})`);
+    vhLog(`🐰 VectHare: rearrangeChat called (type: ${type}, chat length: ${chat?.length || 0})`);
 
     try {
         // === EARLY EXITS ===
@@ -3679,6 +4232,16 @@ export async function rearrangeChat(chat, settings, type) {
             console.debug('VectHare: Skipping quiet prompt');
             return;
         }
+
+        // C11: remember which chat this retrieval is for. Retrieval awaits the
+        // network several times; if the user switched chats meanwhile, the result
+        // belongs to the old chat and must not be injected into the new one.
+        const chatTarget = captureChatTarget();
+        const startChatId = getCurrentChatId();
+        const startGeneration = chatSwitchGeneration;
+        const retrievalStillForThisChat = () => chatTarget
+            ? isChatTargetCurrent(chatTarget)
+            : (getCurrentChatId() === startChatId && chatSwitchGeneration === startGeneration);
 
         // Clear extension prompts (main + any position-specific tags from previous run)
         setExtensionPrompt(EXTENSION_PROMPT_TAG, '', settings.position, settings.depth, false);
@@ -3701,7 +4264,7 @@ export async function rearrangeChat(chat, settings, type) {
         const minChatLength = settings.min_chat_length ?? 0;
         if (minChatLength > 0 && chat.length < minChatLength) {
             console.warn(`⚠️ VectHare: Not enough messages to inject chunks (${chat.length} < ${minChatLength})`);
-            console.log(`   💡 You need at least ${minChatLength} messages before chunk injection starts`);
+            vhLog(`   💡 You need at least ${minChatLength} messages before chunk injection starts`);
             return;
         }
 
@@ -3713,13 +4276,13 @@ export async function rearrangeChat(chat, settings, type) {
 
         if (!hasCollections && !canQueryWI) {
             console.warn('⚠️ VectHare: No enabled collections to query and World Info disabled - chunks cannot be injected!');
-            console.log('   💡 Make sure you have enabled at least one collection in VectHare settings, or enable World Info');
+            vhLog('   💡 Make sure you have enabled at least one collection in VectHare settings, or enable World Info');
             return;
         }
         if (hasCollections) {
-            console.log(`VectHare: Will query ${collectionsToQuery.length} collections:`, collectionsToQuery);
+            vhLog(`VectHare: Will query ${collectionsToQuery.length} collections:`, collectionsToQuery);
         } else {
-            console.log('VectHare: No regular collections enabled, but World Info is enabled - will query lorebooks only');
+            vhLog('VectHare: No regular collections enabled, but World Info is enabled - will query lorebooks only');
         }
 
         // === STAGE 2: Build search query ===
@@ -3736,7 +4299,7 @@ export async function rearrangeChat(chat, settings, type) {
             baseWeight: settings.keyword_boost_base_weight || 1.5
         });
         const queryKeywordTexts = queryKeywords.map(kw => kw.text.toLowerCase());
-        console.log(`VectHare: Extracted ${queryKeywords.length} keywords from query:`, queryKeywordTexts);
+        vhLog(`VectHare: Extracted ${queryKeywords.length} keywords from query:`, queryKeywordTexts);
 
         // === STAGE 3: Filter by activation conditions ===
         let activeCollections = [];
@@ -3757,12 +4320,12 @@ export async function rearrangeChat(chat, settings, type) {
 
         // Allow WI-only mode even if no regular collections pass filters
         if (activeCollections.length === 0 && !canQueryWI) {
-            console.log('⚠️ VectHare: No collections passed activation conditions and World Info disabled - chunks cannot be injected!');
-            console.log('   💡 Check your collection activation conditions in VectHare settings');
+            vhLog('⚠️ VectHare: No collections passed activation conditions and World Info disabled - chunks cannot be injected!');
+            vhLog('   💡 Check your collection activation conditions in VectHare settings');
             return;
         }
         if (activeCollections.length > 0) {
-            console.log(`✅ VectHare: ${activeCollections.length} collections passed activation filters:`, activeCollections);
+            vhLog(`✅ VectHare: ${activeCollections.length} collections passed activation filters:`, activeCollections);
         }
 
         // === INITIALIZE DEBUG DATA ===
@@ -3789,6 +4352,12 @@ export async function rearrangeChat(chat, settings, type) {
             protect: settings.protect
         });
 
+        // C12: let per-chunk annotations (disabled, etc.) of older shared records
+        // be matched to the one collection that holds them before they are used.
+        try { await primeChunkHashClaims(settings); } catch (error) {
+            console.debug(`VectHare: annotation ownership check skipped: ${error.message}`);
+        }
+
         // === STAGE 4: Query all collections and merge results ===
         let chunks = await queryAndMergeCollections(activeCollections, queryText, settings, chat, debugData);
 
@@ -3801,10 +4370,16 @@ export async function rearrangeChat(chat, settings, type) {
                                 'Chunk is disabled', { hash: chunk.hash });
                 return false;
             }
+            // F8: a scene whose messages changed since it was made is not injected.
+            if (meta?.sceneOutdated === true && chunk.metadata?.isScene === true) {
+                recordChunkFate(debugData, chunk.hash, 'disabled_filter', 'dropped',
+                                'Scene is outdated (its messages changed) - re-create it in the chunk browser', { hash: chunk.hash });
+                return false;
+            }
             return true;
         });
         if (chunks.length !== beforeDisabledFilter) {
-            console.log(`VectHare: Disabled filter: ${beforeDisabledFilter} → ${chunks.length} chunks (${beforeDisabledFilter - chunks.length} disabled chunks removed)`);
+            vhLog(`VectHare: Disabled filter: ${beforeDisabledFilter} → ${chunks.length} chunks (${beforeDisabledFilter - chunks.length} disabled chunks removed)`);
             addTrace(debugData, 'disabled_filter', 'Disabled chunks removed', {
                 before: beforeDisabledFilter,
                 after: chunks.length,
@@ -3853,7 +4428,7 @@ export async function rearrangeChat(chat, settings, type) {
             }
 
             if (keywordMatchCount > 0) {
-                console.log(`VectHare: Boosted ${keywordMatchCount}/${chunks.length} chunks with matching keywords to 100% score`);
+                vhLog(`VectHare: Boosted ${keywordMatchCount}/${chunks.length} chunks with matching keywords to 100% score`);
                 debugData.stages.afterKeywordBoost = [...chunks];
                 debugData.stats.keywordBoosted = keywordMatchCount;
                 addTrace(debugData, 'keyword_boost', `Boosted ${keywordMatchCount} chunks with keyword matches`, {
@@ -3861,7 +4436,7 @@ export async function rearrangeChat(chat, settings, type) {
                     boostedCount: keywordMatchCount
                 });
             } else {
-                console.log(`VectHare: No chunks matched query keywords, all ${chunks.length} chunks keep original scores`);
+                vhLog(`VectHare: No chunks matched query keywords, all ${chunks.length} chunks keep original scores`);
             }
         }
 
@@ -3904,7 +4479,7 @@ export async function rearrangeChat(chat, settings, type) {
             console.warn('VectHare: WorldInfo semantic integration failed', wiError.message);
             addTrace(debugData, 'world_info', 'WorldInfo query failed', { error: wiError.message });
         }
-        console.log(`VectHare: Retrieved ${chunks.length} total chunks from ${activeCollections.length} collections`);
+        vhLog(`VectHare: Retrieved ${chunks.length} total chunks from ${activeCollections.length} collections`);
 
         debugData.stages.initial = [...chunks];
         debugData.stats.retrievedFromVector = chunks.length;
@@ -3914,7 +4489,7 @@ export async function rearrangeChat(chat, settings, type) {
         chunks = await expandSummaryChunks(chunks, activeCollections, settings, debugData);
         if (chunks.length !== chunksBeforeExpansion || chunks.some(c => c.expandedFromSummary)) {
             const expandedCount = chunks.filter(c => c.expandedFromSummary).length;
-            console.log(`VectHare: Expanded ${expandedCount} summary chunks to parent text`);
+            vhLog(`VectHare: Expanded ${expandedCount} summary chunks to parent text`);
             debugData.stages.afterSummaryExpansion = [...chunks];
             debugData.stats.summariesExpanded = expandedCount;
         }
@@ -3957,11 +4532,11 @@ export async function rearrangeChat(chat, settings, type) {
             timestamp: Date.now(),
             settings: { threshold: settings.score_threshold, topK: (settings.top_k ?? settings.insert), temporal_decay: settings.temporal_decay }
         };
-        console.log(`VectHare: Stored ${chunks.length} chunks for visualizer`);
+        vhLog(`VectHare: Stored ${chunks.length} chunks for visualizer`);
 
         // === STAGE 9: Deduplicate ===
-        console.log(`[VectHare Deduplication] Starting with ${chunks.length} chunks before deduplication`);
-        console.log(`[VectHare Deduplication] Current chat has ${chat.length} messages`);
+        vhLog(`[VectHare Deduplication] Starting with ${chunks.length} chunks before deduplication`);
+        vhLog(`[VectHare Deduplication] Current chat has ${chat.length} messages`);
 
         const dedupResult = deduplicateChunks(chunks, chat, settings, debugData);
         const skippedDuplicates = dedupResult.skipped;
@@ -3975,21 +4550,21 @@ export async function rearrangeChat(chat, settings, type) {
             const ranked = chunksToInject.filter(chunk => chunk.forcedByGroup == null)
                 .slice(0, Math.max(0, injectionLimit - forced.length));
             const keep = new Set([...forced, ...ranked]);
-            console.log(`[VectHare Deduplication] Trimming ${chunksToInject.length} candidates to top-${injectionLimit} (+${forced.length} group-forced)`);
+            vhLog(`[VectHare Deduplication] Trimming ${chunksToInject.length} candidates to top-${injectionLimit} (+${forced.length} group-forced)`);
             chunksToInject = chunksToInject.filter(chunk => keep.has(chunk));
         }
 
-        console.log(`[VectHare Deduplication] After deduplication: ${chunksToInject.length} to inject, ${skippedDuplicates.length} skipped`);
+        vhLog(`[VectHare Deduplication] After deduplication: ${chunksToInject.length} to inject, ${skippedDuplicates.length} skipped`);
         if (skippedDuplicates.length > 0) {
-            console.log(`[VectHare Deduplication] Skipped chunks (already in chat):`);
+            vhLog(`[VectHare Deduplication] Skipped chunks (already in chat):`);
             skippedDuplicates.forEach((chunk, idx) => {
-                console.log(`  [${idx + 1}] Hash: ${chunk.hash}, Score: ${chunk.score?.toFixed(4)}, Text: "${chunk.text?.substring(0, 80)}..."`);
+                vhLog(`  [${idx + 1}] Hash: ${chunk.hash}, Score: ${chunk.score?.toFixed(4)}, Text: "${chunk.text?.substring(0, 80)}..."`);
             });
         }
 
         if (chunksToInject.length === 0) {
-            console.log('ℹ️ VectHare: All retrieved chunks already in context, nothing to inject');
-            console.log(`   ${skippedDuplicates.length} chunks were skipped (already in current chat)`);
+            vhLog('ℹ️ VectHare: All retrieved chunks already in context, nothing to inject');
+            vhLog(`   ${skippedDuplicates.length} chunks were skipped (already in current chat)`);
             console.info('[VectHare] Injection blocked: All retrieved chunks are already present in the current chat context. Adjust temporal decay or query depth if you want older messages.');
             debugData.stages.injected = [];
             debugData.stats.actuallyInjected = 0;
@@ -4002,14 +4577,18 @@ export async function rearrangeChat(chat, settings, type) {
             return;
         }
 
-        console.log(`[VectHare Deduplication] ✅ ${chunksToInject.length} chunks will proceed to injection`);
+        vhLog(`[VectHare Deduplication] ✅ ${chunksToInject.length} chunks will proceed to injection`);
 
         // === STAGE 10: Inject into prompt ===
+        if (!retrievalStillForThisChat()) {
+            console.warn('VectHare: Chat changed while memories were being retrieved - discarding this result');
+            return;
+        }
         const injection = injectChunksIntoPrompt(chunksToInject, settings, debugData);
 
-        console.log(`\n✅ VectHare: Successfully injected ${chunksToInject.length} chunk(s) into prompt`);
-        console.log(`   Verification: ${injection.verified ? '✓ PASSED' : '✗ FAILED'}`);
-        console.log(`   Total characters injected: ${injection.text.length}\n`);
+        vhLog(`\n✅ VectHare: Successfully injected ${chunksToInject.length} chunk(s) into prompt`);
+        vhLog(`   Verification: ${injection.verified ? '✓ PASSED' : '✗ FAILED'}`);
+        vhLog(`   Total characters injected: ${injection.text.length}\n`);
 
         // Finalize debug data
         debugData.stages.injected = chunksToInject;
@@ -4035,7 +4614,7 @@ export async function rearrangeChat(chat, settings, type) {
         });
 
         setLastSearchDebug(debugData);
-        console.log(`VectHare: ✅ Injected ${chunksToInject.length} chunks (${skippedDuplicates.length} skipped - already in context)`);
+        vhLog(`VectHare: ✅ Injected ${chunksToInject.length} chunks (${skippedDuplicates.length} skipped - already in context)`);
 
     } catch (error) {
         toastr.error(`Generation interceptor aborted: ${error.message}`, 'VectHare');
@@ -4053,6 +4632,7 @@ export async function vectorizeAll(settings, batchSize, includeIndexedCount = fa
     let capturedConfig = null;
     let progressShown = false;
     let runId = null;
+    let runLease = null; // 8C: held for the whole run, renewed every batch
     try {
         // VectHare+: Manual Sync Chat / Continue always runs, regardless of the
         // per-collection auto-sync toggle - auto-sync gating applies ONLY to
@@ -4076,11 +4656,22 @@ export async function vectorizeAll(settings, batchSize, includeIndexedCount = fa
             return;
         }
 
+        // N2: a re-imported/restored chat can get its deleted copy's memories back.
+        await offerDeletedChatReattach(settings);
+        if (!isChatTargetCurrent(target)) throw new ChatSwitchStop();
         // The current chat must have a verified, independent collection.
         const binding = await ensureChatBinding();
         if (!isChatTargetCurrent(target)) throw new ChatSwitchStop();
         if (!binding.writable || !binding.collectionId) {
             toastr.warning('Chat collection identity is not yet verified. No vectors were written.', 'VectHare');
+            vectorizeRunActive = false;
+            return;
+        }
+        try {
+            runLease = await acquireLease(binding.collectionId, { label: 'Sync Chat', isPaused: isVectorizationPaused });
+        } catch (error) {
+            if (error?.code !== 'VH_LEASE_HELD') throw error;
+            toastr.info(error.message, 'VectHare');
             vectorizeRunActive = false;
             return;
         }
@@ -4121,7 +4712,7 @@ export async function vectorizeAll(settings, batchSize, includeIndexedCount = fa
         if (totalMessages === 0) {
             progressTracker.hide();
             toastr.info('This chat has no messages to vectorize.', 'VectHare');
-            console.log('VectHare: Vectorization skipped - chat has no vectorizable messages');
+            vhLog('VectHare: Vectorization skipped - chat has no vectorizable messages');
             vectorizeRunActive = false;
             resetControlState();
             return;
@@ -4137,7 +4728,7 @@ export async function vectorizeAll(settings, batchSize, includeIndexedCount = fa
                 'VectHare',
                 { timeOut: 10000 }
             );
-            console.log('VectHare: Vectorization skipped - per_scene strategy uses scene markers');
+            vhLog('VectHare: Vectorization skipped - per_scene strategy uses scene markers');
             vectorizeRunActive = false;
             resetControlState();
             return;
@@ -4238,6 +4829,7 @@ export async function vectorizeAll(settings, batchSize, includeIndexedCount = fa
                 ? 'from this collection\'s saved configuration'
                 : 'as resolved for this run');
         progressTracker.stats.groupsCompletedThisRun = 0;
+        progressTracker.stats.monotonic = true; // S2: the bar never moves backwards in a run
         progressShown = true;
 
         let finished = false;
@@ -4255,7 +4847,7 @@ export async function vectorizeAll(settings, batchSize, includeIndexedCount = fa
                 progressTracker.markPaused(`Paused after ${processedCount} processed — all completed vectors are saved`);
                 // R9: remember when we paused so ETA/elapsed stay honest on resume
                 progressTracker._pausedAt = Date.now();
-                console.log('VectHare: Vectorization paused');
+                vhLog('VectHare: Vectorization paused');
             },
             onResume: () => {
                 // A stale Resume click must never restart a run for another chat.
@@ -4283,7 +4875,7 @@ export async function vectorizeAll(settings, batchSize, includeIndexedCount = fa
                 if (progressTracker.elements?.resumeBtn) progressTracker.elements.resumeBtn.style.display = 'none';
                 if (progressTracker.elements?.stopBtn) progressTracker.elements.stopBtn.style.display = 'inline-block';
                 progressTracker.updateDisplay();
-                console.log('VectHare: Vectorization resumed — continuing from last completed item');
+                vhLog('VectHare: Vectorization resumed — continuing from last completed item');
             },
             onStop: () => {
                 stopVectorization();
@@ -4303,10 +4895,12 @@ export async function vectorizeAll(settings, batchSize, includeIndexedCount = fa
                 // which is harmless - it writes a valid chunk the next sync's
                 // hash diff reconciles. Nothing partial can ever be written.
                 toastr.info('Stopping - the in-flight request is being cancelled. Everything completed is saved. The run ends immediately.', 'VectHare');
-                console.log('VectHare: Vectorization stop requested (in-flight request aborted)');
+                vhLog('VectHare: Vectorization stop requested (in-flight request aborted)');
             },
         });
 
+        // P1: the plan is made once and reused by later batches while nothing changes.
+        const runCache = {};
         while (!finished) {
             if (!isChatTargetCurrent(target, binding.collectionId)) throw new ChatSwitchStop();
             if (is_send_press) {
@@ -4342,14 +4936,36 @@ export async function vectorizeAll(settings, batchSize, includeIndexedCount = fa
             }
 
             if (!isChatTargetCurrent(target, binding.collectionId)) throw new ChatSwitchStop();
+            if (runLease && !await runLease.touch()) {
+                const lost = new Error('Another tab or device took over this chat; Sync stopped between batches. Completed vectors are saved.');
+                lost.code = 'VH_LEASE_LOST';
+                throw lost;
+            }
             // VectHare+: bypassAutoSync=true - the run was explicitly started by
             // the user (Sync Chat / Continue button); synchronizeChat's autoSync
             // gate must not block a manual run.
             // VectHare+ (restored + improved): bypassAutoSync=true - the run was
             // explicitly started by the user (Sync Chat / Continue button), so
             // synchronizeChat's autoSync gate must not block a manual run.
-            const result = await synchronizeChat(settings, batchSize, true, validatedManualSync, capturedConfig);
+            const result = await synchronizeChat(settings, batchSize, true, validatedManualSync, capturedConfig, runCache);
             if (!isChatTargetCurrent(target, binding.collectionId)) throw new ChatSwitchStop();
+            // A brand-new collection gets its identity ledger in the first pass,
+            // and its saved configuration records that (identityLedger: 1). The
+            // configuration captured before that first write does not, so later
+            // passes of this same run skipped the ledger and only the first
+            // batch was tracked. Adopt the saved record once it exists.
+            if (capturedConfig && capturedConfig.identityLedger !== 1 && (result?.chunksCreated || 0) > 0) {
+                try {
+                    const saved = await readInitialVectorizationConfig(binding.collectionId, settings);
+                    if (saved.status === 'valid' && saved.config?.identityLedger === 1) {
+                        assertCollectionOperationSettingsStable(saved.config, settings, chatConfigChunking(settings));
+                        capturedConfig = saved.config;
+                    }
+                } catch (error) {
+                    console.debug('VectHare: saved configuration not re-read:', error.message);
+                }
+                if (!isChatTargetCurrent(target, binding.collectionId)) throw new ChatSwitchStop();
+            }
 
             // VectHare+ BUG FIX (infinite failure loop): items that permanently
             // fail to embed are never written to the DB, so they re-enter the
@@ -4413,13 +5029,28 @@ export async function vectorizeAll(settings, batchSize, includeIndexedCount = fa
             progressTracker.updateProgress(
                 result.total - result.remaining,
                 result.remaining > 0
-                    ? `Processing... ${result.remaining} ${progressUnit.toLowerCase()} remaining`
+                    ? phaseText('Embedding', result.total - result.remaining, result.total)
                     : 'Finalizing...'
             );
             progressTracker.updateChunks(totalChunks);
 
-            console.log(`VectHare: Vectorization iteration ${iteration}, ${result.remaining > 0 ? result.remaining + ' remaining' : 'complete'} (${result.chunksCreated} chunks this batch)`);
+            vhLog(`VectHare: Vectorization iteration ${iteration}, ${result.remaining > 0 ? result.remaining + ' remaining' : 'complete'} (${result.chunksCreated} chunks this batch)`);
 
+        }
+
+        // A manual Sync finishes in one press: if this run's writes superseded
+        // indexed chunks (see needsReconciliation in synchronizeChat), run one
+        // more pass so their old vectors are removed now, not at a later Sync.
+        if (totalChunks > 0 && !isVectorizationStopped() &&
+            getCollectionMeta(binding.collectionId)?.needsReconciliation === true &&
+            isChatTargetCurrent(target, binding.collectionId)) {
+            try {
+                progressTracker.updateProgress(progressTracker.stats.processedItems, 'Removing superseded chunks…');
+                await synchronizeChat(settings, batchSize, true, validatedManualSync, capturedConfig, {});
+            } catch (error) {
+                if (error instanceof ChatSwitchStop) throw error;
+                console.warn('VectHare: Cleanup pass deferred to the next Sync:', error.message);
+            }
         }
 
         vectorizeRunActive = false;
@@ -4429,7 +5060,20 @@ export async function vectorizeAll(settings, batchSize, includeIndexedCount = fa
         await flushVectHareStore().catch(error =>
             console.error('VectHare: Collection metadata could not be saved:', error));
         toastr.success('Chat vectorized successfully', 'VectHare');
-        console.log(`VectHare: ✅ Vectorization complete after ${iteration} iterations`);
+        vhLog(`VectHare: ✅ Vectorization complete after ${iteration} iterations`);
+        // F8: scenes are never retired by Sync; mark the ones whose messages changed.
+        try {
+            const { refreshSceneStaleness } = await import('./scenes.js');
+            if (isChatTargetCurrent(target, binding.collectionId)) {
+                const scenes = await refreshSceneStaleness(settings, binding.collectionId, target.messages);
+                if (scenes.outdated) {
+                    toastr.warning(`${scenes.outdated} scene(s) are outdated because their messages changed. ` +
+                        'They are not used until re-created (chunk browser \u2192 Scenes).', 'VectHare', { timeOut: 10000 });
+                }
+            }
+        } catch (error) {
+            console.debug('VectHare: Scene staleness check skipped:', error.message);
+        }
         // Content Vectorizer needs the TOTAL stored count, not just the number
         // newly written during this Sync. A read failure must not make a
         // successful vectorization look like a failed one.
@@ -4454,6 +5098,11 @@ export async function vectorizeAll(settings, batchSize, includeIndexedCount = fa
             toastr.info('Vectorization stopped. Everything completed is saved.', 'VectHare');
             return;
         }
+        if (error?.code === 'VH_LEASE_LOST') {
+            if (progressShown) progressTracker.complete('stopped', 'Stopped - another tab took over this chat', runId);
+            toastr.info(error.message, 'VectHare');
+            return;
+        }
         if (error instanceof ChatSwitchStop) {
             if (progressShown) progressTracker.complete('stopped', 'Stopped because you switched chats — completed vectors saved', runId);
             toastr.info('Vectorization stopped because you switched chats. Completed vectors are saved; return to the original chat to continue.', 'VectHare');
@@ -4464,6 +5113,8 @@ export async function vectorizeAll(settings, batchSize, includeIndexedCount = fa
         progressTracker.addError(error.message);
         progressTracker.complete(false, 'Vectorization failed', runId);
         toastr.error(`Vectorization failed: ${error.message}`, 'VectHare');
+    } finally {
+        await runLease?.release();
     }
 }
 
@@ -4489,6 +5140,21 @@ export async function vectorizeAll(settings, batchSize, includeIndexedCount = fa
  * @param {number} batchSize Embed batch size (unused for deletes)
  */
 export async function repairChatVectors(settings, batchSize = 5, embeddedMode = false) {
+    const ctx = { runId: null };
+    const result = await repairChatVectorsImpl(settings, batchSize, embeddedMode, ctx);
+    // S3: the panel now opens when Repair starts, so every way out of Repair
+    // (including the early "blocked" returns) must leave it finished, never
+    // running. Embedded runs hand the panel to Sync Chat right after this.
+    if (embeddedMode !== 'auto' && ctx.runId != null && progressTracker.isCurrentRun(ctx.runId) &&
+        !progressTracker.isComplete) {
+        progressTracker.complete(result === 'ok',
+            result === 'ok' ? 'Repair check finished' : 'Repair ended before making any change - see the message shown',
+            ctx.runId);
+    }
+    return result;
+}
+
+async function repairChatVectorsImpl(settings, batchSize, embeddedMode, ctx) {
     // `embeddedMode`: Sync Chat runs this as its first step and already owns the
     // run (lock, panel controls). Returns 'ok' only when Sync may add new content.
     // 'auto' additionally means background auto-sync: no progress panel, no
@@ -4501,6 +5167,15 @@ export async function repairChatVectors(settings, batchSize = 5, embeddedMode = 
     settings = snapshotCollectionOperationSettings(settings);
     let capturedConfig = null;
     let writeLockedCollection = null;
+    let repairLease = null;
+    // Called at batch boundaries: stop cleanly if another tab took the chat.
+    const leaseStillHeld = async () => {
+        if (repairLease && !await repairLease.touch()) {
+            const error = new Error('Another tab or device took over this chat; Repair stopped between steps.');
+            error.code = 'VH_LEASE_LOST';
+            throw error;
+        }
+    };
     let progressShown = false;
     let runId = null;
     try {
@@ -4524,6 +5199,19 @@ export async function repairChatVectors(settings, batchSize = 5, embeddedMode = 
         if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
         beginChatCollectionWrite(collectionId);
         writeLockedCollection = collectionId;
+        // 8C: one tab at a time per chat (re-entrant when Sync runs Repair).
+        repairLease = await acquireLease(collectionId, { label: 'Repair', isPaused: isVectorizationPaused });
+
+        // S3: open the panel now, so reading and comparing are visible too.
+        // Weights: read 10%, compare 5%, embed 60%, delete 15%, verify 10%
+        // (phases with no work give their share to the others, see below).
+        if (!silent) {
+            runId = panel().show('Repairing Chunks', 0, 'Items');
+            ctx.runId = runId;
+            progressShown = true;
+            panel().setWeightedPercent(0);
+            panel().setPhase('Verifying collection settings…');
+        }
 
         // Repair only makes sense for an existing, registered collection.
         // Stage 2B checks the saved physical destination before any DB action.
@@ -4577,12 +5265,17 @@ export async function repairChatVectors(settings, batchSize = 5, embeddedMode = 
         // These shared-store delete APIs currently delete by hash without a
         // logical collection filter. Do not risk touching another chat's
         // matching hash (issues #30/#70); this is not a settings mismatch.
-        if (settings.vector_backend === 'milvus' ||
-            (settings.vector_backend === 'qdrant' && settings.qdrant_multitenancy)) {
+        // 9b: the collection's own layout (its locator, or today's setting).
+        // 9c (P7): lifted for the new layouts (Qdrant/Milvus v2, Milvus per-
+        // collection) when the plugin scopes them; legacy layouts stay gated.
+        const repairStorage = resolveStorage(collectionId, settings);
+        if ((settings.vector_backend === 'milvus' && !(repairStorage.v2 && await scopedTenancySupported())) ||
+            (settings.vector_backend === 'qdrant' && repairStorage.layout === 'legacy-mt')) {
             // Sync Chat keeps its previous behaviour on these backends; the
             // pre-Sync repair step is simply unavailable there.
             if (embedded) return 'ok';
-            notify('error', 'Repair is disabled for shared storage until deletion is scoped to the logical collection.',
+            notify('error', 'Repair is disabled for shared storage (Milvus, or Qdrant multitenancy) until deletion is scoped to the logical collection. ' +
+                'Your vectors are untouched and Sync Chat still works. For repairable chats use per-collection storage (Standard, LanceDB, or Qdrant with multitenancy off); shared-storage repair comes with the multitenancy update.',
                 'Repair blocked: unsafe shared storage', { timeOut: 0, closeOnHover: false });
             releaseRun();
             return;
@@ -4592,6 +5285,7 @@ export async function repairChatVectors(settings, batchSize = 5, embeddedMode = 
         // Stage 13.0: existing collections opt in only if their original
         // backend-resident configuration recorded the identity ledger capability.
         let identityLedger = null, identityReconciliation = null, identityGroups = [];
+        panel()?.setPhase('Reading collection…');
         if (capturedConfig?.identityLedger === 1) {
             try {
                 try {
@@ -4630,6 +5324,7 @@ export async function repairChatVectors(settings, batchSize = 5, embeddedMode = 
         }
 
         if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
+        panel()?.setWeightedPercent(10);
         const storedHashes = collectionData?.hashes;
         const metadataArr = collectionData?.metadata;
         if (!Array.isArray(storedHashes) || !Array.isArray(metadataArr) ||
@@ -4714,6 +5409,7 @@ export async function repairChatVectors(settings, batchSize = 5, embeddedMode = 
 
         // Current chat, grouped EXACTLY like sync (shared helper)
         if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
+        panel()?.setPhase('Comparing with chat…');
         let groupedItems = collectGroupedItems(target.messages, settings);
         if (identityLedger) {
             identityReconciliation = await reconcileIdentityMessages(target.messages, identityLedger);
@@ -4855,6 +5551,7 @@ export async function repairChatVectors(settings, batchSize = 5, embeddedMode = 
 
         }
 
+        panel()?.setWeightedPercent(15);
         // R14/R18: diagnostic logging. R18 expands this to hash-level detail so
         // the "repair looks clean in-session but dirty again after reload"
         // oscillation (user report) can be attributed in ONE test: compare the
@@ -4863,18 +5560,20 @@ export async function repairChatVectors(settings, batchSize = 5, embeddedMode = 
         //   session-dependent hash drift (macros/regex/fileLength in the text)
         // - DIFFERENT collectionId after reload => collection-ID split (watch
         //   for the "falling back to chatId" warning)
-        console.log(`VectHare: Repair target - collection "${collectionId}" (backend: ${settings.vector_backend || 'standard'}, multitenancy: ${!!settings.qdrant_multitenancy})`);
-        console.log(`VectHare: Repair analysis - stale/duplicate vectors to delete: ${hashesToDelete.length}, replacements to re-vectorize: ${replacements.length}`);
+        vhLog(`VectHare: Repair target - collection "${collectionId}" (backend: ${settings.vector_backend || 'standard'}, storage: ${resolveStorage(collectionId, settings).physical})`);
+        vhLog(`VectHare: Repair analysis - stale/duplicate vectors to delete: ${hashesToDelete.length}, replacements to re-vectorize: ${replacements.length}`);
         for (const { hash, meta } of ghosts) {
-            console.log(`  [stale] hash ${hash} (msgIds: ${extractMessageIds(meta).join(',') || '?'})`);
+            vhLog(`  [stale] hash ${hash} (msgIds: ${extractMessageIds(meta).join(',') || '?'})`);
         }
         for (const item of replacements) {
-            console.log(`  [replace] hash ${item.hash} (msgIds: ${extractMessageIds(item.metadata).join(',') || '?'}) text: "${String(item.text).substring(0, 60)}..."`);
+            vhLog(`  [replace] hash ${item.hash} (msgIds: ${extractMessageIds(item.metadata).join(',') || '?'}) text: "${String(item.text).substring(0, 60)}..."`);
         }
 
         if (hashesToDelete.length === 0 && replacements.length === 0) {
             if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
             if (identityLedger) {
+                panel()?.setPhase('Verifying…');
+                panel()?.setWeightedPercent(90);
                 if (!await finishIdentityLedger(identityLedger, identityReconciliation, identityGroups,
                     await readIdentityInventory(collectionId, settings))) {
                     throw new Error('Identity ledger could not verify the current indexed groups');
@@ -4885,10 +5584,9 @@ export async function repairChatVectors(settings, batchSize = 5, embeddedMode = 
             // panel reveal resurrected clickable controls for a run that no
             // longer existed. complete() hides controls and shows an honest
             // green-tick line.
-            if (!embedded) runId = panel()?.show('Repairing Chunks', 0, 'Items');
             const uncertainCount = identityReconciliation?.uncertainUids?.size || 0;
             const noWorkMessage = uncertainCount
-                ? `No verified repair actions; ${uncertainCount} source identity association(s) unresolved and preserved.`
+                ? `No verified repair actions; ${uncertainCount} source identity association(s) unresolved and preserved. ${UNRESOLVED_ACTION_HINT(uncertainCount)}`
                 : 'Nothing to repair — no repair work detected for the current chat';
             if (!embedded) panel()?.complete(!uncertainCount, noWorkMessage, runId);
             if (uncertainCount) notify('warning', noWorkMessage, 'Repair');
@@ -4908,14 +5606,23 @@ export async function repairChatVectors(settings, batchSize = 5, embeddedMode = 
         // Persist intent before the first embedding or deletion. A crash must
         // not leave a clean ledger falsely asserting the prior indexed state.
         if (identityLedger) {
+            panel()?.setPhase('Saving…');
             await stageIdentityLedger(identityLedger,
                 replacements.map(item => String(item.hash)), hashesToDelete,
                 identityReconciliation, identityGroups);
         }
         // ---- Execute with progress panel + Pause/Stop ----
         const totalUnits = hashesToDelete.length + replacements.length;
-        runId = panel()?.show('Repairing Chunks', totalUnits, 'Items');
-        progressShown = !silent;
+        panel()?.retarget(totalUnits, 'Items');
+        // S3: the 85% after reading/comparing is shared by the phases that have
+        // work, in the weights 60 (embed) : 15 (delete) : 10 (verify).
+        const execWeight = (replacements.length ? 60 : 0) + (hashesToDelete.length ? 15 : 0) + 10;
+        const execScale = 85 / execWeight;
+        const embedStart = 15;
+        const embedSpan = replacements.length ? 60 * execScale : 0;
+        const deleteStart = embedStart + embedSpan;
+        const deleteSpan = hashesToDelete.length ? 15 * execScale : 0;
+        const verifyStart = deleteStart + deleteSpan;
         resetControlState();
         panel()?.setControls({
             onPause: () => { pauseVectorization(); progressTracker.markPaused('Repair paused - completed fixes are saved'); },
@@ -4958,6 +5665,8 @@ export async function repairChatVectors(settings, batchSize = 5, embeddedMode = 
         // Phase 1: re-insert replacements FIRST (insert-before-delete: a failed
         // embed leaves the stale vector in place rather than a hole; the ghost
         // cleanup on the next pass will retry)
+        let attemptedReplacements = 0;
+        if (replacements.length) panel()?.setPhase(phaseText('Re-embedding', 0, replacements.length));
         for (const item of replacements) {
             while (isVectorizationPaused() && !isVectorizationStopped() &&
                 isChatTargetCurrent(target, collectionId)) {
@@ -4965,6 +5674,7 @@ export async function repairChatVectors(settings, batchSize = 5, embeddedMode = 
             }
             if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
             if (isVectorizationStopped()) break;
+            await leaseStillHeld();
             try {
                 const chunks = prepareItemsForInsertion([item]);
                 const supersedes = replacementSources.get(String(item.hash));
@@ -4994,12 +5704,18 @@ export async function repairChatVectors(settings, batchSize = 5, embeddedMode = 
                 console.warn(`VectHare: Repair - replacement write not acknowledged (hash ${item.hash}):`, err.message);
                 replacementFailures++;
             }
-            panel()?.updateProgress(done,
-                `Repairing... ${totalUnits - done} outstanding` +
-                `${replacementFailures ? ` (${replacementFailures} replacement write errors)` : ''}`);
+            attemptedReplacements++;
+            panel()?.updateProgress(done);
+            panel()?.setWeightedPercent(embedStart + embedSpan * attemptedReplacements / replacements.length);
+            panel()?.setPhase(phaseText('Re-embedding', attemptedReplacements, replacements.length) +
+                `${replacementFailures ? ` (${replacementFailures} write errors)` : ''}`, { log: false });
         }
 
         // Check acknowledged replacement hashes BEFORE deleting any stale records.
+        if (writtenReplacements.length > 0 && !isVectorizationStopped()) {
+            panel()?.setPhase('Verifying replacements…');
+            panel()?.setWeightedPercent(deleteStart);
+        }
         let hashesFound = 0;
         let verificationUnavailable = false;
         const hashesNotFound = [];
@@ -5011,15 +5727,21 @@ export async function repairChatVectors(settings, batchSize = 5, embeddedMode = 
             if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
             if (!isVectorizationStopped()) {
                 try {
-                    const savedHashes = await getSavedHashes(collectionId, settings, false, getStopSignal());
+                    // P5: read back only the hashes just written.
+                    const written = await readInventoryForHashes(collectionId, settings,
+                        writtenReplacements.map(item => item.hash), async () => {
+                            // Fallback as before: the plain hash list (works without metadata).
+                            const savedHashes = await getSavedHashes(collectionId, settings, false, getStopSignal());
+                            return new Map(savedHashes.map(hash => [String(hash), []]));
+                        });
                     if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
                     if (!isVectorizationStopped()) {
-                        const verifyHashes = new Set(savedHashes.map(hash => String(hash)));
+                        const verifyHashes = new Set([...written.keys()]);
                         for (const item of writtenReplacements) {
                             if (verifyHashes.has(String(item.hash))) hashesFound++;
                             else hashesNotFound.push(item);
                         }
-                        console.log(`VectHare: Repair hash check - ${hashesFound}/${writtenReplacements.length} acknowledged replacement hashes found`);
+                        vhLog(`VectHare: Repair hash check - ${hashesFound}/${writtenReplacements.length} acknowledged replacement hashes found`);
                         for (const item of hashesNotFound) {
                             console.warn(`VectHare: Repair replacement hash not found: ${item.hash}`);
                         }
@@ -5041,7 +5763,8 @@ export async function repairChatVectors(settings, batchSize = 5, embeddedMode = 
             // Hash presence alone could belong to an unrelated source. For
             // identity-ledger deletes require the new chat provenance too.
             try {
-                const inventory = await readIdentityInventory(collectionId, settings);
+                const inventory = await readInventoryForHashes(collectionId, settings,
+                    replacements.map(item => item.hash));
                 replacementChecksPassed = replacements.every(item =>
                     identityGroups.some(group => String(group.hash) === String(item.hash) &&
                         verifiedGroupHash(identityLedger, group, inventory)));
@@ -5055,7 +5778,8 @@ export async function repairChatVectors(settings, batchSize = 5, embeddedMode = 
             // #57: the hash alone does not prove the stored record has the text,
             // grouping and provenance that this replacement was meant to carry.
             try {
-                const inventory = await readIdentityInventory(collectionId, settings);
+                const inventory = await readInventoryForHashes(collectionId, settings,
+                    writtenReplacements.map(item => item.hash));
                 for (const item of writtenReplacements) {
                     let recordMatches = false;
                     for (const variant of textVariants(item)) {
@@ -5107,31 +5831,54 @@ export async function repairChatVectors(settings, batchSize = 5, embeddedMode = 
         }
         if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
         if (safeDeletes.length > 0 && !isVectorizationStopped()) {
+            // S3: removed in batches of 50, each read back before the next, so
+            // the panel moves and a failure leaves only the unconfirmed keys.
+            const DELETE_BATCH = 50;
+            let confirmedBatches = 0; // keys in batches that were read back
+            let stillStoredTotal = 0;
             try {
                 assertCollectionOperationSettingsStable(capturedConfig, settings, chatConfigChunking(settings));
-                await deleteVectorItems(collectionId, safeDeletes, settings, getStopSignal());
-                if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
-                // An acknowledged request is not proof: read the inventory back and
-                // count only keys whose every physical copy is actually gone (#67).
-                const remaining = await readIdentityInventory(collectionId, settings);
-                if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
-                const stillStored = safeDeletes.filter(hash => remaining.has(String(hash)));
-                deleted += safeDeletes.length - stillStored.length;
-                done += safeDeletes.length - stillStored.length;
-                deletionFailures += stillStored.length;
-                if (stillStored.length) {
-                    console.warn(`VectHare: Repair deletion acknowledged but ${stillStored.length} key(s) remain stored`);
-                } else {
-                    console.log(`VectHare: Repair deletion verified for ${safeDeletes.length} stale deletion key(s)`);
+                for (let from = 0; from < safeDeletes.length; from += DELETE_BATCH) {
+                    while (isVectorizationPaused() && !isVectorizationStopped() &&
+                            isChatTargetCurrent(target, collectionId)) {
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                    }
+                    if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
+                    if (isVectorizationStopped()) break;
+                    await leaseStillHeld();
+                    const part = safeDeletes.slice(from, from + DELETE_BATCH);
+                    panel()?.setPhase(phaseText('Removing stale', confirmedBatches, safeDeletes.length),
+                        { log: from === 0 });
+                    await deleteVectorItems(collectionId, part, settings, getStopSignal());
+                    if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
+                    // An acknowledged request is not proof: read the inventory back and
+                    // count only keys whose every physical copy is actually gone (#67).
+                    const remaining = await readInventoryForHashes(collectionId, settings, part);
+                    if (!isChatTargetCurrent(target, collectionId)) throw new ChatSwitchStop();
+                    const stillStored = part.filter(hash => remaining.has(String(hash)));
+                    deleted += part.length - stillStored.length;
+                    done += part.length - stillStored.length;
+                    deletionFailures += stillStored.length;
+                    stillStoredTotal += stillStored.length;
+                    confirmedBatches += part.length;
+                    panel()?.updateProgress(done);
+                    panel()?.setWeightedPercent(deleteStart + deleteSpan * confirmedBatches / safeDeletes.length);
+                    panel()?.setPhase(phaseText('Removing stale', confirmedBatches, safeDeletes.length), { log: false });
+                }
+                if (stillStoredTotal) {
+                    console.warn(`VectHare: Repair deletion acknowledged but ${stillStoredTotal} key(s) remain stored`);
+                } else if (confirmedBatches === safeDeletes.length) {
+                    vhLog(`VectHare: Repair deletion verified for ${safeDeletes.length} stale deletion key(s)`);
                 }
             } catch (delError) {
-                if (delError instanceof ChatSwitchStop) throw delError;
+                if (delError instanceof ChatSwitchStop || delError?.code === 'VH_LEASE_LOST') throw delError;
                 if (!isVectorizationStopped()) {
-                    deletionFailures += safeDeletes.length;
+                    // Keys in earlier batches were read back; the rest are unconfirmed.
+                    deletionFailures += safeDeletes.length - confirmedBatches;
                     console.warn('VectHare: Repair - deletion not acknowledged; database outcome may be uncertain:', delError.message);
                 }
             }
-            panel()?.updateProgress(done, `Repairing... ${totalUnits - done} outstanding`);
+            panel()?.updateProgress(done);
         }
 
         // Do not finish a merely paused repair; Resume or Stop remains available.
@@ -5148,6 +5895,10 @@ export async function repairChatVectors(settings, batchSize = 5, embeddedMode = 
             hashesFound === replacements.length && deleted === hashesToDelete.length;
         const unresolved = Math.max(0, totalUnits - (hashesFound + deleted));
         let identityLedgerConfirmed = !identityLedger;
+        if (!stopped) {
+            panel()?.setPhase('Verifying…');
+            panel()?.setWeightedPercent(verifyStart);
+        }
         if (identityLedger && !stopped) {
             try {
                 const inventory = await readIdentityInventory(collectionId, settings);
@@ -5172,7 +5923,7 @@ export async function repairChatVectors(settings, batchSize = 5, embeddedMode = 
             // Phase 4: say what was NOT acted on, so a pass that leaves groups
             // behind is never read as "everything is repaired".
             `${identityReconciliation?.uncertainUids?.size
-                ? `, ${identityReconciliation.uncertainUids.size} source identity association(s) unresolved and preserved`
+                ? `, ${identityReconciliation.uncertainUids.size} source identity association(s) unresolved and preserved (${UNRESOLVED_ACTION_HINT(identityReconciliation.uncertainUids.size)})`
                 : ''}` +
             `${groupsLeftToSync ? `, ${groupsLeftToSync} group(s) left to Sync Chat (contain never-indexed messages)` : ''}` +
             `${!identityLedgerConfirmed ? ', identity ledger verification incomplete' : ''}`;
@@ -5196,6 +5947,16 @@ export async function repairChatVectors(settings, batchSize = 5, embeddedMode = 
             notify('info', 'Repair stopped. Completed changes are saved.', 'VectHare');
             return;
         }
+        if (error?.code === 'VH_LEASE_HELD' || error?.code === 'VH_LEASE_LOST') {
+            if (progressShown) panel()?.complete('stopped', 'Repair stopped - another tab is working on this chat', runId);
+            notify('info', error.message, 'Repair');
+            return;
+        }
+        if (error?.code === 'VH_LEDGER_CONFLICT') {
+            if (progressShown) panel()?.complete('stopped', 'Repair stopped - another tab is updating this chat', runId);
+            notify('info', 'Another tab or device is updating this chat right now, so Repair stopped before changing anything unconfirmed. Run it again in a moment.', 'Repair');
+            return;
+        }
         if (error instanceof ChatSwitchStop) {
             if (progressShown) panel()?.complete('stopped', 'Repair stopped because you switched chats — completed changes saved', runId);
             notify('info', 'Repair stopped because you switched chats. Completed changes are saved.', 'VectHare');
@@ -5208,6 +5969,7 @@ export async function repairChatVectors(settings, batchSize = 5, embeddedMode = 
         notify('error', `Repair failed: ${error.message}`, 'VectHare');
     } finally {
         if (writeLockedCollection) endChatCollectionWrite(writeLockedCollection);
+        await repairLease?.release();
     }
 }
 
@@ -5290,7 +6052,7 @@ export async function purgeChatIndex(settings) {
     try {
         if (await withChatCollectionPurgeGuard(collectionId, () => purgeVectorIndex(collectionId, settings))) {
             toastr.success('Vector index purged', 'VectHare');
-            console.log('VectHare: Index purged successfully');
+            vhLog('VectHare: Index purged successfully');
         } else {
             toastr.error('Failed to purge vector index', 'VectHare');
         }

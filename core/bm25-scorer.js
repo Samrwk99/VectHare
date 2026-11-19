@@ -1,3 +1,4 @@
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * BM25+ KEYWORD SCORING (ENHANCED)
@@ -399,7 +400,7 @@ export class BM25Scorer {
         // Calculate IDF for all terms in corpus
         this.idf = calculateIDF(this.documentTermFreqs, this.totalDocs, this.delta);
 
-        console.log(`[BM25+] Indexed ${this.totalDocs} documents, avg length: ${this.avgDocLength.toFixed(1)} tokens, sublinearTf=${this.sublinearTf}, fieldBoosting=${this.fieldBoosting}`);
+        vhLog(`[BM25+] Indexed ${this.totalDocs} documents, avg length: ${this.avgDocLength.toFixed(1)} tokens, sublinearTf=${this.sublinearTf}, fieldBoosting=${this.fieldBoosting}`);
     }
 
     /**
@@ -551,7 +552,7 @@ export function applyBM25Scoring(results, query, options = {}) {
         beta = 0.5    // Weight for BM25 score
     } = options;
 
-    console.log(`[BM25] Applying BM25 scoring to ${results.length} results (k1=${k1}, b=${b}, α=${alpha}, β=${beta})`);
+    vhLog(`[BM25] Applying BM25 scoring to ${results.length} results (k1=${k1}, b=${b}, α=${alpha}, β=${beta})`);
 
     // Create BM25 scorer
     const scorer = createBM25Scorer(results, { k1, b });
@@ -590,7 +591,7 @@ export function applyBM25Scoring(results, query, options = {}) {
     // Sort by combined score
     scoredResults.sort((a, b) => b.score - a.score);
 
-    console.log(`[BM25] Top result: vector=${scoredResults[0].vectorScore.toFixed(4)}, bm25=${scoredResults[0].bm25Score.toFixed(4)}, combined=${scoredResults[0].score.toFixed(4)}`);
+    vhLog(`[BM25] Top result: vector=${scoredResults[0].vectorScore.toFixed(4)}, bm25=${scoredResults[0].bm25Score.toFixed(4)}, combined=${scoredResults[0].score.toFixed(4)}`);
 
     return scoredResults;
 }

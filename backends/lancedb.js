@@ -1,3 +1,4 @@
+import { vhLog } from '../utils/log.js';
 /**
  * ============================================================================
  * LANCEDB BACKEND (via Unified Plugin API)
@@ -72,7 +73,7 @@ export class LanceDBBackend extends VectorBackend {
             throw new Error(`Failed to initialize LanceDB: ${response.status} ${response.statusText} - ${errorBody}`);
         }
 
-        console.log('VectHare: Using LanceDB backend (disk-based, scalable)');
+        vhLog('VectHare: Using LanceDB backend (disk-based, scalable)');
     }
 
     async healthCheck() {
@@ -153,7 +154,7 @@ export class LanceDBBackend extends VectorBackend {
             throw new Error(`[LanceDB] Failed to insert ${items.length} vectors into ${collectionId}: ${response.status} ${response.statusText} - ${errorBody}`);
         }
 
-        console.log(`VectHare LanceDB: Inserted ${items.length} vectors into ${collectionId}`);
+        vhLog(`VectHare LanceDB: Inserted ${items.length} vectors into ${collectionId}`);
     }
 
     async deleteVectorItems(collectionId, hashes, settings) {
@@ -178,7 +179,7 @@ export class LanceDBBackend extends VectorBackend {
 
     async queryCollection(collectionId, searchText, topK, settings, queryVector = null) {
         const actualCollectionId = this._stripRegistryPrefix(collectionId);
-        console.log(`[LanceDB] queryCollection: original=${collectionId}, stripped=${actualCollectionId}`);
+        vhLog(`[LanceDB] queryCollection: original=${collectionId}, stripped=${actualCollectionId}`);
         const response = await fetch('/api/plugins/similharity/chunks/query', {
             method: 'POST',
             headers: getRequestHeaders(),
@@ -318,6 +319,32 @@ export class LanceDBBackend extends VectorBackend {
 
         const data = await response.json();
         return data.chunk;
+    }
+
+    /**
+     * P5: stored records for the given hashes only (verification after writes).
+     * Returns null when the plugin cannot answer, so the caller reads in full.
+     */
+    async getChunksByHashes(collectionId, hashes, settings) {
+        const actualCollectionId = this._stripRegistryPrefix(collectionId);
+        const response = await fetch('/api/plugins/similharity/chunks/get-by-hashes', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                backend: BACKEND_TYPE,
+                collectionId: actualCollectionId,
+                source: settings.source || 'transformers',
+                model: getModelFromSettings(settings),
+                hashes,
+            }),
+        });
+        if (response.status === 404) return null; // older plugin without this route
+        if (!response.ok) {
+            const errorBody = await response.text().catch(() => '');
+            throw new Error(`Reading chunks by hash failed: HTTP ${response.status} ${errorBody}`.trim());
+        }
+        const data = await response.json();
+        return data?.success === true && data.complete === true && Array.isArray(data.items) ? data : null;
     }
 
     /**

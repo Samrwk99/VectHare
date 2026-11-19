@@ -59,7 +59,9 @@ export function checkBackendHealth(settings) {
     const configKey = JSON.stringify([
         backendName, settings.source, settings.qdrant_use_cloud,
         settings.qdrant_host, settings.qdrant_port, settings.qdrant_url,
-        settings.qdrant_api_key, settings.milvus_address, settings.milvus_host,
+        settings.qdrant_api_key, settings.qdrant_key_fingerprint,
+        settings.milvus_token_fingerprint, settings.milvus_password_fingerprint,
+        settings.milvus_address, settings.milvus_host,
         settings.milvus_port,
     ]);
     if (pendingCheck?.key === configKey) return pendingCheck.promise;
