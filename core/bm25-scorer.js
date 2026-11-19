@@ -216,6 +216,9 @@ function tokenize(text, options = {}) {
     // Normalize and split
     let tokens = text
         .toLowerCase()
+        // #15: `\w` keeps underscores, so BM25 used to treat "multi_word" as one
+        // token while keyword extraction split it. Same boundaries in both now.
+        .replace(/_+/g, ' ')
         .replace(/[^\w\s]/g, ' ')
         .replace(/\s+/g, ' ')
         .trim()
@@ -248,6 +251,7 @@ function tokenizeSimple(text) {
     if (!text || typeof text !== 'string') return [];
     return text
         .toLowerCase()
+        .replace(/_+/g, ' ')   // #15: consistent token boundaries
         .replace(/[^\w\s]/g, ' ')
         .split(/\s+/)
         .filter(token => token.length > 0);
@@ -365,7 +369,11 @@ export class BM25Scorer {
                 }
                 // Tag tokens (4x weight) - high weight since tags are curated keywords
                 if (doc.tags && Array.isArray(doc.tags)) {
-                    const tagTokens = doc.tags.flatMap(tag => tokenize(tag));
+                    // #15: VectHare stores keywords as { text, weight } objects.
+                    // tokenize() ignores non-strings, so curated keywords were
+                    // silently contributing nothing to BM25 field boosting.
+                    const tagTokens = doc.tags.flatMap(tag => tokenize(
+                        typeof tag === 'string' ? tag : String(tag?.text ?? '')));
                     for (let i = 0; i < 4; i++) {
                         allTokens.push(...tagTokens);
                     }

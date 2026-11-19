@@ -2456,6 +2456,10 @@ function getSourceData() {
 async function startVectorization() {
     const type = getContentType(currentContentType);
     const source = getSourceData();
+    // #19: a confirmed Replace All keeps a verified copy of the purged vectors
+    // until the replacement has actually been written.
+    let replaceRollback = null;
+    let replaceRollbackSettings = null;
 
     if (!source) {
         toastr.warning('Please select or enter content first');
@@ -2511,6 +2515,12 @@ async function startVectorization() {
                     sameBackend(backendSettings.vector_backend || 'standard')) {
                     throw new Error('The existing collection uses a different storage backend.');
                 }
+                // #20: this chat's vectors can exist under more than one
+                // provider/backend destination. Replacing only the largest would
+                // silently leave the others behind, so refuse instead of guessing.
+                if (existing.allMatches?.length > 1) {
+                    throw new Error(`This chat has vectors in ${existing.allMatches.length} destinations (${existing.allMatches.map(m => `${m.backend}:${m.source}`).join(', ')}). Remove the ones you do not want in Database Browser first.`);
+                }
                 const stored = await readInitialVectorizationConfig(existing.collectionId, backendSettings);
                 if (stored.status === 'valid') {
                     const originalStorage = stored.config.storage;
@@ -2526,20 +2536,19 @@ async function startVectorization() {
                     // Purge the ORIGINAL provider/model destination, not the
                     // user's newly selected embedding settings. The new first
                     // write will use those new settings after confirmed purge.
-                    if (['standard', 'vectra', 'lancedb'].includes(currentStorage.backend)) {
-                        backendSettings.source = stored.config.embedding.provider;
-                    }
+                    // #20: every backend addresses its physical destination by
+                    // provider (Vectra model folder, Qdrant/LanceDB collection
+                    // prefix), so the original provider always decides the target.
+                    backendSettings.source = stored.config.embedding.provider;
                     if (['standard', 'vectra'].includes(currentStorage.backend)) {
                         const { getModelField } = await import('../core/providers.js');
                         const modelField = getModelField(backendSettings.source);
                         if (modelField) backendSettings[modelField] = stored.config.embedding.model || '';
                     }
                 } else if (stored.status === 'missing') {
-                    // A legacy LanceDB collection may have no provenance, but
-                    // its registered provider still identifies the source folder.
-                    if (backendSettings.vector_backend === 'lancedb' && existing.source) {
-                        backendSettings.source = existing.source;
-                    }
+                    // A legacy collection may have no provenance, but its single
+                    // registered destination still identifies the provider (#20).
+                    if (existing.source) backendSettings.source = existing.source;
                 } else {
                     throw new Error(`Cannot verify collection before replacement: ${stored.status}`);
                 }
@@ -2548,6 +2557,8 @@ async function startVectorization() {
                 const { purgeVectorIndex } = await import('../core/core-vector-api.js');
                 const { unregisterCollectionDestination } = await import('../core/collection-loader.js');
                 const { withChatCollectionPurgeGuard } = await import('../core/collection-ids.js');
+                const { snapshotCollectionForReplace } = await import('../core/collection-export.js');
+                const snapshot = await snapshotCollectionForReplace(existing.collectionId, backendSettings);
                 await withChatCollectionPurgeGuard(existing.collectionId, async () => {
                     if (!await purgeVectorIndex(existing.collectionId, backendSettings)) {
                         throw new Error('Existing vectors could not be purged; replacement cancelled');
@@ -2560,6 +2571,8 @@ async function startVectorization() {
                     // the selected destination, not the old index just purged.
                     recordVerifiedCollectionDeletion(existing.collectionId, extension_settings.vecthare);
                 });
+                replaceRollback = snapshot;
+                replaceRollbackSettings = { collectionId: existing.collectionId, settings: backendSettings };
                 toastr.info('Cleared existing vectors', 'VectHare');
             }
         } catch (e) {
@@ -2585,10 +2598,30 @@ async function startVectorization() {
         if (!result.handledBySyncChat) {
             toastr.success(`Vectorized ${result.chunkCount} chunks`, 'VectHare');
         }
+        replaceRollback = null;
         closeContentVectorizer();
 
     } catch (e) {
         console.error('VectHare: Vectorization failed:', e);
+
+        // #19: the replacement failed after the purge - put the previous
+        // vectors back rather than leaving the collection empty.
+        if (replaceRollback) {
+            const { restoreCollectionSnapshot } = await import('../core/collection-export.js');
+            const restored = await restoreCollectionSnapshot(replaceRollbackSettings.collectionId,
+                replaceRollback, replaceRollbackSettings.settings);
+            replaceRollback = null;
+            if (restored) {
+                // The collection is not empty any more: revoke the first-write
+                // authorization recorded for the confirmed purge.
+                const { setCollectionMeta } = await import('../core/collection-metadata.js');
+                setCollectionMeta(replaceRollbackSettings.collectionId, { verifiedPurgeDestination: null });
+            }
+            toastr[restored ? 'info' : 'error'](restored
+                ? 'Replacement failed; your previous vectors were restored.'
+                : 'Replacement failed and the previous vectors could NOT be restored.',
+                'VectHare', { timeOut: restored ? 8000 : 0 });
+        }
 
         // Check for dimension mismatch error and provide helpful guidance
         if (e.message.includes('dimension mismatch') || e.message.includes('Vector dimension error')) {

@@ -520,6 +520,9 @@ export async function readInitialVectorizationConfig(collectionId, settings, loc
     try {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 30000);
+        // An optional run-control signal (Stop) cancels this read too.
+        if (location.signal?.aborted) controller.abort();
+        else location.signal?.addEventListener('abort', () => controller.abort(), { once: true });
         let result;
         try {
             const response = await fetch('/api/plugins/similharity/collections/initial-config/read', {
@@ -814,7 +817,8 @@ export async function checkCollectionOperationSettings(collectionId, settings, o
  */
 export async function resolveCollectionOperationSettings(collectionId, currentSettings, operation, chunking,
     options = {}) {
-    const saved = await readInitialVectorizationConfig(collectionId, currentSettings);
+    const saved = await readInitialVectorizationConfig(collectionId, currentSettings,
+        options.signal ? { signal: options.signal } : {});
     if (saved.status !== 'valid') {
         if (options.readOnly && saved.status === 'missing') {
             return { status: 'legacy_readonly', settings: snapshotCollectionOperationSettings(currentSettings), chunking };
@@ -1147,13 +1151,33 @@ export function isCollectionAutoSyncEnabled(collectionId) {
  * @param {string} hash Chunk hash
  * @returns {object|null} Chunk metadata or null if not found
  */
-export function getChunkMetadata(hash) {
+export function getChunkMetadata(hash, collectionId = null) {
     if (!extension_settings.vecthare) {
         return null;
     }
+    const { shared, byCollection } = splitChunkMetaEntry(extension_settings.vecthare[chunkMetaKey(hash)]);
+    const scope = chunkMetaScope(collectionId);
+    if (scope && byCollection[scope]) return byCollection[scope];
+    return shared;
+}
 
-    const key = `vecthare_chunk_meta_${hash}`;
-    return extension_settings.vecthare[key] || null;
+// #23: identical text in two collections shares one hash, so annotations keyed
+// by hash alone leaked between collections. Each collection now keeps its own
+// record; the shared (pre-existing) record is the fallback for callers without
+// a collection context and seeds a collection's first annotation.
+const CHUNK_META_PREFIX = 'vecthare_chunk_meta_';
+const chunkMetaKey = hash => `${CHUNK_META_PREFIX}${hash}`;
+function chunkMetaScope(collectionId) {
+    if (!collectionId) return null;
+    return String(parseRegistryKey(collectionId).collectionId || collectionId);
+}
+function splitChunkMetaEntry(entry) {
+    if (!entry || typeof entry !== 'object') return { shared: null, byCollection: {} };
+    const { __byCollection, ...shared } = entry;
+    return {
+        shared: Object.keys(shared).length ? shared : null,
+        byCollection: __byCollection && typeof __byCollection === 'object' ? __byCollection : {},
+    };
 }
 
 /**
@@ -1161,16 +1185,25 @@ export function getChunkMetadata(hash) {
  * @param {string} hash Chunk hash
  * @param {object} metadata Chunk metadata
  */
-export function saveChunkMetadata(hash, metadata) {
+export function saveChunkMetadata(hash, metadata, collectionId = null) {
     if (!extension_settings.vecthare) {
         extension_settings.vecthare = {};
     }
 
-    const key = `vecthare_chunk_meta_${hash}`;
-    extension_settings.vecthare[key] = {
-        ...metadata,
-        updatedAt: Date.now(),
-    };
+    const key = chunkMetaKey(hash);
+    const { shared, byCollection } = splitChunkMetaEntry(extension_settings.vecthare[key]);
+    const { __byCollection: _ignored, ...fields } = metadata || {};
+    const record = { ...fields, updatedAt: Date.now() };
+    const scope = chunkMetaScope(collectionId);
+    if (scope) {
+        extension_settings.vecthare[key] = {
+            ...(shared || {}),
+            __byCollection: { ...byCollection, [scope]: record },
+        };
+    } else {
+        extension_settings.vecthare[key] = Object.keys(byCollection).length
+            ? { ...record, __byCollection: byCollection } : record;
+    }
 
     saveSettingsDebounced();
 }
@@ -1179,34 +1212,51 @@ export function saveChunkMetadata(hash, metadata) {
  * Deletes metadata for a specific chunk
  * @param {string} hash Chunk hash
  */
-export function deleteChunkMetadata(hash) {
+export function deleteChunkMetadata(hash, collectionId = null) {
     if (!extension_settings.vecthare) {
         return;
     }
 
-    const key = `vecthare_chunk_meta_${hash}`;
-    if (extension_settings.vecthare[key]) {
+    const key = chunkMetaKey(hash);
+    if (!extension_settings.vecthare[key]) return;
+    const { shared, byCollection } = splitChunkMetaEntry(extension_settings.vecthare[key]);
+    const scope = chunkMetaScope(collectionId);
+    // Never discard other collections' annotations for the same hash.
+    if (scope) {
+        if (!byCollection[scope]) return;
+        const remaining = { ...byCollection };
+        delete remaining[scope];
+        if (!shared && !Object.keys(remaining).length) delete extension_settings.vecthare[key];
+        else if (Object.keys(remaining).length) {
+            extension_settings.vecthare[key] = { ...(shared || {}), __byCollection: remaining };
+        } else {
+            extension_settings.vecthare[key] = { ...shared };
+        }
+    } else if (Object.keys(byCollection).length) {
+        if (!shared) return;
+        extension_settings.vecthare[key] = { __byCollection: byCollection };
+    } else {
         delete extension_settings.vecthare[key];
-        saveSettingsDebounced();
     }
+    saveSettingsDebounced();
 }
 
 /**
  * Gets all chunk metadata entries
  * @returns {object} Map of hash -> metadata
  */
-export function getAllChunkMetadata() {
+export function getAllChunkMetadata(collectionId = null) {
     if (!extension_settings.vecthare) {
         return {};
     }
 
     const result = {};
-    const prefix = 'vecthare_chunk_meta_';
 
     for (const key in extension_settings.vecthare) {
-        if (key.startsWith(prefix)) {
-            const hash = key.replace(prefix, '');
-            result[hash] = extension_settings.vecthare[key];
+        if (key.startsWith(CHUNK_META_PREFIX)) {
+            const hash = key.replace(CHUNK_META_PREFIX, '');
+            const meta = getChunkMetadata(hash, collectionId);
+            if (meta) result[hash] = meta;
         }
     }
 
@@ -2059,12 +2109,12 @@ export function getCollectionDecaySummary(collectionId) {
  * @param {string} hash Chunk hash
  * @param {boolean} isBlind Whether the chunk is temporally blind
  */
-export function setChunkTemporallyBlind(hash, isBlind) {
-    const existing = getChunkMetadata(hash) || {};
+export function setChunkTemporallyBlind(hash, isBlind, collectionId = null) {
+    const existing = getChunkMetadata(hash, collectionId) || {};
     saveChunkMetadata(hash, {
         ...existing,
         temporallyBlind: isBlind,
-    });
+    }, collectionId);
     console.log(`VectHare: Chunk ${hash} temporally blind: ${isBlind}`);
 }
 
@@ -2073,8 +2123,8 @@ export function setChunkTemporallyBlind(hash, isBlind) {
  * @param {string} hash Chunk hash
  * @returns {boolean} Whether the chunk is immune to decay
  */
-export function isChunkTemporallyBlind(hash) {
-    const meta = getChunkMetadata(hash);
+export function isChunkTemporallyBlind(hash, collectionId = null) {
+    const meta = getChunkMetadata(hash, collectionId);
     return meta?.temporallyBlind === true;
 }
 
@@ -2089,11 +2139,11 @@ export function getTemporallyBlindChunks() {
 
     const blindChunks = [];
     for (const key in extension_settings.vecthare) {
-        if (key.startsWith('vecthare_chunk_meta_')) {
-            const meta = extension_settings.vecthare[key];
-            if (meta?.temporallyBlind === true) {
-                const hash = key.replace('vecthare_chunk_meta_', '');
-                blindChunks.push(hash);
+        if (key.startsWith(CHUNK_META_PREFIX)) {
+            const { shared, byCollection } = splitChunkMetaEntry(extension_settings.vecthare[key]);
+            if (shared?.temporallyBlind === true ||
+                Object.values(byCollection).some(meta => meta?.temporallyBlind === true)) {
+                blindChunks.push(key.replace(CHUNK_META_PREFIX, ''));
             }
         }
     }

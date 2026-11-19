@@ -85,7 +85,7 @@ export class ProgressTracker {
     }
 
     /** Show a database-backed snapshot when no manual job is active. */
-    setDatabaseStatus(result, unavailableMessage = 'Saved vector status unavailable') {
+    setDatabaseStatus(result, unavailableMessage = 'Saved vector status unavailable', targetLabel = '') {
         if (!this.panel || !this.isDatabaseSnapshot || this.isPaused) return;
         const validResult = result != null &&
             Number.isSafeInteger(result.total) && Number.isSafeInteger(result.pending) &&
@@ -100,7 +100,9 @@ export class ProgressTracker {
             clearInterval(this.timeIntervalId);
             this.timeIntervalId = null;
         }
-        this.currentOperation = 'Current Chat · Database Progress';
+        // #36: name the chat this snapshot describes; "Current Chat" alone left
+        // the reader guessing which chat the numbers belonged to.
+        this.currentOperation = `${targetLabel || 'Current Chat'} · Database Progress`;
         this.isComplete = true;
         this.isPaused = false;
         this.isStopping = false;
@@ -135,6 +137,17 @@ export class ProgressTracker {
     }
 
     /**
+     * #33: is `runId` the run that currently owns the panel? A null or undefined
+     * id means the caller does not track runs and is always allowed, so every
+     * existing call site keeps working unchanged.
+     * @param {number|null} runId Value returned by show()
+     * @returns {boolean}
+     */
+    isCurrentRun(runId) {
+        return runId == null || runId === this.runId;
+    }
+
+    /**
      * Hide all run-control buttons (used on completion/failure)
      */
     hideControls() {
@@ -153,6 +166,14 @@ export class ProgressTracker {
      * @param {string} itemLabel - Label for items (e.g., "Messages", "Steps", "Entries")
      */
     show(operation, totalItems = 0, itemLabel = 'Progress') {
+        // #33: every operation shares this one panel. Each show() starts a new
+        // run; a run that has been superseded can no longer complete the panel
+        // (see isCurrentRun), so a slower earlier operation cannot overwrite
+        // the reporting of the operation the user is now watching.
+        this.runId = (this.runId || 0) + 1;
+        if (!this.isComplete && this.currentOperation && this.currentOperation !== operation) {
+            console.warn(`VectHare: progress panel taken over by "${operation}" while "${this.currentOperation}" was still reporting`);
+        }
         this.currentOperation = operation;
         this.isDatabaseSnapshot = false;
         this.isComplete = false;
@@ -194,6 +215,7 @@ export class ProgressTracker {
         this.modal.style.display = 'flex';
         this.isVisible = true;
         if (this.elements?.startBtn) this.elements.startBtn.style.display = 'none';
+        return this.runId; // #33: callers pass this back to complete()
     }
 
     /**
@@ -351,7 +373,13 @@ export class ProgressTracker {
      * @param {boolean} success - Whether operation succeeded
      * @param {string} message - Completion message
      */
-    complete(success, message = '') {
+    complete(success, message = '', runId = null) {
+        // #33: a completion from an operation that no longer owns the panel is
+        // ignored, so it cannot mark the current operation as finished.
+        if (!this.isCurrentRun(runId)) {
+            console.debug(`VectHare: ignoring completion from a superseded operation (${message || 'no message'})`);
+            return;
+        }
         this.isComplete = true;
         this.isPaused = false;
         this.isStopping = false; // R10: drain finished - no lingering "stopping…" state
@@ -370,9 +398,14 @@ export class ProgressTracker {
         const duration = Date.now() - startTime;
         const seconds = (duration / 1000).toFixed(1);
 
-        const completionMessage = success
-            ? `✅ ${message || 'Operation completed successfully'} (${seconds}s)`
-            : `❌ ${message || 'Operation failed'} (${seconds}s)`;
+        // #39: a run the user stopped, or one that ended because the chat
+        // changed, neither succeeded nor failed. Showing a green tick for it was
+        // misleading, and a red cross would be just as wrong.
+        const completionMessage = success === 'stopped'
+            ? `⏹ ${message || 'Operation stopped'} (${seconds}s)`
+            : success
+                ? `✅ ${message || 'Operation completed successfully'} (${seconds}s)`
+                : `❌ ${message || 'Operation failed'} (${seconds}s)`;
 
         this.terminalStatus = completionMessage;
         this.updateDisplay();
@@ -692,11 +725,16 @@ export class ProgressTracker {
     updateErrorsList() {
         // PERF: Use cached element reference
         const errorsList = this.elements?.errorsList;
-        if (errorsList) {
-            errorsList.innerHTML = this.stats.errors
-                .map(err => `<div class="vecthare-progress-error-item">${err.message}</div>`)
-                .join('');
-        }
+        if (!errorsList) return;
+        // #53: error text can come from a backend response or a remote
+        // provider. It was interpolated straight into innerHTML, so markup in
+        // an error message could execute. Build the nodes and set text instead.
+        errorsList.replaceChildren(...this.stats.errors.map(err => {
+            const item = document.createElement('div');
+            item.className = 'vecthare-progress-error-item';
+            item.textContent = String(err?.message ?? err ?? '');
+            return item;
+        }));
     }
 
     /**

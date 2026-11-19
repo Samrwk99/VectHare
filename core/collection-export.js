@@ -35,6 +35,20 @@ import {
 import { progressTracker } from '../ui/progress-tracker.js';
 import { getStringHash } from '../../../../utils.js';
 import { withChatCollectionPurgeGuard, withChatCollectionWriteGuard } from './collection-ids.js';
+import { getModelField } from './providers.js';
+
+// #25: `settings.model` does not exist - each provider stores its model in its
+// own field. Comparing or sending an undefined model made export/import treat
+// any two models as interchangeable and addressed the wrong Vectra folder.
+function providerModel(settings) {
+    if (!settings) return '';
+    // An explicit `model` (e.g. a per-collection export/import override) wins;
+    // otherwise read the provider's own model field.
+    if (settings.model != null && String(settings.model) !== '') return String(settings.model);
+    const field = getModelField(settings.source);
+    const value = field ? settings[field] : null;
+    return value == null ? '' : String(value);
+}
 
 // ============================================================================
 // CONSTANTS
@@ -61,29 +75,95 @@ const EXPORT_BATCH_SIZE = 100;
  */
 async function fetchChunksWithVectors(collectionId, settings) {
     const backendName = settings.vector_backend || 'standard';
-    const response = await fetch('/api/plugins/similharity/chunks/list', {
-        method: 'POST',
-        headers: getRequestHeaders(),
-        body: JSON.stringify({
-            backend: backendName === 'standard' ? 'vectra' : backendName,
-            collectionId: collectionId,
-            source: settings.source || 'transformers',
-            model: settings.model || '',
-            limit: 50000, // High limit to get all chunks
-            includeVectors: true, // Include the actual embedding vectors
-        }),
+    const pageSize = 50000;
+    const items = [];
+    let expected = null;
+    // #73: one page is not a collection. Follow pagination and require the
+    // backend's own reported total, so a truncated listing can never pass as
+    // a complete export (or as a complete pre-replacement snapshot, #19).
+    for (let page = 0; ; page++) {
+        const response = await fetch('/api/plugins/similharity/chunks/list', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                backend: backendName === 'standard' ? 'vectra' : backendName,
+                collectionId: collectionId,
+                source: settings.source || 'transformers',
+                model: providerModel(settings),
+                offset: items.length,
+                limit: pageSize,
+                includeVectors: true, // Include the actual embedding vectors
+                strictRead: true,     // Require independent completeness evidence
+            }),
+        });
+
+        if (!response.ok) {
+            throw new Error(`Failed to fetch chunks: ${response.status} ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        if (!data.success || !Array.isArray(data.items)) {
+            throw new Error('Invalid response from chunks API');
+        }
+        const total = Number(data.total);
+        if (!Number.isSafeInteger(total) || total < 0) {
+            throw new Error('Chunk listing did not report a usable collection total');
+        }
+        if (expected === null) expected = total;
+        else if (expected !== total) {
+            throw new Error('The collection changed while it was being read; listing abandoned');
+        }
+        items.push(...data.items);
+        if (items.length >= expected) break;
+        if (data.items.length === 0) {
+            throw new Error(`Chunk listing stopped at ${items.length}/${expected} records`);
+        }
+    }
+    if (items.length !== expected) {
+        throw new Error(`Incomplete chunk listing: ${items.length}/${expected} records`);
+    }
+
+    return items;
+}
+
+/**
+ * #19: a replacement must never be the only copy. Reads the collection's
+ * current chunks WITH their vectors so the caller can restore them if the
+ * replacement fails. Throws when the snapshot cannot be proven complete -
+ * an unverifiable snapshot must block the replacement, not permit a blind purge.
+ * @returns {Promise<object[]|null>} Snapshot chunks, or null for an empty collection
+ */
+export async function snapshotCollectionForReplace(collectionId, settings) {
+    const items = await fetchChunksWithVectors(collectionId, settings);
+    if (!items.length) return null;
+    const snapshot = items.map(item => {
+        const text = item.text ?? item.metadata?.text;
+        const vector = item.vector ?? item.metadata?.vector;
+        if (typeof text !== 'string' || !Array.isArray(vector) || !vector.length) {
+            throw new Error('Existing vectors cannot be snapshotted for rollback');
+        }
+        const { vector: _v, ...metadata } = item.metadata || {};
+        return { hash: item.hash ?? getStringHash(text), text, index: item.index ?? 0, vector, metadata };
     });
+    console.log(`VectHare: Snapshotted ${snapshot.length} chunk(s) of ${collectionId} before replacement`);
+    return snapshot;
+}
 
-    if (!response.ok) {
-        throw new Error(`Failed to fetch chunks: ${response.status} ${response.statusText}`);
+/**
+ * #19: puts a pre-replacement snapshot back after a failed replacement.
+ * Reports failure instead of throwing, so the original error still surfaces.
+ * @returns {Promise<boolean>} Whether every snapshotted chunk was restored
+ */
+export async function restoreCollectionSnapshot(collectionId, snapshot, settings) {
+    if (!snapshot?.length) return true;
+    try {
+        await insertChunksWithVectors(collectionId, snapshot, settings);
+        console.log(`VectHare: Restored ${snapshot.length} chunk(s) of ${collectionId} after a failed replacement`);
+        return true;
+    } catch (error) {
+        console.error(`VectHare: Could not restore ${collectionId} after a failed replacement:`, error);
+        return false;
     }
-
-    const data = await response.json();
-    if (!data.success || !data.items) {
-        throw new Error('Invalid response from chunks API');
-    }
-
-    return data.items;
 }
 
 /**
@@ -94,7 +174,7 @@ async function fetchChunksWithVectors(collectionId, settings) {
  * @returns {Promise<object>} Export data object
  */
 export async function exportCollection(collectionId, settings, collectionInfo = {}) {
-    progressTracker.show('Exporting Collection', 3, 'Steps');
+    const panelRunId = progressTracker.show('Exporting Collection', 3, 'Steps');
     progressTracker.updateCurrentItem(collectionId);
 
     // Use collection-specific settings if provided (for multi-backend support)
@@ -102,7 +182,7 @@ export async function exportCollection(collectionId, settings, collectionInfo = 
         ...settings,
         vector_backend: collectionInfo.backend || settings.vector_backend,
         source: collectionInfo.source || settings.source,
-        model: collectionInfo.model || settings.model,
+        model: collectionInfo.model || providerModel(settings),
     };
 
     try {
@@ -116,12 +196,18 @@ export async function exportCollection(collectionId, settings, collectionInfo = 
 
         const chunks = rawChunks.map(item => {
             const meta = item.metadata || item;
+            // #26: a field-by-field copy silently dropped grouping identity
+            // (strategy, messageIds, messageHashes) and scene flags, so an
+            // import could not reproduce the original chunks. Keep the stored
+            // metadata as it is; the embedding is carried separately.
+            const { vector: _vectorInMeta, ...fullMetadata } = meta || {};
             const chunk = {
                 hash: meta.hash || item.hash,
                 text: meta.text || item.text || '',
                 index: meta.index ?? item.index,
                 vector: item.vector || meta.vector || null, // The actual embedding!
                 metadata: {
+                    ...fullMetadata,
                     contentType: meta.contentType,
                     sourceName: meta.sourceName,
                     entryName: meta.entryName,
@@ -146,7 +232,7 @@ export async function exportCollection(collectionId, settings, collectionInfo = 
             };
 
             // Get per-chunk metadata from VectHare settings
-            const chunkMeta = getChunkMetadata(chunk.hash);
+            const chunkMeta = getChunkMetadata(chunk.hash, collectionId);
             if (chunkMeta) {
                 chunk.chunkMeta = chunkMeta;
             }
@@ -233,12 +319,12 @@ export async function exportCollection(collectionId, settings, collectionInfo = 
             },
         };
 
-        progressTracker.complete(true, `Exported ${chunks.length} chunks`);
+        progressTracker.complete(true, `Exported ${chunks.length} chunks`, panelRunId);
         return exportData;
 
     } catch (error) {
         progressTracker.addError(error.message);
-        progressTracker.complete(false, 'Export failed');
+        progressTracker.complete(false, 'Export failed', panelRunId);
         throw error;
     }
 }
@@ -250,7 +336,7 @@ export async function exportCollection(collectionId, settings, collectionInfo = 
  * @returns {Promise<object>} Export data with multiple collections
  */
 export async function exportMultipleCollections(collectionIds, settings) {
-    progressTracker.show('Exporting Collections', collectionIds.length, 'Collections');
+    const panelRunId = progressTracker.show('Exporting Collections', collectionIds.length, 'Collections');
 
     const exports = [];
     const errors = [];
@@ -272,6 +358,8 @@ export async function exportMultipleCollections(collectionIds, settings) {
                     text: meta.text || '',
                     index: meta.index,
                     metadata: {
+                        // #26: keep grouping identity and scene flags too.
+                        ...(({ vector: _v, ...rest }) => rest)(meta || {}),
                         contentType: meta.contentType,
                         sourceName: meta.sourceName,
                         entryName: meta.entryName,
@@ -294,7 +382,7 @@ export async function exportMultipleCollections(collectionIds, settings) {
                 }));
 
                 for (const chunk of chunks) {
-                    const chunkMeta = getChunkMetadata(chunk.hash);
+                    const chunkMeta = getChunkMetadata(chunk.hash, collectionId);
                     if (chunkMeta) {
                         chunk.chunkMeta = chunkMeta;
                     }
@@ -344,7 +432,7 @@ export async function exportMultipleCollections(collectionIds, settings) {
         }
     }
 
-    progressTracker.complete(errors.length === 0, `Exported ${exports.length}/${collectionIds.length} collections`);
+    progressTracker.complete(errors.length === 0, `Exported ${exports.length}/${collectionIds.length} collections`, panelRunId);
 
     return {
         version: EXPORT_VERSION,
@@ -487,7 +575,7 @@ async function insertChunksWithVectors(collectionId, chunks, settings) {
             backend: backendName === 'standard' ? 'vectra' : backendName,
             collectionId: collectionId,
             source: settings.source || 'transformers',
-            model: settings.model || '',
+            model: providerModel(settings),
             items: chunks.map(c => ({
                 hash: c.hash,
                 text: c.text,
@@ -545,20 +633,27 @@ async function importCollectionUnlocked(exportData, settings, options = {}) {
     const canUseVectors = !options.forceReembed &&
         chunksWithVectors.length === validChunks.length &&
         embeddingInfo.source === settings.source &&
-        (!embeddingInfo.model || !settings.model || embeddingInfo.model === settings.model);
+        // #25: compare the provider's real model field. An unknown model on
+        // either side is not proof of compatibility, so vectors are re-embedded.
+        Boolean(embeddingInfo.model) && embeddingInfo.model === providerModel(settings);
 
     const totalSteps = 4;
-    progressTracker.show('Importing Collection', totalSteps, 'Steps');
+    const panelRunId = progressTracker.show('Importing Collection', totalSteps, 'Steps');
     progressTracker.updateCurrentItem(collectionId);
     progressTracker.updateChunks(validChunks.length);
 
     const errors = [];
+    let rollback = null;
 
     try {
         // Step 1: Handle existing collection
         progressTracker.updateProgress(1, 'Preparing collection...');
 
         if (options.overwrite) {
+            // #19: keep a verified copy of what is about to be replaced. A
+            // snapshot that cannot be proven complete blocks the overwrite
+            // rather than allowing an unrecoverable purge.
+            rollback = await snapshotCollectionForReplace(collectionId, settings);
             if (!await purgeVectorIndex(collectionId, settings)) {
                 throw new Error(`VectHare Import: Could not safely purge ${collectionId}`);
             }
@@ -641,7 +736,7 @@ async function importCollectionUnlocked(exportData, settings, options = {}) {
         for (const chunk of validChunks) {
             if (chunk.chunkMeta) {
                 const newHash = getStringHash(chunk.text);
-                saveChunkMetadata(newHash, chunk.chunkMeta);
+                saveChunkMetadata(newHash, chunk.chunkMeta, collectionId);
             }
         }
 
@@ -652,7 +747,7 @@ async function importCollectionUnlocked(exportData, settings, options = {}) {
         const statusMsg = canUseVectors
             ? `Imported ${preparedChunks.length} chunks (used existing vectors)`
             : `Imported ${preparedChunks.length} chunks (re-embedded)`;
-        progressTracker.complete(true, statusMsg);
+        progressTracker.complete(true, statusMsg, panelRunId);
 
         return {
             success: true,
@@ -663,8 +758,19 @@ async function importCollectionUnlocked(exportData, settings, options = {}) {
         };
 
     } catch (error) {
+        // #19: an overwrite that failed after the purge must not leave the
+        // collection empty. Put the snapshot back before reporting the failure.
+        if (rollback) {
+            const restored = await restoreCollectionSnapshot(collectionId, rollback, settings);
+            errors.push(restored
+                ? 'Replacement failed; the previous vectors were restored.'
+                : 'Replacement failed and the previous vectors could NOT be restored.');
+            if (!restored) {
+                progressTracker.addError('Previous vectors could not be restored');
+            }
+        }
         progressTracker.addError(error.message);
-        progressTracker.complete(false, 'Import failed');
+        progressTracker.complete(false, 'Import failed', panelRunId);
         throw error;
     }
 }
@@ -683,7 +789,7 @@ export async function importMultipleCollections(multiExportData, settings, optio
         throw new Error('No collections in export file');
     }
 
-    progressTracker.show('Importing Collections', collections.length, 'Collections');
+    const panelRunId = progressTracker.show('Importing Collections', collections.length, 'Collections');
 
     const results = [];
     let imported = 0;
@@ -712,7 +818,7 @@ export async function importMultipleCollections(multiExportData, settings, optio
         }
     }
 
-    progressTracker.complete(failed === 0, `Imported ${imported}/${collections.length} collections`);
+    progressTracker.complete(failed === 0, `Imported ${imported}/${collections.length} collections`, panelRunId);
 
     return {
         success: failed === 0,
@@ -752,13 +858,20 @@ async function importCollectionSilentUnlocked(exportData, settings, options = {}
     const canUseVectors = !options.forceReembed &&
         chunksWithVectors.length === validChunks.length &&
         embeddingInfo.source === settings.source &&
-        (!embeddingInfo.model || !settings.model || embeddingInfo.model === settings.model);
+        // #25: compare the provider's real model field. An unknown model on
+        // either side is not proof of compatibility, so vectors are re-embedded.
+        Boolean(embeddingInfo.model) && embeddingInfo.model === providerModel(settings);
 
-    // Handle existing collection
-    if (options.overwrite && !await purgeVectorIndex(collectionId, settings)) {
-        throw new Error(`VectHare Import: Could not safely purge ${collectionId}`);
+    // Handle existing collection. #19: snapshot first, restore on failure.
+    let rollback = null;
+    if (options.overwrite) {
+        rollback = await snapshotCollectionForReplace(collectionId, settings);
+        if (!await purgeVectorIndex(collectionId, settings)) {
+            throw new Error(`VectHare Import: Could not safely purge ${collectionId}`);
+        }
     }
 
+    try {
     // Prepare chunks
     const preparedChunks = validChunks.map((chunk, index) => ({
         text: chunk.text,
@@ -812,7 +925,7 @@ async function importCollectionSilentUnlocked(exportData, settings, options = {}
     for (const chunk of validChunks) {
         if (chunk.chunkMeta) {
             const newHash = getStringHash(chunk.text);
-            saveChunkMetadata(newHash, chunk.chunkMeta);
+            saveChunkMetadata(newHash, chunk.chunkMeta, collectionId);
         }
     }
 
@@ -825,6 +938,10 @@ async function importCollectionSilentUnlocked(exportData, settings, options = {}
         chunkCount: preparedChunks.length,
         usedVectors: canUseVectors,
     };
+    } catch (error) {
+        if (rollback) await restoreCollectionSnapshot(collectionId, rollback, settings);
+        throw error;
+    }
 }
 
 // ============================================================================

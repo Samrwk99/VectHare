@@ -931,9 +931,16 @@ function normalizeKeyword(kw, defaultWeight = DEFAULT_BASE_WEIGHT) {
  * @param {string} keyword - Keyword to check (lowercased)
  * @returns {boolean}
  */
-function queryHasKeyword(query, keyword) {
+function queryHasKeyword(query, keyword, normalizedQuery = null) {
     if (!query || !keyword) return false;
-    return query.includes(keyword);
+    if (query.includes(keyword)) return true;
+    // #15: keywords are extracted from boundary-normalized text ("state of the
+    // art", "multi word"), so a query that keeps the original punctuation
+    // ("state-of-the-art", "multi_word") has to match them too. Capitalization
+    // is already handled by lowercasing both sides.
+    const haystack = normalizedQuery ?? normalizeTokenBoundaries(query);
+    const needle = normalizeTokenBoundaries(keyword);
+    return Boolean(needle) && haystack.includes(needle);
 }
 
 /**
@@ -983,6 +990,7 @@ export function applyKeywordBoost(results, query, options = {}) {
     } = options;
 
     const queryLower = query.toLowerCase();
+    const queryNormalized = normalizeTokenBoundaries(queryLower);
     const queryTokens = extractQueryTokens(query);
 
     console.log(`[VectHare Keyword Boost] Starting keyword boost for query: "${query}" (diminishing=${diminishingReturns}, cap=${perKeywordCap})`);
@@ -996,7 +1004,7 @@ export function applyKeywordBoost(results, query, options = {}) {
             const normalized = normalizeKeyword(kw);
             if (!normalized) continue;
 
-            if (queryHasKeyword(queryLower, normalized.text)) {
+            if (queryHasKeyword(queryLower, normalized.text, queryNormalized)) {
                 matchedKeywords.push(normalized);
 
                 // Calculate contribution with optional per-keyword cap

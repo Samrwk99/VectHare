@@ -156,7 +156,8 @@ export function applyNostalgiaToResults(chunks, currentMessageId, nostalgiaSetti
 
         // Check if chunk is temporally blind (immune to weighting)
         const chunkHash = chunk.hash ?? chunk.metadata?.hash;
-        if (chunkHash !== undefined && chunkHash !== null && isChunkTemporallyBlind(chunkHash)) {
+        if (chunkHash !== undefined && chunkHash !== null &&
+            isChunkTemporallyBlind(chunkHash, chunk.collectionId)) {
             blindCount++;
             return {
                 ...chunk,
@@ -210,7 +211,8 @@ export function applyDecayToResults(chunks, currentMessageId, decaySettings) {
 
         // Check if chunk is temporally blind (immune to decay)
         const chunkHash = chunk.hash ?? chunk.metadata?.hash;
-        if (chunkHash !== undefined && chunkHash !== null && isChunkTemporallyBlind(chunkHash)) {
+        if (chunkHash !== undefined && chunkHash !== null &&
+            isChunkTemporallyBlind(chunkHash, chunk.collectionId)) {
             blindCount++;
             return {
                 ...chunk,
@@ -284,7 +286,8 @@ export function applySceneAwareDecay(chunks, currentMessageId, scenes, decaySett
 
         // Check if chunk is temporally blind (immune to decay)
         const chunkHash = chunk.hash ?? chunk.metadata?.hash;
-        if (chunkHash !== undefined && chunkHash !== null && isChunkTemporallyBlind(chunkHash)) {
+        if (chunkHash !== undefined && chunkHash !== null &&
+            isChunkTemporallyBlind(chunkHash, chunk.collectionId)) {
             blindCount++;
             return {
                 ...chunk,

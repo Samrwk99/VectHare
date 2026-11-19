@@ -128,16 +128,20 @@ export async function vectorizeContent({ contentType, source, settings }) {
 
     const sourceName = source.name || source.filename || source.id || contentType;
     let initialConfig;
-    progressTracker.show(`Vectorizing ${type.label || contentType}`, 4, 'Steps');
+    const panelRunId = progressTracker.show(`Vectorizing ${type.label || contentType}`, 4, 'Steps');
     progressTracker.updateCurrentItem(sourceName);
 
     try {
-        // Content Vectorizer shares the same chat identity as Sync Chat.
-        const chatBinding = contentType === 'chat' ? await ensureChatBinding() : null;
-        if (contentType === 'chat' && !chatBinding?.writable) {
+        // #8: only the LIVE chat belongs in this chat's own collection, where
+        // Content Vectorizer shares Sync Chat's identity. An uploaded or pasted
+        // transcript is separate content and gets its own collection, so it can
+        // never be mistaken for this chat's vectors by Sync, Repair or RAG.
+        const liveChatSource = contentType === 'chat' && source.type === 'current';
+        const chatBinding = liveChatSource ? await ensureChatBinding() : null;
+        if (liveChatSource && !chatBinding?.writable) {
             throw new Error('Chat collection identity could not be verified; vectorization cancelled');
         }
-        const collectionId = contentType === 'chat'
+        const collectionId = liveChatSource
             ? chatBinding.collectionId
             : generateCollectionId(contentType, source, settings);
         // The collection's own saved preparation settings take precedence over
@@ -258,11 +262,19 @@ export async function vectorizeContent({ contentType, source, settings }) {
         };
 
         try {
-            if (contentType === 'chat') {
+            if (liveChatSource) {
+                // #9: the chat can change while content is prepared and embedded.
+                // Re-verify the live chat's identity immediately before the write
+                // rather than trusting the binding resolved minutes earlier.
+                const current = await ensureChatBinding();
+                if (!current?.writable || current.collectionId !== collectionId ||
+                    source.content !== getContext()?.chat) {
+                    throw new Error('The selected chat changed; nothing was written');
+                }
                 beginChatCollectionWrite(collectionId);
             }
             try {
-                if (contentType === 'chat') recordChatStore(collectionId, vecthareSettings);
+                if (liveChatSource) recordChatStore(collectionId, vecthareSettings);
                 await insertVectorItems(collectionId, hashedChunks, vecthareSettings, (embedded, total) => {
             // Insert progress is reported after a successful backend write. Record
             // the original settings even if a later batch fails or is stopped.
@@ -275,7 +287,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
             progressTracker.updateCurrentItem(`Processing: ${embedded}/${total} chunks (${total - embedded} remaining)`);
                 });
             } finally {
-                if (contentType === 'chat') endChatCollectionWrite(collectionId);
+                if (liveChatSource) endChatCollectionWrite(collectionId);
             }
         } catch (error) {
             if (initialConfigSave) await initialConfigSave;
@@ -316,14 +328,14 @@ export async function vectorizeContent({ contentType, source, settings }) {
 
         // Register collection in the registry so it's discoverable
         // The registry must match the saved backend/source for later Repair.
-        const registryKey = contentType === 'chat'
+        const registryKey = liveChatSource
             ? `${vecthareSettings.vector_backend || 'standard'}:${vecthareSettings.source || 'transformers'}:${collectionId}`
             : collectionId;
         registerCollection(registryKey);
         console.log(`VectHare: Registered collection ${registryKey}`);
 
         progressTracker.updateProgress(4, 'Finalizing...');
-        progressTracker.complete(true, `Vectorized ${hashedChunks.length} chunks`);
+        progressTracker.complete(true, `Vectorized ${hashedChunks.length} chunks`, panelRunId);
 
         return {
             success: true,
@@ -332,7 +344,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
         };
     } catch (error) {
         progressTracker.addError(error.message);
-        progressTracker.complete(false, 'Vectorization failed');
+        progressTracker.complete(false, 'Vectorization failed', panelRunId);
         throw error;
     }
 }
@@ -801,9 +813,12 @@ function generateCollectionId(contentType, source, settings) {
 
     switch (contentType) {
         case 'chat':
-            // Only the verified resolver may provide a chat ID. Never invent a
-            // name-based or UUID-based fallback when the binding is absent.
-            return buildChatCollectionId();
+            // Only the verified resolver may provide a chat ID, and only for the
+            // live chat. Never invent a name-based or UUID-based fallback when the
+            // binding is absent. An uploaded/pasted transcript (#8) is its own
+            // document collection, never the active chat's.
+            if (source.type === 'current') return buildChatCollectionId();
+            return buildDocumentCollectionId(sourceName, timestamp);
 
         case 'lorebook':
             return buildLorebookCollectionId(sourceName, timestamp);

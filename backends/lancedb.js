@@ -15,7 +15,7 @@
 
 import { getRequestHeaders } from '../../../../../script.js';
 import { VectorBackend } from './backend-interface.js';
-import { getModelField } from '../core/providers.js';
+import { getModelField, getValidProviderIds } from '../core/providers.js';
 import { VECTOR_LIST_LIMIT } from '../core/constants.js';
 
 const BACKEND_TYPE = 'lancedb';
@@ -40,8 +40,10 @@ export class LanceDBBackend extends VectorBackend {
         }
 
         const knownBackends = ['standard', 'lancedb', 'vectra', 'milvus', 'qdrant'];
-        const knownSources = ['transformers', 'openai', 'cohere', 'ollama', 'llamacpp',
-            'vllm', 'koboldcpp', 'webllm', 'bananabread', 'openrouter', 'togetherai', 'mistral'];
+        // #13: a hand-written provider list omitted supported providers, so their
+        // registry prefixes were never stripped and the collection was addressed by
+        // the wrong name. The provider registry is the single source of truth.
+        const knownSources = getValidProviderIds();
 
         const parts = collectionId.split(':');
 
@@ -174,7 +176,7 @@ export class LanceDBBackend extends VectorBackend {
         }
     }
 
-    async queryCollection(collectionId, searchText, topK, settings) {
+    async queryCollection(collectionId, searchText, topK, settings, queryVector = null) {
         const actualCollectionId = this._stripRegistryPrefix(collectionId);
         console.log(`[LanceDB] queryCollection: original=${collectionId}, stripped=${actualCollectionId}`);
         const response = await fetch('/api/plugins/similharity/chunks/query', {
@@ -184,6 +186,8 @@ export class LanceDBBackend extends VectorBackend {
                 backend: BACKEND_TYPE,
                 collectionId: actualCollectionId,
                 searchText: searchText,
+                // #52: reuse one query embedding across collections when given.
+                ...(Array.isArray(queryVector) && queryVector.length ? { queryVector } : {}),
                 topK: topK,
                 threshold: 0.0,
                 source: settings.source || 'transformers',
@@ -210,7 +214,7 @@ export class LanceDBBackend extends VectorBackend {
         return { hashes, metadata };
     }
 
-    async queryMultipleCollections(collectionIds, searchText, topK, threshold, settings) {
+    async queryMultipleCollections(collectionIds, searchText, topK, threshold, settings, queryVector = null) {
         // Query each collection separately
         const results = {};
 
@@ -224,6 +228,8 @@ export class LanceDBBackend extends VectorBackend {
                         backend: BACKEND_TYPE,
                         collectionId: actualCollectionId,
                         searchText: searchText,
+                        // #52: reuse one query embedding across collections when given.
+                        ...(Array.isArray(queryVector) && queryVector.length ? { queryVector } : {}),
                         topK: topK,
                         threshold: threshold,
                         source: settings.source || 'transformers',
@@ -330,6 +336,7 @@ export class LanceDBBackend extends VectorBackend {
                 offset: options.offset || 0,
                 limit: options.limit || 100,
                 includeVectors: options.includeVectors || false,
+                strictRead: options.strictRead === true,
             }),
         });
 

@@ -17,6 +17,7 @@ import { VectorBackend } from './backend-interface.js';
 import { getModelField } from '../core/providers.js';
 import { getProviderSpecificParams } from './provider-params.js';
 import { VECTOR_LIST_LIMIT } from '../core/constants.js';
+import AsyncUtils from '../utils/async-utils.js';
 
 /**
  * Get the model value from settings based on provider
@@ -218,7 +219,9 @@ export class StandardBackend extends VectorBackend {
 
             if (!response.ok) {
                 const errorBody = await response.text().catch(() => 'No response body');
-                throw new Error(`Failed to insert vectors: ${response.status} - ${errorBody}`);
+                // #47: keep a forwarded Retry-After so the retry policy obeys it.
+                throw AsyncUtils.httpError(response,
+                    `Failed to insert vectors: ${response.status} - ${errorBody}`);
             }
 
             console.log(`VectHare Standard: Inserted ${items.length} vectors into ${collectionId}`);
@@ -271,7 +274,11 @@ export class StandardBackend extends VectorBackend {
             collectionId: collectionId,
             searchText: searchText,
             topK: topK,
-            threshold: settings.score_threshold || 0.0,
+            // #10: the relevance threshold is applied by the RAG pipeline AFTER
+            // keyword boosting and BM25 fusion (Stage 6). Pre-filtering here
+            // dropped keyword-strong candidates before they could be promoted,
+            // and the other backends already send no threshold.
+            threshold: 0.0,
             source: settings.source || 'transformers',
             model: model,
             ...providerParams,

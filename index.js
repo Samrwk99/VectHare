@@ -25,7 +25,7 @@ import { debounce } from '../../../utils.js';
 import { debounce_timeout } from '../../../constants.js';
 
 // VectHare modules - Core
-import { synchronizeChat, rearrangeChat, vectorizeAll, repairChatVectors, checkUnfinishedVectorization, isVectorizationActive, isChatSynchronizationActive, consumeWasLastRunStoppedByUser, flagImmediateReverseSync, parseRegistryKey } from './core/chat-vectorization.js';
+import { synchronizeChat, rearrangeChat, vectorizeAll, repairChatVectors, checkUnfinishedVectorization, isVectorizationActive, isChatSynchronizationActive, consumeWasLastRunStoppedByUser, flagImmediateReverseSync, parseRegistryKey, noteChatSwitch } from './core/chat-vectorization.js';
 import {
     ensureChatBinding, chatFileExists, deletionCandidates, anotherChatClaimsCollection,
     removeChatBinding, releaseToQuarantine, onChatBindingRenamed, onCharacterBindingRenamed,
@@ -266,6 +266,26 @@ function currentStatusChatKey() {
     ]) : null;
 }
 
+// #36: a saved-progress snapshot must say which chat it describes.
+function currentStatusTargetLabel() {
+    const ctx = getContext();
+    const name = ctx?.characterId != null && ctx?.characters?.[ctx.characterId]?.name
+        ? ctx.characters[ctx.characterId].name
+        : (ctx?.groupId && ctx?.groups?.find(group => group.id === ctx.groupId)?.name) || '';
+    const file = normChat(ctx?.chatId) || '';
+    if (name && file) return `${name} · ${file}`;
+    return name || file || '';
+}
+
+// #37: the status line and button only knew about Sync/Repair runs. Any
+// operation that owns the progress panel (Content Vectorizer, import, export)
+// counts as in flight, so saved snapshots cannot overwrite its reporting.
+function isAnyOperationActive() {
+    return isVectorizationActive() || isChatSynchronizationActive() ||
+        Boolean(progressTracker.isVisible && !progressTracker.isComplete &&
+            progressTracker.currentOperation && !progressTracker.isDatabaseSnapshot);
+}
+
 function unavailableVectorizationStatus() {
     if (settings.chunking_strategy === 'per_scene') {
         return 'Per-scene: chat progress is managed through scene markers';
@@ -286,8 +306,8 @@ function invalidateSavedVectorizationStatus() {
     lastDbStatus = null;
     ++dbStatusRequestId;
     ++resumeCheckId;
-    if (!isVectorizationActive() && !progressTracker.isPaused && progressTracker.isDatabaseSnapshot) {
-        progressTracker.setDatabaseStatus(null, unavailableVectorizationStatus());
+    if (!isAnyOperationActive() && !progressTracker.isPaused && progressTracker.isDatabaseSnapshot) {
+        progressTracker.setDatabaseStatus(null, unavailableVectorizationStatus(), currentStatusTargetLabel());
     }
     refreshVectorizationStatusDisplay();
 }
@@ -299,7 +319,7 @@ function isValidSavedStatus(result) {
 }
 
 function refreshVectorizationStatusDisplay() {
-    if (isVectorizationActive() || progressTracker.isPaused) {
+    if (isAnyOperationActive() || progressTracker.isPaused) {
         const state = progressTracker.isPaused ? 'Paused' : 'Running';
         if (settings.chunking_strategy === 'per_scene') {
             updateVectorizationStatus(`${state} — click to view`);
@@ -360,7 +380,7 @@ function refreshSavedDatabaseStatus() {
     if (savedStatusRead) return savedStatusRead;
     savedStatusRead = (async () => {
         while (savedStatusRefreshQueued) {
-            if (isVectorizationActive() || isChatSynchronizationActive() ||
+            if (isAnyOperationActive() ||
                 isChatCollectionWriteActive(getChatCollectionId())) {
                 clearTimeout(dbRefreshTimer);
                 dbRefreshTimer = setTimeout(() => {
@@ -373,8 +393,7 @@ function refreshSavedDatabaseStatus() {
         }
     })().finally(() => {
         savedStatusRead = null;
-        if (savedStatusRefreshQueued && !isVectorizationActive() &&
-            !isChatSynchronizationActive() &&
+        if (savedStatusRefreshQueued && !isAnyOperationActive() &&
             !isChatCollectionWriteActive(getChatCollectionId())) {
             scheduleSavedDatabaseRefresh();
         }
@@ -386,8 +405,8 @@ async function readSavedDatabaseStatus() {
     const chatKey = currentStatusChatKey();
     if (!chatKey) {
         lastDbStatus = null;
-        if (!isVectorizationActive() && !progressTracker.isPaused && progressTracker.isDatabaseSnapshot) {
-            progressTracker.setDatabaseStatus(null, unavailableVectorizationStatus());
+        if (!isAnyOperationActive() && !progressTracker.isPaused && progressTracker.isDatabaseSnapshot) {
+            progressTracker.setDatabaseStatus(null, unavailableVectorizationStatus(), currentStatusTargetLabel());
         }
         refreshVectorizationStatusDisplay();
         return;
@@ -405,21 +424,20 @@ async function readSavedDatabaseStatus() {
     // A status read only publishes while its chat and request still match.
     if (requestId !== dbStatusRequestId || chatKey !== currentStatusChatKey() ||
         collectionId !== getChatCollectionId() ||
-        isVectorizationActive() || isChatSynchronizationActive() ||
-        isChatCollectionWriteActive(collectionId)) return;
+        isAnyOperationActive() || isChatCollectionWriteActive(collectionId)) return;
     result = isValidSavedStatus(result) ? result : null;
     lastDbStatus = result ? { ...result, statusKey: chatKey } : null;
 
     // A periodic refresh may supersede a resume check. Keep its button usable.
-    if (result && !isVectorizationActive() && !progressTracker.isPaused) {
+    if (result && !isAnyOperationActive() && !progressTracker.isPaused) {
         updateContinueVectorizationButton(
             result.pending > 0 ? 'backlog' : 'available', result.pending, result.total);
     }
     // Saved snapshots never mutate active or paused run counters.
-    if (!isVectorizationActive() && !progressTracker.isPaused && progressTracker.isDatabaseSnapshot) {
+    if (!isAnyOperationActive() && !progressTracker.isPaused && progressTracker.isDatabaseSnapshot) {
         progressTracker.setDatabaseStatus(
             settings.chunking_strategy === 'per_scene' ? null : result,
-            unavailableVectorizationStatus());
+            unavailableVectorizationStatus(), currentStatusTargetLabel());
     }
     refreshVectorizationStatusDisplay();
 }
@@ -432,7 +450,7 @@ function scheduleSavedDatabaseRefresh() {
 // R10: light interval keeps the status line live during runs without the core
 // needing UI hooks. Only active while a run is in flight (cheap no-op otherwise).
 setInterval(() => {
-    if (isVectorizationActive()) {
+    if (isAnyOperationActive()) {
         refreshVectorizationStatusDisplay();
     }
 }, 3000);
@@ -489,16 +507,16 @@ async function offerResumeOfUnfinishedVectorization() {
                 );
                 lastDbStatus = { ...result, statusKey: chatKey };
                 refreshVectorizationStatusDisplay();
-                if (!isVectorizationActive() && !progressTracker.isPaused && progressTracker.isDatabaseSnapshot) {
+                if (!isAnyOperationActive() && !progressTracker.isPaused && progressTracker.isDatabaseSnapshot) {
                     progressTracker.setDatabaseStatus(
                         settings.chunking_strategy === 'per_scene' ? null : result,
-                        unavailableVectorizationStatus());
+                        unavailableVectorizationStatus(), currentStatusTargetLabel());
                 }
                 // R9: if the user just pressed Stop, they KNOW it's unfinished - don't
                 // immediately nag with the toast. Button still updates (persistent
                 // affordance). Flag is consume-on-read so later natural checks toast.
                 const justStoppedByUser = consumeWasLastRunStoppedByUser();
-                if (result.pending > 0 && !isVectorizationActive() && !justStoppedByUser) {
+                if (result.pending > 0 && !isAnyOperationActive() && !justStoppedByUser) {
                     console.log(`VectHare: Unfinished vectorization detected (${result.pending}/${result.total} pending)`);
                     showResumeToast(result.pending, result.total);
                 }
@@ -535,8 +553,8 @@ async function offerResumeOfUnfinishedVectorization() {
         }
         lastDbStatus = null;
         refreshVectorizationStatusDisplay();
-        if (!isVectorizationActive() && !progressTracker.isPaused && progressTracker.isDatabaseSnapshot) {
-            progressTracker.setDatabaseStatus(null, unavailableVectorizationStatus());
+        if (!isAnyOperationActive() && !progressTracker.isPaused && progressTracker.isDatabaseSnapshot) {
+            progressTracker.setDatabaseStatus(null, unavailableVectorizationStatus(), currentStatusTargetLabel());
         }
         console.debug('VectHare: Resume check inconclusive after retries; saved status unavailable');
     } finally {
@@ -821,6 +839,9 @@ jQuery(async () => {
 
     // When chat changes, refresh UI state to match settings
     eventSource.on(event_types.CHAT_CHANGED, () => {
+        // #7: make any chat switch detectable to in-flight operations, even
+        // when the host reuses the same chat array (A -> B -> A).
+        noteChatSwitch();
         // Invalidate all cached status and outstanding reads for the prior chat.
         invalidateSavedVectorizationStatus();
         // Safe, idempotent, one-time identity discovery. Never enable writes

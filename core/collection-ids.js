@@ -12,6 +12,7 @@
  */
 
 import { getContext, extension_settings } from '../../../../extensions.js';
+import { getValidProviderIds } from './providers.js';
 import { getCurrentChatId, chat_metadata, getRequestHeaders, saveSettingsDebounced } from '../../../../../script.js';
 import { getStringHash } from '../../../../utils.js';
 
@@ -493,6 +494,16 @@ async function resolveChatBinding(snap, opts = { create: true }) {
             if (rec.bindingKind !== 'vecthare-settings' ||
                 (snap.claim && (claimOwnerKey(snap.claim) !== ownerKey(snap.owner) ||
                     normChat(snap.claim.chat) !== snap.chat))) {
+                return commit(snap, id, rec);
+            }
+            // #6: a binding with no recorded chat UUID matched ANY chat with the
+            // same owner and filename, so replacing a chat file with a different
+            // conversation under the same name could inherit its vectors. Pin the
+            // UUID of the chat verified against it now (first use wins); a later
+            // replacement then has a different integrity value and no longer
+            // matches. An exact copy stays indistinguishable by design.
+            if (!rec.uuid && snap.uuid) {
+                console.info('VectHare: Recording chat identity on an older binding to prevent filename collisions');
                 return commit(snap, id, rec);
             }
             return { state: 'active', collectionId: id, writable: true };
@@ -1063,9 +1074,10 @@ export function parseRegistryKey(registryKey) {
 
     // Known backends and embedding sources
     const knownBackends = ['standard', 'lancedb', 'vectra', 'milvus', 'qdrant'];
-    const knownSources = ['transformers', 'openai', 'cohere', 'ollama', 'llamacpp',
-        'vllm', 'koboldcpp', 'webllm', 'bananabread', 'openrouter',
-        'electronhub', 'mistral', 'nomicai', 'palm', 'vertexai', 'togetherai', 'extras'];
+    // #13: a hand-written provider list omitted supported providers, so their
+    // registry prefixes were never stripped and the collection was addressed by
+    // the wrong name. The provider registry is the single source of truth.
+    const knownSources = getValidProviderIds();
 
     const parts = registryKey.split(':');
 

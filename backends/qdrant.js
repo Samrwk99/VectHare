@@ -30,7 +30,7 @@
 
 import { getRequestHeaders } from '../../../../../script.js';
 import { VectorBackend } from './backend-interface.js';
-import { getModelField } from '../core/providers.js';
+import { getModelField, getValidProviderIds } from '../core/providers.js';
 import { getProviderSpecificParams } from './provider-params.js';
 
 const BACKEND_TYPE = 'qdrant';
@@ -130,8 +130,11 @@ export class QdrantBackend extends VectorBackend {
         }
 
         const knownBackends = ['standard', 'lancedb', 'vectra', 'milvus', 'qdrant'];
-        const knownSources = ['transformers', 'openai', 'cohere', 'ollama', 'llamacpp',
-            'vllm', 'koboldcpp', 'webllm', 'bananabread', 'openrouter'];
+        // #13: this hand-written list omitted supported providers (togetherai,
+        // mistral, nomicai, palm, vertexai, electronhub, extras), so their
+        // registry prefixes were never stripped and the collection was addressed
+        // by the wrong name. Use the provider registry as the single source.
+        const knownSources = getValidProviderIds();
 
         const parts = collectionId.split(':');
 
@@ -591,6 +594,7 @@ export class QdrantBackend extends VectorBackend {
             offset: options.offset || 0,
             limit: options.limit || 100,
             includeVectors: options.includeVectors || false,
+            strictRead: options.strictRead === true,
         };
 
         if (settings.qdrant_multitenancy) {

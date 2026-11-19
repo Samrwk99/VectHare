@@ -109,6 +109,59 @@ async function withHealthInvalidation(operation, settings) {
     }
 }
 
+// #40: the historical default (5 calls / 60s) is a cloud-API courtesy limit and
+// made local embedding painfully slow. Providers that run on the user's own
+// machine are not throttled while the setting is still at that default; any
+// other configured value is the user's explicit choice and is always honoured.
+const LOCAL_EMBEDDING_PROVIDERS = ['transformers', 'ollama', 'llamacpp', 'vllm',
+    'koboldcpp', 'bananabread', 'webllm', 'extras'];
+const LEGACY_DEFAULT_RATE_LIMIT_CALLS = 5;
+const LEGACY_DEFAULT_RATE_LIMIT_INTERVAL = 60;
+function effectiveRateLimitCalls(settings) {
+    const maxCalls = settings.rate_limit_calls || 0;
+    if (maxCalls <= 0) return 0;
+    const atLegacyDefault = maxCalls === LEGACY_DEFAULT_RATE_LIMIT_CALLS &&
+        (settings.rate_limit_interval || LEGACY_DEFAULT_RATE_LIMIT_INTERVAL) === LEGACY_DEFAULT_RATE_LIMIT_INTERVAL;
+    if (atLegacyDefault && LOCAL_EMBEDDING_PROVIDERS.includes(settings.source)) return 0;
+    return maxCalls;
+}
+
+// #52: backends whose plugin query route accepts a ready-made query vector.
+const PREEMBED_QUERY_BACKENDS = ['qdrant', 'lancedb', 'milvus'];
+
+/**
+ * #52: embeds a RAG query once for a given embedding configuration so a
+ * multi-collection search does not repeat it per collection. Best-effort:
+ * returns null and lets each collection embed its own query on failure.
+ * @param {string} searchText Query text
+ * @param {object} settings Resolved operation settings
+ * @returns {Promise<number[]|null>} Query vector, or null when unavailable
+ */
+async function embedQueryForSettings(searchText, settings) {
+    try {
+        const modelField = getModelField(settings.source);
+        const response = await fetch('/api/plugins/similharity/get-embedding', {
+            method: 'POST', headers: getRequestHeaders(),
+            body: JSON.stringify(getVectorsRequestBody({
+                source: settings.source,
+                model: modelField ? settings[modelField] || '' : '',
+                text: searchText,
+                isQuery: true, // #14: asymmetric providers embed queries differently
+            }, settings)),
+        });
+        if (!response.ok) throw AsyncUtils.httpError(response, `Query embedding failed: ${response.status}`);
+        const data = await response.json();
+        if (!Array.isArray(data.embedding) || !data.embedding.length ||
+            !data.embedding.every(Number.isFinite)) {
+            throw new Error('Invalid query embedding');
+        }
+        return data.embedding;
+    } catch (error) {
+        console.warn('VectHare: Shared query embedding unavailable; using per-collection fallback:', error.message);
+        return null;
+    }
+}
+
 /**
  * Rate limiter that respects user settings dynamically.
  */
@@ -124,7 +177,7 @@ class DynamicRateLimiter {
      * @returns {Promise<any>} Result of the function
      */
     async execute(fn, settings) {
-        const maxCalls = settings.rate_limit_calls || 0; // 0 = disabled
+        const maxCalls = effectiveRateLimitCalls(settings); // 0 = disabled
         const intervalMs = (settings.rate_limit_interval || 60) * 1000;
 
         if (maxCalls <= 0) {
@@ -440,8 +493,10 @@ async function createKoboldCppEmbeddings(items, settings, onProgress = null, abo
         const batchItems = cleanedItems.slice(i, Math.min(i + BATCH_SIZE, cleanedItems.length));
         const originalBatchItems = items.slice(i, Math.min(i + BATCH_SIZE, items.length));
 
-        const result = await dynamicRateLimiter.execute(async () => {
-            return await AsyncUtils.retry(async () => {
+        // #45: rate limiting counts every provider call, retries included, so
+        // the limiter sits inside the retry rather than around it.
+        const result = await AsyncUtils.retry(async () => {
+            return await dynamicRateLimiter.execute(async () => {
                 const serverUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : textgenerationwebui_settings.server_urls[textgen_types.KOBOLDCPP];
                 if (!serverUrl) {
                     throw new Error('KoboldCpp URL not found');
@@ -465,7 +520,8 @@ async function createKoboldCppEmbeddings(items, settings, onProgress = null, abo
                         signal: controller.signal,
                     });
                     if (!response.ok) {
-                        throw new Error(`Failed to get KoboldCpp embeddings: ${response.status} ${response.statusText}`);
+                        throw AsyncUtils.httpError(response,
+                            `Failed to get KoboldCpp embeddings: ${response.status} ${response.statusText}`);
                     }
                     data = await response.json();
                 } finally {
@@ -547,8 +603,9 @@ async function createBananaBreadEmbeddings(items, settings, abortSignal = null) 
         return text.length > 0 ? text : ' ';
     });
 
-    return await dynamicRateLimiter.execute(async () => {
-        return await AsyncUtils.retry(async () => {
+    // #45: retries are provider calls too; the limiter is inside the retry.
+    return await AsyncUtils.retry(async () => {
+        return await dynamicRateLimiter.execute(async () => {
             const serverUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : 'http://localhost:8008';
             const cleanUrl = serverUrl.replace(/\/$/, '');
 
@@ -575,7 +632,8 @@ async function createBananaBreadEmbeddings(items, settings, abortSignal = null) 
             const response = await AsyncUtils.timeout(fetchPromise, API_TIMEOUT_MS * 20, 'BananaBread embedding request timed out');
 
             if (!response.ok) {
-                throw new Error(`Failed to get BananaBread embeddings: ${response.status} ${response.statusText}`);
+                throw AsyncUtils.httpError(response,
+                    `Failed to get BananaBread embeddings: ${response.status} ${response.statusText}`);
             }
 
             const data = await response.json();
@@ -725,7 +783,7 @@ export async function getSavedHashes(collectionId, settings, includeMetadata = f
     if (settings.vector_backend === 'qdrant') {
         const data = await withOpGuard(
             () => backend.listChunks(collectionId, settings, {
-                offset: 0, limit: Number.MAX_SAFE_INTEGER,
+                offset: 0, limit: Number.MAX_SAFE_INTEGER, strictRead: strictMetadata,
             }), abortSignal, 'Read collection metadata');
         const items = data?.items;
         if ((strictMetadata && (data?.success !== true || data.offset !== 0)) ||
@@ -857,6 +915,21 @@ export async function getSavedHashes(collectionId, settings, includeMetadata = f
  */
 export async function insertVectorItems(collectionId, items, settings, onProgress = null, abortSignal = null) {
     assertVectHareCollectionForWrite(collectionId);
+    // #49: an item whose text is empty (or only whitespace) after cleaning
+    // cannot be embedded; providers either error or return nothing useful.
+    // Previously such items were sent as a single space.
+    const embeddable = items.filter(item => {
+        const text = typeof item === 'string' ? item : item?.text;
+        return typeof text === 'string' && text.trim().length > 0;
+    });
+    if (embeddable.length !== items.length) {
+        const dropped = items.length - embeddable.length;
+        if (!embeddable.length) {
+            throw new Error(`All ${dropped} item(s) are empty after text cleaning; nothing to embed`);
+        }
+        console.warn(`VectHare: Skipping ${dropped} item(s) with no text after cleaning`);
+        items = embeddable;
+    }
     // Write-only, optional provenance. Existing hash keys, chunk order and
     // insert behavior are unchanged; no reader uses the new metadata yet.
     items = await addInsertionProvenance(collectionId, items);
@@ -865,6 +938,23 @@ export async function insertVectorItems(collectionId, items, settings, onProgres
     // unable to free it (user symptom: "stopping hangs on embedding" while
     // Ollama logs show no activity).
     const backend = await withOpGuard(() => getBackend(settings), abortSignal, 'Backend initialization');
+
+    // #21: the operation's embedding identity is captured here and re-checked
+    // before every batch. Changing provider, model or endpoint mid-run would
+    // otherwise embed the rest of the same operation into a different space.
+    const embeddingIdentity = () => {
+        const modelField = getModelField(settings.source);
+        return JSON.stringify([settings.source || 'transformers',
+            modelField ? settings[modelField] || '' : '',
+            settings.use_alt_endpoint ? settings.alt_endpoint_url || '' : '',
+            settings.vector_backend || 'standard']);
+    };
+    const capturedIdentity = embeddingIdentity();
+    const assertSameEmbeddingIdentity = () => {
+        if (embeddingIdentity() !== capturedIdentity) {
+            throw new Error('Embedding provider/model changed during this operation; insert aborted');
+        }
+    };
 
     // Sources that require client-side embedding generation
     const clientSideEmbeddingSources = ['webllm', 'koboldcpp', 'bananabread'];
@@ -882,7 +972,8 @@ export async function insertVectorItems(collectionId, items, settings, onProgres
             });
 
             // Use streaming embedding generation with immediate writes
-            await streamEmbeddingsAndWrite(backend, collectionId, items, textStrings, settings, onProgress, abortSignal);
+            await streamEmbeddingsAndWrite(backend, collectionId, items, textStrings, settings, onProgress,
+                abortSignal, assertSameEmbeddingIdentity);
         } else {
             // Server-side embeddings - backend handles everything
             // VEC-6: Use configurable batch size for optimized bulk inserts
@@ -892,36 +983,37 @@ export async function insertVectorItems(collectionId, items, settings, onProgres
             const BATCH_SIZE = smallBatchProviders.includes(settings.source) ? 1 : configuredBatchSize;
             const batches = chunkArray(items, BATCH_SIZE);
 
-            const hasRateLimit = settings.rate_limit_calls > 0;
+            const hasRateLimit = effectiveRateLimitCalls(settings) > 0;
             console.log(`VectHare: Processing ${items.length} items in ${batches.length} batch(es) of up to ${BATCH_SIZE}${hasRateLimit ? ` with rate limit (Max ${settings.rate_limit_calls} calls / ${settings.rate_limit_interval}s)` : ''}`);
 
             for (let i = 0; i < batches.length; i++) {
+                assertSameEmbeddingIdentity();
                 const processBatch = async () => {
                     await AsyncUtils.retry(async () => {
                         // R17: timeout-bounded + abortable (was a bare unbounded fetch)
-                        await withOpGuard(
+                        // #45: each attempt (including retries) takes its own
+                        // rate-limit slot - a retry is another provider call.
+                        const attempt = () => withOpGuard(
                             () => backend.insertVectorItems(collectionId, batches[i], settings),
                             abortSignal,
                             'Batch insert'
                         );
+                        await (hasRateLimit ? dynamicRateLimiter.execute(attempt, settings) : attempt());
                     }, RETRY_CONFIG);
                 };
 
-                // Apply rate limiting if configured, otherwise execute directly.
                 // R13: abortable - Stop cancels the wait instantly. For server-side
                 // sources the detached request may still complete server-side and
                 // write a valid chunk, which the next sync's hash diff reconciles.
-                if (hasRateLimit) {
-                    await makeAbortable(dynamicRateLimiter.execute(processBatch, settings), abortSignal);
-                } else {
-                    await makeAbortable(processBatch(), abortSignal);
-                }
+                await makeAbortable(processBatch(), abortSignal);
 
                 notifyDatabaseChanged(collectionId);
                 if (onProgress) {
                     const embeddedCount = (i + 1) * BATCH_SIZE;
                     const actualEmbedded = Math.min(embeddedCount, items.length);
-                    onProgress(actualEmbedded, items.length);
+                    // #34: this provider embeds and writes in one request, so
+                    // there is no separate phase to report.
+                    onProgress(actualEmbedded, items.length, 'Embedding and writing');
                 }
             }
         }
@@ -944,7 +1036,8 @@ export async function insertVectorItems(collectionId, items, settings, onProgres
  * @param {object} settings - Settings object
  * @param {Function} onProgress - Progress callback
  */
-async function streamEmbeddingsAndWrite(backend, collectionId, items, textStrings, settings, onProgress, abortSignal = null) {
+async function streamEmbeddingsAndWrite(backend, collectionId, items, textStrings, settings, onProgress,
+    abortSignal = null, assertSameEmbeddingIdentity = null) {
     // VEC-6: Use configurable batch size for optimized bulk inserts
     const EMBEDDING_BATCH_SIZE = settings.insert_batch_size || 50;
     let totalProcessed = 0;
@@ -958,8 +1051,12 @@ async function streamEmbeddingsAndWrite(backend, collectionId, items, textString
         const batchTextStrings = textStrings.slice(i, batchEnd);
         const batchItems = items.slice(i, batchEnd);
         const batchNum = Math.floor(i / EMBEDDING_BATCH_SIZE) + 1;
+        assertSameEmbeddingIdentity?.(); // #21: same embedding space for the whole run
 
         console.log(`VectHare: Embedding batch ${batchNum}/${totalBatches} (items ${i + 1}-${batchEnd})`);
+        // #34: the phase is reported by whoever performs it, not guessed from a
+        // percentage. Here embedding and writing really are separate steps.
+        onProgress?.(totalProcessed, items.length, 'Embedding');
 
         // Generate this batch once; provider/back-end retries are handled downstream.
         let additionalArgs;
@@ -1006,6 +1103,7 @@ async function streamEmbeddingsAndWrite(backend, collectionId, items, textString
 
         // VEC-6: Write batch to database with retry logic
         console.log(`VectHare: Writing batch ${batchNum} to database (${itemsToWrite.length} items)`);
+        onProgress?.(totalProcessed, items.length, 'Writing to database');
         try {
             // R13: abortable. R17: also timeout-bounded (was unbounded).
             await makeAbortable(AsyncUtils.retry(async () => {
@@ -1026,7 +1124,7 @@ async function streamEmbeddingsAndWrite(backend, collectionId, items, textString
         // Update progress
         if (onProgress) {
             console.log(`[Core Vector API] Streamed ${totalProcessed}/${items.length} (${Math.round((totalProcessed / items.length) * 100)}%)`);
-            onProgress(totalProcessed, items.length);
+            onProgress(totalProcessed, items.length, 'Written');
         }
     }
 
@@ -1118,10 +1216,16 @@ async function groupQueryCollections(collectionIds, settings) {
  * @param {object} settings VectHare settings object
  * @returns {Promise<{ hashes: number[], metadata: object[]}>} - Hashes and metadata of the results
  */
-export async function queryCollection(collectionId, searchText, topK, settings) {
+export async function queryCollection(collectionId, searchText, topK, settings, queryVectorCache = null) {
     const resolved = await getQueryCollectionSettings(collectionId, settings);
     if (!resolved) return { hashes: [], metadata: [] };
     settings = resolved;
+    // #52: collections sharing one embedding configuration share one query
+    // vector. Keyed by the resolved provider/model/endpoint, so a collection
+    // saved with different embedding settings never reuses a foreign vector.
+    const vectorCacheKey = queryVectorCache ? [settings.source,
+        getModelField(settings.source) ? settings[getModelField(settings.source)] || '' : '',
+        settings.use_alt_endpoint ? settings.alt_endpoint_url || '' : ''].join('|') : null;
     const queryChunking = { pipeline: 'rag', strategy: 'query' };
     const capturedConfig = createInitialVectorizationConfig(settings, queryChunking);
     assertCollectionOperationSettingsStable(capturedConfig, settings, queryChunking);
@@ -1132,7 +1236,9 @@ export async function queryCollection(collectionId, searchText, topK, settings) 
     let queryVector = null;
 
     // If source requires client-side embeddings, generate query vector
-    if (clientSideEmbeddingSources.includes(settings.source)) {
+    if (vectorCacheKey && queryVectorCache.has(vectorCacheKey)) {
+        queryVector = queryVectorCache.get(vectorCacheKey);
+    } else if (clientSideEmbeddingSources.includes(settings.source)) {
         const queryItem = [searchText];
         try {
             const additionalArgs = await getAdditionalArgs(queryItem, settings);
@@ -1146,6 +1252,15 @@ export async function queryCollection(collectionId, searchText, topK, settings) 
         } catch (clientEmbedError) {
             // VEC-35: Fallback to server-side embedding when client-side fails
             console.warn(`[VectHare] Client-side embedding failed for ${settings.source}: ${clientEmbedError.message}. Falling back to server-side embedding.`);
+        }
+        if (vectorCacheKey && Array.isArray(queryVector) && queryVector.length) {
+            queryVectorCache.set(vectorCacheKey, queryVector);
+        }
+    } else if (vectorCacheKey && PREEMBED_QUERY_BACKENDS.includes(settings.vector_backend)) {
+        // #52: embed once for this configuration; later collections reuse it.
+        queryVector = await embedQueryForSettings(searchText, settings);
+        if (Array.isArray(queryVector) && queryVector.length) {
+            queryVectorCache.set(vectorCacheKey, queryVector);
         }
     }
 
@@ -1306,28 +1421,11 @@ async function queryMultipleCollectionsForSettings(collectionIds, searchText, to
         }
     }
 
+    // #52: one query, one embedding. Every plugin-backed backend can take the
+    // vector, so none of them re-embeds the same query per collection.
     if (!queryVector && !clientSideEmbeddingSources.includes(settings.source) &&
-        collectionIds.length > 1 && settings.vector_backend === 'qdrant') {
-        try {
-            const modelField = getModelField(settings.source);
-            const response = await fetch('/api/plugins/similharity/get-embedding', {
-                method: 'POST', headers: getRequestHeaders(),
-                body: JSON.stringify(getVectorsRequestBody({
-                    source: settings.source,
-                    model: modelField ? settings[modelField] || '' : '',
-                    text: searchText,
-                }, settings)),
-            });
-            if (!response.ok) throw new Error(`Query embedding failed: ${response.status}`);
-            const data = await response.json();
-            if (!Array.isArray(data.embedding) || !data.embedding.length ||
-                !data.embedding.every(Number.isFinite)) {
-                throw new Error('Invalid query embedding');
-            }
-            queryVector = data.embedding;
-        } catch (error) {
-            console.warn('VectHare: Shared query embedding unavailable; using per-collection fallback:', error.message);
-        }
+        collectionIds.length > 1 && PREEMBED_QUERY_BACKENDS.includes(settings.vector_backend)) {
+        queryVector = await embedQueryForSettings(searchText, settings);
     }
 
     // Check if hybrid search is enabled - process each collection with hybrid search
@@ -1666,6 +1764,25 @@ export async function purgeAllVectorIndexes(settings) {
             skipped.push(registryKey);
             continue;
         }
+        // #27: an acknowledged purge is not proof of deletion, and the caller
+        // clears VectHare's tracking on the strength of this result. Confirm the
+        // destination no longer holds the collection's backend-resident record.
+        // This uses the read-only provenance accessor on purpose: listing a
+        // missing Vectra index through the native API can recreate it.
+        try {
+            const after = await readInitialVectorizationConfig(id, operationSettings,
+                { backend: backendName, source });
+            const gone = after.status === 'missing' &&
+                (!['standard', 'lancedb'].includes(backendName) || after.physicalAbsent !== false);
+            if (!gone) {
+                skipped.push(`unverified-deletion:${registryKey}`);
+                continue;
+            }
+        } catch (error) {
+            console.warn(`VectHare: Could not verify deletion of ${id}:`, error.message);
+            skipped.push(`unverified-deletion:${registryKey}`);
+            continue;
+        }
         removed++;
     }
     // A fresh unregistered installation is empty, but any unknown registered
@@ -1682,8 +1799,20 @@ export async function purgeAllVectorIndexes(settings) {
  */
 export async function updateChunkText(collectionId, hash, newText, settings) {
     assertVectHareCollectionForWrite(collectionId);
+    settings = await resolveEmbeddingSettingsForEdit(collectionId, settings);
     const backend = await getBackend(settings);
     return await backend.updateChunkText(collectionId, hash, newText, settings);
+}
+
+/**
+ * #60: a manual re-embed must use the collection's recorded embedding space.
+ * A confirmed mismatch or unreadable record blocks the edit; a legacy collection
+ * with no record keeps its previous behaviour (nothing is assigned to it).
+ */
+export async function resolveEmbeddingSettingsForEdit(collectionId, settings) {
+    const result = await resolveCollectionOperationSettings(collectionId, settings, 'rag',
+        { pipeline: 'rag', strategy: 'query' }, { readOnly: true });
+    return result.settings;
 }
 
 /**

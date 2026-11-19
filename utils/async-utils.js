@@ -22,6 +22,35 @@ const AsyncUtils = {
   },
 
   /**
+   * #47: reads a provider's Retry-After header (delay-seconds or HTTP-date).
+   * @param {Response} response Fetch response
+   * @returns {number|null} Milliseconds to wait, or null when absent/unusable
+   */
+  parseRetryAfterMs(response) {
+    const header = response?.headers?.get?.('Retry-After');
+    if (!header) return null;
+    const seconds = Number(String(header).trim());
+    if (Number.isFinite(seconds)) return seconds >= 0 ? Math.min(seconds * 1000, 120000) : null;
+    const when = Date.parse(String(header));
+    if (!Number.isFinite(when)) return null;
+    return Math.min(Math.max(when - Date.now(), 0), 120000);
+  },
+
+  /**
+   * #47: an HTTP failure that carries the provider's own retry instruction.
+   * @param {Response} response Fetch response
+   * @param {string} message Error message
+   * @returns {Error} Error with `status` and, when present, `retryAfterMs`
+   */
+  httpError(response, message) {
+    const error = new Error(message);
+    error.status = response?.status;
+    const retryAfterMs = this.parseRetryAfterMs(response);
+    if (retryAfterMs !== null) error.retryAfterMs = retryAfterMs;
+    return error;
+  },
+
+  /**
    * Retry async function with exponential backoff
    *
    * @param {Function} fn - Async function to retry
@@ -61,7 +90,12 @@ const AsyncUtils = {
           onRetry(attempt, error);
         }
 
-        await this.sleep(currentDelay);
+        // #47: a provider that said when to come back is obeyed instead of
+        // using our own backoff guess.
+        const instructed = Number(error?.retryAfterMs);
+        const wait = Number.isFinite(instructed) && instructed >= 0
+          ? Math.min(instructed, 120000) : currentDelay;
+        await this.sleep(wait);
         currentDelay = Math.min(currentDelay * backoffFactor, maxDelay);
       }
     }

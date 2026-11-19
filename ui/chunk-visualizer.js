@@ -24,9 +24,11 @@ import {
     deleteVectorItems,
     insertVectorItems,
     updateChunkText,
+    resolveEmbeddingSettingsForEdit,
     updateChunkMetadata,
 } from '../core/core-vector-api.js';
 import { getStringHash } from '../../../../utils.js';
+import { noteManualVectorChange } from '../core/chat-vectorization.js';
 import {
     filterSceneChunks,
     filterNonSceneChunks,
@@ -115,7 +117,7 @@ function normalizeKeywords(keywords) {
 }
 
 function getChunkData(chunk) {
-    const stored = getChunkMetadata(chunk.hash) || {};
+    const stored = getChunkMetadata(chunk.hash, currentCollectionId) || {};
 
     // User overrides take priority, then fall back to DB-stored keywords
     const dbKeywords = chunk.metadata?.keywords || chunk.keywords || [];
@@ -152,7 +154,7 @@ function updateChunkData(hash, updates) {
         allChunks.forEach(chunk => {
             if (chunk.hash === hash) {
                 // merge pending changes into the chunk for fresh data if chunks end up with same hash somehow.
-                const stored = getChunkMetadata(hash) || {};
+                const stored = getChunkMetadata(hash, currentCollectionId) || {};
                 const pending = pendingChanges.get(hash) || {};
                 chunk.data = { ...chunk.data, ...pending };
             }
@@ -171,6 +173,7 @@ async function saveAllChanges() {
             // Check what kind of update is needed
             if (updates.text) {
                 // Text changed - requires re-embedding
+                await noteManualVectorChange(currentCollectionId, currentSettings, [hash]);
                 await updateChunkText(currentCollectionId, hash, updates.text, currentSettings);
             }
 
@@ -205,8 +208,8 @@ async function saveAllChanges() {
             delete toSave._newSummaries;
             delete toSave._deletedSummaries;
             delete toSave.text; // Don't save text to metadata here
-            const existing = getChunkMetadata(hash) || {};
-            saveChunkMetadata(hash, { ...existing, ...toSave });
+            const existing = getChunkMetadata(hash, currentCollectionId) || {};
+            saveChunkMetadata(hash, { ...existing, ...toSave }, currentCollectionId);
 
             // Only call updateChunkMetadata if there are non-metadata changes
             // (metadata-only updates should skip the API call)
@@ -615,7 +618,7 @@ function renderSceneDetailPanel() {
     }
 
     // Read fresh metadata from persistent storage, not from scene object
-    const stored = getChunkMetadata(scene.hash) || {};
+    const stored = getChunkMetadata(scene.hash, currentCollectionId) || {};
     const meta = { ...scene.metadata, ...stored } || {};
     const start = meta.sceneStart ?? 0;
     const end = meta.sceneEnd ?? start;
@@ -741,7 +744,7 @@ function bindSceneDetailEvents() {
     $('#vecthare_scene_title').off('blur').on('blur', async function() {
         const title = $(this).val().trim();
         try {
-            await updateSceneChunkMetadata(scene.hash, { title }, currentSettings);
+            await updateSceneChunkMetadata(scene.hash, { title }, currentSettings, currentCollectionId);
             // Update local chunk data
             if (scene.metadata) scene.metadata.title = title;
             renderSceneList();
@@ -756,7 +759,7 @@ function bindSceneDetailEvents() {
     $('#vecthare_scene_summary').off('blur').on('blur', async function() {
         const summary = $(this).val().trim();
         try {
-            await updateSceneChunkMetadata(scene.hash, { summary }, currentSettings);
+            await updateSceneChunkMetadata(scene.hash, { summary }, currentSettings, currentCollectionId);
             if (scene.metadata) scene.metadata.summary = summary;
             toastr.success('Summary saved', 'VectHare');
         } catch (error) {
@@ -770,7 +773,7 @@ function bindSceneDetailEvents() {
         const keywordsStr = $(this).val().trim();
         const keywords = keywordsStr ? keywordsStr.split(',').map(k => k.trim()).filter(Boolean) : [];
         try {
-            await updateSceneChunkMetadata(scene.hash, { keywords }, currentSettings);
+            await updateSceneChunkMetadata(scene.hash, { keywords }, currentSettings, currentCollectionId);
             // Update local metadata to reflect saved changes
             if (scene.metadata) {
                 scene.metadata.keywords = keywords;
@@ -1726,6 +1729,29 @@ function bindEvents() {
     $('#vecthare_bulk_disable').on('click', () => bulkSetEnabled(false));
 }
 
+/**
+ * Replace a chunk's text: write the replacement first (keeping the original
+ * vector's source metadata and flags), only then remove the original, and tell
+ * the identity ledger beforehand that the original association is obsolete.
+ * @returns {Promise<number>} The replacement hash
+ */
+async function replaceChunkText(chunk, newText) {
+    const newHash = getStringHash(newText);
+    if (String(newHash) === String(chunk.hash)) return newHash;
+    const { text, hash, vecthareProvenance, vecthareImportedProvenance, ...carried } = chunk.metadata || {};
+    const editSettings = await resolveEmbeddingSettingsForEdit(currentCollectionId, currentSettings);
+    await noteManualVectorChange(currentCollectionId, currentSettings, [chunk.hash]);
+    await insertVectorItems(currentCollectionId, [{
+        hash: newHash, // keep as number for Qdrant compatibility
+        text: newText,
+        index: chunk.index,
+        metadata: carried,
+        __vecthareProvenanceHint: { writer: 'chunk-visualizer', sourceType: 'manual-edit' },
+    }], editSettings);
+    await deleteVectorItems(currentCollectionId, [chunk.hash], editSettings);
+    return newHash;
+}
+
 function bindDetailEvents() {
     // PERF: Use Map for O(1) lookup instead of O(n) find()
     const chunk = allChunksMap.get(selectedChunkId);
@@ -1761,23 +1787,13 @@ function bindDetailEvents() {
         $(this).prop('disabled', true).html('<i class="fa-solid fa-spinner fa-spin"></i> Saving...');
 
         try {
-            // Delete old
-            await deleteVectorItems(currentCollectionId, [chunk.hash], currentSettings);
-
-            // Insert new with new hash (keep as number for Qdrant compatibility)
-            const newHash = getStringHash(newText);
-            await insertVectorItems(currentCollectionId, [{
-                hash: newHash,
-                text: newText,
-                index: chunk.index,
-                __vecthareProvenanceHint: { writer: 'chunk-visualizer', sourceType: 'manual-edit' },
-            }], currentSettings);
+            const newHash = await replaceChunkText(chunk, newText);
 
             // Update metadata (use string keys for metadata storage)
-            const oldMeta = getChunkMetadata(String(chunk.hash));
+            const oldMeta = getChunkMetadata(String(chunk.hash), currentCollectionId);
             if (oldMeta) {
-                deleteChunkMetadata(String(chunk.hash));
-                saveChunkMetadata(String(newHash), { ...oldMeta });
+                deleteChunkMetadata(String(chunk.hash), currentCollectionId);
+                saveChunkMetadata(String(newHash), { ...oldMeta }, currentCollectionId);
             }
 
             // Update local state
@@ -1799,8 +1815,8 @@ function bindDetailEvents() {
     // Enabled toggle - save immediately (no pending changes, direct write)
     $('#vecthare_detail_enabled').on('change', function() {
         const enabled = $(this).is(':checked');
-        const existing = getChunkMetadata(chunk.hash) || {};
-        saveChunkMetadata(chunk.hash, { ...existing, disabled: !enabled, enabled });
+        const existing = getChunkMetadata(chunk.hash, currentCollectionId) || {};
+        saveChunkMetadata(chunk.hash, { ...existing, disabled: !enabled, enabled }, currentCollectionId);
         chunk.data.enabled = enabled;
         renderChunkList();
     });
@@ -1808,7 +1824,7 @@ function bindDetailEvents() {
     // Blind toggle
     $('#vecthare_detail_blind').on('change', function() {
         const blind = $(this).is(':checked');
-        setChunkTemporallyBlind(chunk.hash, blind);
+        setChunkTemporallyBlind(chunk.hash, blind, currentCollectionId);
         chunk.data.temporallyBlind = blind;
         renderChunkList();
     });
@@ -2022,23 +2038,13 @@ function openTextEditor(chunk) {
         $(this).prop('disabled', true).text('Saving...');
 
         try {
-            // Delete old
-            await deleteVectorItems(currentCollectionId, [chunk.hash], currentSettings);
-
-            // Insert new with new hash (keep as number for Qdrant compatibility)
-            const newHash = getStringHash(newText);
-            await insertVectorItems(currentCollectionId, [{
-                hash: newHash,
-                text: newText,
-                index: chunk.index,
-                __vecthareProvenanceHint: { writer: 'chunk-visualizer', sourceType: 'manual-edit' },
-            }], currentSettings);
+            const newHash = await replaceChunkText(chunk, newText);
 
             // Update metadata (use string keys for metadata storage)
-            const oldMeta = getChunkMetadata(String(chunk.hash));
+            const oldMeta = getChunkMetadata(String(chunk.hash), currentCollectionId);
             if (oldMeta) {
-                deleteChunkMetadata(String(chunk.hash));
-                saveChunkMetadata(String(newHash), { ...oldMeta });
+                deleteChunkMetadata(String(chunk.hash), currentCollectionId);
+                saveChunkMetadata(String(newHash), { ...oldMeta }, currentCollectionId);
             }
 
             // Update local state - update hash but keep same uniqueId for selection
@@ -2238,8 +2244,9 @@ async function deleteChunk(chunk) {
     if (!confirm(`Delete chunk #${chunk.index}?`)) return;
 
     try {
+        await noteManualVectorChange(currentCollectionId, currentSettings, [chunk.hash]);
         await deleteVectorItems(currentCollectionId, [chunk.hash], currentSettings);
-        deleteChunkMetadata(chunk.hash);
+        deleteChunkMetadata(chunk.hash, currentCollectionId);
 
         // Remove from local state by uniqueId
         const idx = allChunks.findIndex(c => c.uniqueId === chunk.uniqueId);
