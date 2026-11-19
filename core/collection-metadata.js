@@ -472,6 +472,83 @@ export async function saveInitialVectorizationConfig(collectionId, snapshot, set
 }
 
 /**
+ * Read and validate the original configuration from backend storage only.
+ * This does not compare current settings, save metadata, or change any operation.
+ * `location` can identify the original source/model if global settings changed.
+ * @returns {Promise<{status: 'valid'|'missing'|'invalid'|'unavailable', config?: object, reason?: string}>}
+ */
+export async function readInitialVectorizationConfig(collectionId, settings, location = {}) {
+    if (!collectionId || !settings) return { status: 'unavailable', reason: 'Collection or settings missing' };
+    const parsed = parseRegistryKey(collectionId);
+    const logicalId = parsed.collectionId || collectionId;
+    const backend = location.backend || parsed.backend || settings.vector_backend || 'standard';
+    const source = location.source || parsed.source || settings.source || 'transformers';
+    // An unspecified model searches existing Vectra model folders; it must not
+    // depend on today's global model selection.
+    const model = location.model ?? '';
+    const physicalCollectionId = location.physicalCollectionId ||
+        (backend === 'qdrant' && settings.qdrant_multitenancy ? 'vecthare_multitenancy' :
+            backend === 'milvus' ? 'vecthare_main' : logicalId);
+    const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+    const sameBackend = stored => stored === backend ||
+        (['standard', 'vectra'].includes(stored) && ['standard', 'vectra'].includes(backend));
+
+    try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30000);
+        let result;
+        try {
+            const response = await fetch('/api/plugins/similharity/collections/initial-config/read', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                signal: controller.signal,
+                body: JSON.stringify({ backend, collectionId: logicalId, physicalCollectionId, source, model }),
+            });
+            if (!response.ok) return { status: 'unavailable', reason: `Backend returned HTTP ${response.status}` };
+            result = await response.json();
+        } finally {
+            clearTimeout(timeout);
+        }
+        if (!result?.success) return { status: 'unavailable', reason: 'Backend did not confirm the read' };
+        if (result.status === 'missing') return { status: 'missing' };
+        if (result.status === 'invalid') return { status: 'invalid', reason: 'Stored configuration cannot be decoded' };
+        if (result.status === 'ambiguous') return { status: 'unavailable', reason: 'Multiple model configurations exist; specify the original model location' };
+        if (result.status !== 'found') return { status: 'unavailable', reason: 'Unexpected backend response' };
+
+        const record = result.record;
+        const config = record?.snapshot;
+        if (!isObject(record) || record.collectionId !== logicalId || !isObject(config) ||
+            config.schemaVersion !== 1 || typeof config.recordedAt !== 'string' ||
+            !Number.isFinite(Date.parse(config.recordedAt)) ||
+            !isObject(config.embedding) || typeof config.embedding.provider !== 'string' ||
+            !config.embedding.provider || !isObject(config.storage) ||
+            !sameBackend(config.storage.backend) || !isObject(config.chunking) ||
+            !['sync-chat', 'content-vectorizer', 'scene-markers'].includes(config.chunking.pipeline) ||
+            typeof config.chunking.strategy !== 'string' || !config.chunking.strategy ||
+            !isObject(config.hashing) || config.hashing.algorithm !== 'getStringHash' ||
+            typeof config.hashing.input !== 'string' || !config.hashing.input ||
+            !isObject(config.textCleaning) || typeof config.textCleaning.applied !== 'boolean' ||
+            typeof config.textCleaning.preset !== 'string' ||
+            !Array.isArray(config.textCleaning.activePatterns) ||
+            !config.textCleaning.activePatterns.every(pattern => isObject(pattern) &&
+                typeof pattern.pattern === 'string' && typeof pattern.flags === 'string' &&
+                typeof pattern.replacement === 'string') ||
+            (config.keywordExtraction !== null && !isObject(config.keywordExtraction)) ||
+            (backend === 'qdrant' &&
+                (physicalCollectionId === 'vecthare_multitenancy') !== (config.storage.multitenancy === true))) {
+            return { status: 'invalid', reason: 'Stored configuration is malformed or has a different collection identity' };
+        }
+        // For local storage, the embedding source is part of the physical directory.
+        if (['standard', 'vectra', 'lancedb'].includes(backend) && config.embedding.provider !== source) {
+            return { status: 'invalid', reason: 'Stored embedding source does not match collection storage' };
+        }
+        return { status: 'valid', config };
+    } catch (error) {
+        return { status: 'unavailable', reason: error.message || 'Backend read failed' };
+    }
+}
+
+/**
  * Deletes metadata for a collection
  * @param {string} collectionId Collection identifier
  */
