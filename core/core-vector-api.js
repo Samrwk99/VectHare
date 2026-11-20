@@ -888,10 +888,18 @@ export async function getSavedHashes(collectionId, settings, includeMetadata = f
         const items = data?.items || data?.chunks || [];
         const metaByHash = new Map(items.map(item => {
             // Flat records are accepted only when their hash and text are explicit.
-            const metadata = strictMetadata
+            let metadata = strictMetadata
                 ? (item?.metadata ?? (item?.hash !== undefined && typeof item?.text === 'string' ? item : null))
                 : (item?.metadata || item);
-            return [String(item?.hash), metadata];
+            // VH-105: LanceDB (and others) keep hash/text on the record, not in
+            // its metadata. Copy them in when metadata lacks them, as the strict
+            // inventory above does, so export, scenes and the loader see the text.
+            if (metadata && typeof metadata === 'object' && metadata !== item) {
+                const hash = metadata.hash ?? item?.hash;
+                const text = metadata.text ?? item?.text;
+                if (metadata.hash == null || metadata.text == null) metadata = { ...metadata, ...(hash != null ? { hash } : {}), ...(typeof text === 'string' ? { text } : {}) };
+            }
+            return [String(item?.hash ?? metadata?.hash), metadata];
         }));
         if (strictMetadata && hashes.some(hash => {
             const metadata = metaByHash.get(String(hash));
@@ -1759,12 +1767,16 @@ export async function purgeVectorIndex(collectionId, settings, options = {}) {
             const modelField = getModelField(source);
             const modelFolder = modelField ? (settings[modelField] || '') : '';
             const destination = JSON.stringify([backendName, source, modelFolder]);
+            // VH-099: "vectra" and "standard" are two names for this backend (older
+            // registry entries use "vectra"); a pending record under either is ours.
+            const sameDestination = recorded => ['standard', 'vectra'].some(name =>
+                recorded === JSON.stringify([name, source, modelFolder]));
             const stored = await standardPurgeRecovery(collectionId, 'read');
             if (!['found', 'missing'].includes(stored.status)) {
                 throw new Error('Standard purge recovery record is invalid or unavailable');
             }
             let pending = stored.status === 'found' ? stored.record : null;
-            if (pending && pending.destination !== destination) {
+            if (pending && !sameDestination(pending.destination)) {
                 throw new Error('Pending Standard ledger cleanup belongs to different collection settings');
             }
             const location = { backend: backendName, source, model: modelFolder };
@@ -1828,8 +1840,14 @@ export async function purgeVectorIndex(collectionId, settings, options = {}) {
                         storage: config.storage,
                         chunking: config.chunking,
                     };
-                    pending = { version: 1, collectionId, backend: backendName,
-                        source, modelFolder, destination, originalRecordedAt: config.recordedAt, binding };
+                    // VH-099: the record's backend must be the saved one (the plugin
+                    // checks record.backend === binding.backend); a "vectra" registry
+                    // entry for a collection saved as "standard" sent both names and
+                    // every delete failed with "purge recovery prepare: HTTP 400".
+                    const recordBackend = ['standard', 'vectra'].includes(binding.backend) ? binding.backend : backendName;
+                    pending = { version: 1, collectionId, backend: recordBackend,
+                        source, modelFolder, destination: JSON.stringify([recordBackend, source, modelFolder]),
+                        originalRecordedAt: config.recordedAt, binding };
                     // Must be durable BEFORE native deletion removes the original
                     // saved configuration. An unconfirmed write blocks the purge.
                     await standardPurgeRecovery(collectionId, 'prepare', pending);

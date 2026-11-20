@@ -36,7 +36,7 @@ import {
 import { purgeAllVectorIndexes, purgeVectorIndex } from './core/core-vector-api.js';
 import { getChatCollectionId } from './core/chat-vectorization.js';
 import { getDefaultDecaySettings } from './core/temporal-decay.js';
-import { migrateOldEnabledKeys, deleteCollectionMeta, forgetAllLegacyCollectionKeys, renameChatPolicy, renameCharacterPolicies, fillStorageLocators } from './core/collection-metadata.js';
+import { migrateOldEnabledKeys, deleteCollectionMeta, forgetAllLegacyCollectionKeys, renameChatPolicy, renameCharacterPolicies, renameChatLocks, renameCharacterLocks, fillStorageLocators } from './core/collection-metadata.js';
 import { getBackend as getBackendForLocators } from './backends/backend-manager.js';
 import { loadVectHareStore, vecthareState, storeStatus, flushVectHareStore, resetVectHareStore, refreshStoreIfStale } from './core/vecthare-store.js';
 import { escapeHtml } from './utils/html.js';
@@ -1093,6 +1093,7 @@ jQuery(async () => {
     eventSource.on(event_types.CHAT_RENAMED, payload => {
         onChatBindingRenamed(payload);
         try { renameChatPolicy(payload); } catch (error) { console.warn('VectHare: chat policy rename failed', error); }
+        try { renameChatLocks(payload); } catch (error) { console.warn('VectHare: chat lock rename failed', error); }
         invalidateSavedVectorizationStatus();
         void ensureChatBinding(undefined, { create: false }).then(result => {
             if (result.state === 'active') {
@@ -1104,6 +1105,7 @@ jQuery(async () => {
     eventSource.on(event_types.CHARACTER_RENAMED, (oldAvatar, newAvatar) => {
         onCharacterBindingRenamed(oldAvatar, newAvatar);
         try { renameCharacterPolicies(oldAvatar, newAvatar); } catch (error) { console.warn('VectHare: chat policy rename failed', error); }
+        try { renameCharacterLocks(oldAvatar, newAvatar); } catch (error) { console.warn('VectHare: character lock rename failed', error); }
     });
 
     // When WebLLM extension is loaded, refresh the model list

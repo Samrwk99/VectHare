@@ -89,6 +89,26 @@ export class StandardBackend extends VectorBackend {
         const providerParams = getProviderSpecificParams(settings, false);
         const model = getModelFromSettings(settings);
 
+        // VH-100: SillyTavern's /api/vector/list CREATES an empty index for a
+        // collection that does not exist. Asked before a first write (Content
+        // Vectorizer, status checks), that left an empty folder, after which the
+        // new collection read as "exists without saved settings" and every first
+        // document/lorebook vectorization on Standard was refused ("Original
+        // configuration missing"). The plugin's existence check creates nothing:
+        // a collection it reports absent holds no hashes.
+        if (this.pluginAvailable) {
+            try {
+                const probe = await fetch('/api/plugins/similharity/collections/exists', {
+                    method: 'POST',
+                    headers: getRequestHeaders(),
+                    body: JSON.stringify({ backend: 'vectra', collectionId, source: settings.source || 'transformers', model }),
+                });
+                if (probe.ok && (await probe.json())?.existence === 'absent') return [];
+            } catch {
+                // Fall through to SillyTavern's own list.
+            }
+        }
+
         const response = await fetch('/api/vector/list', {
             method: 'POST',
             headers: getRequestHeaders(),

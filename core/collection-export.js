@@ -603,6 +603,7 @@ async function insertChunksWithVectors(collectionId, chunks, settings) {
         const adapter = await getBackend(settings);
         await adapter.insertVectorItems(collectionId, chunks.map(c => ({
             hash: c.hash, text: c.text, index: c.index, vector: c.vector, metadata: c.metadata || {},
+            ...(Array.isArray(c.metadata?.keywords) && c.metadata.keywords.length ? { keywords: c.metadata.keywords } : {}), // VH-103
         })), settings);
         return { success: true };
     }
@@ -835,6 +836,10 @@ async function importCollectionUnlocked(exportData, settings, options = {}) {
             index: chunk.index ?? index,
             hash: imported.hashes[index],
             vector: canUseVectors ? chunk.vector : undefined,
+            // VH-103: keywords at the top level too, as fresh vectorization sends
+            // them - Qdrant embeds them with the text ("[KEYWORDS: …]"), and
+            // imported chunks were embedded without them.
+            ...(Array.isArray(chunk.metadata?.keywords) && chunk.metadata.keywords.length ? { keywords: chunk.metadata.keywords } : {}),
             metadata: remapImportedMetadata(metadataForImport(chunk.metadata, collectionId), imported.map),
         }));
 
@@ -1051,6 +1056,7 @@ async function importCollectionSilentUnlocked(exportData, settings, options = {}
         index: chunk.index ?? index,
         hash: imported.hashes[index],
         vector: canUseVectors ? chunk.vector : undefined,
+        ...(Array.isArray(chunk.metadata?.keywords) && chunk.metadata.keywords.length ? { keywords: chunk.metadata.keywords } : {}), // VH-103
         metadata: remapImportedMetadata(metadataForImport(chunk.metadata, collectionId), imported.map),
     }));
 

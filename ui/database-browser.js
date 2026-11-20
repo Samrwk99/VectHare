@@ -70,6 +70,7 @@ import {
   removeCollectionCharacterLock,
   clearCollectionCharacterLocks,
   isCollectionLockedToCharacter,
+  currentCharacterLockKey,
   getCollectionCharacterLockCount,
   getChatCollectionPolicy,
   setChatCollectionPolicy,
@@ -1374,6 +1375,7 @@ function renderCollectionCard(collection) {
   const backendDisplayName =
     {
       standard: "Standard",
+      vectra: "Standard", // registry keys name the Standard backend "vectra"
       lancedb: "LanceDB",
       qdrant: "Qdrant",
       milvus: "Milvus",
@@ -2486,15 +2488,16 @@ function bindCollectionCardEvents() {
   $(".vecthare-action-visualize")
     .off("click")
     .on("click", async function (e) {
-      vhLog("test");
       e.stopPropagation();
       const collectionKey = $(this).data("collection-key");
       const collection = findCollectionByKey(collectionKey);
 
       if (!collection) return;
 
+      let loadingToast = null;
       try {
-        toastr.info("Loading chunks...", "VectHare");
+        // Closed as soon as loading ends (it used to stay up over the opened chunks).
+        loadingToast = toastr.info("Loading chunks...", "VectHare", { timeOut: 0, extendedTimeOut: 0 });
 
         // Use the collection's actual backend, not the global setting
         // This ensures we query Standard collections with Standard backend, etc.
@@ -2552,6 +2555,8 @@ function bindCollectionCardEvents() {
       } catch (error) {
         console.error("VectHare: Failed to load chunks", error);
         toastr.error(`Failed to load chunks: ${error.message}`, "VectHare");
+      } finally {
+        if (loadingToast) toastr.clear(loadingToast);
       }
     });
 
@@ -4741,15 +4746,16 @@ function renderSearchResults(results, query, originalResults = null) {
   $(".vecthare-action-visualize")
     .off("click")
     .on("click", async function (e) {
-      vhLog("test");
       e.stopPropagation();
       const collectionKey = $(this).data("collection-key");
       const collection = findCollectionByKey(collectionKey);
 
       if (!collection) return;
 
+      let loadingToast = null;
       try {
-        toastr.info("Loading chunks...", "VectHare");
+        // Closed as soon as loading ends (it used to stay up over the opened chunks).
+        loadingToast = toastr.info("Loading chunks...", "VectHare", { timeOut: 0, extendedTimeOut: 0 });
 
         // Use the collection's actual backend, not the global setting
         // This ensures we query Standard collections with Standard backend, etc.
@@ -4802,6 +4808,8 @@ function renderSearchResults(results, query, originalResults = null) {
       } catch (error) {
         console.error("VectHare: Failed to load chunks", error);
         toastr.error(`Failed to load chunks: ${error.message}`, "VectHare");
+      } finally {
+        if (loadingToast) toastr.clear(loadingToast);
       }
     });
 }
@@ -5101,7 +5109,7 @@ function openCollectionLockDialog(collectionId) {
     const characterLocks = getCollectionCharacterLocks(collectionId);
     const currentChatId = getCurrentChatId();
     const context = getContext();
-    const currentCharacterId = context?.characterId || null;
+    const currentCharacterId = currentCharacterLockKey(); // VH-107: avatar name
     const characters = context?.characters || [];
 
     // Build HTML for locked chats
@@ -5123,7 +5131,7 @@ function openCollectionLockDialog(collectionId) {
     const charLocksHtml = characterLocks.length === 0
         ? '<div class="vecthare-lock-list-empty">No characters locked yet</div>'
         : characterLocks.map((charId) => {
-            const charName = characters[charId]?.data?.name || `Character ${charId}`;
+            const charName = characters.find(c => c?.avatar === charId)?.name || characters[charId]?.data?.name || `Character ${charId}`;
             return `
                 <div class="vecthare-lock-item" data-character-id="${escapeHtml(charId)}">
                     <span class="vecthare-lock-character-name">

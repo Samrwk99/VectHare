@@ -1798,6 +1798,39 @@ export function renameChatPolicy({ avatarId, groupId, oldFileName, newFileName }
     delete policies[from];
     persistVectHareStore();
 }
+// VH-108: locks follow a renamed chat or character. SillyTavern's rename
+// events name chats with their .jsonl extension; locks store the chat id
+// (no extension), and renaming a character renames its avatar file.
+export function renameChatLocks({ oldFileName, newFileName } = {}) {
+    const from = normChat(oldFileName), to = normChat(newFileName);
+    if (!from || !to || from === to || !ensureCollectionsObject()) return 0;
+    let changed = 0;
+    for (const record of Object.values(vecthareState().collections)) {
+        if (!record || typeof record !== 'object') continue;
+        const locks = Array.isArray(record.lockedToChatIds) ? record.lockedToChatIds.map(String) : [];
+        const legacy = record.lockedToChatId != null && String(record.lockedToChatId) === from;
+        if (!locks.includes(from) && !legacy) continue;
+        record.lockedToChatIds = [...new Set(locks.map(id => (id === from ? to : id)).concat(legacy ? [to] : []))];
+        if (legacy) record.lockedToChatId = null;
+        changed++;
+    }
+    if (changed) persistVectHareStore();
+    return changed;
+}
+
+export function renameCharacterLocks(oldAvatar, newAvatar) {
+    if (!oldAvatar || !newAvatar || oldAvatar === newAvatar || !ensureCollectionsObject()) return 0;
+    let changed = 0;
+    for (const record of Object.values(vecthareState().collections)) {
+        const locks = Array.isArray(record?.lockedToCharacterIds) ? record.lockedToCharacterIds.map(String) : [];
+        if (!locks.includes(String(oldAvatar))) continue;
+        record.lockedToCharacterIds = [...new Set(locks.map(id => (id === String(oldAvatar) ? String(newAvatar) : id)))];
+        changed++;
+    }
+    if (changed) persistVectHareStore();
+    return changed;
+}
+
 export function renameCharacterPolicies(oldAvatar, newAvatar) {
     if (!oldAvatar || !newAvatar || oldAvatar === newAvatar || !ensureChatCollectionPoliciesObject()) return;
     const policies = vecthareState().chatCollectionPolicies;
@@ -2369,6 +2402,35 @@ export function getCollectionLockCount(collectionId) {
 // CHARACTER LOCKING (Bind collection to one or more character cards)
 // ============================================================================
 
+// VH-107: character locks are kept by the character's avatar file name, which
+// SillyTavern keeps unique and stable. They used to be kept by the character's
+// position in SillyTavern's character list (context.characterId), which moves
+// when a character is added or deleted - the lock then applied to someone else.
+// A lock written the old way (digits only) is converted once, as soon as the
+// character list is loaded, using the positions as they are at that moment.
+function characterLockKey(characterId) {
+    if (characterId === null || characterId === undefined || characterId === '') return null;
+    const id = String(characterId);
+    if (!/^\d+$/.test(id)) return id;
+    const avatar = getContext()?.characters?.[Number(id)]?.avatar;
+    return avatar ? String(avatar) : null;
+}
+
+function migrateCharacterLocks(collectionId, meta) {
+    const locks = Array.isArray(meta.lockedToCharacterIds) ? meta.lockedToCharacterIds.map(String) : [];
+    if (!locks.some(id => /^\d+$/.test(id))) return locks;
+    const characters = getContext()?.characters;
+    if (!Array.isArray(characters) || characters.length === 0) return locks; // list not loaded yet
+    // A position with no character there is kept as it is: it matches nobody,
+    // as before. Dropping it could leave an exclusive lock with no entries,
+    // which would make the collection active everywhere.
+    const converted = [...new Set(locks.map(id => (/^\d+$/.test(id) ? (characterLockKey(id) ?? id) : id)))];
+    if (JSON.stringify(converted) === JSON.stringify(locks)) return locks;
+    setCollectionMeta(collectionId, { lockedToCharacterIds: converted });
+    vhLog(`VectHare: Collection ${collectionId} character locks converted to avatar names:`, converted);
+    return converted;
+}
+
 /**
  * Adds a character to the collection's character lock list. Supports multiple characters per collection.
  * Stores character IDs in metadata field `lockedToCharacterIds` (array).
@@ -2380,8 +2442,9 @@ export function setCollectionCharacterLock(collectionId, characterId) {
     const meta = getCollectionMeta(collectionId);
     const update = {};
 
-    characterId = String(characterId);
-    let locks = Array.isArray(meta.lockedToCharacterIds) ? [...meta.lockedToCharacterIds] : [];
+    characterId = characterLockKey(characterId);
+    if (!characterId) return;
+    let locks = migrateCharacterLocks(collectionId, meta);
 
     // Add character if not already present
     if (!locks.includes(characterId)) {
@@ -2403,10 +2466,11 @@ export function removeCollectionCharacterLock(collectionId, characterId) {
     const meta = getCollectionMeta(collectionId);
     const update = {};
 
-    let locks = Array.isArray(meta.lockedToCharacterIds) ? [...meta.lockedToCharacterIds] : [];
+    const key = characterLockKey(characterId) ?? String(characterId);
+    let locks = migrateCharacterLocks(collectionId, meta);
 
-    // Remove the character
-    locks = locks.filter(id => String(id) !== String(characterId));
+    // Remove the character (by avatar; a lock not yet converted by its own value)
+    locks = locks.filter(id => String(id) !== key && String(id) !== String(characterId));
 
     update.lockedToCharacterIds = locks;
     setCollectionMeta(collectionId, update);
@@ -2429,8 +2493,7 @@ export function clearCollectionCharacterLocks(collectionId) {
  * @returns {string[]}
  */
 export function getCollectionCharacterLocks(collectionId) {
-    const meta = getCollectionMeta(collectionId);
-    return Array.isArray(meta.lockedToCharacterIds) ? [...meta.lockedToCharacterIds] : [];
+    return [...migrateCharacterLocks(collectionId, getCollectionMeta(collectionId))];
 }
 
 /**
@@ -2441,8 +2504,14 @@ export function getCollectionCharacterLocks(collectionId) {
  */
 export function isCollectionLockedToCharacter(collectionId, characterId) {
     if (!collectionId || !characterId) return false;
-    const locks = getCollectionCharacterLocks(collectionId);
-    return locks.some(id => String(id) === String(characterId));
+    const key = characterLockKey(characterId);
+    if (!key) return false;
+    return getCollectionCharacterLocks(collectionId).some(id => String(id) === key);
+}
+
+/** VH-107: the lock key (avatar file name) of the character open now, or null. */
+export function currentCharacterLockKey() {
+    return characterLockKey(getContext()?.characterId);
 }
 
 /**
@@ -2678,7 +2747,7 @@ export async function shouldCollectionActivate(collectionId, context) {
         const hasChatLocks = chatLocks.length > 0;
         const hasCharacterLocks = characterLocks.length > 0;
         const chatAllowed = hasChatLocks && currentChatId && chatLocks.some(id => String(id) === String(currentChatId));
-        const characterAllowed = hasCharacterLocks && currentCharacterId && characterLocks.some(id => String(id) === String(currentCharacterId));
+        const characterAllowed = hasCharacterLocks && currentCharacterId != null && isCollectionLockedToCharacter(collectionId, currentCharacterId);
 
         if ((hasChatLocks || hasCharacterLocks) && !chatAllowed && !characterAllowed) {
             vhLog(`[VectHare Activation Filter] Collection ${collectionId}: ✗ LOCKED_TO_OTHER_CONTEXT`);
@@ -2706,7 +2775,7 @@ export async function shouldCollectionActivate(collectionId, context) {
         const explicitForThisChat = forcedForChat
             || meta.forceMode === 'forced'
             || (currentChatId && isCollectionLockedToChat(collectionId, currentChatId))
-            || (currentCharacterId && isCollectionLockedToCharacter(collectionId, currentCharacterId));
+            || (currentCharacterId != null && isCollectionLockedToCharacter(collectionId, currentCharacterId));
         if (!explicitForThisChat) {
             vhLog(`[VectHare Activation Filter] Collection ${collectionId}: ✗ BOUND_TO_OTHER_CHAT`);
             recordDecision('skipped', 'Belongs to another chat (not forced, selected or locked for this chat)');
@@ -2737,7 +2806,7 @@ export async function shouldCollectionActivate(collectionId, context) {
     }
 
     // Priority 2.6: Check if locked to current character (overrides other conditions)
-    if (currentCharacterId && isCollectionLockedToCharacter(collectionId, currentCharacterId)) {
+    if (currentCharacterId != null && isCollectionLockedToCharacter(collectionId, currentCharacterId)) {
         vhLog(`[VectHare Activation Filter] Collection ${collectionId}: ✓ LOCKED_TO_CURRENT_CHARACTER (${currentCharacterId})`);
         recordDecision('queried', 'Locked to current character');
         return true;

@@ -37,6 +37,11 @@ function getHealthDisplay(backendName, metrics) {
             label: checking ? 'Checking' : 'Not checked',
         };
     }
+    // VH-101: no failed health check, but an operation reported the backend
+    // unreachable since the last one: say so instead of a bare "Unhealthy".
+    if (!metrics.healthy && !metrics.healthChecksFailed && metrics.healthChecksPassed) {
+        return { css: 'vecthare-health-warning', icon: '&#x26A0;', label: 'Error — re-checks on next use' };
+    }
     return {
         css: getHealthClass(metrics.healthy, metrics.errors),
         icon: getHealthIcon(metrics.healthy, metrics.errors),
