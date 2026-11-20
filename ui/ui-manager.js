@@ -30,6 +30,7 @@ import { parseRegistryKey } from '../core/collection-ids.js';
 import { getModelField } from '../core/providers.js';
 import { getChunkingStrategies } from '../core/content-types.js';
 import { fetchSecretStatus, setSecret } from '../core/secret-store.js';
+import { checkPluginCompatibility } from '../core/plugin-health.js';
 
 /**
  * Applies the current settings snapshot without overwriting collection metadata
@@ -136,6 +137,29 @@ function bindSecretField(inputSelector, name, settings) {
  * @param {Function} callbacks.onPurge - Called when "Purge" is clicked
  * @param {Function} callbacks.onRunDiagnostics - Called when "Run Diagnostics" is clicked
  */
+/**
+ * Extension and plugin versions, in the style of the diagnostics header, with
+ * whether the two work together (core/plugin-health.js). Used at the top of
+ * Core Settings and in the diagnostics results.
+ */
+function versionInfoHtml(c) {
+    if (!c) return '<i class="fa-solid fa-info-circle"></i> Checking versions…';
+    const plugin = c.pluginVersion ? `v${escapeHtml(c.pluginVersion)}` : (c.state === 'missing' ? 'Not installed' : 'Unknown');
+    const extension = c.extensionVersion && c.extensionVersion !== 'unknown' ? `v${escapeHtml(c.extensionVersion)}` : 'Unknown';
+    const status = c.state === 'ok'
+        ? '<span style="margin-left: 10px; color: var(--vecthare-success);"><i class="fa-solid fa-circle-check"></i> compatible</span>'
+        : c.state === 'unknown' ? ''
+        : `<div style="margin-top: 6px; color: var(--vecthare-warning);"><i class="fa-solid fa-triangle-exclamation"></i> ${escapeHtml(c.message)}</div>`;
+    return `<i class="fa-solid fa-info-circle"></i> <strong>Extension:</strong> ${extension}`
+        + `<span style="margin: 0 10px;">•</span><strong>Plugin:</strong> ${plugin}${status}`;
+}
+
+async function refreshVersionInfo() {
+    const el = $('#vecthare_version_info');
+    if (!el.length) return;
+    try { el.html(versionInfoHtml(await checkPluginCompatibility())); } catch { el.html(versionInfoHtml({ state: 'unknown' })); }
+}
+
 export function renderSettings(containerId, settings, callbacks) {
     vhLog('VectHare UI: Rendering settings...');
 
@@ -160,6 +184,8 @@ export function renderSettings(containerId, settings, callbacks) {
                             <p class="vecthare-card-subtitle">Configure embedding provider and vectorization parameters</p>
                         </div>
                         <div class="vecthare-card-body">
+
+                            <div id="vecthare_version_info" class="vecthare-diagnostics-version" style="padding: 10px 15px; background: var(--black30alpha); border-radius: 8px; margin-bottom: 15px; font-size: 0.9em; color: var(--grey70);">${versionInfoHtml(null)}</div>
 
                             <label for="vecthare_vector_backend">
                                 <small>Vector Backend</small>
@@ -1049,6 +1075,9 @@ export function renderSettings(containerId, settings, callbacks) {
 
     // Initialize health dashboard
     initializeHealthDashboard();
+
+    // Extension / plugin versions at the top of Core Settings
+    void refreshVersionInfo();
 
     vhLog('VectHare UI: Settings rendered');
 }
@@ -3106,9 +3135,6 @@ function renderDiagnosticsContent(results, filter = 'all') {
     output.empty();
 
     vhLog('VectHare UI: Rendering diagnostics with results:', results);
-    vhLog('VectHare UI: Version data received:', results.version);
-    vhLog('VectHare UI: Extension version:', results.version?.extension);
-    vhLog('VectHare UI: Plugin version:', results.version?.plugin);
 
     const statusIcons = {
         'pass': '<i class="fa-solid fa-circle-check" style="color: var(--vecthare-success);"></i>',
@@ -3164,10 +3190,7 @@ function renderDiagnosticsContent(results, filter = 'all') {
     const html = `
         <!-- Version Info -->
         <div class="vecthare-diagnostics-version" style="padding: 10px 15px; background: var(--black30alpha); border-radius: 8px; margin-bottom: 15px; font-size: 0.9em; color: var(--grey70);">
-            <i class="fa-solid fa-info-circle"></i>
-            <strong>Extension:</strong> v${escapeHtml(results.version?.extension || 'Unknown')}
-            <span style="margin: 0 10px;">•</span>
-            <strong>Plugin:</strong> v${escapeHtml(results.version?.plugin || 'Not installed')}
+            ${versionInfoHtml(results.version?.compatibility || { state: 'unknown', extensionVersion: results.version?.extension, pluginVersion: results.version?.plugin })}
         </div>
 
         <!-- Summary Stats Bar (Clickable Filters) -->
