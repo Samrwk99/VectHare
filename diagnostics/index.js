@@ -70,6 +70,7 @@ import { testConditionalActivation } from './activation-tests.js';
 
 import { runVisualizerTests } from './visualizer-tests.js';
 import { cleanupTestCollections } from '../core/collection-loader.js';
+import { checkPluginCompatibility } from '../core/plugin-health.js';
 
 /**
  * Runs all diagnostic checks
@@ -84,38 +85,16 @@ export async function runDiagnostics(settings, includeProductionTests = false) {
     let extensionVersion = 'Unknown';
     let pluginVersion = 'Not installed';
 
-    // Try to get extension version from manifest.json
+    // Versions from the same reader as the health panel and Core Settings
+    // (manifest.json next to this extension, wherever its folder is, and the
+    // plugin's /health). The old check looked in a fixed folder name.
+    let compatibility = null;
     try {
-        // Add cache-busting parameter to ensure fresh fetch
-        const manifestUrl = `/scripts/extensions/third-party/VectHare/manifest.json?_=${Date.now()}`;
-        console.log('VectHare Diagnostics: Fetching manifest from:', manifestUrl);
-        const manifestResponse = await fetch(manifestUrl);
-        console.log('VectHare Diagnostics: Manifest response status:', manifestResponse.status);
-        if (manifestResponse.ok) {
-            const manifest = await manifestResponse.json();
-            console.log('VectHare Diagnostics: Manifest data:', manifest);
-            extensionVersion = manifest.version || 'Unknown';
-            console.log('VectHare Diagnostics: Extension version:', extensionVersion);
-        } else {
-            console.warn('VectHare Diagnostics: Manifest fetch failed with status:', manifestResponse.status);
-        }
-    } catch (error) {
-        console.error('VectHare Diagnostics: Could not fetch manifest.json', error);
-    }
-
-    // Try to get plugin version from health endpoint
-    try {
-        const response = await fetch('/api/plugins/similharity/health', {
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' }
-        });
-        if (response.ok) {
-            const data = await response.json();
-            pluginVersion = data.version || 'Unknown';
-        }
-    } catch (error) {
-        // Plugin not available
-    }
+        compatibility = await checkPluginCompatibility();
+        if (compatibility.extensionVersion && compatibility.extensionVersion !== 'unknown') extensionVersion = compatibility.extensionVersion;
+        if (compatibility.pluginVersion) pluginVersion = compatibility.pluginVersion;
+        else if (compatibility.state !== 'missing') pluginVersion = 'Unknown';
+    } catch { /* versions stay unknown */ }
 
     // Auto-clean any ghost test collections from the registry
     const testCollectionsCleaned = cleanupTestCollections();
@@ -259,7 +238,8 @@ export async function runDiagnostics(settings, includeProductionTests = false) {
     const results = {
         version: {
             extension: extensionVersion,
-            plugin: pluginVersion
+            plugin: pluginVersion,
+            compatibility,
         },
         categories,
         checks: allChecks,
@@ -268,9 +248,6 @@ export async function runDiagnostics(settings, includeProductionTests = false) {
     };
 
     console.log('VectHare Diagnostics: Complete', results);
-    console.log('VectHare Diagnostics: Version object:', results.version);
-    console.log('VectHare Diagnostics: Extension version in results:', results.version.extension);
-    console.log('VectHare Diagnostics: Plugin version in results:', results.version.plugin);
 
     return results;
 }
