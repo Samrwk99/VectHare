@@ -7,7 +7,7 @@ import AsyncUtils from '../utils/async-utils.js';
  * Data access layer for managing vector collections and chunks
  *
  * @author Coneja Chibi
- * @version 2.2.0-alpha
+ * @version see manifest.json
  * ============================================================================
  */
 

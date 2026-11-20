@@ -11,7 +11,7 @@ import { progressTracker } from './progress-tracker.js';
  * Main entry point for browsing, managing, and editing all vector collections
  *
  * @author Coneja Chibi
- * @version 2.2.0-alpha
+ * @version see manifest.json
  * ============================================================================
  */
 

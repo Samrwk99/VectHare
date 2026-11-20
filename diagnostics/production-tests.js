@@ -5,7 +5,7 @@
  * Integration tests for embedding, storage, and retrieval
  *
  * @author Coneja Chibi
- * @version 2.2.0-alpha
+ * @version see manifest.json
  * ============================================================================
  */
 

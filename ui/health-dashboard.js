@@ -12,12 +12,13 @@
  * - Auto-refresh with configurable interval
  *
  * @author VectHare
- * @version 2.2.0-alpha
+ * @version see manifest.json
  * ============================================================================
  */
 
 import { escapeHtml } from '../utils/html.js';
 import { getBackendMetrics, initializeBackend, resetBackendHealth } from '../backends/backend-manager.js';
+import { checkPluginCompatibility, getPluginCompatibility } from '../core/plugin-health.js';
 import { extension_settings } from '../../../../extensions.js';
 
 let refreshInterval = null;
@@ -150,6 +151,15 @@ function getHealthIcon(healthy, errors = 0) {
  * Render the health dashboard content
  * @returns {string} HTML content
  */
+function renderCompatibility() {
+    const c = getPluginCompatibility();
+    if (!c) return '<div class="vecthare-health-section"><small>Plugin: checking…</small></div>';
+    const icon = c.state === 'ok' ? '✓' : c.state === 'unknown' ? '?' : '⚠';
+    const versions = `VectHare ${c.extensionVersion} · Similharity ${c.pluginVersion ?? (c.state === 'missing' ? 'not installed' : 'unknown')}`;
+    return `<div class="vecthare-health-section"><small title="${escapeHtml(c.message)}">${icon} ${escapeHtml(versions)}`
+        + `${c.state === 'ok' ? ' — compatible' : `<br>${escapeHtml(c.message)}`}</small></div>`;
+}
+
 function renderDashboard() {
     const metrics = getBackendMetrics();
     const currentBackend = getCurrentBackend();
@@ -183,6 +193,8 @@ function renderDashboard() {
                     <small>Uptime: ${escapeHtml(metrics.uptimeFormatted)}</small>
                 </div>
             </div>
+
+            ${renderCompatibility()}
 
             <!-- Current Backend Section -->
             <div class="vecthare-health-section">
@@ -326,6 +338,7 @@ export function openHealthDashboard() {
     if (modal) {
         modal.style.display = 'flex';
         updateDashboard();
+        void checkPluginCompatibility().then(() => { if (isModalOpen) updateDashboard(); }).catch(() => {});
         startAutoRefresh(5000);
     }
 }

@@ -22,7 +22,7 @@
  * - combined: Merge then chunk with adaptive
  *
  * @author Coneja Chibi
- * @version 3.0.0
+ * @version see manifest.json
  * ============================================================================
  */
 

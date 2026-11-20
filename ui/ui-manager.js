@@ -8,7 +8,7 @@ import { vhLog } from '../utils/log.js';
  * Keeps index.js clean and lean
  *
  * @author Coneja Chibi
- * @version 2.2.0-alpha
+ * @version see manifest.json
  * ============================================================================
  */
 

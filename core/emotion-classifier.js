@@ -9,7 +9,7 @@ import { vhLog } from '../utils/log.js';
  * - Using embedding similarity with emotion descriptions
  *
  * @author VectHare
- * @version 1.0.0
+ * @version see manifest.json
  * ============================================================================
  */
 

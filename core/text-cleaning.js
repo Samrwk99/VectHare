@@ -6,7 +6,7 @@
  * Strips HTML, metadata blocks, and custom tags before chunking.
  *
  * @author Coneja Chibi
- * @version 1.0.0
+ * @version see manifest.json
  * ============================================================================
  */
 

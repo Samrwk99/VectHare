@@ -6,7 +6,7 @@
  * Accessible from the Actions panel.
  *
  * @author Coneja Chibi
- * @version 1.0.0
+ * @version see manifest.json
  * ============================================================================
  */
 

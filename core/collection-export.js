@@ -14,7 +14,7 @@ import { vhLog } from '../utils/log.js';
  * imported directly. Otherwise, user is warned to switch settings.
  *
  * @author Coneja Chibi
- * @version 1.0.0
+ * @version see manifest.json
  * ============================================================================
  */
 

@@ -24,7 +24,7 @@ import { substituteParams } from '../../../../../script.js';
  *   The boost above 1.0 is added together:
  *     - "magic" (1.5x) + "divine" (2.0x) = 1 + 0.5 + 1.0 = 2.5x total boost
  *
- * @version 4.0.0
+ * @version see manifest.json
  * ============================================================================
  */
 

@@ -7,7 +7,7 @@ import { vhLog } from './utils/log.js';
  * All logic is in separate modules - see project guidelines
  *
  * @author Coneja Chibi
- * @version 2.2.0-alpha
+ * @version see manifest.json
  * ============================================================================
  */
 
@@ -51,6 +51,7 @@ import { progressTracker } from './ui/progress-tracker.js';
 import { initializeVisualizer } from './ui/chunk-visualizer.js';
 import { initializeDatabaseBrowser } from './ui/database-browser.js';
 import { checkBackendHealth } from './ui/health-dashboard.js';
+import { checkPluginCompatibility } from './core/plugin-health.js';
 import { initializeSceneMarkers, updateAllMarkerStates, setSceneSettings } from './ui/scene-markers.js';
 import { initializeWorldInfoIntegration } from './core/world-info-integration.js';
 
@@ -946,6 +947,14 @@ jQuery(async () => {
 
     // Fresh check on page load; no health cache is trusted for the indicator.
     void checkBackendHealth(settings);
+    // Plugin / extension compatibility: one warning on load if they do not match
+    // (shown in full in the health panel). A missing plugin is not warned here:
+    // Standard works without it and the other backends already say so.
+    void checkPluginCompatibility().then(result => {
+        if (result.state === 'plugin-older' || result.state === 'extension-older') {
+            toastr.warning(result.message, 'VectHare: plugin and extension do not match', { timeOut: 15000 });
+        }
+    }).catch(() => {});
 
     // 9b: record where this backend's existing collections are (read-only
     // probes, a pointer per collection), so later toggles of the multitenancy

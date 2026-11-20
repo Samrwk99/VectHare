@@ -17,7 +17,7 @@ import { vhLog } from '../utils/log.js';
  * Inclusive mode reuses the existing chunk link system.
  *
  * @author VectHare Team
- * @version 1.0.0
+ * @version see manifest.json
  * ============================================================================
  */
 

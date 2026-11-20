@@ -8,7 +8,7 @@ import AsyncUtils from '../utils/async-utils.js';
  * Core logic for vectorizing chat messages and retrieving relevant context
  *
  * @author Coneja Chibi
- * @version 2.2.0-alpha
+ * @version see manifest.json
  * ============================================================================
  */
 

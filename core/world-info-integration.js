@@ -7,7 +7,7 @@ import { vhLog } from '../utils/log.js';
  * Provides semantic activation of WI entries based on vector similarity
  *
  * @author VectHare Team
- * @version 1.0.0
+ * @version see manifest.json
  * ============================================================================
  */
 

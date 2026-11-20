@@ -10,7 +10,7 @@ import { vhLog } from '../utils/log.js';
  * This is the default backend - no setup required.
  *
  * @author VectHare
- * @version 3.1.0
+ * @version see manifest.json
  * ============================================================================
  */
 

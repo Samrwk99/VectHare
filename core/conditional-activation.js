@@ -8,7 +8,7 @@ import { safePatternTest, riskyRegexReason } from './safe-regex.js';
  * Ported from legacy VectHare with enhanced structure
  *
  * @author Coneja Chibi
- * @version 2.2.0-alpha
+ * @version see manifest.json
  * ============================================================================
  */
 

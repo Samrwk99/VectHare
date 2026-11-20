@@ -17,7 +17,7 @@ import { vhLog } from '../utils/log.js';
  * Requires either a local Milvus instance or Milvus Cloud account.
  *
  * @author VectHare
- * @version 3.0.0
+ * @version see manifest.json
  * ============================================================================
  */
 

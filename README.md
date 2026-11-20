@@ -2,7 +2,7 @@
 
 > *It's like having a perfect memory for your roleplay conversations.* VectHare brings intelligent context retrieval to SillyTavern with temporal decay, conditional activation, and multiple vector backends.
 
-![Version](https://img.shields.io/badge/version-2.0.0--alpha-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Status](https://img.shields.io/badge/status-Active-brightgreen)
+![Version](https://img.shields.io/badge/version-4.0.0-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Status](https://img.shields.io/badge/status-Active-brightgreen)
 
 ---
 
@@ -202,9 +202,11 @@ That's it! VectHare will be downloaded and enabled automatically.
 2. Select your embedding provider (Transformers, OpenAI, Ollama, BananaBread, etc.)
 3. Configure API keys if using cloud providers
 
-### Step 3: (Optional) Install Similharity Plugin
+### Step 3: Install the Similharity Plugin
 
-**Only needed for LanceDB or Qdrant backends!**
+**Needed for Qdrant, LanceDB and Milvus, and for full Standard (Vectra) support.**
+
+Install the plugin with the **same version number** as VectHare. The health panel shows both versions and whether they work together; a mismatch also shows a warning when SillyTavern loads.
 
 ```bash
 cd SillyTavern/plugins

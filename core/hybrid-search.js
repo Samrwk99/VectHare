@@ -9,7 +9,7 @@ import { vhLog } from '../utils/log.js';
  * Supports both native backend hybrid search (Qdrant/Milvus) and client-side
  * fusion for backends without native support (Standard/LanceDB).
  *
- * @version 1.0.0
+ * @version see manifest.json
  * ============================================================================
  */
 
