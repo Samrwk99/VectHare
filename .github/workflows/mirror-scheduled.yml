@@ -1,0 +1,22 @@
+name: Mirror sync (scheduled)
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync both branches
+        env:
+          TOKEN: ${{ secrets.SIMILHARITY_PLUGIN_TOKEN }}
+        run: |
+          URL="https://x-access-token:${TOKEN}@github.com/Samrwk99/Similharity-VectHare-Plugin.git"
+          git push --force "$URL" "origin/Similharity-VH-main:refs/heads/main"
+          git push --force "$URL" "origin/Similharity-VH-dev:refs/heads/dev"
