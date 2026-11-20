@@ -54,6 +54,7 @@ VectHare is an **advanced Retrieval-Augmented Generation (RAG) system** for Sill
 - **Standard (Vectra)**: ST's built-in file-based storage (great for getting started)
 - **LanceDB**: Disk-based, handles millions of vectors, production-ready
 - **Qdrant**: Enterprise-grade with HNSW indexing, cloud support, advanced filtering
+- **Milvus**: Scalable vector database server
 
 ### 📄 Multi-Content Vectorization
 - Chat conversations (with automatic chunking strategies)
@@ -127,9 +128,10 @@ Built-in diagnostic tool that checks everything and offers auto-fixes for common
 
 | Backend | Best For | Pros | Cons |
 |---------|----------|------|------|
-| **Standard (Vectra)** | Getting started, small datasets | No dependencies, works out of box | Slower with large datasets |
+| **Standard (Vectra)** | Getting started, small datasets | No database server needed, works out of box | Slower with large datasets |
 | **LanceDB** | Medium to large datasets | Handles millions of vectors, very fast | Requires Similharity plugin |
 | **Qdrant** | Production, cloud deployments | Enterprise-grade, advanced filtering | Requires a running Qdrant server, version 1.15 or newer |
+| **Milvus** | Large deployments | Scalable, server-based | Requires a running Milvus server, version 2.2.9 or newer |
 
 > 💡 **Need help choosing?** Start with Standard. Upgrade to LanceDB when you have 10k+ vectors.
 
@@ -210,7 +212,7 @@ Install the plugin with the **same version number** as VectHare. The health pane
 
 ```bash
 cd SillyTavern/plugins
-git clone -b Similharity-Plugin https://github.com/Coneja-Chibi/VectHare.git similharity
+git clone https://github.com/Samrwk99/Similharity-VectHare-Plugin.git similharity
 cd similharity
 npm install
 ```
@@ -235,7 +237,7 @@ This fork ships with `auto_update: false` in its manifest, so SillyTavern will n
 ### 🎛️ Core Settings
 | Setting | Description |
 |---------|-------------|
-| **Vector Backend** | Standard, LanceDB, or Qdrant |
+| **Vector Backend** | Standard, LanceDB, Qdrant, or Milvus |
 | **Embedding Provider** | 15+ providers supported |
 | **API URL** | Custom endpoint for local providers |
 
@@ -299,7 +301,7 @@ This fork ships with `auto_update: false` in its manifest, so SillyTavern will n
 ### "Backend health check failed"
 1. Run Diagnostics to see which backend failed
 2. **LanceDB**: Ensure Similharity plugin is installed
-3. **Qdrant**: Ensure Qdrant server is running
+3. **Qdrant / Milvus**: Ensure the server is running and reachable
 4. **Fallback**: Switch to Standard backend
 
 ### Slow performance
@@ -315,24 +317,14 @@ This fork ships with `auto_update: false` in its manifest, so SillyTavern will n
 
 ---
 
-## 📖 Documentation
-
-Detailed docs available in the `/docs` folder:
-- `ARCHITECTURE.md` - System design
-- `PLUGGABLE_BACKENDS.md` - Backend implementation
-- `METADATA_ARCHITECTURE.md` - Chunk metadata system
-- `TEMPORAL_DECAY.md` - Decay formulas and tuning
-
----
-
 ## 🔗 Requirements
 
 ### Required
 - **SillyTavern** (latest version)
 - **Embedding Provider** (one of 15+ supported)
+- **Similharity Plugin** (same version as VectHare) - Needed for Qdrant, LanceDB and Milvus, and for full Standard support
 
 ### Optional
-- **Similharity Plugin** - For LanceDB/Qdrant backends
 - **Character Expressions** - For sprite-based emotion detection
 
 ---
@@ -343,7 +335,7 @@ Found a bug? Have an idea? Contributions welcome!
 
 - 🐛 **Issues**: Report bugs on GitHub
 - 💡 **Features**: Open a discussion first
-- 🔧 **PRs**: Follow the code standards in `CLAUDE.md`
+- 🔧 **PRs**: Follow the existing code style
 
 ---
 
