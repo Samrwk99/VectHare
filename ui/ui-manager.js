@@ -30,7 +30,7 @@ import { parseRegistryKey } from '../core/collection-ids.js';
 import { getModelField } from '../core/providers.js';
 import { getChunkingStrategies } from '../core/content-types.js';
 import { fetchSecretStatus, setSecret } from '../core/secret-store.js';
-import { checkPluginCompatibility } from '../core/plugin-health.js';
+import { checkPluginCompatibility, readBackendServerInfo } from '../core/plugin-health.js';
 
 /**
  * Applies the current settings snapshot without overwriting collection metadata
@@ -142,22 +142,42 @@ function bindSecretField(inputSelector, name, settings) {
  * whether the two work together (core/plugin-health.js). Used at the top of
  * Core Settings and in the diagnostics results.
  */
-function versionInfoHtml(c) {
+function versionInfoHtml(c, server = null) {
     if (!c) return '<i class="fa-solid fa-info-circle"></i> Checking versions…';
     const plugin = c.pluginVersion ? `v${escapeHtml(c.pluginVersion)}` : (c.state === 'missing' ? 'Not installed' : 'Unknown');
     const extension = c.extensionVersion && c.extensionVersion !== 'unknown' ? `v${escapeHtml(c.extensionVersion)}` : 'Unknown';
-    const status = c.state === 'ok'
-        ? '<span style="margin-left: 10px; color: var(--vecthare-success);"><i class="fa-solid fa-circle-check"></i> compatible</span>'
-        : c.state === 'unknown' ? ''
+    const compatible = c.state === 'ok'
+        ? '<span style="margin-left: 6px; color: var(--vecthare-success);"><i class="fa-solid fa-circle-check"></i> compatible</span>' : '';
+    const status = c.state === 'ok' || c.state === 'unknown' ? ''
         : `<div style="margin-top: 6px; color: var(--vecthare-warning);"><i class="fa-solid fa-triangle-exclamation"></i> ${escapeHtml(c.message)}</div>`;
+    // Qdrant / Milvus server version when that backend is selected
+    let serverItem = '', serverNote = '';
+    if (server) {
+        const shown = String(server.version || '').replace(/^v(?=\d)/i, '');
+        const v = server.connected ? (shown ? `${/^\d/.test(shown) ? 'v' : ''}${escapeHtml(shown)}` : 'version unknown') : 'not connected';
+        const icon = !server.connected ? '' : server.writable === false
+            ? ' <i class="fa-solid fa-triangle-exclamation" style="color: var(--vecthare-warning);"></i>'
+            : server.version ? ' <i class="fa-solid fa-circle-check" style="color: var(--vecthare-success);"></i>' : '';
+        serverItem = `<span style="margin: 0 10px;">•</span><strong>${escapeHtml(server.name)}:</strong> ${v}${icon}`;
+        if (server.connected && server.writable === false) {
+            serverNote = `<div style="margin-top: 6px; color: var(--vecthare-warning);"><i class="fa-solid fa-triangle-exclamation"></i> ${escapeHtml(server.message)}</div>`;
+        }
+    }
     return `<i class="fa-solid fa-info-circle"></i> <strong>Extension:</strong> ${extension}`
-        + `<span style="margin: 0 10px;">•</span><strong>Plugin:</strong> ${plugin}${status}`;
+        + `<span style="margin: 0 10px;">•</span><strong>Plugin:</strong> ${plugin}${compatible}${serverItem}${status}${serverNote}`;
 }
 
+let versionInfoSettings = null;
+let versionInfoListening = false;
 async function refreshVersionInfo() {
     const el = $('#vecthare_version_info');
     if (!el.length) return;
-    try { el.html(versionInfoHtml(await checkPluginCompatibility())); } catch { el.html(versionInfoHtml({ state: 'unknown' })); }
+    try {
+        const backend = versionInfoSettings?.vector_backend;
+        const [c, server] = await Promise.all([checkPluginCompatibility(), readBackendServerInfo(backend)]);
+        if (versionInfoSettings?.vector_backend !== backend) return; // switched meanwhile; a newer refresh follows
+        el.html(versionInfoHtml(c, server));
+    } catch { el.html(versionInfoHtml({ state: 'unknown' })); }
 }
 
 export function renderSettings(containerId, settings, callbacks) {
@@ -1076,8 +1096,13 @@ export function renderSettings(containerId, settings, callbacks) {
     // Initialize health dashboard
     initializeHealthDashboard();
 
-    // Extension / plugin versions at the top of Core Settings
+    // Extension / plugin (and Qdrant / Milvus) versions at the top of Core Settings
+    versionInfoSettings = settings;
     void refreshVersionInfo();
+    if (!versionInfoListening) {
+        versionInfoListening = true;
+        document.addEventListener('vecthare:backend-checked', () => { void refreshVersionInfo(); });
+    }
 
     vhLog('VectHare UI: Settings rendered');
 }
@@ -2122,6 +2147,7 @@ function bindSettingsEvents(settings, callbacks) {
             }
 
             vhLog(`VectHare: Vector backend changed to ${settings.vector_backend}`);
+            void refreshVersionInfo(); // and again when the connection check below finishes
             // Preserve existing invalidation and check the newly selected backend.
             resetBackendHealth();
             void checkBackendHealth(settings);
@@ -3190,7 +3216,7 @@ function renderDiagnosticsContent(results, filter = 'all') {
     const html = `
         <!-- Version Info -->
         <div class="vecthare-diagnostics-version" style="padding: 10px 15px; background: var(--black30alpha); border-radius: 8px; margin-bottom: 15px; font-size: 0.9em; color: var(--grey70);">
-            ${versionInfoHtml(results.version?.compatibility || { state: 'unknown', extensionVersion: results.version?.extension, pluginVersion: results.version?.plugin })}
+            ${versionInfoHtml(results.version?.compatibility || { state: 'unknown', extensionVersion: results.version?.extension, pluginVersion: results.version?.plugin }, results.version?.server || null)}
         </div>
 
         <!-- Summary Stats Bar (Clickable Filters) -->

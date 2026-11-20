@@ -107,3 +107,33 @@ export async function checkPluginCompatibility() {
 
 /** The last result of checkPluginCompatibility(), or null before the first check. */
 export function getPluginCompatibility() { return compatibility; }
+
+// ---------------------------------------------------------------------------
+// Database server version (Qdrant / Milvus), shown beside the versions above
+// ---------------------------------------------------------------------------
+const SERVER_MINIMUM = { qdrant: '1.15', milvus: '2.2.9' };
+const SERVER_NAME = { qdrant: 'Qdrant', milvus: 'Milvus' };
+
+/**
+ * For Qdrant or Milvus: { name, connected, version, writable, message } from the
+ * plugin's backend health answer; null for other backends. writable is false
+ * only when the server is KNOWN to be too old to store collections.
+ */
+export async function readBackendServerInfo(backend) {
+    if (!SERVER_NAME[backend]) return null;
+    const name = SERVER_NAME[backend];
+    let data = null;
+    try {
+        const response = await fetch(`/api/plugins/similharity/backend/health/${backend}`);
+        if (response.ok) data = await response.json();
+    } catch { /* not reachable */ }
+    if (!data?.healthy) return { name, connected: false, version: null, writable: null, message: `${name} is not connected.` };
+    const version = typeof data.version === 'string' && data.version ? data.version : null;
+    const writable = data.writable === false ? false : (data.writable === true ? true : null);
+    const message = writable === false
+        ? `${name} ${version ?? ''} is older than ${SERVER_MINIMUM[backend]}: ` +
+          (backend === 'qdrant' ? 'existing collections can be read, but nothing new can be stored.' : 'new collections cannot be stored.') +
+          ` Update ${name} to ${SERVER_MINIMUM[backend]} or newer.`
+        : `${name} ${version ?? '(version unknown)'} is connected.`;
+    return { name, connected: true, version, writable, message: message.replace(/\s+/g, ' ') };
+}

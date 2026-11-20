@@ -92,6 +92,8 @@ export function checkBackendHealth(settings) {
             pendingCheck = null;
             updateHealthIndicator();
             updateDashboard();
+            // the version strip in Core Settings re-reads the database server version
+            try { document.dispatchEvent(new CustomEvent('vecthare:backend-checked')); } catch { /* no DOM */ }
         }
     });
     checkQueue = record.promise;
