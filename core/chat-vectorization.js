@@ -12,7 +12,7 @@ import AsyncUtils from '../utils/async-utils.js';
  * ============================================================================
  */
 
-import { getCurrentChatId, is_send_press, setExtensionPrompt, substituteParams, chat_metadata, extension_prompts } from '../../../../../script.js';
+import { getCurrentChatId, is_send_press, setExtensionPrompt, substituteParams, chat_metadata, extension_prompts, extension_prompt_types } from '../../../../../script.js';
 import { getContext } from '../../../../extensions.js';
 import { getStringHash as calculateHash, waitUntilCondition, onlyUnique, uuidv4 } from '../../../../utils.js';
 import { isUnitStrategy, groupConversationTurns } from './chunking.js';
@@ -20,6 +20,7 @@ import { extractChatKeywords, extractBM25Keywords } from './keyword-boost.js';
 import { cleanText } from './text-cleaning.js';
 import { stripGeneratedKeywordSuffix } from '../utils/keyword-suffix.js';
 import { applyPromptRegexToMemories, loadMemoryRegexEngine } from './memory-regex.js';
+import { readContextLine, messagesDisplacedBy, countTokens, noteGenerationType } from './context-line.js';
 import {
     getSavedHashes,
     insertVectorItems,
@@ -32,7 +33,7 @@ import {
     resolveEmbeddingSettingsForEdit,
 } from './core-vector-api.js';
 import { isBackendAvailable, getBackend } from '../backends/backend-manager.js';
-import { applyDecayToResults, applySceneAwareDecay } from './temporal-decay.js';
+import { applyDecayToResults, applySceneAwareDecay, applyNostalgiaToResults } from './temporal-decay.js';
 import { isChunkDisabledByScene } from './scenes.js';
 import { registerCollection, getCollectionRegistry } from './collection-loader.js';
 import {
@@ -51,6 +52,7 @@ import {
     carryOverCollectionPreferences,
     transferCollectionAnnotations,
     getAnnotatedChunkHashes,
+    getCollectionDecaySettings,
 } from './collection-metadata.js';
 import { progressTracker, describeEffectiveSettings, phaseText } from '../ui/progress-tracker.js';
 import { sha256Text } from './vector-provenance.js';
@@ -261,6 +263,19 @@ function withSavedChatChunking(settings, saved) {
         conversation_turn_order: c.conversationTurnOrder ?? settings.conversation_turn_order,
         keyword_extraction_level: c.keywordLevel ?? settings.keyword_extraction_level,
     };
+}
+
+/**
+ * VH-117: a chat vectorized for the first time by Sync or auto-sync starts at
+ * Per Message. The stored global strategy has no control in the panel (older
+ * versions left whatever was last used there), so new chats silently took it.
+ * The Vectorize dialog's own choice is marked and kept.
+ */
+export const CHAT_CHUNKING_CHOSEN = 'vecthare_chat_chunking_chosen';
+function newChatChunking(settings) {
+    if (!settings || settings[CHAT_CHUNKING_CHOSEN] === true) return settings;
+    if (!['conversation_turns', 'message_batch', 'adaptive'].includes(settings.chunking_strategy)) return settings;
+    return { ...settings, chunking_strategy: 'per_message' };
 }
 
 function chatConfigChunking(settings) {
@@ -1854,7 +1869,7 @@ async function collectStableIdentityGroups(chat, settings, ledger, reconciliatio
 async function collectCurrentChatGroups(chat, settings, collectionId, hashOnly = false) {
     if (!collectionId || !getCollectionRegistry().some(key =>
         parseRegistryKey(key).collectionId === collectionId)) {
-        return collectGroupedItems(chat, settings, hashOnly);
+        return collectGroupedItems(chat, newChatChunking(settings), hashOnly); // VH-117
     }
     const saved = await readInitialVectorizationConfig(collectionId, settings);
     if (saved.status === 'invalid' || saved.status === 'unavailable') {
@@ -2484,7 +2499,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                 resolved = await recoverEmptyFirstSyncPreflight(collectionId, settings);
                 if (!resolved) throw error;
             }
-            settings = resolved.settings;
+            settings = resolved.status === 'new' && !resolved.config ? newChatChunking(resolved.settings) : resolved.settings; // VH-117
             capturedConfig = resolved.config || createInitialVectorizationConfig(settings, chatConfigChunking(settings));
             syncCompatibility = { status: resolved.status };
         }
@@ -3345,6 +3360,67 @@ function getRecentMessagesForDedup(chat, settings) {
     return depth > 0 && depth < chat.length ? chat.slice(-depth) : chat;
 }
 
+/**
+ * Which memories count as "already in context" for this recall.
+ * - "Skip memories already in context" on and SillyTavern's context line known
+ *   (core/context-line.js): the messages inside the line. A memory of the open
+ *   chat is skipped when any message it was made from is inside (all of them
+ *   while the context limit has not been reached). Other collections: only an
+ *   exact copy of an in-context message (as before).
+ * - Otherwise: the last Dedup Depth messages, as before.
+ */
+function buildInContextView(chat, settings, contextLine) {
+    let ownId = null;
+    try { ownId = peekChatCollectionId(); } catch { ownId = null; }
+    const isOpenChat = id => !!ownId && (parseRegistryKey(id).collectionId || id) === ownId;
+    const hashOf = message => getStringHash(getTextWithoutAttachments(message));
+    let mode = 'depth';
+    let messages;
+    if (settings.skip_in_context_memories !== false && contextLine?.known) {
+        mode = 'line';
+        const live = (() => { try { return getContext().chat || []; } catch { return []; } })();
+        messages = contextLine.inContext.map(index => live[index]).filter(Boolean);
+    } else {
+        messages = getRecentMessagesForDedup(chat, settings);
+    }
+    const hashes = new Set(messages.filter(message => message.mes).map(hashOf));
+    return {
+        mode,
+        hashes,
+        keys: new Set([...hashes].map(String)),
+        wholeOpenChat: mode === 'line' && !contextLine.limitReached,
+        line: mode === 'line' ? contextLine.line : null,
+        isOpenChat,
+        messageCount: messages.length,
+    };
+}
+
+/** Why a memory is already in context (null: it is not). */
+function inContextReason(chunk, view) {
+    const members = chunk.metadata?.messageHashes ?? chunk.messageHashes;
+    const hasMembers = Array.isArray(members) && members.length > 0;
+    if (view.mode === 'line' && view.isOpenChat(chunk.collectionId)) {
+        if (view.wholeOpenChat) return 'Context limit not reached: this whole chat is in context';
+        if (view.hashes.has(chunk.hash)) return 'Its message is inside the context line';
+        if (hasMembers) {
+            return members.some(hash => view.keys.has(String(hash)))
+                ? 'Part of this memory is inside the context line' : null;
+        }
+        // Older records without message hashes: their recorded positions.
+        const ids = Array.isArray(chunk.metadata?.messageIds) ? chunk.metadata.messageIds
+            : [chunk.metadata?.messageId ?? chunk.metadata?.endIndex].filter(Number.isInteger);
+        return view.line !== null && ids.some(id => id >= view.line) ? 'Its message is inside the context line' : null;
+    }
+    if (view.hashes.has(chunk.hash)) return 'Already in current chat context - no injection needed';
+    // #12: a grouped chunk is hashed over its combined text; it is redundant
+    // when every message it was built from is in context. A partially-present
+    // group still carries information and is kept.
+    if (hasMembers && members.every(hash => view.keys.has(String(hash)))) {
+        return 'Every message of this group is already in current chat context';
+    }
+    return null;
+}
+
 const RAG_QUERY_CONCURRENCY = 4;
 
 /**
@@ -3428,7 +3504,7 @@ function reportRagIssues(issues, debugData) {
  * @param {object} debugData Debug tracking object
  * @returns {Promise<object[]>} Array of chunk objects with scores
  */
-async function queryAndMergeCollections(activeCollections, queryText, settings, chat, debugData) {
+async function queryAndMergeCollections(activeCollections, queryText, settings, chat, debugData, inContextView = null) {
     let chunksForVisualizer = [];
     const effectiveTopK = settings.top_k ?? settings.insert;
     // Retrieve replacement candidates before Stage 9 dedup, without reducing configured top-K.
@@ -3578,23 +3654,11 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
     }
     reportRagIssues(ragIssues, debugData);
 
-    // Filter exact recent-message duplicates before the global top-K.
-    // Stage 9 remains authoritative after summary/group/link processing.
-    const recentHashes = new Set(getRecentMessagesForDedup(chat, settings)
-        .filter(message => message.mes)
-        .map(message => getStringHash(getTextWithoutAttachments(message))));
-    // #12: grouped chunks hash their combined text, so the early filter needs
-    // the same member-level check Stage 9 uses.
-    const recentHashKeys = new Set([...recentHashes].map(String));
-    const fullyInRecentContext = chunk => {
-        const members = chunk.metadata?.messageHashes ?? chunk.messageHashes;
-        // Any size: a one-message group of a grouped strategy hashes its
-        // speaker-labelled text, so only its member hash shows it is in context.
-        return Array.isArray(members) && members.length > 0 &&
-            members.every(hash => recentHashKeys.has(String(hash)));
-    };
-    chunksForVisualizer = chunksForVisualizer.filter(chunk =>
-        !recentHashes.has(chunk.hash) && !fullyInRecentContext(chunk));
+    // Filter memories already in context before the global top-K, so the
+    // freed places go to other memories. Stage 9 remains authoritative after
+    // summary/group/link processing.
+    const view = inContextView || buildInContextView(chat, settings, null);
+    chunksForVisualizer = chunksForVisualizer.filter(chunk => inContextReason(chunk, view) === null);
 
     chunksForVisualizer.sort((a, b) => b.score - a.score);
     // The overfetched candidates are deliberately kept here: the threshold,
@@ -3796,119 +3860,115 @@ function applyThresholdFilter(chunks, threshold, debugData) {
  * @param {object} debugData Debug tracking object
  * @returns {object[]} Chunks with decay applied
  */
-function applyTemporalDecayStage(chunks, chat, settings, threshold, debugData) {
-    if (!settings.temporal_decay || !settings.temporal_decay.enabled) {
-        addTrace(debugData, 'decay', 'Temporal decay skipped (disabled)', { enabled: false });
-        chunks.forEach(chunk => {
-            recordChunkFate(debugData, chunk.hash, 'decay', 'passed', 'Decay disabled', {
-                score: chunk.score
-            });
+/** VH-118: for Search Debug - temporal weighting of the collections queried. */
+function describeTemporalWeighting(collectionIds) {
+    const list = [];
+    for (const id of collectionIds || []) {
+        try {
+            const w = getCollectionDecaySettings(id);
+            list.push({ id, enabled: w?.enabled === true, type: w?.type || 'decay', halfLife: w?.halfLife, mode: w?.mode });
+        } catch { /* unknown: left out */ }
+    }
+    const on = list.filter(x => x.enabled);
+    return { enabled: on.length > 0, collections: list, halfLife: on[0]?.halfLife, mode: on[0]?.mode,
+        summary: on.length ? `${on.length} of ${list.length} collection(s): ${[...new Set(on.map(x => x.type))].join(', ')}` : 'off for all queried collections' };
+}
+
+async function applyTemporalDecayStage(chunks, chat, settings, threshold, debugData) {
+    // VH-118: each collection's own temporal weighting (set when it is created
+    // from the panel's "default for new collections", changed in the Database
+    // Browser or the Vectorize dialog). This only read a hidden global switch
+    // that no version ever had a control for, so per-collection decay and
+    // nostalgia never applied.
+    const currentMessageId = chat.length - 1;
+    const beforeCount = chunks.length;
+    const byCollection = new Map();
+    for (const chunk of chunks) {
+        const id = String(chunk.collectionId || '');
+        if (!byCollection.has(id)) byCollection.set(id, []);
+        byCollection.get(id).push(chunk);
+    }
+    const typesUsed = new Set();
+    const changed = new Map(); // hash -> decayed record
+
+    for (const [collectionId, group] of byCollection) {
+        let weighting = null;
+        try { weighting = getCollectionDecaySettings(collectionId); } catch { weighting = null; }
+        if (!weighting?.enabled) continue;
+
+        // Chat memories: as old as their newest message (grouped ones carry
+        // messageIds, not messageId, and were never weighted).
+        const bare = parseRegistryKey(collectionId)?.collectionId || collectionId;
+        const isChat = parseCollectionId(bare)?.type === 'chat';
+        const records = group.map(chunk => {
+            const meta = { ...(chunk.metadata || {}) };
+            if (isChat) {
+                meta.source = 'chat';
+                if (meta.messageId == null) {
+                    const ids = Array.isArray(meta.messageIds) ? meta.messageIds : null;
+                    const newest = meta.endIndex ?? (ids?.length ? ids[ids.length - 1] : null) ?? chunk.index;
+                    if (newest != null) meta.messageId = newest;
+                }
+            }
+            return { hash: chunk.hash, collectionId: chunk.collectionId, metadata: meta, score: chunk.score };
         });
+
+        let weighted;
+        let type;
+        if (weighting.type === 'nostalgia') {
+            weighted = applyNostalgiaToResults(records, currentMessageId, weighting);
+            type = 'nostalgia';
+        } else {
+            const scenes = weighting.sceneAware
+                ? group.filter(c => c.metadata?.isScene === true).map(c => ({ start: c.metadata.sceneStart, end: c.metadata.sceneEnd, hash: c.hash }))
+                : [];
+            weighted = scenes.length ? applySceneAwareDecay(records, currentMessageId, scenes, weighting)
+                : applyDecayToResults(records, currentMessageId, weighting);
+            type = scenes.length ? 'scene_aware' : 'decay';
+        }
+        typesUsed.add(type);
+        for (const record of weighted) {
+            if (record.decayApplied || record.sceneAwareDecay || record.nostalgiaApplied) changed.set(record.hash, { ...record, type });
+        }
+    }
+
+    if (!changed.size) {
+        addTrace(debugData, 'decay', 'Temporal weighting: none applies (off for these collections)', { enabled: false });
+        chunks.forEach(chunk => recordChunkFate(debugData, chunk.hash, 'decay', 'passed', 'No temporal weighting for this collection', { score: chunk.score }));
         return chunks;
     }
+    addTrace(debugData, 'decay', 'Starting temporal weighting', { types: [...typesUsed] });
 
-    const beforeCount = chunks.length;
-    addTrace(debugData, 'decay', 'Starting temporal decay', {
-        enabled: true,
-        sceneAware: settings.temporal_decay.sceneAware,
-        halfLife: settings.temporal_decay.halfLife || settings.temporal_decay.half_life,
-        strength: settings.temporal_decay.strength || settings.temporal_decay.rate
-    });
-
-    const currentMessageId = chat.length - 1;
-    const chunksWithScores = chunks.map(chunk => ({
-        hash: chunk.hash,
-        metadata: chunk.metadata,
-        score: chunk.score
-    }));
-
-    let decayedChunks;
-    let decayType = 'standard';
-
-    // Use scene-aware decay if enabled and scenes exist
-    if (settings.temporal_decay.sceneAware) {
-        const sceneChunks = chunks.filter(c => c.metadata?.isScene === true);
-        const scenes = sceneChunks.map(c => ({
-            start: c.metadata.sceneStart,
-            end: c.metadata.sceneEnd,
-            hash: c.hash,
-        }));
-
-        if (scenes.length > 0) {
-            decayedChunks = applySceneAwareDecay(chunksWithScores, currentMessageId, scenes, settings.temporal_decay);
-            decayType = 'scene_aware';
-            vhLog('VectHare: Applied scene-aware temporal decay to search results');
-        } else {
-            decayedChunks = applyDecayToResults(chunksWithScores, currentMessageId, settings.temporal_decay);
-            decayType = 'standard_no_scenes';
-            vhLog('VectHare: Applied temporal decay to search results (no scenes marked)');
-        }
-    } else {
-        decayedChunks = applyDecayToResults(chunksWithScores, currentMessageId, settings.temporal_decay);
-        vhLog('VectHare: Applied temporal decay to search results');
-    }
-
-    decayedChunks.sort((a, b) => b.score - a.score);
-
-    // PERF: Build Map for O(1) lookups instead of O(n) find() per chunk
-    const decayedChunksMap = new Map(decayedChunks.map(dc => [dc.hash, dc]));
-
-    // Map decay results back to chunks and record fate
     let result = chunks.map(chunk => {
-        const decayedChunk = decayedChunksMap.get(chunk.hash);
-        if (decayedChunk && (decayedChunk.decayApplied || decayedChunk.sceneAwareDecay)) {
-            const decayMultiplier = decayedChunk.score / (decayedChunk.originalScore || 1);
-            const newScore = decayedChunk.score;
-            const stillAboveThreshold = newScore >= threshold;
-
-            if (stillAboveThreshold) {
-                recordChunkFate(debugData, chunk.hash, 'decay', 'passed', null, {
-                    originalScore: decayedChunk.originalScore,
-                    decayedScore: newScore,
-                    decayMultiplier,
-                    messageAge: decayedChunk.messageAge || decayedChunk.effectiveAge,
-                    decayType
-                });
-            } else {
-                recordChunkFate(debugData, chunk.hash, 'decay', 'dropped',
-                    `Decayed score ${newScore.toFixed(3)} < threshold ${threshold}`,
-                    {
-                        originalScore: decayedChunk.originalScore,
-                        decayedScore: newScore,
-                        decayMultiplier,
-                        messageAge: decayedChunk.messageAge || decayedChunk.effectiveAge,
-                        decayType
-                    }
-                );
-            }
-
-            return {
-                ...chunk,
-                score: newScore,
-                originalScore: decayedChunk.originalScore,
-                messageAge: decayedChunk.messageAge || decayedChunk.effectiveAge,
-                decayApplied: true,
-                sceneAwareDecay: decayedChunk.sceneAwareDecay || false,
-                decayMultiplier
-            };
+        const weighted = changed.get(chunk.hash);
+        if (!weighted) {
+            recordChunkFate(debugData, chunk.hash, 'decay', 'passed', 'No temporal weighting applied', { score: chunk.score });
+            return chunk;
         }
-
-        recordChunkFate(debugData, chunk.hash, 'decay', 'passed', 'No decay applied', {
-            score: chunk.score
-        });
-        return chunk;
+        const newScore = weighted.score;
+        const multiplier = newScore / (weighted.originalScore || 1);
+        const details = { originalScore: weighted.originalScore, decayedScore: newScore, decayMultiplier: multiplier,
+            messageAge: weighted.messageAge || weighted.effectiveAge, decayType: weighted.type };
+        if (newScore >= threshold) recordChunkFate(debugData, chunk.hash, 'decay', 'passed', null, details);
+        else recordChunkFate(debugData, chunk.hash, 'decay', 'dropped', `Weighted score ${newScore.toFixed(3)} < threshold ${threshold}`, details);
+        return {
+            ...chunk,
+            score: newScore,
+            originalScore: weighted.originalScore,
+            messageAge: weighted.messageAge || weighted.effectiveAge,
+            decayApplied: true,
+            sceneAwareDecay: weighted.sceneAwareDecay || false,
+            nostalgiaApplied: weighted.nostalgiaApplied || false,
+            decayMultiplier: multiplier,
+        };
     });
 
-    // Re-filter by threshold after decay
+    result.sort((a, b) => b.score - a.score);
+    // Re-filter by threshold after weighting
     result = result.filter(c => c.score >= threshold);
-
-    addTrace(debugData, 'decay', 'Temporal decay completed', {
-        decayType,
-        before: beforeCount,
-        after: result.length,
-        dropped: beforeCount - result.length
+    addTrace(debugData, 'decay', 'Temporal weighting completed', {
+        types: [...typesUsed], before: beforeCount, after: result.length, dropped: beforeCount - result.length,
     });
-
     return result;
 }
 
@@ -4153,87 +4213,31 @@ async function applyGroupsAndLinksStage(chunks, activeCollections, settings, deb
  * @param {object} debugData Debug tracking object
  * @returns {{toInject: object[], skipped: object[]}} Chunks to inject and skipped duplicates
  */
-function deduplicateChunks(chunks, chat, settings, debugData) {
-    // Determine how far back to check for duplicates
-    // Default to 50 messages if not specified (reasonable context window)
+function deduplicateChunks(chunks, chat, settings, debugData, inContextView = null) {
+    const view = inContextView || buildInContextView(chat, settings, null);
     const deduplicationDepth = settings.deduplication_depth ?? 50;
 
     addTrace(debugData, 'injection', 'Starting deduplication and injection', {
         chunksToInject: chunks.length,
         chatLength: chat.length,
-        deduplicationDepth: deduplicationDepth
+        ...(view.mode === 'line'
+            ? { inContextBy: 'context line', inContextMessages: view.messageCount, wholeOpenChat: view.wholeOpenChat }
+            : { deduplicationDepth }),
     });
-
-    // Use the exact same depth semantics as the early top-K candidate filter.
-    const recentMessages = getRecentMessagesForDedup(chat, settings);
-
-    vhLog(`[VectHare Dedup] Building hash set from ${recentMessages.length} recent messages (depth: ${deduplicationDepth})`);
-    vhLog(`[VectHare Dedup] Total chat length: ${chat.length}, checking duplicates in last ${recentMessages.length} messages`);
-
-    // Build set of hashes currently in chat context
-    const currentChatHashes = new Set();
-    const chatHashMap = new Map(); // For debugging: hash -> message preview
-
-    recentMessages.forEach((msg, idx) => {
-        if (msg.mes) {
-            const cleanedText = substituteParams(getTextWithoutAttachments(msg));
-            // R22: raw-text hash - must match the storage-side formula
-            const hash = getStringHash(getTextWithoutAttachments(msg));
-            currentChatHashes.add(hash);
-
-            // Store sample for debugging (first occurrence only)
-            // Calculate absolute index in full chat
-            const absoluteIndex = chat.length - recentMessages.length + idx;
-            if (!chatHashMap.has(hash)) {
-                chatHashMap.set(hash, {
-                    index: absoluteIndex,
-                    preview: cleanedText.substring(0, 80),
-                    isUser: msg.is_user,
-                    name: msg.name
-                });
-            }
-        }
-    });
-
-    vhLog(`[VectHare Dedup] Built hash set with ${currentChatHashes.size} unique message hashes from recent context`);
-
-    // #12: a grouped chunk is hashed over its combined text, so its hash never
-    // equals a single message's hash. It is still redundant when every message
-    // it was built from is already in the recent context. A partially-present
-    // group still carries information and is kept.
-    const currentChatHashKeys = new Set([...currentChatHashes].map(String));
-    const groupMemberHashes = chunk => {
-        const stored = chunk.metadata?.messageHashes ?? chunk.messageHashes;
-        return Array.isArray(stored) && stored.length > 0 ? stored.map(String) : null;
-    };
+    vhLog(`[VectHare Dedup] ${view.mode === 'line'
+        ? `Context line: ${view.messageCount} message(s) in context${view.wholeOpenChat ? ' (limit not reached: no memories of this chat)' : ''}`
+        : `Dedup Depth ${deduplicationDepth}: checking the last ${view.messageCount} message(s)`}`);
 
     const toInject = [];
     const skipped = [];
 
     for (const chunk of chunks) {
-        const members = groupMemberHashes(chunk);
-        const isInChat = currentChatHashes.has(chunk.hash) ||
-            (members !== null && members.every(hash => currentChatHashKeys.has(hash)));
-
-        if (isInChat) {
-            const matchedMsg = chatHashMap.get(chunk.hash);
-            console.debug(`[VectHare Dedup] ❌ SKIPPING chunk (hash: ${chunk.hash})`);
-            console.debug(`  Chunk text: "${chunk.text?.substring(0, 80)}..."`);
-            console.debug(matchedMsg
-                ? `  Matches chat message #${matchedMsg.index} from ${matchedMsg.name}: "${matchedMsg.preview}..."`
-                : `  Every message in this group (${members?.length ?? 0}) is already in recent context`);
-            console.debug(`  Score: ${chunk.score?.toFixed(4)}, Collection: ${chunk.collectionId}`);
-
+        const reason = inContextReason(chunk, view);
+        if (reason) {
+            console.debug(`[VectHare Dedup] ❌ SKIPPING chunk (hash: ${chunk.hash}): ${reason}`);
             skipped.push(chunk);
-            recordChunkFate(debugData, chunk.hash, 'injection', 'skipped',
-                matchedMsg ? 'Already in current chat context - no injection needed'
-                    : 'Every message of this group is already in current chat context',
-                { score: chunk.score }
-            );
+            recordChunkFate(debugData, chunk.hash, 'injection', 'skipped', reason, { score: chunk.score });
         } else {
-            console.debug(`[VectHare Dedup] ✅ KEEPING chunk (hash: ${chunk.hash}, score: ${chunk.score?.toFixed(4)})`);
-            console.debug(`  Text: "${chunk.text?.substring(0, 80)}..."`);
-
             toInject.push(chunk);
             recordChunkFate(debugData, chunk.hash, 'injection', 'passed',
                 'Not in current context - will inject',
@@ -4374,6 +4378,45 @@ function resolveChunkInjectionPosition(chunk, settings) {
 }
 
 /**
+ * Keeps in-chat memory blocks inside SillyTavern's context (always), or puts
+ * them at its top ("Place memories at the top of the context"). The deepest
+ * safe depth is the number of messages in context less the messages the
+ * memories' own tokens push out (core/context-line.js). Nothing changes while
+ * the line is not known, or (for the cap) while the limit is not reached.
+ */
+async function placeInChatGroupsInsideContext(groups, settings, debugData, contextLine) {
+    const inChat = groups.filter(group => Number(group.position) === extension_prompt_types.IN_CHAT);
+    if (!inChat.length || !contextLine?.known) return;
+    const toTop = settings.memories_at_context_top === true;
+    if (!toTop && !contextLine.limitReached) return;
+    const blockText = buildNestedInjectionText(groups.flatMap(group => group.chunks), settings);
+    const tokens = await countTokens(blockText);
+    const displaced = await messagesDisplacedBy(contextLine.inContext, tokens);
+    const deepest = Math.max(0, contextLine.inContext.length - displaced);
+    const moves = [];
+    for (const group of inChat) {
+        const from = Number(group.depth);
+        const to = toTop ? deepest : Math.min(from, deepest);
+        if (to !== from) {
+            moves.push({ from, to, chunks: group.chunks.length });
+            group.depth = to;
+        }
+    }
+    debugData.contextPlacement = {
+        mode: toTop ? 'top' : 'cap',
+        inContext: contextLine.inContext.length,
+        limitReached: contextLine.limitReached,
+        memoryTokens: tokens,
+        deepestSafeDepth: deepest,
+        moves,
+    };
+    if (moves.length) {
+        addTrace(debugData, 'injection', toTop ? 'Memories placed at the top of the context'
+            : 'Injection depth capped to stay inside the context', debugData.contextPlacement);
+    }
+}
+
+/**
  * Stage 8: Format and inject chunks into prompt
  * Supports per-chunk/per-collection injection positions via cascade resolution.
  * Groups chunks by their resolved position+depth and creates separate injections.
@@ -4383,7 +4426,7 @@ function resolveChunkInjectionPosition(chunk, settings) {
  * @param {object} debugData Debug tracking object
  * @returns {{verified: boolean, text: string}} Injection result
  */
-function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
+async function injectChunksIntoPrompt(chunksToInject, settings, debugData, contextLine = null) {
     // Control print: Log chunks QUEUED for injection (not yet injected)
     vhLog(`[VectHare Injection Control] Preparing to inject ${chunksToInject.length} chunks`);
     vhLog('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -4417,6 +4460,23 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
             positionGroups.set(key, { position, depth, chunks: [] });
         }
         positionGroups.get(key).chunks.push(chunk);
+    }
+
+    // In-chat memories stay inside the context (SillyTavern cuts a block that
+    // sits above its context line, with the oldest messages), or go to the top
+    // of it ("Place memories at the top of the context"). Done before the regex
+    // step, whose depth limits use the final depth.
+    await placeInChatGroupsInsideContext([...positionGroups.values()], settings, debugData, contextLine);
+    if (positionGroups.size > 1) {
+        // Groups that now share a position and depth are injected together.
+        const merged = new Map();
+        for (const group of positionGroups.values()) {
+            const key = `${group.position}:${group.depth}`;
+            if (merged.has(key)) merged.get(key).chunks.push(...group.chunks);
+            else merged.set(key, group);
+        }
+        positionGroups.clear();
+        for (const [key, group] of merged) positionGroups.set(key, group);
     }
 
     // SillyTavern's "Alter Outgoing Prompt" regex scripts, per memory, per
@@ -4593,6 +4653,7 @@ export async function rearrangeChat(chat, settings, type) {
 }
 
 async function rearrangeChatWithinDeadline(chat, settings, type, isCurrentRun) {
+    noteGenerationType(type || 'normal');
     vhLog(`🐰 VectHare: rearrangeChat called (type: ${type}, chat length: ${chat?.length || 0})`);
     // VH-109: pick up other tabs' changes first (one small request). A tab
     // whose copy of the store is out of date looked for a collection another
@@ -4715,8 +4776,7 @@ async function rearrangeChatWithinDeadline(chat, settings, type, isCurrentRun) {
         debugData.settings = {
             threshold: settings.score_threshold,
             topK: effectiveTopK,
-            temporal_decay: settings.temporal_decay,
-            protect: settings.protect,
+            temporal_decay: describeTemporalWeighting(activeCollections),
             chatLength: chat.length
         };
 
@@ -4725,7 +4785,6 @@ async function rearrangeChatWithinDeadline(chat, settings, type, isCurrentRun) {
             queryLength: queryText.length,
             threshold: settings.score_threshold,
             topK: effectiveTopK,
-            protect: settings.protect
         });
 
         // C12: let per-chunk annotations (disabled, etc.) of older shared records
@@ -4734,8 +4793,20 @@ async function rearrangeChatWithinDeadline(chat, settings, type, isCurrentRun) {
             console.debug(`VectHare: annotation ownership check skipped: ${error.message}`);
         }
 
+        // SillyTavern's context line from the last generation (core/context-line.js)
+        const contextLine = readContextLine(type || 'normal');
+        const inContextView = buildInContextView(chat, settings, contextLine);
+        debugData.contextLine = {
+            known: contextLine.known,
+            limitReached: contextLine.limitReached,
+            line: contextLine.line,
+            inContext: contextLine.inContext.length,
+            skipInContext: settings.skip_in_context_memories !== false,
+            usedFor: inContextView.mode === 'line' ? 'context line' : 'dedup depth',
+        };
+
         // === STAGE 4: Query all collections and merge results ===
-        let chunks = await queryAndMergeCollections(activeCollections, queryText, settings, chat, debugData);
+        let chunks = await queryAndMergeCollections(activeCollections, queryText, settings, chat, debugData, inContextView);
 
         // === STAGE 4.1: Filter disabled chunks ===
         const beforeDisabledFilter = chunks.length;
@@ -4906,7 +4977,7 @@ async function rearrangeChatWithinDeadline(chat, settings, type, isCurrentRun) {
         debugData.stages.afterThreshold = [...chunks];
 
         // === STAGE 7: Temporal decay ===
-        chunks = applyTemporalDecayStage(chunks, chat, settings, threshold, debugData);
+        chunks = await applyTemporalDecayStage(chunks, chat, settings, threshold, debugData);
         debugData.stages.afterDecay = [...chunks];
         debugData.stats.afterDecay = chunks.length;
 
@@ -4925,7 +4996,7 @@ async function rearrangeChatWithinDeadline(chat, settings, type, isCurrentRun) {
             chunks: chunks,
             query: queryText,
             timestamp: Date.now(),
-            settings: { threshold: settings.score_threshold, topK: (settings.top_k ?? settings.insert), temporal_decay: settings.temporal_decay }
+            settings: { threshold: settings.score_threshold, topK: (settings.top_k ?? settings.insert), temporal_decay: debugData.settings?.temporal_decay }
         };
         vhLog(`VectHare: Stored ${chunks.length} chunks for visualizer`);
 
@@ -4933,7 +5004,7 @@ async function rearrangeChatWithinDeadline(chat, settings, type, isCurrentRun) {
         vhLog(`[VectHare Deduplication] Starting with ${chunks.length} chunks before deduplication`);
         vhLog(`[VectHare Deduplication] Current chat has ${chat.length} messages`);
 
-        const dedupResult = deduplicateChunks(chunks, chat, settings, debugData);
+        const dedupResult = deduplicateChunks(chunks, chat, settings, debugData, inContextView);
         const skippedDuplicates = dedupResult.skipped;
         // Apply the configured top-K to the final injection set. Chunks pulled
         // in by a mandatory group are kept regardless, as before.
@@ -4979,7 +5050,7 @@ async function rearrangeChatWithinDeadline(chat, settings, type, isCurrentRun) {
             console.warn('VectHare: Chat changed while memories were being retrieved - discarding this result');
             return;
         }
-        const injection = injectChunksIntoPrompt(chunksToInject, settings, debugData);
+        const injection = await injectChunksIntoPrompt(chunksToInject, settings, debugData, contextLine);
 
         vhLog(`\n✅ VectHare: Successfully injected ${chunksToInject.length} chunk(s) into prompt`);
         vhLog(`   Verification: ${injection.verified ? '✓ PASSED' : '✗ FAILED'}`);
@@ -4994,6 +5065,7 @@ async function rearrangeChatWithinDeadline(chat, settings, type, isCurrentRun) {
             text: injection.text,
             position: settings.position,
             depth: settings.depth,
+            ...(debugData.contextPlacement?.moves?.length ? { placedDepth: debugData.contextPlacement.moves[0].to } : {}),
             promptTag: EXTENSION_PROMPT_TAG,
             charCount: injection.text.length
         };
@@ -5092,7 +5164,7 @@ export async function vectorizeAll(settings, batchSize, includeIndexedCount = fa
             resolvedSync = await recoverEmptyFirstSyncPreflight(binding.collectionId, settings);
             if (!resolvedSync) throw error;
         }
-        settings = resolvedSync.settings;
+        settings = resolvedSync.status === 'new' && !resolvedSync.config ? newChatChunking(resolvedSync.settings) : resolvedSync.settings; // VH-117
         capturedConfig = resolvedSync.config || createInitialVectorizationConfig(settings, chatConfigChunking(settings));
 
         // Pre-flight check: verify backend is available before starting

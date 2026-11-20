@@ -106,6 +106,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
         }
         const liveSettings = snapshotCollectionOperationSettings(vecthareSettings);
         liveSettings.chunking_strategy = settings.strategy || type.defaultStrategy;
+        liveSettings.vecthare_chat_chunking_chosen = true; // VH-117: the dialog's choice, kept for a new chat
         liveSettings.conversation_turn_order = settings.conversation_turn_order || 'user_character';
         liveSettings.keyword_extraction_level = settings.keywordLevel || liveSettings.keyword_extraction_level;
         if (liveSettings.chunking_strategy === 'message_batch') {

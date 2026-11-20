@@ -54,10 +54,16 @@ export function getProviderSpecificParams(settings, isQuery = false) {
             params.apiUrl = settings.use_alt_endpoint
                 ? settings.alt_endpoint_url
                 : 'http://localhost:8008';
-            if (secret_state['bananabread_api_key']) {
+            // VH-116: the key VectHare saves in its settings (the panel writes it
+            // there; SillyTavern's secret state does not give extensions the
+            // key itself), as searches already use it. Secret state only as a
+            // fallback for keys saved before.
+            if (settings.bananabread_api_key) {
+                params.apiKey = settings.bananabread_api_key;
+            } else if (secret_state['bananabread_api_key']) {
                 const secrets = secret_state['bananabread_api_key'];
                 const activeSecret = Array.isArray(secrets) ? (secrets.find(s => s.active) || secrets[0]) : null;
-                if (activeSecret) {
+                if (activeSecret?.value && !/^\*+/.test(String(activeSecret.value))) {
                     params.apiKey = activeSecret.value;
                 }
             }

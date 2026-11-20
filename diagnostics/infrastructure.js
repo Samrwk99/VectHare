@@ -9,6 +9,7 @@
  * ============================================================================
  */
 
+import { getProviderSpecificParams } from '../backends/provider-params.js';
 import { getRequestHeaders } from '../../../../../script.js';
 import { isSecretAvailable } from '../core/secret-store.js';
 import { secret_state } from '../../../../secrets.js';
@@ -32,35 +33,11 @@ import {
  * @returns {object} Additional body parameters for the request
  */
 function getPluginProviderParams(settings) {
-    const params = {};
-    const source = settings.source;
-
-    // BananaBread requires apiUrl and apiKey in request body
-    if (source === 'bananabread') {
-        params.apiUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : 'http://localhost:8008';
-        // API key is stored in extension settings (not ST's secret store)
-        if (settings.bananabread_api_key) {
-            params.apiKey = settings.bananabread_api_key;
-        }
-    }
-
-    // Ollama needs apiUrl and keep param
-    if (source === 'ollama') {
-        params.apiUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : settings.ollama_url;
-        params.keep = !!settings.ollama_keep;
-    }
-
-    // llamacpp needs apiUrl
-    if (source === 'llamacpp') {
-        params.apiUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : settings.llamacpp_url;
-    }
-
-    // vllm needs apiUrl
-    if (source === 'vllm') {
-        params.apiUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : settings.vllm_url;
-    }
-
-    return params;
+    // VH-116: the same parameters real embedding sends (backends/provider-params.js).
+    // This used settings that do not exist (ollama_url, llamacpp_url, vllm_url),
+    // so Ollama/llama.cpp/vLLM were tested at the default local address instead
+    // of SillyTavern's configured server, and Google/Vertex lacked their settings.
+    return getProviderSpecificParams(settings);
 }
 
 /**

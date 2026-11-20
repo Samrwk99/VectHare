@@ -128,6 +128,17 @@ function normalizeKeywords(keywords) {
     }).filter(Boolean);
 }
 
+/** VH-119: Qdrant stores " [KEYWORDS: ...]" after a chunk's text (vectorizing adds it). */
+function isQdrantCollection() {
+    return (parseRegistryKey(String(currentCollectionId || ''))?.backend || currentSettings?.vector_backend) === 'qdrant';
+}
+
+/** The text as vectorizing would store it on Qdrant: text + generated keyword list. */
+function withGeneratedKeywordSuffix(text, keywords) {
+    const list = (keywords || []).map(kw => kw?.text ?? kw).filter(Boolean);
+    return isQdrantCollection() && list.length ? `${text} [KEYWORDS: ${list.join(' ')}]` : text;
+}
+
 function getChunkData(chunk) {
     const stored = getChunkMetadata(chunk.hash, currentCollectionId) || {};
 
@@ -135,10 +146,17 @@ function getChunkData(chunk) {
     const dbKeywords = chunk.metadata?.keywords || chunk.keywords || [];
     const keywords = stored.keywords !== undefined ? stored.keywords : dbKeywords;
 
+    // VH-119: the memory's own text - without Qdrant's generated keyword list,
+    // which showed as editable text (deleting it quietly took the keywords out
+    // of the embedding); it is added back from the keywords when text is saved.
+    const text = isQdrantCollection() && typeof chunk.text === 'string'
+        ? String(stripGeneratedKeywordSuffix(chunk.text, dbKeywords.length ? dbKeywords : keywords) ?? chunk.text)
+        : chunk.text;
+
     return {
         hash: chunk.hash,
         index: chunk.index,
-        text: chunk.text,
+        text,
         score: chunk.score || 1,
         similarity: chunk.similarity || 1,
         messageAge: chunk.messageAge,
@@ -194,7 +212,10 @@ async function saveAllChanges() {
                 }
                 // Text changed - requires re-embedding
                 await noteManualVectorChange(currentCollectionId, (await settingsFor()), [hash]);
-                const result = await updateChunkText(currentCollectionId, hash, updates.text, (await settingsFor()));
+                const currentKeywords = updates.keywords !== undefined ? updates.keywords
+                    : (allChunks.find(c => String(c.hash) === String(hash))?.data?.keywords || []);
+                const result = await updateChunkText(currentCollectionId, hash,
+                    withGeneratedKeywordSuffix(updates.text, currentKeywords), (await settingsFor()));
                 if (result?.newHash !== undefined && result.newHash !== null && String(result.newHash) !== String(hash)) {
                     rehashChunkReferences(hash, result.newHash);
                     hash = result.newHash;
@@ -1946,6 +1967,9 @@ async function replaceChunkText(chunk, newText) {
             hash: newHash, // keep as number for Qdrant compatibility
             text: newText,
             index: chunk.index,
+            // VH-119: Qdrant builds its " [KEYWORDS: ...]" list from the item's
+            // keywords; inside metadata only, the edited chunk lost the list.
+            ...(carried.keywords !== undefined ? { keywords: carried.keywords } : {}),
             metadata: carried,
             __vecthareProvenanceHint: { writer: 'chunk-visualizer', sourceType: 'manual-edit' },
         }], editSettings);

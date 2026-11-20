@@ -28,7 +28,7 @@ export async function savedHashesFor(collectionId, settings, includeMetadata = f
 }
 import { getChatCollectionId, getChatUUID, parseCollectionId } from '../core/chat-vectorization.js';
 import { VALID_EMOTIONS, VALID_GENERATION_TYPES, validateConditionRule } from '../core/conditional-activation.js';
-import { getTemporallyBlindCount, getTemporallyBlindChunks, isChunkTemporallyBlind, isCollectionEnabled, getChunkMetadata } from '../core/collection-metadata.js';
+import { getTemporallyBlindCount, getTemporallyBlindChunks, isChunkTemporallyBlind, isCollectionEnabled, isCollectionAutoSyncEnabled, getChunkMetadata } from '../core/collection-metadata.js';
 import { getCollectionRegistry } from '../core/collection-loader.js';
 
 /**
@@ -37,8 +37,15 @@ import { getCollectionRegistry } from '../core/collection-loader.js';
  * that can be queried during generation.
  */
 export function checkChatEnabled(settings) {
-    const chatEnabled = settings.enabled_chats;
+    // VH-115: this read the old global 'enabled_chats' switch, which nothing sets
+    // any more (auto-sync is per chat), so it reported "no collections" for a
+    // vectorized chat and its fix could never clear the warning. What recall
+    // queries is the open chat's own collection when it exists and is enabled.
     const chatCollectionId = getChatCollectionId();
+    const chatKey = chatCollectionId ? getCollectionRegistry().find(key =>
+        key === chatCollectionId || key.endsWith(`:${chatCollectionId}`)) : null;
+    const chatEnabled = Boolean(chatKey) && isCollectionEnabled(chatKey);
+    const chatAutoSync = Boolean(chatKey) && isCollectionAutoSyncEnabled(chatKey);
 
     // Count other enabled collections (not the current chat)
     const registry = getCollectionRegistry();
@@ -71,16 +78,18 @@ export function checkChatEnabled(settings) {
         return {
             name: 'RAG Query Status',
             status: 'warning',
-            message: 'No collections enabled for querying. Enable chat vectorization or enable other collections in the Database Browser.',
-            fixable: true,
-            fixAction: 'enable_chats'
+            message: chatKey
+                ? 'This chat\'s collection is disabled and no other collections are enabled. Enable it (or others) in the Database Browser.'
+                : 'Nothing to recall from: this chat is not vectorized and no other collections are enabled. Turn on auto-sync (or Vectorize) for this chat, or enable collections in the Database Browser.',
+            fixable: !chatKey,
+            ...(chatKey ? {} : { fixAction: 'enable_chats' }),
         };
     }
 
     // Build status message
     const parts = [];
     if (chatEnabled) {
-        parts.push('Chat: enabled');
+        parts.push(`This chat: enabled${chatAutoSync ? ', auto-sync on' : ''}`);
     }
     if (otherEnabledCount > 0) {
         const names = otherEnabledNames.length < otherEnabledCount
@@ -93,45 +102,6 @@ export function checkChatEnabled(settings) {
         name: 'RAG Query Status',
         status: 'pass',
         message: parts.join(' | ')
-    };
-}
-
-/**
- * Check: Chunk size (for adaptive strategy)
- */
-export function checkChunkSize(settings) {
-    const size = settings.chunk_size || 500;
-
-    if (size < 50) {
-        return {
-            name: 'Chunk Size',
-            status: 'fail',
-            message: `Chunk size too small (${size} chars). Minimum: 50`,
-            fixable: true,
-            fixAction: 'fix_chunk_size'
-        };
-    }
-
-    if (size < 100) {
-        return {
-            name: 'Chunk Size',
-            status: 'warning',
-            message: `Chunk size is very small (${size} chars). Recommended: 200-800`
-        };
-    }
-
-    if (size > 2000) {
-        return {
-            name: 'Chunk Size',
-            status: 'warning',
-            message: `Chunk size is very large (${size} chars). May cause context issues`
-        };
-    }
-
-    return {
-        name: 'Chunk Size',
-        status: 'pass',
-        message: `${size} characters`
     };
 }
 
@@ -178,14 +148,15 @@ export function checkScoreThreshold(settings) {
  * Check: Insert and query counts
  */
 export function checkInsertQueryCounts(settings) {
-    const insert = settings.insert;
+    // VH-115: 'insert' is the old name of Top K; the panel sets top_k.
+    const insert = settings.top_k ?? settings.insert;
     const query = settings.query;
 
     if (insert < 1 || query < 1) {
         return {
-            name: 'Insert/Query Counts',
+            name: 'Top K / Query Depth',
             status: 'fail',
-            message: `Invalid counts (insert: ${insert}, query: ${query}). Must be >= 1`,
+            message: `Invalid counts (Top K: ${insert}, query depth: ${query}). Must be >= 1`,
             fixable: true,
             fixAction: 'fix_counts'
         };
@@ -193,16 +164,16 @@ export function checkInsertQueryCounts(settings) {
 
     if (insert > 20 || query > 20) {
         return {
-            name: 'Insert/Query Counts',
+            name: 'Top K / Query Depth',
             status: 'warning',
-            message: `High counts (insert: ${insert}, query: ${query}). May use too much context`
+            message: `High counts (Top K: ${insert}, query depth: ${query}). May use too much context`
         };
     }
 
     return {
-        name: 'Insert/Query Counts',
+        name: 'Top K / Query Depth',
         status: 'pass',
-        message: `Insert: ${insert}, Query: ${query}`
+        message: `Top K: ${insert}, Query depth: ${query}`
     };
 }
 

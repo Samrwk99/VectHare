@@ -29,7 +29,6 @@ import {
 
 import {
     checkChatEnabled,
-    checkChunkSize,
     checkScoreThreshold,
     checkInsertQueryCounts,
     checkChatVectors,
@@ -153,7 +152,6 @@ export async function runDiagnostics(settings, includeProductionTests = false) {
 
     // ========== CONFIGURATION CHECKS ==========
     categories.configuration.push(checkChatEnabled(settings));
-    categories.configuration.push(checkChunkSize(settings));
     categories.configuration.push(checkScoreThreshold(settings));
     categories.configuration.push(checkInsertQueryCounts(settings));
     categories.configuration.push(await checkChatVectors(settings));

@@ -1,4 +1,6 @@
 import { vhLog } from '../utils/log.js';
+import { getModelField } from '../core/providers.js';
+import { extension_settings } from '../../../../extensions.js';
 /**
  * ============================================================================
  * VECTHARE PROGRESS TRACKER
@@ -1295,15 +1297,18 @@ export function phaseText(phase, n, total) {
  */
 export function describeEffectiveSettings(settings, extra = {}) {
     if (!settings || typeof settings !== 'object') return { ...extra };
-    const model = settings.openai_model || settings.ollama_model || settings.llamacpp_model ||
-        settings.vllm_model || settings.webllm_model || settings.togetherai_model ||
-        settings.cohere_model || settings.nomicai_model || settings.mistral_model ||
-        settings.palm_model || settings.koboldcpp_model || '';
-    const cleaning = settings.__collectionCleaningPatterns
-        ? `${settings.__collectionCleaningPatterns.length} pattern(s) from the collection`
-        : settings.text_cleaning_enabled === false
-            ? 'off'
-            : settings.text_cleaning_preset || 'default';
+    // VH-115: the selected provider's model (this took the first model setting of
+    // ANY provider, so with OpenAI's default it showed text-embedding-ada-002 for
+    // everyone), and the real text-cleaning setting (it read two settings that
+    // do not exist and always said "default").
+    const modelField = getModelField(settings.source || 'transformers');
+    const model = modelField ? String(settings[modelField] || '') : '';
+    const preset = extension_settings?.vecthare?.cleaning?.selectedPreset || 'none';
+    const cleaning = Array.isArray(settings.__collectionCleaningPatterns)
+        ? (settings.__collectionCleaningPatterns.length
+            ? `${settings.__collectionCleaningPatterns.length} pattern(s) saved with the collection`
+            : 'none (saved with the collection)')
+        : (preset === 'none' ? 'off' : preset);
     const out = {
         'Backend': settings.vector_backend || 'standard',
         'Embedding source': settings.source || 'transformers',

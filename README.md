@@ -157,7 +157,9 @@ For example, with half-life = 50:
 | 150 | 12.5% |
 
 ### Configuration Options
+Temporal weighting is set **per collection** (Database Browser → collection settings); the settings panel sets the default for new collections.
 - **Enabled**: Toggle decay on/off (default: OFF)
+- **Type**: Decay (favour recent) or Nostalgia (favour older memories)
 - **Mode**: Exponential or Linear
 - **Half-life**: Messages until 50% relevance (default: 50)
 - **Floor**: Minimum relevance, prevents complete forgetting (default: 0.3)
@@ -244,16 +246,22 @@ This fork ships with `auto_update: false` in its manifest, so SillyTavern will n
 ### 💬 Chat Vectorization
 | Setting | Description |
 |---------|-------------|
-| **Enable Auto-Sync** | Automatically vectorize new messages |
-| **Chunking Strategy** | Per Message, Conversation Turns, Message Batch, Per Scene |
+| **Enable Auto-Sync** | Automatically vectorize new messages (per chat) |
+| **Chunking Strategy** | Chosen in the Vectorize dialog when a chat is first vectorized: Per Message (default), Conversation Turns or Message Batch. Each chat keeps its own |
 | **Score Threshold** | Minimum similarity to include chunk (0.0-1.0) |
-| **Query Depth** | How many chunks to retrieve |
-| **Insert Count** | How many chunks to inject into prompt |
+| **Query Depth** | How many recent messages make up the search query |
+| **Top K** | How many chunks to inject into prompt |
+| **Apply "Alter Outgoing Prompt" Regex to Memories** | Runs your SillyTavern prompt regex scripts on recalled memories (on by default) |
+| **Skip Memories Already in Context** | Memories of this chat whose messages are still inside SillyTavern's context line (the orange dashed line) are not recalled; a grouped memory is skipped if any part is inside, and none are recalled until the context limit is reached. Other collections are unaffected. Replaces Dedup Depth once the line is known (after one generation in the chat); the panel shows where the line is (on by default) |
+| **Dedup Depth** | Recent messages checked for duplicates; used while the context line is not known, or with the option above off |
+| **Injection Depth** | For In-Chat @ Depth: messages from the end of the chat. Always kept inside the context: memories set deeper than the context line (which SillyTavern would cut) are moved just inside it |
+| **Place Memories at the Top of the Context** | In-Chat @ Depth memories go just inside the context line, as far in as their own size needs (off by default) |
 
-### ⏰ Temporal Decay
+### ⏰ Temporal Decay (per collection)
 | Setting | Description |
 |---------|-------------|
-| **Enabled** | Toggle decay system |
+| **Enabled** | Toggle decay or nostalgia for the collection |
+| **Type** | Decay (recent first) or Nostalgia (older first) |
 | **Mode** | Exponential or Linear |
 | **Half-life** | Messages until 50% relevance |
 | **Floor** | Minimum relevance multiplier |
@@ -287,10 +295,9 @@ This fork ships with `auto_update: false` in its manifest, so SillyTavern will n
 ## 🐛 Troubleshooting
 
 ### "No embeddings available"
-1. Enable Vectors extension in main ST settings
-2. Select embedding provider in VectHare settings
-3. Add API key if using cloud provider
-4. Run Diagnostics to verify connectivity
+1. Select embedding provider in VectHare settings
+2. Add API key if using cloud provider
+3. Run Diagnostics to verify connectivity
 
 ### Chunks not being retrieved
 1. Click "Vectorize" button to index current chat

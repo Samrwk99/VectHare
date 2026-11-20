@@ -320,7 +320,11 @@ function createModalHtml(data, historyIndex = 0) {
                                 </div>
                                 <div class="vecthare-debug-setting">
                                     <span class="vecthare-debug-setting-label">Temporal Decay</span>
-                                    <span class="vecthare-debug-setting-value">${data.settings.temporal_decay?.enabled ? 'On' : 'Off'}</span>
+                                    <span class="vecthare-debug-setting-value">${data.settings.temporal_decay?.enabled ? escapeHtml(`On (${data.settings.temporal_decay.summary || 'some collections'})`) : 'Off'}</span>
+                                </div>
+                                <div class="vecthare-debug-setting">
+                                    <span class="vecthare-debug-setting-label">Already in Context</span>
+                                    <span class="vecthare-debug-setting-value">${escapeHtml(describeInContextCheck(data))}</span>
                                 </div>
                                 <div class="vecthare-debug-setting">
                                     <span class="vecthare-debug-setting-label">Collection</span>
@@ -891,13 +895,36 @@ function buildScoreBreakdown(chunk) {
 /**
  * Renders injection verification card - proof that injection actually happened
  */
+/** How "already in context" was decided for this recall. */
+function describeInContextCheck(data) {
+    const c = data.contextLine;
+    if (!c) return 'Dedup Depth';
+    if (!c.skipInContext) return 'Dedup Depth (skip by context line is off)';
+    if (!c.known) return 'Dedup Depth (context line not known yet)';
+    return c.limitReached
+        ? `Context line: ${c.inContext} message(s) in context`
+        : 'Context limit not reached: no memories of this chat';
+}
+
+/** Search Debug note when the context moved the memories. */
+function describePlacement(placement) {
+    const moves = placement.moves.map(m => `${m.from} → ${m.to}`).join(', ');
+    return placement.mode === 'top'
+        ? `Placed at the top of the context: depth ${moves} (${placement.inContext} message(s) in context; the memories, ${placement.memoryTokens} tokens, push out the oldest few)`
+        : `Depth capped to stay inside the context: ${moves} (only ${placement.inContext} message(s) are in context; deeper memories would be cut with the oldest messages)`;
+}
+
 function renderInjectionVerification(data) {
     // Only show if there were injected chunks
     if (!data.injection || data.stages.injected.length === 0) {
         return '';
     }
 
-    const { verified, text, position, depth, charCount } = data.injection;
+    const { verified, text, position, charCount } = data.injection;
+    const placement = data.contextPlacement;
+    const moved = placement?.moves?.length ? placement.moves : null;
+    const depth = moved ? moved.map(m => m.to).join(', ') : data.injection.depth;
+    const placementNote = moved ? describePlacement(placement) : '';
     const statusClass = verified ? 'vecthare-verification-success' : 'vecthare-verification-failed';
     const statusIcon = verified ? 'fa-circle-check' : 'fa-circle-xmark';
     const statusText = verified ? 'VERIFIED' : 'VERIFICATION FAILED';
@@ -937,6 +964,7 @@ function renderInjectionVerification(data) {
                         <span class="stat-value">${charCount.toLocaleString()}</span>
                     </div>
                 </div>
+                ${placementNote ? `<div class="vecthare_hint" style="margin: 6px 0;"><i class="fa-solid fa-arrows-up-down"></i> ${escapeHtml(placementNote)}</div>` : ''}
                 <div class="vecthare-verification-text-wrapper" style="display: none;">
                     <div class="vecthare-verification-text-label">Actual Injected Text:</div>
                     <pre class="vecthare-verification-text">${escapeHtml(text)}</pre>
@@ -1117,13 +1145,13 @@ function diagnosePipeline(data) {
                 return (chunk.finalScore || 0) > (best.finalScore || 0) ? chunk : best;
             });
 
-            const decayStrength = temporalDecay.strength || temporalDecay.rate || 'unknown';
+            const decayStrength = temporalDecay.mode || 'unknown';
             const halfLife = temporalDecay.halfLife || temporalDecay.half_life || 'unknown';
 
             diagnosis.push({
                 label: 'Temporal Decay',
                 detail: `All ${aboveThreshold.length} chunks fell below threshold after decay. Best surviving score was ${bestSurvivor.finalScore?.toFixed(3) || 'N/A'} (age: ${bestSurvivor.age} messages).`,
-                fix: `Your decay settings (strength: ${decayStrength}, half-life: ${halfLife}) are too aggressive. Either disable temporal decay, or increase half-life to preserve older messages longer.`,
+                fix: `The collection's temporal weighting (mode: ${decayStrength}, half-life: ${halfLife}) is too aggressive (Database Browser > collection settings). Either turn it off, or increase half-life to preserve older messages longer.`,
                 isCause: true,
                 isOk: false
             });
@@ -1182,11 +1210,12 @@ function diagnosePipeline(data) {
                 isOk: false
             });
         } else {
-            // No explicit conditions - might be protected messages or other filtering
+            // No chunk conditions: the filtering came from elsewhere. (VH-115: this
+            // pointed to a "protect recent N messages" setting that does not exist.)
             diagnosis.push({
                 label: 'Condition Filtering',
-                detail: `All ${afterDecayCount} chunks were filtered out. This may be due to message protection settings.`,
-                fix: `Check if these messages fall within your "protect recent N messages" setting. Messages in the protected range won't be injected as RAG context.`,
+                detail: `All ${afterDecayCount} chunks were filtered out, although none has its own conditions.`,
+                fix: 'Check the chunks are not disabled (Chunk Visualizer) and the collection\'s activation settings (Database Browser: triggers, conditions, locks).',
                 isCause: true,
                 isOk: false
             });
@@ -1578,7 +1607,8 @@ SETTINGS
   Threshold: ${s.threshold}
   Top K: ${s.topK}
   Min Chat Length: ${s.min_chat_length ?? 0} (current: ${s.chatLength} messages)
-  Temporal Decay: ${s.temporal_decay?.enabled ? `ON (half-life: ${s.temporal_decay.halfLife || s.temporal_decay.half_life})` : 'OFF'}
+  Temporal Weighting: ${s.temporal_decay?.enabled ? `ON - ${s.temporal_decay.summary}` : 'OFF'}
+  Already in Context: ${describeInContextCheck(d)}${d.contextPlacement?.moves?.length ? `\n  Placement: ${describePlacement(d.contextPlacement)}` : ''}
 
 PIPELINE RESULTS
   Vector Search: ${st.initial?.length || 0} chunks retrieved

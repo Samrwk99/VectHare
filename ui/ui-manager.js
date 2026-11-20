@@ -25,6 +25,9 @@ import { openTextCleaningManager } from './text-cleaning-manager.js';
 import { resetBackendHealth } from '../backends/backend-manager.js';
 import { getHealthIndicatorHtml, getHealthModalHtml, initializeHealthDashboard, checkBackendHealth } from './health-dashboard.js';
 import { getChatCollectionId } from '../core/chat-vectorization.js';
+import { isCollectionEnabled, isCollectionAutoSyncEnabled } from '../core/collection-metadata.js';
+import { getProviderSpecificParams } from '../backends/provider-params.js';
+import { describeContextLine } from '../core/context-line.js';
 import { doesChatHaveVectors, getCollectionRegistry, invalidateCollectionInventory } from '../core/collection-loader.js';
 import { parseRegistryKey } from '../core/collection-ids.js';
 import { getModelField } from '../core/providers.js';
@@ -690,6 +693,13 @@ export function renderSettings(containerId, settings, callbacks) {
                             <input type="range" id="vecthare_deduplication_depth" class="vecthare-slider" min="0" max="500" step="10" />
                             <small class="vecthare_hint">Recent messages to check for duplicates (0 = check all, lower = allow older content to resurface)</small>
 
+                            <label class="checkbox_label" for="vecthare_skip_in_context_memories" style="margin-top: 12px;">
+                                <input id="vecthare_skip_in_context_memories" type="checkbox" class="checkbox" />
+                                <span>Skip memories already in context</span>
+                            </label>
+                            <small class="vecthare_hint">Memories of this chat whose messages are still inside SillyTavern's context line (the orange dashed line) are not recalled; a grouped memory is skipped if any part is inside. Until the context limit is reached, no memories of this chat are recalled. Other collections are unaffected. Replaces Dedup Depth, which is used until the line is known.</small>
+                            <small class="vecthare_hint" id="vecthare_context_readout" style="display: block; margin-top: 4px;"></small>
+
                             <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
                                 <label for="vecthare_topk" style="margin:0; white-space:nowrap;"><small>Top K</small></label>
                                 <input id="vecthare_topk" type="number" class="vecthare-input" min="1" style="width:90px;" />
@@ -711,7 +721,13 @@ export function renderSettings(containerId, settings, callbacks) {
                                     <small>Injection Depth: <span id="vecthare_injection_depth_value">2</span></small>
                                 </label>
                                 <input type="range" id="vecthare_injection_depth" class="vecthare-slider" min="0" max="50" step="1" />
-                                <small class="vecthare_hint">Messages from end of chat to insert at</small>
+                                <small class="vecthare_hint">Messages from end of chat to insert at. Kept inside the context: memories set deeper than SillyTavern's context line would be cut, so they are moved just inside it.</small>
+
+                                <label class="checkbox_label" for="vecthare_memories_at_context_top" style="margin-top: 8px;">
+                                    <input id="vecthare_memories_at_context_top" type="checkbox" class="checkbox" />
+                                    <span>Place memories at the top of the context</span>
+                                </label>
+                                <small class="vecthare_hint">Puts in-chat memories just inside the context line instead of at the depth above (as far in as their own size needs).</small>
                             </div>
 
                         </div>
@@ -1667,6 +1683,18 @@ function describeOriginalCleaning(config) {
     const preset = cleaning.preset || 'none';
     return patterns === null ? `Preset: ${preset}`
         : `Preset: ${preset} · ${patterns} pattern${patterns === 1 ? '' : 's'}`;
+}
+
+/** The context line readout under "Skip memories already in context". */
+export function refreshContextReadout() {
+    const element = $('#vecthare_context_readout');
+    if (!element.length) return;
+    try {
+        element.text(describeContextLine().text);
+    } catch (error) {
+        element.text('');
+        console.debug('VectHare: context readout failed:', error?.message || error);
+    }
 }
 
 export function refreshAutoSyncCheckbox(settings) {
@@ -2777,6 +2805,22 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
         });
 
+    $('#vecthare_skip_in_context_memories')
+        .prop('checked', settings.skip_in_context_memories !== false)
+        .on('change', function() {
+            settings.skip_in_context_memories = $(this).prop('checked');
+            applySettingsSnapshot(settings);
+            saveSettingsDebounced();
+        });
+    $('#vecthare_memories_at_context_top')
+        .prop('checked', settings.memories_at_context_top === true)
+        .on('change', function() {
+            settings.memories_at_context_top = $(this).prop('checked');
+            applySettingsSnapshot(settings);
+            saveSettingsDebounced();
+        });
+    refreshContextReadout();
+
     $('#vecthare_apply_prompt_regex_to_memories')
         .prop('checked', settings.apply_prompt_regex_to_memories !== false)
         .on('change', function() {
@@ -3435,19 +3479,31 @@ function copyDiagnosticsReport(results) {
     const source = settings.source || 'none';
     const modelField = getModelField(source);
     const model = modelField ? (settings[modelField] || 'not set') : 'n/a (provider handles it)';
-    const qdrantMode = settings.qdrant_mode || 'local';
+    // VH-115: these read settings that do not exist (qdrant_mode,
+    // qdrant_cloud_url), so the report always said "local" with the local
+    // address; and local providers showed a made-up default address.
+    const qdrantMode = settings.qdrant_use_cloud ? 'cloud' : 'local';
     const qdrantUrl = backend === 'qdrant'
-        ? (qdrantMode === 'cloud' ? settings.qdrant_cloud_url : settings.qdrant_url)
+        ? (settings.qdrant_use_cloud ? (settings.qdrant_url || 'not set')
+            : `${settings.qdrant_host || 'localhost'}:${settings.qdrant_port || 6333}`)
         : null;
 
-    // Build provider URL info
+    // Provider URL: the address real embedding uses
     let providerUrl = 'n/a';
-    if (settings.use_alt_endpoint && settings.alt_endpoint_url) {
-        providerUrl = settings.alt_endpoint_url;
-    } else if (['bananabread', 'ollama', 'llamacpp', 'koboldcpp', 'vllm'].includes(source)) {
-        // Local server providers - show their configured URL
-        providerUrl = settings.alt_endpoint_url || 'http://localhost:8008';
-    }
+    try {
+        const params = getProviderSpecificParams(settings);
+        providerUrl = params.apiUrl || params.extrasUrl || 'n/a';
+    } catch { /* n/a */ }
+
+    // VH-115: auto-sync is per chat (the old global switch is not used)
+    let chatReportLine = 'no chat open';
+    try {
+        const chatCollectionId = getChatCollectionId();
+        const key = chatCollectionId ? getCollectionRegistry().find(k => k === chatCollectionId || k.endsWith(`:${chatCollectionId}`)) : null;
+        chatReportLine = !chatCollectionId ? 'no chat open'
+            : !key ? 'not vectorized'
+            : `vectorized, ${isCollectionEnabled(key) ? 'enabled' : 'disabled'}, auto-sync ${isCollectionAutoSyncEnabled(key) ? 'on' : 'off'}`;
+    } catch { /* unknown */ }
 
     let report = `╔══════════════════════════════════════════════════════════════╗
 ║              VECTHARE DIAGNOSTICS REPORT                      ║
@@ -3466,7 +3522,7 @@ ${isFiltered ? `🔍 Filter: ${filterNames[filter]} (${filteredCount} of ${total
   Model:             ${model}${providerUrl !== 'n/a' ? `\n  Provider URL:      ${providerUrl}` : ''}${qdrantUrl ? `\n  Qdrant URL:        ${qdrantUrl}` : ''}
   Score Threshold:   ${settings.score_threshold || 0.5}
   Query Depth:       ${settings.query || 3}
-  Chat Auto-Sync:    ${settings.enabled_chats ? 'enabled' : 'disabled'}
+  This Chat:         ${chatReportLine}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                          SUMMARY
