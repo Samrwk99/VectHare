@@ -8,7 +8,7 @@ import AsyncUtils from '../utils/async-utils.js';
  * Core logic for vectorizing chat messages and retrieving relevant context
  *
  * @author Coneja Chibi
- * @version 2.2.0-alpha
+ * @version see manifest.json
  * ============================================================================
  */
 
@@ -4550,6 +4550,11 @@ export async function rearrangeChat(chat, settings, type) {
 
 async function rearrangeChatWithinDeadline(chat, settings, type, isCurrentRun) {
     vhLog(`🐰 VectHare: rearrangeChat called (type: ${type}, chat length: ${chat?.length || 0})`);
+    // VH-109: pick up other tabs' changes first (one small request). A tab
+    // whose copy of the store is out of date looked for a collection another
+    // tab or device had just written where today's rule puts NEW collections;
+    // on multitenant Qdrant that is a different place, so nothing was recalled.
+    await refreshStoreIfStale({ minIntervalMs: 0 }).catch(() => false);
 
     try {
         // === EARLY EXITS ===
@@ -6410,6 +6415,8 @@ async function repairChatVectorsImpl(settings, batchSize, embeddedMode, ctx) {
  */
 export async function checkUnfinishedVectorization(settings, collectionIdOverride = null) {
     try {
+        // VH-109: another tab may have just created or moved this collection.
+        await refreshStoreIfStale({ minIntervalMs: 1000 }).catch(() => false);
         const target = captureChatTarget();
         if (!target) return null;
         const collectionId = collectionIdOverride || getChatCollectionId();

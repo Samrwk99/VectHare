@@ -11,7 +11,7 @@ import { vhLog } from '../utils/log.js';
  * - pendingSceneStart: message index where user clicked START (not yet in DB)
  *
  * @author Coneja Chibi
- * @version 2.2.0-alpha
+ * @version see manifest.json
  * ============================================================================
  */
 

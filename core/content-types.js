@@ -10,7 +10,7 @@
  * - "text" strategies (adaptive, paragraph, section, sentence) = show size controls where applicable
  *
  * @author Coneja Chibi
- * @version 3.0.0
+ * @version see manifest.json
  * ============================================================================
  */
 

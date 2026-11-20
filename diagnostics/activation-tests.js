@@ -7,7 +7,7 @@
  * Returns individual test results for each condition type
  *
  * @author Coneja Chibi
- * @version 2.2.0-alpha
+ * @version see manifest.json
  * ============================================================================
  */
 

@@ -30,7 +30,7 @@ import { vhLog } from '../utils/log.js';
  * Requires either a local Qdrant instance or Qdrant Cloud account.
  *
  * @author VectHare
- * @version 3.2.0
+ * @version see manifest.json
  * ============================================================================
  */
 

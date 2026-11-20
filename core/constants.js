@@ -6,7 +6,7 @@
  * Change these values here instead of hunting through the codebase.
  *
  * @author Coneja Chibi
- * @version 2.2.0-alpha
+ * @version see manifest.json
  * ============================================================================
  */
 

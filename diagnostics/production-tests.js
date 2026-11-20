@@ -5,7 +5,7 @@
  * Integration tests for embedding, storage, and retrieval
  *
  * @author Coneja Chibi
- * @version 2.2.0-alpha
+ * @version see manifest.json
  * ============================================================================
  */
 
@@ -17,6 +17,32 @@ import { unregisterCollection } from '../core/collection-loader.js';
 import { reciprocalRankFusion, weightedCombination } from '../core/hybrid-search.js';
 import { applyKeywordBoost, extractTextKeywords, extractLorebookKeywords } from '../core/keyword-boost.js';
 import { savedHashesFor } from './configuration.js';
+import { getBackend } from '../backends/backend-manager.js';
+import { chooseNewCollectionStorage } from '../core/collection-metadata.js';
+
+/**
+ * VH-106: Milvus requests must name their collection the way the Milvus
+ * backend does (shared collection + tenant, or a v2 storage); raw plugin calls
+ * were refused with 400. Milvus tests therefore write and read through the
+ * backend itself. No vector is passed, so the plugin still generates it.
+ * Returns { settings, inserted, error, found } - settings are the ones the
+ * test collection was written with (for cleanup).
+ */
+async function milvusRoundTrip(collectionId, hash, text, settings) {
+    const s = await chooseNewCollectionStorage(collectionId, { ...settings });
+    const backend = await getBackend(s);
+    try {
+        await backend.insertVectorItems(collectionId, [{ hash, text, index: 0 }], s);
+    } catch (error) {
+        return { settings: s, inserted: false, error: error.message, found: false };
+    }
+    let found = false;
+    try {
+        const r = await backend.queryCollection(collectionId, text, 1, s);
+        found = (r?.hashes || []).some(h => String(h) === String(hash));
+    } catch { found = false; }
+    return { settings: s, inserted: true, error: null, found };
+}
 
 /**
  * Full cleanup for test collections - purges vectors AND unregisters from registry
@@ -24,12 +50,38 @@ import { savedHashesFor } from './configuration.js';
  * @param {object} settings - VectHare settings
  */
 async function cleanupTestCollection(collectionId, settings) {
+    // VH-102: these tests write straight through the plugin (no storage
+    // layout), so they are removed the same way, where they were written.
+    // VectHare's own purge looks the collection up by today's switches; with
+    // Qdrant multitenancy on it looked in the old shared store, refused, and
+    // the refusal was ignored - the test collections stayed behind and later
+    // blocked Purge All.
+    const backend = settings.vector_backend || 'standard';
+    let removed = false;
     try {
-        // Purge all vectors from the backend
-        await purgeVectorIndex(collectionId, settings);
-    } catch (e) {
-        // Ignore purge errors - collection might already be empty
+        const response = await fetch('/api/plugins/similharity/chunks/purge', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                backend: backend === 'standard' ? 'vectra' : backend,
+                collectionId,
+                source: settings.source || 'transformers',
+                model: settings[getModelField(settings.source)] || null,
+                ...getPluginProviderParams(settings),
+            }),
+        });
+        removed = response.ok;
+    } catch {
+        removed = false;
     }
+    if (!removed) {
+        try {
+            removed = await purgeVectorIndex(collectionId, settings, { ownershipVerified: true }) !== false;
+        } catch {
+            removed = false;
+        }
+    }
+    if (!removed) console.warn(`VectHare Diagnostics: could not remove test collection ${collectionId}`);
     // Always unregister from registry to prevent ghost entries
     const registryKey = `${settings.source}:${collectionId}`;
     unregisterCollection(registryKey);
@@ -171,6 +223,14 @@ export async function testVectorStorage(settings) {
         const testText = 'VectHare storage test message';
         const backend = settings.vector_backend || 'standard';
         const backendType = backend === 'standard' ? 'vectra' : backend;
+
+        if (backend === 'milvus') {
+            const r = await milvusRoundTrip(testCollectionId, testHash, testText, settings);
+            await cleanupTestCollection(testCollectionId, r.settings);
+            return r.inserted
+                ? { name: '[PROD] Vector Storage', status: 'pass', message: 'Successfully stored and cleaned up test vector', category: 'production' }
+                : { name: '[PROD] Vector Storage', status: 'fail', message: `Failed to store vector: ${r.error}`, category: 'production' };
+        }
 
         const insertResponse = await fetch('/api/plugins/similharity/chunks/insert', {
             method: 'POST',
@@ -714,6 +774,15 @@ export async function testPluginEmbeddingGeneration(settings) {
         const testCollectionId = `vecthare_diagtest_embed_${Date.now()}`; // VH-041
         const testHash = String(Math.floor(Math.random() * 1000000));
         const testText = 'Plugin embedding generation test';
+
+        if (backend === 'milvus') {
+            const r = await milvusRoundTrip(testCollectionId, testHash, testText, settings);
+            await cleanupTestCollection(testCollectionId, r.settings);
+            if (!r.inserted) return { name: '[PROD] Plugin Embedding Gen', status: 'fail', message: `Plugin failed to generate embedding: ${r.error}`, category: 'production' };
+            return r.found
+                ? { name: '[PROD] Plugin Embedding Gen', status: 'pass', message: `${backend} backend correctly generates embeddings`, category: 'production' }
+                : { name: '[PROD] Plugin Embedding Gen', status: 'warning', message: 'Insert succeeded but could not verify vector retrieval', category: 'production' };
+        }
 
         // Try to insert WITHOUT providing a vector - the plugin must generate it
         const insertResponse = await fetch('/api/plugins/similharity/chunks/insert', {

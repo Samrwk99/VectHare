@@ -6,7 +6,7 @@
  * Tests: delete, edit/re-vectorize, summary vectors, metadata operations
  *
  * @author Coneja Chibi
- * @version 2.2.0-alpha
+ * @version see manifest.json
  * ============================================================================
  */
 
@@ -23,6 +23,7 @@ import {
     deleteChunkMetadata,
 } from '../core/collection-metadata.js';
 import { unregisterCollection } from '../core/collection-loader.js';
+import { chooseNewCollectionStorage } from '../core/collection-metadata.js';
 import { getStringHash } from '../../../../utils.js';
 
 // Test collection prefix using new vh: format for proper multitenancy parsing
@@ -37,7 +38,12 @@ const TEST_COLLECTION_PREFIX = 'vecthare_diagtest_visualizer_'; // VH-041: an id
 async function cleanupTestCollection(collectionId, settings) {
     try {
         // Purge all vectors from the backend
-        await purgeVectorIndex(collectionId, settings);
+        // VH-102: Diagnostics made this collection itself in this run, which is the
+        // ownership proof the purge accepts; without it the purge refused (no saved
+        // settings), the refusal was ignored, and the test data stayed behind -
+        // later blocking Purge All.
+        const removed = await purgeVectorIndex(collectionId, settings, { ownershipVerified: true });
+        if (removed === false) console.warn(`VectHare Diagnostics: could not remove test collection ${collectionId}`);
     } catch (e) {
         // Ignore purge errors - collection might already be empty
     }
@@ -232,6 +238,8 @@ export async function checkVectorInsert(settings) {
     }
 
     const testCollectionId = getTestCollectionId();
+    // VH-102: a new collection gets today's layout for new collections (as real writers do).
+    settings = await chooseNewCollectionStorage(testCollectionId, { ...settings });
     const testText = `VectHare visualizer insert test ${Date.now()}`;
     const testHash = getStringHash(testText);
 
@@ -290,6 +298,8 @@ export async function checkVectorDelete(settings) {
     }
 
     const testCollectionId = getTestCollectionId();
+    // VH-102: a new collection gets today's layout for new collections (as real writers do).
+    settings = await chooseNewCollectionStorage(testCollectionId, { ...settings });
     const testText = `VectHare visualizer delete test ${Date.now()}`;
     const testHash = getStringHash(testText);
 
@@ -365,6 +375,8 @@ export async function checkReVectorization(settings) {
     }
 
     const testCollectionId = getTestCollectionId();
+    // VH-102: a new collection gets today's layout for new collections (as real writers do).
+    settings = await chooseNewCollectionStorage(testCollectionId, { ...settings });
     const originalText = `Original text for revectorization test ${Date.now()}`;
     const editedText = `Edited text for revectorization test ${Date.now()}`;
     const originalHash = getStringHash(originalText);
@@ -477,6 +489,8 @@ export async function checkSummaryVectorCreate(settings) {
     }
 
     const testCollectionId = getTestCollectionId();
+    // VH-102: a new collection gets today's layout for new collections (as real writers do).
+    settings = await chooseNewCollectionStorage(testCollectionId, { ...settings });
     const parentText = `Parent chunk for summary test ${Date.now()}`;
     const summaryText = `Summary of the parent chunk ${Date.now()}`;
     const parentHash = getStringHash(parentText);
@@ -567,6 +581,8 @@ export async function checkSummaryVectorDelete(settings) {
     }
 
     const testCollectionId = getTestCollectionId();
+    // VH-102: a new collection gets today's layout for new collections (as real writers do).
+    settings = await chooseNewCollectionStorage(testCollectionId, { ...settings });
     const parentText = `Parent for summary delete test ${Date.now()}`;
     const summaryText = `Summary to delete ${Date.now()}`;
     const parentHash = getStringHash(parentText);
@@ -651,6 +667,8 @@ export async function checkBackendResponsiveness(settings) {
     }
 
     const testCollectionId = getTestCollectionId();
+    // VH-102: a new collection gets today's layout for new collections (as real writers do).
+    settings = await chooseNewCollectionStorage(testCollectionId, { ...settings });
     const testText = `Responsiveness test ${Date.now()}`;
     const testHash = getStringHash(testText);
 

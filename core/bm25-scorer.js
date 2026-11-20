@@ -13,7 +13,7 @@ import { vhLog } from '../utils/log.js';
  *
  * Based on research showing BM25+ outperforms standard BM25 for long documents.
  *
- * @version 2.0.0
+ * @version see manifest.json
  * ============================================================================
  */
 

@@ -7,7 +7,7 @@
  *
  * If a word appears X times in an entry, suggest it as a keyword for that entry.
  *
- * @version 1.0.0
+ * @version see manifest.json
  * ============================================================================
  */
 

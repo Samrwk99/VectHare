@@ -11,7 +11,7 @@ import { vhLog } from '../utils/log.js';
  * Requires the VectHare plugin to be installed.
  *
  * @author VectHare
- * @version 3.0.0
+ * @version see manifest.json
  * ============================================================================
  */
 

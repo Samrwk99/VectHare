@@ -15,7 +15,7 @@ import { vhLog } from '../utils/log.js';
  * - Both flags are cleared by resetControlState() whenever a run starts or
  *   ends, so stale flags can never wedge the extension.
  *
- * Part of the VectHare+ persistence/resume feature set. See CHANGES.txt.
+ * Part of the VectHare+ persistence/resume feature set.
  * ============================================================================
  */
 

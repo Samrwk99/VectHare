@@ -6,7 +6,7 @@
  * Import this anywhere you need provider information.
  *
  * @author VectHare
- * @version 2.0.0
+ * @version see manifest.json
  * ============================================================================
  */
 

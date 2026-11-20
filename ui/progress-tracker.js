@@ -8,7 +8,7 @@ import { vhLog } from '../utils/log.js';
  * VectHare+: Pause / Resume / Stop controls on the progress panel
  *
  * @author VectHare
- * @version 2.2.1-alpha
+ * @version see manifest.json
  * ============================================================================
  */
 

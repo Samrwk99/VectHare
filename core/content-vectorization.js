@@ -8,7 +8,7 @@ import { vhLog } from '../utils/log.js';
  * Uses the same pipeline infrastructure, just with type-appropriate settings.
  *
  * @author Coneja Chibi
- * @version 2.2.0-alpha
+ * @version see manifest.json
  * ============================================================================
  */
 

@@ -18,7 +18,7 @@ import { vhLog } from '../utils/log.js';
  * Individual chunks within a scene get disabledByScene: sceneHash
  *
  * @author Coneja Chibi
- * @version 2.2.0-alpha
+ * @version see manifest.json
  * ============================================================================
  */
 

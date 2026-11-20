@@ -7,7 +7,7 @@ import { vhLog } from '../utils/log.js';
  * Keeps the abstraction layer clean and focused.
  *
  * @author VectHare
- * @version 2.2.0-alpha
+ * @version see manifest.json
  * ============================================================================
  */
 
@@ -503,6 +503,17 @@ export function resetBackendHealth(backendName = null) {
  */
 export function invalidateBackendHealth(backendName, error = null) {
     const normalizedName = normalizeBackendName(backendName);
+
+    // VH-101: only failures that say the backend is down or unreachable make it
+    // "Unhealthy". A refused request (HTTP 4xx, a validation or verification
+    // error) is the operation's problem, not the backend's: it used to flip the
+    // health panel to Unhealthy beside "2 passed, 0 failed" checks.
+    const text = String(error?.message || error || '');
+    const status = Number(error?.status ?? error?.statusCode);
+    const backendDown = !error ||
+        (Number.isFinite(status) && status >= 500) ||
+        /Failed to fetch|fetch failed|NetworkError|network|ECONN|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|timed out|timeout|socket hang up|not initialized|unreachable|HTTP 5\d\d|\b50[0234]\b/i.test(text);
+    if (!backendDown) return;
 
     // Only invalidate if we have a cached healthy status
     if (backendHealthStatus[normalizedName]) {

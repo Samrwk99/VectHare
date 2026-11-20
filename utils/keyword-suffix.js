@@ -10,9 +10,16 @@ export function stripGeneratedKeywordSuffix(text, keywords) {
     const keywordTexts = keywords.map(kw => kw?.text || kw).join(' ');
     const suffix = ` [KEYWORDS: ${keywordTexts}]`;
     const trimmedText = text.trimEnd();
-    if (!trimmedText.endsWith(suffix)) return text;
     let originalText = trimmedText;
     while (originalText.endsWith(suffix)) originalText = originalText.slice(0, -suffix.length);
+    // VH-103: a chunk whose keywords were edited after it was embedded still
+    // carries the suffix built from its OLD keywords (a keyword edit changes the
+    // stored keywords, not the embedded text). Trailing generated blocks are
+    // removed too, so an export/import does not end with two suffixes. Only for
+    // chunks that carry keywords, as before.
+    const generatedBlock = / \[KEYWORDS: [^\]\n]*\]$/;
+    while (generatedBlock.test(originalText)) originalText = originalText.replace(generatedBlock, '');
+    if (originalText === trimmedText) return text;
     if (!originalText.trim()) return text; // a suffix-only chunk stays as it is
     return originalText + text.slice(trimmedText.length);
 }

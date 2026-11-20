@@ -5,7 +5,7 @@
  * Backend, provider, and plugin availability checks
  *
  * @author Coneja Chibi
- * @version 2.2.0-alpha
+ * @version see manifest.json
  * ============================================================================
  */
 

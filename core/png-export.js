@@ -18,7 +18,7 @@ import { vhLog } from '../utils/log.js';
  * Falls back to storing as tEXt (base64, uncompressed) if compression unavailable.
  *
  * @author VectHare
- * @version 1.0.0
+ * @version see manifest.json
  * ============================================================================
  */
 

@@ -9,7 +9,7 @@ import { vhLog } from '../utils/log.js';
  * Right panel: full details of selected chunk
  *
  * @author Coneja Chibi
- * @version 2.2.0-alpha
+ * @version see manifest.json
  * ============================================================================
  */
 
