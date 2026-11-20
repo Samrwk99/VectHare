@@ -1317,7 +1317,6 @@ export function describeEffectiveSettings(settings, extra = {}) {
         out['Pairing order'] = settings.conversation_turn_order === 'character_user'
             ? 'Character → User' : 'User → Character';
     }
-    if (settings.chunk_size) out['Chunk size'] = settings.chunk_size;
     out['Text cleaning'] = cleaning;
     if (settings.embedding_batch_size) out['Embedding batch'] = settings.embedding_batch_size;
     else if (settings.insert_batch_size_set === true || (settings.insert_batch_size && settings.insert_batch_size !== 50)) {

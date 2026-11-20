@@ -789,6 +789,12 @@ export function renderSettings(containerId, settings, callbacks) {
                             </label>
                             <small class="vecthare_hint">Show stored keyword annotations in injected Qdrant RAG memories. Does not affect keyword searching or Semantic World Info.</small>
 
+                            <label class="checkbox_label" for="vecthare_apply_prompt_regex_to_memories" style="margin-top: 12px;">
+                                <input id="vecthare_apply_prompt_regex_to_memories" type="checkbox" class="checkbox" />
+                                <span>Apply "Alter Outgoing Prompt" Regex to Memories</span>
+                            </label>
+                            <small class="vecthare_hint">Runs your SillyTavern regex scripts on recalled memories as they would run in the prompt: User Input / AI Output scripts on chat memories by who wrote each part, World Info scripts on lorebook memories; other memories are unchanged. Stored memories are never changed. Depth limits count the newest recalled chat memory as the injection depth, the next as one deeper, and so on (by rank, not real age).</small>
+
                             <div class="vecthare_info" style="margin-top: 16px; padding: 8px 12px; border-radius: 4px; background: var(--SmartThemeBlurTintColor); font-size: 0.85em;">
                                 <i class="fa-solid fa-info-circle"></i>
                                 <span>Collection and chunk-level context can be set in the Database Browser and Chunk Visualizer respectively.</span>
@@ -2128,16 +2134,6 @@ function bindSettingsEvents(settings, callbacks) {
     // configuration only.
     refreshChatVectorizationConfig(settings);
 
-    // Chunk size (for adaptive strategy)
-    $('#vecthare_chunk_size')
-        .val(settings.chunk_size || 500)
-        .on('input', function() {
-            const value = Number($(this).val());
-            settings.chunk_size = value;
-            applySettingsSnapshot(settings);
-            saveSettingsDebounced();
-        });
-
     // Vector backend selection
     $('#vecthare_vector_backend')
         .val(settings.vector_backend || 'standard')
@@ -2777,6 +2773,14 @@ function bindSettingsEvents(settings, callbacks) {
         .prop('checked', settings.include_keywords_in_rag_context === true)
         .on('change', function() {
             settings.include_keywords_in_rag_context = $(this).prop('checked');
+            applySettingsSnapshot(settings);
+            saveSettingsDebounced();
+        });
+
+    $('#vecthare_apply_prompt_regex_to_memories')
+        .prop('checked', settings.apply_prompt_regex_to_memories !== false)
+        .on('change', function() {
+            settings.apply_prompt_regex_to_memories = $(this).prop('checked');
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
@@ -3460,7 +3464,6 @@ ${isFiltered ? `🔍 Filter: ${filterNames[filter]} (${filteredCount} of ${total
   Backend:           ${backend}${backend === 'qdrant' ? ` (${qdrantMode})` : ''}
   Embedding Source:  ${source}
   Model:             ${model}${providerUrl !== 'n/a' ? `\n  Provider URL:      ${providerUrl}` : ''}${qdrantUrl ? `\n  Qdrant URL:        ${qdrantUrl}` : ''}
-  Chunk Size:        ${settings.chunk_size || 500} chars (adaptive only)
   Score Threshold:   ${settings.score_threshold || 0.5}
   Query Depth:       ${settings.query || 3}
   Chat Auto-Sync:    ${settings.enabled_chats ? 'enabled' : 'disabled'}

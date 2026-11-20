@@ -34,6 +34,7 @@ import { getStringHash } from '../../../../utils.js';
 import { noteManualVectorChange } from '../core/chat-vectorization.js';
 import { withLease } from '../core/leases.js';
 import { parseRegistryKey } from '../core/collection-ids.js';
+import { stripGeneratedKeywordSuffix } from '../utils/keyword-suffix.js';
 // 8C: edits here take the collection's cross-tab lease, like Sync and Repair.
 const leaseIdOf = id => parseRegistryKey(id).collectionId || id;
 import {
@@ -1098,6 +1099,92 @@ function renderGroupDetailPanel() {
 /**
  * Opens the add member dialog
  */
+/**
+ * Full text of one chunk in a read-only window above the visualizer. Closing it
+ * (×, Close, Escape, a click outside) returns to the visualizer exactly as it
+ * was, with the chunk still selected; nothing else is changed.
+ */
+function openChunkTextViewer(chunk, returnFocusTo = null) {
+    $('.vecthare-chunk-text-viewer').remove();
+    const data = chunk?.data || {};
+    const meta = chunk?.metadata || {};
+    const keywords = Array.isArray(data.keywords) ? data.keywords : (Array.isArray(meta.keywords) ? meta.keywords : []);
+    let text = typeof data.text === 'string' ? data.text : '';
+    // Qdrant keeps a generated " [KEYWORDS: ...]" list at the end of the stored
+    // text; it is not part of the memory, so it is shown as keywords instead.
+    const backend = parseRegistryKey(String(currentCollectionId || ''))?.backend || currentSettings?.vector_backend;
+    if (backend === 'qdrant' && keywords.length) text = String(stripGeneratedKeywordSuffix(text, keywords) ?? text);
+
+    // Title: its name, or which message(s) it holds and who wrote it
+    const ids = Array.isArray(meta.messageIds) && meta.messageIds.length ? meta.messageIds : null;
+    const where = ids && ids.length > 1 ? `Messages #${ids[0]}–#${ids[ids.length - 1]}`
+        : (meta.messageId ?? chunk?.index) != null ? `Message #${meta.messageId ?? chunk.index}` : 'Chunk';
+    const who = typeof meta.is_user === 'boolean' ? (meta.is_user ? 'User' : 'Character') : '';
+    const title = data.name || [where, who].filter(Boolean).join(' · ');
+    const words = text.split(/\s+/).filter(Boolean).length;
+    const keywordLine = keywords.length
+        ? `<div class="vecthare-chunk-text-viewer-keywords"><i class="fa-solid fa-key"></i> ${keywords.map(kw => escapeHtml(kw?.text ?? kw)).join(', ')}</div>` : '';
+
+    const overlay = $(`
+        <div class="vecthare-editor-overlay vecthare-chunk-text-viewer" role="dialog" aria-modal="true" aria-label="Full chunk text">
+            <div class="vecthare-editor-dialog">
+                <div class="vecthare-editor-header">
+                    <h3><i class="fa-solid fa-file-lines"></i> ${escapeHtml(title)}</h3>
+                    <button class="vecthare-editor-close vecthare-chunk-text-viewer-x" title="Close">
+                        <i class="fa-solid fa-times"></i>
+                    </button>
+                </div>
+                <div class="vecthare-editor-body">
+                    <div class="vecthare-chunk-text-viewer-meta">${escapeHtml(text.length)} characters · ${escapeHtml(words)} words</div>
+                    <div class="vecthare-chunk-text-viewer-text" tabindex="0">${text ? escapeHtml(text) : '<em>(no text)</em>'}</div>
+                    ${keywordLine}
+                </div>
+                <div class="vecthare-chunk-text-viewer-footer">
+                    <button class="menu_button vecthare-chunk-text-viewer-copy" title="Copy the full text"><i class="fa-solid fa-copy"></i> Copy</button>
+                    <button class="menu_button vecthare-chunk-text-viewer-close">Close</button>
+                </div>
+            </div>
+        </div>
+    `);
+    const close = () => {
+        document.removeEventListener('keydown', onKey, true);
+        overlay.remove();
+        if (returnFocusTo && document.contains(returnFocusTo)) returnFocusTo.focus?.();
+    };
+    // Escape closes only this window, not the visualizer behind it.
+    const onKey = e => {
+        if (e.key !== 'Escape') return;
+        e.preventDefault();
+        e.stopPropagation();
+        close();
+    };
+    document.addEventListener('keydown', onKey, true);
+    // SillyTavern closes drawers on mousedown/touchstart; keep it inside.
+    overlay.on('mousedown touchstart', e => e.stopPropagation());
+    overlay.on('click', function (e) {
+        e.stopPropagation();
+        if (e.target === this) close();
+    });
+    overlay.find('.vecthare-chunk-text-viewer-x, .vecthare-chunk-text-viewer-close').on('click', e => { e.preventDefault(); close(); });
+    overlay.find('.vecthare-chunk-text-viewer-copy').on('click', async e => {
+        e.preventDefault();
+        try {
+            await navigator.clipboard.writeText(text);
+            toastr.success('Chunk text copied', 'VectHare', { timeOut: 2000 });
+        } catch {
+            // older browsers / no clipboard permission: select it for Ctrl+C
+            const range = document.createRange();
+            range.selectNodeContents(overlay.find('.vecthare-chunk-text-viewer-text')[0]);
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+            toastr.info('Text selected - press Ctrl+C (Cmd+C) to copy', 'VectHare', { timeOut: 4000 });
+        }
+    });
+    $('.vecthare-visualizer-container').append(overlay);
+    overlay.find('.vecthare-chunk-text-viewer-close').trigger('focus');
+}
+
 function openAddMemberDialog() {
     const groups = getGroups();
     const group = groups.find(g => g.id === selectedGroupId);
@@ -1782,6 +1869,9 @@ function bindEvents() {
         selectedChunkId = uid;
         renderChunkList();
         renderDetailPanel();
+        // Full text in a window above the visualizer (closing returns here).
+        const clicked = allChunks.find(c => c.uniqueId === uid);
+        if (clicked) openChunkTextViewer(clicked, $('#vecthare_visualizer_modal .vecthare-chunk-item').filter((_, el) => el.getAttribute('data-uid') === uid)[0] || null);
     });
 
     // Load more

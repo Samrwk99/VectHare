@@ -18,6 +18,8 @@ import { getStringHash as calculateHash, waitUntilCondition, onlyUnique, uuidv4 
 import { isUnitStrategy, groupConversationTurns } from './chunking.js';
 import { extractChatKeywords, extractBM25Keywords } from './keyword-boost.js';
 import { cleanText } from './text-cleaning.js';
+import { stripGeneratedKeywordSuffix } from '../utils/keyword-suffix.js';
+import { applyPromptRegexToMemories, loadMemoryRegexEngine } from './memory-regex.js';
 import {
     getSavedHashes,
     insertVectorItems,
@@ -571,6 +573,25 @@ function chatSpeakerLabel(m) {
 }
 const chatRoleLabel = m => (m.is_user ? 'User' : 'Character');
 
+/**
+ * Who wrote each part of a grouped chunk's text, and where that part's message
+ * text is (character offsets into the combined `[Name]: text` text). Stored as
+ * metadata only, so recall can apply SillyTavern's "Alter Outgoing Prompt"
+ * regex per speaker (core/memory-regex.js). Text, hash and embedding unchanged.
+ */
+function chatSpeakerParts(group) {
+    const parts = [];
+    let position = 0;
+    group.forEach((m, i) => {
+        if (i > 0) position += 2; // '\n\n' between parts
+        position += `[${chatSpeakerLabel(m)}]: `.length;
+        const length = String(m.text ?? '').length;
+        parts.push({ role: m.is_user ? 'user' : 'character', start: position, end: position + length });
+        position += length;
+    });
+    return parts;
+}
+
 // Records written before speaker names were used carry role-labelled text.
 // Verification that compares stored text accepts that earlier form as well.
 const legacyLabelText = new WeakMap();
@@ -616,6 +637,7 @@ function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel
                         strategy: 'conversation_turns',
                         messageIds: pair.map(m => m.index),
                         messageHashes: pair.map(m => m.hash), // Store individual hashes for injection lookup
+                        speakerParts: chatSpeakerParts(pair),
                         startIndex: pair[0].index,
                         endIndex: pair[pair.length - 1].index
                     }
@@ -649,6 +671,7 @@ function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel
                         batchSize: batch.length,
                         messageIds: batch.map(m => m.index),
                         messageHashes: batch.map(m => m.hash), // Store individual hashes for injection lookup
+                        speakerParts: chatSpeakerParts(batch),
                         startIndex: batch[0].index,
                         endIndex: batch[batch.length - 1].index
                     }
@@ -859,7 +882,7 @@ function chatRecordMatchesItem(meta, item, collectionId, textFingerprint, requir
 const REGENERATED_RECORD_KEYS = new Set(['hash', 'text', 'index', 'source', 'strategy', 'messageId',
     'messageIds', 'messageHashes', 'startIndex', 'endIndex', 'batchSize', 'vecthareProvenance',
     'vecthareImportedProvenance', 'timestamp', 'messageIndex', 'type', 'sourceId', 'embeddingSource',
-    'embeddingModel', 'is_user']);
+    'embeddingModel', 'is_user', 'speakerParts']);
 function carriedRecordMetadata(meta) {
     return Object.fromEntries(Object.entries(meta || {}).filter(([key]) => !REGENERATED_RECORD_KEYS.has(key)));
 }
@@ -4250,33 +4273,10 @@ function getRagInjectionChunkText(chunk, settings) {
     if (settings?.include_keywords_in_rag_context === true || settings?.vector_backend !== 'qdrant') {
         return text;
     }
-
-    const keywords = chunk?.metadata?.keywords;
-    if (!Array.isArray(keywords) || keywords.length === 0) {
-        return text;
-    }
-
-    // Matches Qdrant's generated suffix, without stripping arbitrary user-authored tags.
-    const keywordTexts = keywords.map(kw => kw?.text || kw).join(' ');
-    const suffix = ` [KEYWORDS: ${keywordTexts}]`;
-    const trimmedText = text.trimEnd();
-
-    if (!trimmedText.endsWith(suffix)) {
-        return text;
-    }
-
-    // Handle repeated identical suffixes; preserve trailing whitespace exactly.
-    let originalText = trimmedText;
-    while (originalText.endsWith(suffix)) {
-        originalText = originalText.slice(0, -suffix.length);
-    }
-
-    // Do not turn a suffix-only chunk into empty injected memory text.
-    if (!originalText.trim()) {
-        return text;
-    }
-
-    return originalText + text.slice(trimmedText.length);
+    // VH-113: the shared stripper also removes a suffix built from keywords
+    // that were edited after the chunk was embedded (it only removed a suffix
+    // matching the CURRENT keywords, so stale [KEYWORDS: ...] reached the model).
+    return stripGeneratedKeywordSuffix(text, chunk?.metadata?.keywords);
 }
 
 function buildNestedInjectionText(chunks, settings) {
@@ -4417,6 +4417,26 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
             positionGroups.set(key, { position, depth, chunks: [] });
         }
         positionGroups.get(key).chunks.push(chunk);
+    }
+
+    // SillyTavern's "Alter Outgoing Prompt" regex scripts, per memory, per
+    // injection position (core/memory-regex.js). Copies only; off = unchanged.
+    if (settings.apply_prompt_regex_to_memories !== false) {
+        const openChatCollectionId = (() => { try { return getChatCollectionId(); } catch { return null; } })();
+        for (const group of positionGroups.values()) {
+            group.chunks = applyPromptRegexToMemories(group.chunks, group,
+                chunk => getRagInjectionChunkText(chunk, settings),
+                {
+                    openChatCollectionId,
+                    messageFingerprint: message => getStringHash(getTextWithoutAttachments(message)),
+                    // Qdrant's generated [KEYWORDS: ...] list, when kept in the text
+                    generatedSuffixOf: (text, chunk) => {
+                        if (settings.vector_backend !== 'qdrant') return '';
+                        const body = String(stripGeneratedKeywordSuffix(text, chunk?.metadata?.keywords) ?? text).trimEnd();
+                        return body && body !== text.trimEnd() && text.startsWith(body) ? text.slice(body.length) : '';
+                    },
+                });
+        }
     }
 
     // If all chunks go to the same position, use the simple single-injection path
@@ -4579,6 +4599,8 @@ async function rearrangeChatWithinDeadline(chat, settings, type, isCurrentRun) {
     // tab or device had just written where today's rule puts NEW collections;
     // on multitenant Qdrant that is a different place, so nothing was recalled.
     await refreshStoreIfStale({ minIntervalMs: 0 }).catch(() => false);
+    // Alter Outgoing Prompt regex on recalled memories (setting; default on).
+    if (settings.apply_prompt_regex_to_memories !== false) await loadMemoryRegexEngine();
 
     try {
         // === EARLY EXITS ===

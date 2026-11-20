@@ -1380,7 +1380,11 @@
     to { opacity: 1; }
 }
 
-.vecthare-editor-modal {
+/* .vecthare-editor-dialog is the same window box (used by the full-text and
+   add-member windows, which had no box style: no background or border). */
+.vecthare-editor-modal,
+.vecthare-editor-dialog {
+    position: relative; /* the coloured top bar (::before) sits on the window */
     width: 90%;
     max-width: 500px;
     background: linear-gradient(135deg,
@@ -1405,7 +1409,8 @@
     }
 }
 
-.vecthare-editor-modal::before {
+.vecthare-editor-modal::before,
+.vecthare-editor-dialog::before {
     content: '';
     position: absolute;
     top: 0;
@@ -1886,3 +1891,47 @@
     }
 }
 
+
+/* Full chunk text viewer (opened by clicking a chunk) */
+.vecthare-chunk-text-viewer .vecthare-editor-dialog {
+    max-width: min(900px, 95vw);
+    width: 100%;
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+}
+.vecthare-chunk-text-viewer .vecthare-editor-body {
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+.vecthare-chunk-text-viewer-meta {
+    font-size: 0.85em;
+    opacity: 0.7;
+    margin-bottom: 8px;
+}
+.vecthare-chunk-text-viewer-text {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    overflow-y: auto;
+    min-height: 0;
+    flex: 1;
+    padding: 10px 12px;
+    border-radius: 6px;
+    background: var(--black30alpha);
+    line-height: 1.5;
+    user-select: text;
+}
+.vecthare-chunk-text-viewer-keywords {
+    margin-top: 8px;
+    font-size: 0.85em;
+    opacity: 0.8;
+    overflow-wrap: anywhere;
+}
+.vecthare-chunk-text-viewer-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 10px 16px;
+}

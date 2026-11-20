@@ -115,6 +115,7 @@ const defaultSettings = {
     top_k: 3,
     query: 2,
     chunk_size: 500, // For adaptive strategy only
+    apply_prompt_regex_to_memories: true, // SillyTavern "Alter Outgoing Prompt" regex on recalled memories
     score_threshold: 0.25,
 
     // Deduplication settings
