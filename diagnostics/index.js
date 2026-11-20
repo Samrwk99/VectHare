@@ -70,7 +70,7 @@ import { testConditionalActivation } from './activation-tests.js';
 
 import { runVisualizerTests } from './visualizer-tests.js';
 import { cleanupTestCollections } from '../core/collection-loader.js';
-import { checkPluginCompatibility, readBackendServerInfo } from '../core/plugin-health.js';
+import { checkPluginCompatibility, readBackendServerInfo, readSillyTavernInfo } from '../core/plugin-health.js';
 
 /**
  * Runs all diagnostic checks
@@ -96,6 +96,7 @@ export async function runDiagnostics(settings, includeProductionTests = false) {
         else if (compatibility.state !== 'missing') pluginVersion = 'Unknown';
     } catch { /* versions stay unknown */ }
     const server = await readBackendServerInfo(settings?.vector_backend).catch(() => null);
+    const sillytavern = await readSillyTavernInfo().catch(() => null);
 
     // Auto-clean any ghost test collections from the registry
     const testCollectionsCleaned = cleanupTestCollections();
@@ -242,6 +243,7 @@ export async function runDiagnostics(settings, includeProductionTests = false) {
             plugin: pluginVersion,
             compatibility,
             server,
+            sillytavern,
         },
         categories,
         checks: allChecks,

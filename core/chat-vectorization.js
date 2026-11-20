@@ -241,6 +241,26 @@ const UNRESOLVED_ACTION_HINT = n =>
 const syncDeferred = () => ({ remaining: -1, messagesProcessed: 0, chunksCreated: 0 });
 const validatedManualSync = Symbol('validated-manual-sync');
 
+/**
+ * VH-110: a chat's chunking (strategy, batch size, turn order, keyword level)
+ * is chosen when the chat is first vectorized and saved with its collection;
+ * the settings panel has no control for it. Sync and the status line used the
+ * hidden global value instead, so a chat vectorized with another strategy
+ * showed "database check inconclusive" and Sync was refused. Returns a copy of
+ * settings carrying the collection's own saved chunking (or settings itself).
+ */
+function withSavedChatChunking(settings, saved) {
+    const c = saved?.status === 'valid' ? saved.config?.chunking : null;
+    if (c?.pipeline !== 'sync-chat') return settings;
+    return {
+        ...settings,
+        chunking_strategy: c.strategy ?? settings.chunking_strategy,
+        batch_size: c.batchSize ?? settings.batch_size,
+        conversation_turn_order: c.conversationTurnOrder ?? settings.conversation_turn_order,
+        keyword_extraction_level: c.keywordLevel ?? settings.keyword_extraction_level,
+    };
+}
+
 function chatConfigChunking(settings) {
     return {
         pipeline: 'sync-chat',
@@ -949,8 +969,12 @@ export async function planChatVectorizationRebuild(settings) {
     if (saved.status === 'valid') {
         // 9b/9c: compare against THIS collection's storage (its recorded
         // location), not today's switch, which only decides new collections.
+        // VH-110: Sync keeps the chat's own saved chunking; only settings that
+        // can be selected (provider, model, backend, storage) are compared.
+        const syncSettings = withSavedChatChunking(settings, saved);
         const comparison = compareInitialVectorizationConfig(saved.config,
-            createInitialVectorizationConfig(settingsForCollectionStorage(collectionId, settings), chunking), 'sync-chat');
+            createInitialVectorizationConfig(settingsForCollectionStorage(collectionId, syncSettings),
+                chatConfigChunking(syncSettings)), 'sync-chat');
         if (comparison.status === 'incompatible') {
             return {
                 action: 'rebuild', collectionId, chunkCount,
@@ -6456,8 +6480,13 @@ export async function checkUnfinishedVectorization(settings, collectionIdOverrid
         // A completed read for Chat A must never be paired with Chat B's messages.
         if (!isChatTargetCurrent(target, collectionId)) return null;
 
-        // Match Sync Chat's message preparation, grouping and raw-text hashes.
-        const groupedItems = await collectCurrentChatGroups(target.messages, settings,
+        // Match Sync Chat's message preparation, grouping and raw-text hashes -
+        // with the chat's own saved chunking, as Sync uses it (VH-110).
+        let statusSettings = settings;
+        try {
+            statusSettings = withSavedChatChunking(settings, await readInitialVectorizationConfig(collectionId, readSettings));
+        } catch { /* no saved settings readable: today's settings, as before */ }
+        const groupedItems = await collectCurrentChatGroups(target.messages, statusSettings,
             collectionId, true);
         if (!isChatTargetCurrent(target, collectionId)) return null;
         const pending = groupedItems.filter(

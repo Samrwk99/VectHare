@@ -30,7 +30,7 @@ import { parseRegistryKey } from '../core/collection-ids.js';
 import { getModelField } from '../core/providers.js';
 import { getChunkingStrategies } from '../core/content-types.js';
 import { fetchSecretStatus, setSecret } from '../core/secret-store.js';
-import { checkPluginCompatibility, readBackendServerInfo } from '../core/plugin-health.js';
+import { checkPluginCompatibility, readBackendServerInfo, readSillyTavernInfo } from '../core/plugin-health.js';
 
 /**
  * Applies the current settings snapshot without overwriting collection metadata
@@ -138,33 +138,49 @@ function bindSecretField(inputSelector, name, settings) {
  * @param {Function} callbacks.onRunDiagnostics - Called when "Run Diagnostics" is clicked
  */
 /**
- * Extension and plugin versions, in the style of the diagnostics header, with
- * whether the two work together (core/plugin-health.js). Used at the top of
- * Core Settings and in the diagnostics results.
+ * Extension, plugin, SillyTavern and (Qdrant / Milvus) versions, in the style of
+ * the diagnostics header (core/plugin-health.js). Each gets ✓ (works), ⚠ (works
+ * in part), ✗ (does not work) or ? (unknown); anything but ✓ is explained on a
+ * line below. Used at the top of Core Settings and in the diagnostics results.
  */
-function versionInfoHtml(c, server = null) {
+const VERSION_ICON = {
+    ok: '<i class="fa-solid fa-circle-check" style="color: var(--vecthare-success);"></i>',
+    partial: '<i class="fa-solid fa-triangle-exclamation" style="color: var(--vecthare-warning);"></i>',
+    bad: '<i class="fa-solid fa-circle-xmark" style="color: var(--vecthare-danger);"></i>',
+    unknown: '<i class="fa-solid fa-circle-question" style="color: var(--grey70);"></i>',
+};
+const VERSION_NOTE_COLOR = { partial: 'var(--vecthare-warning)', bad: 'var(--vecthare-danger)', unknown: 'inherit' };
+
+function versionInfoHtml(c, server = null, st = null) {
     if (!c) return '<i class="fa-solid fa-info-circle"></i> Checking versions…';
-    const plugin = c.pluginVersion ? `v${escapeHtml(c.pluginVersion)}` : (c.state === 'missing' ? 'Not installed' : 'Unknown');
+    const sep = '<span style="margin: 0 10px;">•</span>';
+    const items = [], notes = [];
+    const add = (label, value, kind, note) => {
+        items.push(`<strong>${escapeHtml(label)}:</strong> ${value}${kind ? ` ${VERSION_ICON[kind]}` : ''}`);
+        if (note && kind && kind !== 'ok') notes.push(`<div style="margin-top: 6px; color: ${VERSION_NOTE_COLOR[kind]};">${VERSION_ICON[kind]} ${escapeHtml(note)}</div>`);
+    };
     const extension = c.extensionVersion && c.extensionVersion !== 'unknown' ? `v${escapeHtml(c.extensionVersion)}` : 'Unknown';
-    const compatible = c.state === 'ok'
-        ? '<span style="margin-left: 6px; color: var(--vecthare-success);"><i class="fa-solid fa-circle-check"></i> compatible</span>' : '';
-    const status = c.state === 'ok' || c.state === 'unknown' ? ''
-        : `<div style="margin-top: 6px; color: var(--vecthare-warning);"><i class="fa-solid fa-triangle-exclamation"></i> ${escapeHtml(c.message)}</div>`;
-    // Qdrant / Milvus server version when that backend is selected
-    let serverItem = '', serverNote = '';
+    items.push(`<strong>Extension:</strong> ${extension}`);
+    // plugin: compatible / mismatch / missing / not answering
+    const plugin = c.pluginVersion ? `v${escapeHtml(c.pluginVersion)}` : (c.state === 'missing' ? 'Not installed' : 'Unknown');
+    const pluginKind = { ok: 'ok', 'plugin-older': 'partial', 'extension-older': 'partial', missing: 'bad', unknown: 'unknown' }[c.state] || 'unknown';
+    add('Plugin', c.state === 'ok' ? `${plugin} <span style="color: var(--vecthare-success);">compatible</span>` : plugin, pluginKind, c.message);
+    // SillyTavern
+    if (st) {
+        const kind = { ok: 'ok', partial: 'partial', unsupported: 'bad', unknown: 'unknown' }[st.state] || 'unknown';
+        add('SillyTavern', st.version ? `v${escapeHtml(st.version)}` : 'Unknown', kind, st.message);
+    }
+    // Qdrant / Milvus server when that backend is selected
     if (server) {
         const shown = String(server.version || '').replace(/^v(?=\d)/i, '');
-        const v = server.connected ? (shown ? `${/^\d/.test(shown) ? 'v' : ''}${escapeHtml(shown)}` : 'version unknown') : 'not connected';
-        const icon = !server.connected ? '' : server.writable === false
-            ? ' <i class="fa-solid fa-triangle-exclamation" style="color: var(--vecthare-warning);"></i>'
-            : server.version ? ' <i class="fa-solid fa-circle-check" style="color: var(--vecthare-success);"></i>' : '';
-        serverItem = `<span style="margin: 0 10px;">•</span><strong>${escapeHtml(server.name)}:</strong> ${v}${icon}`;
-        if (server.connected && server.writable === false) {
-            serverNote = `<div style="margin-top: 6px; color: var(--vecthare-warning);"><i class="fa-solid fa-triangle-exclamation"></i> ${escapeHtml(server.message)}</div>`;
-        }
+        const value = server.connected ? (shown ? `${/^\d/.test(shown) ? 'v' : ''}${escapeHtml(shown)}` : 'version unknown') : 'not connected';
+        const kind = !server.connected ? 'unknown' : server.writable === false ? 'partial' : server.version ? 'ok' : 'unknown';
+        const note = !server.connected ? server.message
+            : server.writable === false ? server.message
+            : server.version ? '' : `${server.name} did not report its version.`;
+        add(server.name, value, kind, note);
     }
-    return `<i class="fa-solid fa-info-circle"></i> <strong>Extension:</strong> ${extension}`
-        + `<span style="margin: 0 10px;">•</span><strong>Plugin:</strong> ${plugin}${compatible}${serverItem}${status}${serverNote}`;
+    return `<i class="fa-solid fa-info-circle"></i> ${items.join(sep)}${notes.join('')}`;
 }
 
 let versionInfoSettings = null;
@@ -174,9 +190,9 @@ async function refreshVersionInfo() {
     if (!el.length) return;
     try {
         const backend = versionInfoSettings?.vector_backend;
-        const [c, server] = await Promise.all([checkPluginCompatibility(), readBackendServerInfo(backend)]);
+        const [c, server, st] = await Promise.all([checkPluginCompatibility(), readBackendServerInfo(backend), readSillyTavernInfo()]);
         if (versionInfoSettings?.vector_backend !== backend) return; // switched meanwhile; a newer refresh follows
-        el.html(versionInfoHtml(c, server));
+        el.html(versionInfoHtml(c, server, st));
     } catch { el.html(versionInfoHtml({ state: 'unknown' })); }
 }
 
@@ -3216,7 +3232,7 @@ function renderDiagnosticsContent(results, filter = 'all') {
     const html = `
         <!-- Version Info -->
         <div class="vecthare-diagnostics-version" style="padding: 10px 15px; background: var(--black30alpha); border-radius: 8px; margin-bottom: 15px; font-size: 0.9em; color: var(--grey70);">
-            ${versionInfoHtml(results.version?.compatibility || { state: 'unknown', extensionVersion: results.version?.extension, pluginVersion: results.version?.plugin }, results.version?.server || null)}
+            ${versionInfoHtml(results.version?.compatibility || { state: 'unknown', extensionVersion: results.version?.extension, pluginVersion: results.version?.plugin }, results.version?.server || null, results.version?.sillytavern || null)}
         </div>
 
         <!-- Summary Stats Bar (Clickable Filters) -->
