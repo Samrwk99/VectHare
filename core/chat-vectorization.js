@@ -5193,6 +5193,8 @@ export async function vectorizeAll(settings, batchSize, includeIndexedCount = fa
         let totalChunks = 0;
         let transientBlockCount = 0; // VectHare+: consecutive transient-block counter
         let consecutiveFailingIterations = 0; // VectHare+ R6: all-fail loop guard
+        let writesNotReadBack = 0; // VH-094
+        let previousRemaining = null;
 
         // VectHare+: wire Pause/Resume/Stop controls into the progress panel
         resetControlState();
@@ -5348,6 +5350,32 @@ export async function vectorizeAll(settings, batchSize, includeIndexedCount = fa
             } else {
                 consecutiveFailingIterations = 0;
             }
+
+            // VH-094: writes that are never read back. If batches keep reporting
+            // stored chunks but the number left does not go down, the backend
+            // saves to one place and reads from another (or drops the writes):
+            // stop with a clear error instead of writing the same chunks forever.
+            if (result.remaining > 0 && iterationSuccesses > 0 &&
+                previousRemaining !== null && result.remaining >= previousRemaining) {
+                writesNotReadBack++;
+                if (writesNotReadBack >= 3) {
+                    progressTracker.complete(false,
+                        'Stopped: chunks were written but could not be read back from the vector store.',
+                        runId);
+                    toastr.error(
+                        `Vectorization stopped: VectHare stored chunks, but reading the collection back still shows ${result.remaining} of ${result.total} missing. ` +
+                        'The vector store saves and reads in different places. Check that the Similharity plugin is the version that comes with this VectHare, then try again.',
+                        'VectHare', { timeOut: 20000 }
+                    );
+                    console.warn(`VectHare: Aborting run - ${writesNotReadBack} batches wrote chunks without reducing what is left (${result.remaining})`);
+                    vectorizeRunActive = false;
+                    resetControlState();
+                    return;
+                }
+            } else if (result.remaining >= 0) {
+                writesNotReadBack = 0;
+            }
+            if (result.remaining >= 0) previousRemaining = result.remaining;
 
             // Handle disabled/blocked state.
             // VectHare+ FIX: -1 is usually TRANSIENT (send in progress, sync

@@ -101,11 +101,10 @@ export class StandardBackend extends VectorBackend {
         });
 
         if (!response.ok) {
-            // Collection doesn't exist or error
-            if (response.status === 500) {
-                // Likely collection doesn't exist
-                return [];
-            }
+            // VH-098: SillyTavern answers a missing collection with an empty list
+            // (status 200) and rebuilds a corrupted index itself; a 500 is a real
+            // failure. Reading it as "nothing stored" made Sync re-insert every
+            // chunk after one server error.
             const errorBody = await response.text().catch(() => 'No response body');
             throw new Error(`Failed to get saved hashes: ${response.status} ${response.statusText} - ${errorBody}`);
         }
@@ -239,6 +238,9 @@ export class StandardBackend extends VectorBackend {
      * Uses native ST API
      */
     async deleteVectorItems(collectionId, hashes, settings) {
+        // VH-096: SillyTavern picks the collection's model folder from the
+        // request's model for openai, ollama, cohere, vllm and others; without
+        // it the delete went to a folder named "undefined" and removed nothing.
         const response = await fetch('/api/vector/delete', {
             method: 'POST',
             headers: getRequestHeaders(),
@@ -246,6 +248,8 @@ export class StandardBackend extends VectorBackend {
                 collectionId: collectionId,
                 hashes: hashes,
                 source: settings.source || 'transformers',
+                model: getModelFromSettings(settings),
+                ...getProviderSpecificParams(settings, false),
             }),
         });
 
@@ -259,7 +263,51 @@ export class StandardBackend extends VectorBackend {
      * Query a collection for similar vectors
      * Uses native ST API
      */
+    /**
+     * VH-097: search through the plugin's Vectra search, which returns real
+     * similarity scores. SillyTavern's /api/vector/query returns only the stored
+     * metadata (no score), so every Standard result scored 0: only chunks that
+     * shared keywords with the question got past the relevance threshold.
+     * Returns null when the plugin cannot answer (the native API is used then).
+     */
+    async _pluginQuery(collectionId, searchText, topK, settings, queryVector) {
+        if (!this.pluginAvailable) return null;
+        try {
+            const response = await fetch('/api/plugins/similharity/chunks/query', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                body: JSON.stringify({
+                    backend: 'vectra',
+                    collectionId,
+                    searchText,
+                    ...(Array.isArray(queryVector) && queryVector.length ? { queryVector } : {}),
+                    topK,
+                    threshold: 0.0,
+                    source: settings.source || 'transformers',
+                    model: getModelFromSettings(settings),
+                    ...getProviderSpecificParams(settings, true),
+                }),
+            });
+            if (!response.ok) {
+                console.warn(`VectHare: Plugin search failed for ${collectionId} (HTTP ${response.status}); using SillyTavern's search (no scores)`);
+                return null;
+            }
+            const data = await response.json();
+            const results = Array.isArray(data?.results) ? data.results : null;
+            if (!results) return null;
+            return {
+                hashes: results.map(r => r.hash),
+                metadata: results.map(r => ({ ...(r.metadata || {}), hash: r.hash, text: r.text ?? r.metadata?.text, score: r.score })),
+            };
+        } catch (error) {
+            console.warn(`VectHare: Plugin search failed for ${collectionId}: ${error?.message || error}; using SillyTavern's search (no scores)`);
+            return null;
+        }
+    }
+
     async queryCollection(collectionId, searchText, topK, settings, queryVector = null) {
+        const viaPlugin = await this._pluginQuery(collectionId, searchText, topK, settings, queryVector);
+        if (viaPlugin) return viaPlugin;
         const providerParams = getProviderSpecificParams(settings, true);
         const model = getModelFromSettings(settings);
 
@@ -312,6 +360,18 @@ export class StandardBackend extends VectorBackend {
      * Uses native ST API
      */
     async queryMultipleCollections(collectionIds, searchText, topK, threshold, settings, queryVector = null) {
+        // VH-097: with the plugin, search each collection with scores (as LanceDB does).
+        if (this.pluginAvailable) {
+            const results = {};
+            let answered = true;
+            for (const collectionId of collectionIds) {
+                const one = await this._pluginQuery(collectionId, searchText, topK, settings, queryVector);
+                if (!one) { answered = false; break; }
+                const keep = one.metadata.map((m, i) => i).filter(i => (one.metadata[i].score ?? 0) >= (threshold || 0));
+                results[collectionId] = { hashes: keep.map(i => one.hashes[i]), metadata: keep.map(i => one.metadata[i]) };
+            }
+            if (answered) return results;
+        }
         const providerParams = getProviderSpecificParams(settings, true);
         const model = getModelFromSettings(settings);
 
