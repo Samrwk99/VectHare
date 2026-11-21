@@ -246,16 +246,24 @@ This fork ships with `auto_update: false` in its manifest, so SillyTavern will n
 ### 💬 Chat Vectorization
 | Setting | Description |
 |---------|-------------|
-| **Enable Auto-Sync** | Automatically vectorize new messages (per chat) |
-| **Chunking Strategy** | Chosen in the Vectorize dialog when a chat is first vectorized: Per Message (default), Conversation Turns or Message Batch. Each chat keeps its own |
-| **Score Threshold** | Minimum similarity to include chunk (0.0-1.0) |
-| **Query Depth** | How many recent messages make up the search query |
-| **Top K** | How many chunks to inject into prompt |
-| **Apply "Alter Outgoing Prompt" Regex to Memories** | Runs your SillyTavern prompt regex scripts on recalled memories (on by default) |
-| **Skip Memories Already in Context** | Memories of this chat whose messages are still inside SillyTavern's context line (the orange dashed line) are not recalled; a grouped memory is skipped if any part is inside, and none are recalled until the context limit is reached. Other collections are unaffected. Replaces Dedup Depth once the line is known (after one generation in the chat); the panel shows where the line is (on by default) |
-| **Dedup Depth** | Recent messages checked for duplicates; used while the context line is not known, or with the option above off |
-| **Injection Depth** | For In-Chat @ Depth: messages from the end of the chat. Always kept inside the context: memories set deeper than the context line (which SillyTavern would cut) are moved just inside it |
-| **Place Memories at the Top of the Context** | In-Chat @ Depth memories go just inside the context line, as far in as their own size needs (off by default) |
+| **Enable Auto-Sync** | Add new messages of this chat to its memories as you go (per chat) |
+| **Score Threshold** | Memories scoring below this are not recalled (0.0-1.0) |
+| **Query Depth** | How many recent messages are used to search for memories |
+| **Top K** | Most memories recalled per message, across all collections |
+| **Skip Memories Already in Context** | Don't recall this chat's messages that are still in the prompt (below SillyTavern's orange dashed line). Other collections are not affected. The panel shows where the line is (on by default) |
+| **Dedup Depth** | Skip memories that repeat one of the last N messages. Only used with the option above off |
+| **Injection Depth** | For In-Chat @ Depth: how many messages from the end. If that is above the orange line, memories are moved just below it so they aren't cut |
+| **Place Memories at the Top of the Context** | Insert in-chat memories just below the orange line (off by default) |
+| **Apply "Alter Outgoing Prompt" Regex to Memories** | Runs your prompt regex scripts on recalled chat and lorebook memories (on by default) |
+
+### 🆕 New Collection Defaults
+Starting settings when you vectorize something new; you can change them each time, and existing collections keep their own.
+| Setting | Description |
+|---------|-------------|
+| **Chunking Strategy (chats)** | Per Message, Conversation Turns (with pairing order) or Message Batch (with batch size) |
+| **Text Cleaning** | Preset, or Custom patterns from the Text Cleaning manager |
+| **Keyword Extraction** | Off / Minimal / Balanced / Aggressive, and the keyword weight |
+| **Temporal Weighting** | Off, Decay or Nostalgia |
 
 ### ⏰ Temporal Decay (per collection)
 | Setting | Description |

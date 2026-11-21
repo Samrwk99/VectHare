@@ -899,11 +899,12 @@ function buildScoreBreakdown(chunk) {
 function describeInContextCheck(data) {
     const c = data.contextLine;
     if (!c) return 'Dedup Depth';
-    if (!c.skipInContext) return 'Dedup Depth (skip by context line is off)';
-    if (!c.known) return 'Dedup Depth (context line not known yet)';
+    if (!c.skipInContext) return 'Dedup Depth';
+    if (!c.known) return 'Nothing skipped (context line not known)';
+    const by = c.source === 'estimate' ? 'Estimated from the context size' : 'Context line';
     return c.limitReached
-        ? `Context line: ${c.inContext} message(s) in context`
-        : 'Context limit not reached: no memories of this chat';
+        ? `${by}: ${c.inContext} message(s) in context`
+        : `${by}: limit not reached, no memories of this chat`;
 }
 
 /** Search Debug note when the context moved the memories. */

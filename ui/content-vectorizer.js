@@ -31,6 +31,7 @@ import { saveSettingsDebounced, getRequestHeaders, chat_metadata } from '../../.
 import { getChatUUID } from '../core/chat-vectorization.js';
 import { callGenericPopup, POPUP_TYPE } from '../../../../popup.js';
 import { openTextCleaningManager } from './text-cleaning-manager.js';
+import { getNewCollectionDefaults, clampBatchSize, getCleaningPatternsFor } from '../core/collection-defaults.js';
 
 // ============================================================================
 // STATE
@@ -59,16 +60,22 @@ export function isChatRebuildRequested() {
     return rebuildChatRequested;
 }
 
+/**
+ * The dialog starts from the content type's own defaults, overlaid with the
+ * New Collection Defaults (chat chunking, text cleaning, keywords, temporal
+ * weighting). Changing them here applies to this vectorization only.
+ */
+function startingSettings(typeId) {
+    return { ...getContentTypeDefaults(typeId), ...getNewCollectionDefaults(typeId) };
+}
+
 export function openContentVectorizer(initialType = null, options = {}) {
     // A rebuild is only ever requested by the Vectorize entry point, after the
     // user confirmed it for a chat that already has a collection. It is never
     // inferred here, and it never survives into the next time this opens.
     rebuildChatRequested = options.rebuild === true && initialType === 'chat';
     currentContentType = initialType;
-    currentSettings = initialType ? { ...getContentTypeDefaults(initialType) } : {};
-    if (initialType === 'chat') {
-        currentSettings.conversation_turn_order = extension_settings.vecthare?.conversation_turn_order || 'user_character';
-    }
+    currentSettings = initialType ? startingSettings(initialType) : {};
     sourceData = null;
 
     createModal();
@@ -195,6 +202,11 @@ function createModal() {
                                     <option value="character_user">Character → User</option>
                                 </select>
                                 <small class="vecthare_hint">Consecutive messages from one speaker count as a single turn.</small>
+                            </div>
+
+                            <div id="vecthare_cv_batch_row" style="display: none; margin-top: 12px;">
+                                <label for="vecthare_cv_batch_size">Messages per Batch</label>
+                                <input type="number" id="vecthare_cv_batch_size" class="vecthare-input-number" min="2" max="20" step="1" />
                             </div>
 
                             <!-- Size/Overlap controls - only shown for text-based strategies -->
@@ -765,6 +777,7 @@ function updateChunkingSection(type) {
     $('#vecthare_cv_overlap_val').text(chunkOverlap === 0 ? 'Off' : chunkOverlap);
 
     $('#vecthare_cv_turn_order').val(currentSettings.conversation_turn_order || 'user_character');
+    $('#vecthare_cv_batch_size').val(clampBatchSize(currentSettings.batchSize));
 
     // Show/hide size controls based on strategy type
     updateSizeControlsVisibility();
@@ -786,6 +799,7 @@ function updateSizeControlsVisibility() {
     const hasAnyControls = needsSize || needsOverlap;
     $('#vecthare_cv_size_controls').toggle(hasAnyControls);
     $('#vecthare_cv_turn_order_row').toggle(strategyId === 'conversation_turns');
+    $('#vecthare_cv_batch_row').toggle(strategyId === 'message_batch');
 
     // Show/hide individual controls
     $('#vecthare_cv_chunk_size_row').toggle(needsSize);
@@ -1164,10 +1178,7 @@ function bindEvents() {
         }
 
         currentContentType = type;
-        currentSettings = { ...getContentTypeDefaults(type) };
-        if (type === 'chat') {
-            currentSettings.conversation_turn_order = extension_settings.vecthare?.conversation_turn_order || 'user_character';
-        }
+        currentSettings = startingSettings(type);
 
         // Show type-specific hint
         const typeInfo = getContentType(type);
@@ -1198,6 +1209,12 @@ function bindEvents() {
         $('#vecthare_cv_strategy_desc').text(selected?.description || '');
         currentSettings.strategy = strategy;
         updateSizeControlsVisibility();
+        refreshPreviewIfOpen();
+    });
+
+    $('#vecthare_cv_batch_size').on('change', function() {
+        currentSettings.batchSize = clampBatchSize($(this).val());
+        $(this).val(currentSettings.batchSize);
         refreshPreviewIfOpen();
     });
 
@@ -1330,9 +1347,7 @@ function bindEvents() {
             custom: 'Your own pattern selection',
         };
         $('#vecthare_cv_cleaning_hint').text(hints[presetId] || '');
-
-        // Save to extension settings
-        saveCleaningPresetToSettings(presetId);
+        // This vectorization only; the default is set in New Collection Defaults.
     });
 
     // Manage cleaning patterns button - opens the standalone Text Cleaning Manager
@@ -2459,12 +2474,14 @@ async function previewChunks() {
                 conversation_turn_order: currentSettings.conversation_turn_order || 'user_character',
                 keyword_extraction_level: currentSettings.keywordLevel || extension_settings.vecthare?.keyword_extraction_level,
                 batch_size: currentSettings.batchSize || extension_settings.vecthare?.batch_size || 4,
+                __collectionCleaningPatterns: getCleaningPatternsFor(currentSettings.cleaningPreset),
             };
             chunks = await previewSyncChatGroups(source.content, liveSettings);
             totalChars = chunks.reduce((sum, chunk) => sum + chunk.text.length, 0);
         } else {
             // Uploaded transcripts and non-Sync strategies keep their original preview.
-            const prepared = await resolveAndPrepareContent(currentContentType, source, currentSettings);
+            const prepared = await resolveAndPrepareContent(currentContentType, source,
+                { ...currentSettings, __collectionCleaningPatterns: getCleaningPatternsFor(currentSettings.cleaningPreset) });
             const contentText = prepared.text;
             if (!contentText || (Array.isArray(contentText) && contentText.length === 0)) {
                 if (generation !== previewGeneration) return;
@@ -2476,6 +2493,7 @@ async function previewChunks() {
                 chunkSize: currentSettings.chunkSize || type.defaults.chunkSize,
                 chunkOverlap: currentSettings.chunkOverlap || type.defaults.chunkOverlap,
                 conversationTurnOrder: currentSettings.conversation_turn_order || 'user_character',
+                batchSize: clampBatchSize(currentSettings.batchSize),
             });
             totalChars = Array.isArray(contentText)
                 ? contentText.reduce((sum, t) => sum + (t?.length || 0), 0)
@@ -2830,13 +2848,6 @@ async function startVectorization() {
 /**
  * Saves the cleaning preset to extension settings
  */
-async function saveCleaningPresetToSettings(presetId) {
-    const { saveCleaningSettings, getCleaningSettings } = await import('../core/text-cleaning.js');
-    const settings = getCleaningSettings();
-    settings.selectedPreset = presetId;
-    saveCleaningSettings(settings);
-    saveSettingsDebounced();
-}
 
 // Note: Text cleaning management is now handled by the standalone Text Cleaning Manager
 // accessible from the Actions panel. The openTextCleaningManager() function is imported

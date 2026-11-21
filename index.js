@@ -132,6 +132,7 @@ const defaultSettings = {
 
     // Keyword extraction level for chat messages
     keyword_extraction_level: 'balanced', // 'off', 'minimal', 'balanced', 'aggressive'
+    keyword_base_weight: 1.5, // Default base weight for extracted keywords (new collections)
 
     // Hybrid Search settings (combines vector + full-text search)
     hybrid_search_enabled: false,       // Enable hybrid search mode
@@ -193,8 +194,8 @@ const onChatEvent = debounce(async () => await moduleWorker.update(), debounce_t
 /**
  * Generation interceptor - searches and injects relevant messages
  */
-async function vecthare_rearrangeChat(chat, _contextSize, _abort, type) {
-    await rearrangeChat(chat, settings, type);
+async function vecthare_rearrangeChat(chat, contextSize, _abort, type) {
+    await rearrangeChat(chat, settings, type, contextSize);
 }
 
 // Export to window for ST to call

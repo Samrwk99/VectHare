@@ -1304,11 +1304,14 @@ export function describeEffectiveSettings(settings, extra = {}) {
     const modelField = getModelField(settings.source || 'transformers');
     const model = modelField ? String(settings[modelField] || '') : '';
     const preset = extension_settings?.vecthare?.cleaning?.selectedPreset || 'none';
-    const cleaning = Array.isArray(settings.__collectionCleaningPatterns)
-        ? (settings.__collectionCleaningPatterns.length
-            ? `${settings.__collectionCleaningPatterns.length} pattern(s) saved with the collection`
-            : 'none (saved with the collection)')
-        : (preset === 'none' ? 'off' : preset);
+    // Per-collection cleaning: the collection's saved rules, or (a new
+    // collection) the preset chosen in the Vectorize dialog.
+    const runPreset = settings.__collectionCleaningPreset;
+    const patternCount = Array.isArray(settings.__collectionCleaningPatterns) ? settings.__collectionCleaningPatterns.length : null;
+    const cleaning = patternCount === null
+        ? (preset === 'none' ? 'off' : preset)
+        : (patternCount === 0 ? 'off'
+            : `${runPreset && runPreset !== 'custom' ? runPreset : 'custom'} (${patternCount} pattern(s))`);
     const out = {
         'Backend': settings.vector_backend || 'standard',
         'Embedding source': settings.source || 'transformers',

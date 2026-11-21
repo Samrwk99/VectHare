@@ -478,6 +478,7 @@ function bindEvents() {
 
         saveCleaningSettings(settings);
         saveSettingsDebounced();
+        $(document).trigger('vecthare:cleaning-changed');
 
         toastr.success('Text cleaning settings saved', 'VectHare');
         closeModal();

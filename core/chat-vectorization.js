@@ -20,7 +20,9 @@ import { extractChatKeywords, extractBM25Keywords } from './keyword-boost.js';
 import { cleanText } from './text-cleaning.js';
 import { stripGeneratedKeywordSuffix } from '../utils/keyword-suffix.js';
 import { applyPromptRegexToMemories, loadMemoryRegexEngine } from './memory-regex.js';
-import { readContextLine, messagesDisplacedBy, countTokens, noteGenerationType } from './context-line.js';
+import { clampBatchSize } from './collection-defaults.js';
+import { LIVE_CHAT_STRATEGIES } from './content-types.js';
+import { estimateContextLine, messagesDisplacedBy, countTokens, armContextLine } from './context-line.js';
 import {
     getSavedHashes,
     insertVectorItems,
@@ -67,7 +69,7 @@ import {
     getStopSignal,
 } from './vectorization-control.js';
 import { buildSearchContext, filterChunksByConditions, processChunkLinks } from './conditional-activation.js';
-import { getChunkMetadata, getCollectionMeta, setCollectionMeta, deleteChunkMetadata } from './collection-metadata.js';
+import { getChunkMetadata, getCollectionMeta, setCollectionMeta, deleteChunkMetadata, adoptDefaultDecayForNewCollection } from './collection-metadata.js';
 import { flushVectHareStore, persistVectHareStore, assertStoreAuthoritative, refreshStoreIfStale } from './vecthare-store.js';
 import { acquireLease } from './leases.js';
 import { resolveStorage, settingsForCollectionStorage, scopedTenancySupported } from './storage-resolver.js';
@@ -266,16 +268,22 @@ function withSavedChatChunking(settings, saved) {
 }
 
 /**
- * VH-117: a chat vectorized for the first time by Sync or auto-sync starts at
- * Per Message. The stored global strategy has no control in the panel (older
- * versions left whatever was last used there), so new chats silently took it.
- * The Vectorize dialog's own choice is marked and kept.
+ * VH-117: a chat vectorized for the first time by Sync uses the chat chunking
+ * set in New Collection Defaults (core/collection-defaults.js). The Vectorize
+ * dialog's own choice is marked and kept.
  */
 export const CHAT_CHUNKING_CHOSEN = 'vecthare_chat_chunking_chosen';
 function newChatChunking(settings) {
     if (!settings || settings[CHAT_CHUNKING_CHOSEN] === true) return settings;
-    if (!['conversation_turns', 'message_batch', 'adaptive'].includes(settings.chunking_strategy)) return settings;
-    return { ...settings, chunking_strategy: 'per_message' };
+    if (settings.chunking_strategy === 'per_scene') return settings; // scene pipeline, not Sync
+    // These settings are the defaults; older values Sync cannot keep (e.g.
+    // 'adaptive') start a new chat at Per Message.
+    return {
+        ...settings,
+        chunking_strategy: LIVE_CHAT_STRATEGIES.includes(settings.chunking_strategy) ? settings.chunking_strategy : 'per_message',
+        conversation_turn_order: settings.conversation_turn_order === 'character_user' ? 'character_user' : 'user_character',
+        batch_size: clampBatchSize(settings.batch_size),
+    };
 }
 
 function chatConfigChunking(settings) {
@@ -3103,6 +3111,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                         initialConfigRecorded = await saveInitialVectorizationConfig(collectionId, initialConfig, settings);
                         if (initialConfigRecorded) {
                             setCollectionMeta(collectionId, { verifiedPurgeDestination: null, firstInsertConfig: null });
+                            adoptDefaultDecayForNewCollection(collectionId, 'chat');
                         }
                         if (identityLedger && !initialConfigRecorded) {
                             throw new Error('Cannot confirm ledger capability in saved collection settings');
@@ -3150,6 +3159,7 @@ export async function synchronizeChat(settings, batchSize = 5, bypassAutoSync = 
                         initialConfigRecorded = await saveInitialVectorizationConfig(collectionId, initialConfig, settings);
                         if (initialConfigRecorded) {
                             setCollectionMeta(collectionId, { verifiedPurgeDestination: null, firstInsertConfig: null });
+                            adoptDefaultDecayForNewCollection(collectionId, 'chat');
                             if (!isRegistered) {
                                 registerCollection(`${settings.vector_backend || 'standard'}:${settings.source || 'transformers'}:${collectionId}`);
                                 isRegistered = true;
@@ -3376,10 +3386,17 @@ function buildInContextView(chat, settings, contextLine) {
     const hashOf = message => getStringHash(getTextWithoutAttachments(message));
     let mode = 'depth';
     let messages;
-    if (settings.skip_in_context_memories !== false && contextLine?.known) {
-        mode = 'line';
-        const live = (() => { try { return getContext().chat || []; } catch { return []; } })();
-        messages = contextLine.inContext.map(index => live[index]).filter(Boolean);
+    if (settings.skip_in_context_memories !== false) {
+        // Dedup Depth is not used while this is on.
+        if (contextLine?.known) {
+            mode = 'line';
+            const live = (() => { try { return getContext().chat || []; } catch { return []; } })();
+            messages = contextLine.inContext.map(index => live[index]).filter(Boolean);
+        } else {
+            // No line and no context size to estimate one from: nothing to skip.
+            mode = 'none';
+            messages = [];
+        }
     } else {
         messages = getRecentMessagesForDedup(chat, settings);
     }
@@ -3880,7 +3897,12 @@ async function applyTemporalDecayStage(chunks, chat, settings, threshold, debugD
     // Browser or the Vectorize dialog). This only read a hidden global switch
     // that no version ever had a control for, so per-collection decay and
     // nostalgia never applied.
-    const currentMessageId = chat.length - 1;
+    // Ages count messages of the open chat (hidden ones included, as stored).
+    const liveLength = (() => { try { return getContext().chat?.length; } catch { return null; } })();
+    const currentMessageId = (Number.isInteger(liveLength) ? liveLength : chat.length) - 1;
+    let openChatId = null;
+    try { openChatId = peekChatCollectionId(); } catch { openChatId = null; }
+    const keyOf = (collectionId, hash) => `${collectionId}\u0000${hash}`;
     const beforeCount = chunks.length;
     const byCollection = new Map();
     for (const chunk of chunks) {
@@ -3899,9 +3921,14 @@ async function applyTemporalDecayStage(chunks, chat, settings, threshold, debugD
         // Chat memories: as old as their newest message (grouped ones carry
         // messageIds, not messageId, and were never weighted).
         const bare = parseRegistryKey(collectionId)?.collectionId || collectionId;
-        const isChat = parseCollectionId(bare)?.type === 'chat';
+        // Only the open chat's memories have an age here: another chat's
+        // message numbers say nothing about how long ago that was in this one.
+        const isChatType = parseCollectionId(bare)?.type === 'chat';
+        const isChat = isChatType && bare === openChatId;
         const records = group.map(chunk => {
             const meta = { ...(chunk.metadata || {}) };
+            // Stored chat records say source 'chat'; the decay helpers date those.
+            if (isChatType && !isChat) meta.source = 'other-chat';
             if (isChat) {
                 meta.source = 'chat';
                 if (meta.messageId == null) {
@@ -3928,7 +3955,7 @@ async function applyTemporalDecayStage(chunks, chat, settings, threshold, debugD
         }
         typesUsed.add(type);
         for (const record of weighted) {
-            if (record.decayApplied || record.sceneAwareDecay || record.nostalgiaApplied) changed.set(record.hash, { ...record, type });
+            if (record.decayApplied || record.sceneAwareDecay || record.nostalgiaApplied) changed.set(keyOf(record.collectionId, record.hash), { ...record, type });
         }
     }
 
@@ -3940,7 +3967,7 @@ async function applyTemporalDecayStage(chunks, chat, settings, threshold, debugD
     addTrace(debugData, 'decay', 'Starting temporal weighting', { types: [...typesUsed] });
 
     let result = chunks.map(chunk => {
-        const weighted = changed.get(chunk.hash);
+        const weighted = changed.get(keyOf(chunk.collectionId, chunk.hash));
         if (!weighted) {
             recordChunkFate(debugData, chunk.hash, 'decay', 'passed', 'No temporal weighting applied', { score: chunk.score });
             return chunk;
@@ -4222,10 +4249,11 @@ function deduplicateChunks(chunks, chat, settings, debugData, inContextView = nu
         chatLength: chat.length,
         ...(view.mode === 'line'
             ? { inContextBy: 'context line', inContextMessages: view.messageCount, wholeOpenChat: view.wholeOpenChat }
-            : { deduplicationDepth }),
+            : view.mode === 'none' ? { inContextBy: 'nothing (context line not known)' } : { deduplicationDepth }),
     });
     vhLog(`[VectHare Dedup] ${view.mode === 'line'
         ? `Context line: ${view.messageCount} message(s) in context${view.wholeOpenChat ? ' (limit not reached: no memories of this chat)' : ''}`
+        : view.mode === 'none' ? 'Context line not known: nothing skipped'
         : `Dedup Depth ${deduplicationDepth}: checking the last ${view.messageCount} message(s)`}`);
 
     const toInject = [];
@@ -4426,7 +4454,7 @@ async function placeInChatGroupsInsideContext(groups, settings, debugData, conte
  * @param {object} debugData Debug tracking object
  * @returns {{verified: boolean, text: string}} Injection result
  */
-async function injectChunksIntoPrompt(chunksToInject, settings, debugData, contextLine = null) {
+async function injectChunksIntoPrompt(chunksToInject, settings, debugData, contextLine = null, stillCurrent = () => true) {
     // Control print: Log chunks QUEUED for injection (not yet injected)
     vhLog(`[VectHare Injection Control] Preparing to inject ${chunksToInject.length} chunks`);
     vhLog('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -4467,6 +4495,9 @@ async function injectChunksIntoPrompt(chunksToInject, settings, debugData, conte
     // of it ("Place memories at the top of the context"). Done before the regex
     // step, whose depth limits use the final depth.
     await placeInChatGroupsInsideContext([...positionGroups.values()], settings, debugData, contextLine);
+    // Token counting awaited: the chat may have changed or this retrieval timed
+    // out meanwhile; its memories must not reach another prompt.
+    if (!stillCurrent()) return null;
     if (positionGroups.size > 1) {
         // Groups that now share a position and depth are injected together.
         const merged = new Map();
@@ -4624,11 +4655,11 @@ const ragRunsTimedOut = new Set();
 const RAG_TIMED_OUT = Symbol('rag-timed-out');
 let ragTimeoutNoticeAt = 0;
 
-export async function rearrangeChat(chat, settings, type) {
+export async function rearrangeChat(chat, settings, type, contextSize = null) {
     const seconds = Number(settings?.rag_timeout_seconds ?? 15);
     const run = ++ragRunCounter;
     const isCurrentRun = () => run === ragRunCounter && !ragRunsTimedOut.has(run);
-    const inner = rearrangeChatWithinDeadline(chat, settings, type, isCurrentRun);
+    const inner = rearrangeChatWithinDeadline(chat, settings, type, isCurrentRun, contextSize);
     if (!(seconds > 0) || type === 'quiet') return inner;
     let timer;
     const deadline = new Promise(resolve => { timer = setTimeout(() => resolve(RAG_TIMED_OUT), seconds * 1000); });
@@ -4652,8 +4683,8 @@ export async function rearrangeChat(chat, settings, type) {
     return undefined;
 }
 
-async function rearrangeChatWithinDeadline(chat, settings, type, isCurrentRun) {
-    noteGenerationType(type || 'normal');
+async function rearrangeChatWithinDeadline(chat, settings, type, isCurrentRun, contextSize = null) {
+    armContextLine(type || 'normal');
     vhLog(`🐰 VectHare: rearrangeChat called (type: ${type}, chat length: ${chat?.length || 0})`);
     // VH-109: pick up other tabs' changes first (one small request). A tab
     // whose copy of the store is out of date looked for a collection another
@@ -4794,15 +4825,17 @@ async function rearrangeChatWithinDeadline(chat, settings, type, isCurrentRun) {
         }
 
         // SillyTavern's context line from the last generation (core/context-line.js)
-        const contextLine = readContextLine(type || 'normal');
+        const contextLine = await estimateContextLine(type || 'normal', contextSize);
         const inContextView = buildInContextView(chat, settings, contextLine);
         debugData.contextLine = {
             known: contextLine.known,
+            source: contextLine.source,
             limitReached: contextLine.limitReached,
             line: contextLine.line,
             inContext: contextLine.inContext.length,
             skipInContext: settings.skip_in_context_memories !== false,
-            usedFor: inContextView.mode === 'line' ? 'context line' : 'dedup depth',
+            usedFor: { line: contextLine.source === 'estimate' ? 'estimated context' : 'context line',
+                depth: 'dedup depth', none: 'nothing' }[inContextView.mode],
         };
 
         // === STAGE 4: Query all collections and merge results ===
@@ -5050,7 +5083,11 @@ async function rearrangeChatWithinDeadline(chat, settings, type, isCurrentRun) {
             console.warn('VectHare: Chat changed while memories were being retrieved - discarding this result');
             return;
         }
-        const injection = await injectChunksIntoPrompt(chunksToInject, settings, debugData, contextLine);
+        const injection = await injectChunksIntoPrompt(chunksToInject, settings, debugData, contextLine, retrievalStillForThisChat);
+        if (!injection) {
+            console.warn('VectHare: Chat changed while memories were being placed - discarding this result');
+            return;
+        }
 
         vhLog(`\n✅ VectHare: Successfully injected ${chunksToInject.length} chunk(s) into prompt`);
         vhLog(`   Verification: ${injection.verified ? '✓ PASSED' : '✗ FAILED'}`);
@@ -5303,9 +5340,7 @@ export async function vectorizeAll(settings, batchSize, includeIndexedCount = fa
         // collection are its own saved vectorization settings - not today's
         // global selection.
         progressTracker.setRunSettings(describeEffectiveSettings(settings),
-            settings.__collectionCleaningPatterns
-                ? 'from this collection\'s saved configuration'
-                : 'as resolved for this run');
+            resolvedSync?.config ? 'from this collection\'s saved configuration' : 'as chosen for this new collection');
         progressTracker.stats.groupsCompletedThisRun = 0;
         progressTracker.stats.monotonic = true; // S2: the bar never moves backwards in a run
         progressShown = true;

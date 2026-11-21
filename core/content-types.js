@@ -45,7 +45,7 @@ export const CHUNKING_STRATEGIES = {
     message_batch: {
         id: 'message_batch',
         name: 'Message Batch',
-        description: 'Groups N messages together. Configurable batch size.',
+        description: 'Groups a set number of messages into each chunk.',
         needsSize: false,
         needsOverlap: false,
         needsBatchSize: true,
@@ -199,7 +199,8 @@ export const CONTENT_TYPES = {
             chunkSize: 500,
             batchSize: 4,
             conversation_turn_order: 'user_character',
-            temporalDecay: { enabled: true, halfLife: 50, floor: 0.3 },
+            // Temporal weighting, chunking, cleaning and keywords come from the
+            // New Collection Defaults (core/collection-defaults.js).
             autoKeywords: false,
         },
 
@@ -475,7 +476,7 @@ export const CHARACTER_FIELDS = [
     { id: 'first_mes', name: 'First Message', description: 'Opening message' },
     { id: 'mes_example', name: 'Example Messages', description: 'Example dialogue' },
     { id: 'system_prompt', name: 'System Prompt', description: 'System instructions' },
-    { id: 'post_history_instructions', name: 'Jailbreak/NSFW', description: 'Post-history instructions' },
+    { id: 'post_history_instructions', name: 'Post-History Instructions', description: 'Instructions placed after the chat history' },
     { id: 'creator_notes', name: 'Creator Notes', description: 'Notes from card creator' },
     { id: 'character_book', name: 'Embedded Lorebook', description: "Entries of the lorebook embedded in the card (disabled entries skipped)" },
 ];

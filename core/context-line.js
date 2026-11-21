@@ -25,6 +25,10 @@ import * as tokenizers from '../../../../tokenizers.js';
 const SHIFT_TYPES = new Set(['swipe', 'regenerate', 'continue']);
 
 let generationType = 'normal';
+// Set when the generate interceptor runs (never for dry runs); a line is only
+// recorded for such a generation. Older SillyTavern versions do not say
+// whether GENERATE_AFTER_DATA came from a dry run.
+let armed = false;
 /** @type {null|{chatId: string, lineIndex: number, promptCount: number, allFit: boolean}} */
 let record = null;
 
@@ -34,9 +38,16 @@ export function noteGenerationType(type, dryRun = false) {
     generationType = typeof type === 'string' && type ? type : 'normal';
 }
 
+/** The generate interceptor: SillyTavern is building a real prompt. */
+export function armContextLine(type) {
+    noteGenerationType(type);
+    armed = true;
+}
+
 /** A chat switch: the recorded line belongs to the previous chat. */
 export function forgetContextLine() {
     record = null;
+    armed = false;
 }
 
 function liveChat() {
@@ -63,11 +74,12 @@ function countedIndices(chat, end = chat.length) {
  * the prompt it built. Records how many messages fitted.
  */
 export function recordContextLine(dryRun = false) {
-    if (dryRun) return;
+    if (dryRun || !armed) return;
+    armed = false;
     const chat = liveChat();
     const line = chat_metadata?.lastInContextMessageId;
     const chatId = getCurrentChatId();
-    if (!chatId || !Number.isInteger(line) || line < 0) return;
+    if (!chatId || !Number.isInteger(line) || line < 0 || line > chat.length) return;
     const shifted = SHIFT_TYPES.has(generationType);
     const counted = countedIndices(chat);
     const countWithShift = chat.length - line;
@@ -102,13 +114,51 @@ export function readContextLine(type = 'normal') {
     }
     // After a reload: SillyTavern's saved line (no count to carry forward).
     const saved = chat_metadata?.lastInContextMessageId;
-    if (Number.isInteger(saved) && saved >= 0) {
+    if (Number.isInteger(saved) && saved >= 0 && saved < chat.length) {
         if (saved === 0) return all('saved');
         const inContext = promptMessages.filter(index => index >= saved);
         if (inContext.length >= promptMessages.length) return all('saved');
         return { known: true, limitReached: true, inContext, promptMessages, line: inContext[0] ?? null, source: 'saved' };
     }
     return unknown;
+}
+
+/**
+ * Before SillyTavern has drawn a line in this chat (its first generation, or a
+ * chat from before SillyTavern recorded one): the newest messages that fit in
+ * 60% of the context size SillyTavern gives the generate interceptor. The rest
+ * of the prompt (system prompt, character, World Info) is not known here, so
+ * the estimate leans small: a memory slightly inside is recalled, rather than a
+ * block placed where SillyTavern would cut it.
+ * @param {string} type
+ * @param {number} contextSize tokens
+ */
+export function estimateContextLine(type, contextSize) {
+    const state = readContextLine(type);
+    if (state.known || !(contextSize > 0)) return state;
+    const chat = liveChat();
+    const budget = Math.floor(contextSize * 0.6);
+    const promptMessages = state.promptMessages;
+    let used = 0;
+    let first = promptMessages.length;
+    for (let i = promptMessages.length - 1; i >= 0; i--) {
+        const message = chat[promptMessages[i]];
+        // A character-based estimate: running SillyTavern's tokenizer over a
+        // long chat (some tokenizers are remote) could take the whole time limit.
+        const tokens = Math.ceil(`${message?.name ?? ''}: ${message?.mes ?? ''}`.length / 3.5);
+        if (used + tokens > budget) break;
+        used += tokens;
+        first = i;
+    }
+    const inContext = promptMessages.slice(first);
+    return {
+        known: true,
+        limitReached: first > 0,
+        inContext,
+        promptMessages,
+        line: inContext[0] ?? null,
+        source: 'estimate',
+    };
 }
 
 /**
@@ -127,7 +177,7 @@ export function describeContextLine() {
         else from = Math.min(record.lineIndex, Math.max(0, last));
     } else {
         const saved = chat_metadata?.lastInContextMessageId;
-        if (Number.isInteger(saved) && saved >= 0) from = saved;
+        if (Number.isInteger(saved) && saved >= 0 && saved < Math.max(1, chat.length)) from = saved;
     }
     if (from === null) return { state: 'unknown', text: 'Not known yet — generate once in this chat' };
     const inside = counted.filter(index => index >= from);

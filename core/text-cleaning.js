@@ -168,12 +168,23 @@ export function saveCleaningSettings(settings) {
  * @returns {Array<object>} Array of active pattern objects
  */
 export function getActivePatterns() {
+    return getPatternsForPreset(getCleaningSettings().selectedPreset);
+}
+
+/**
+ * Patterns a preset applies. 'custom' uses the patterns chosen in the Text
+ * Cleaning manager. Used to clean one vectorization with a preset other than
+ * the default without changing the default.
+ * @param {string} presetId
+ * @returns {Array<object>}
+ */
+export function getPatternsForPreset(presetId) {
     const settings = getCleaningSettings();
     const patterns = [];
 
     // If using a preset, get its patterns
-    if (settings.selectedPreset && settings.selectedPreset !== 'custom') {
-        const preset = CLEANING_PRESETS[settings.selectedPreset];
+    if (presetId && presetId !== 'custom') {
+        const preset = CLEANING_PRESETS[presetId];
         if (preset) {
             for (const patternId of preset.patterns) {
                 if (BUILTIN_PATTERNS[patternId]) {

@@ -17,7 +17,6 @@ import {
     checkPluginEndpoints,
     checkLanceDBBackend,
     checkQdrantBackend,
-    checkQdrantDimensionMatch,
     checkEmbeddingProvider,
     checkTransformersMemoryLimits,
     checkApiKeys,
@@ -117,7 +116,6 @@ export async function runDiagnostics(settings, includeProductionTests = false) {
     categories.infrastructure.push(await checkPluginEndpoints());
     categories.infrastructure.push(await checkLanceDBBackend(settings));
     categories.infrastructure.push(await checkQdrantBackend(settings));
-    categories.infrastructure.push(await checkQdrantDimensionMatch(settings));
     categories.infrastructure.push(await checkEmbeddingProvider(settings));
 
     // WASM memory warning for Transformers users
