@@ -2536,7 +2536,7 @@ async function previewChunks() {
             openTextViewer({
                 title: `Chunk #${index + 1} of ${chunks.length}`,
                 text: shown[index],
-                appendTo: $('#vecthare_content_vectorizer_modal'),
+                appendTo: document.body,
                 returnFocusTo: element,
                 fixed: true,
             });

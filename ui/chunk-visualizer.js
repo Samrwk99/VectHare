@@ -1505,18 +1505,24 @@ function bindKeywordItemEvents(chunk, refreshKeywords) {
     });
 }
 
+/** A keyword weight for display: at most two decimals (1.9911649563701288 → 1.99). */
+function shortWeight(weight) {
+    const n = Number(weight);
+    return Number.isFinite(n) ? Number(n.toFixed(2)) : weight;
+}
+
 /** The keyword list (tags, or plain text) inside the chunk detail panel. */
 function renderKeywordsInner(data) {
     return `
                     ${plaintextKeywordMode ? `
-                        <textarea class="vecthare-keyword-plaintext" id="vecthare_keywords_plaintext" placeholder="keyword:1.5x, another:2x, plain">${escapeHtml(data.keywords.map(k => k.weight !== 1.0 ? `${k.text}:${k.weight}x` : k.text).join(', '))}</textarea>
+                        <textarea class="vecthare-keyword-plaintext" id="vecthare_keywords_plaintext" placeholder="keyword:1.5x, another:2x, plain">${escapeHtml(data.keywords.map(k => k.weight !== 1.0 ? `${k.text}:${shortWeight(k.weight)}x` : k.text).join(', '))}</textarea>
                         <div class="vecthare-keyword-plaintext-hint">Format: keyword:2x for boost, or just keyword (defaults to 1.5x)</div>
                     ` : `
                         <div class="vecthare-keywords-list">
                             ${data.keywords.map((k, idx) => `
                                 <span class="vecthare-keyword-tag" data-index="${idx}">
                                     <span class="vecthare-keyword-tag-text">${escapeHtml(k.text || 'unnamed')}</span>
-                                    <span class="vecthare-keyword-tag-weight">${escapeHtml(String(k.weight))}x</span>
+                                    <span class="vecthare-keyword-tag-weight">${escapeHtml(String(shortWeight(k.weight)))}x</span>
                                     <i class="fa-solid fa-xmark vecthare-keyword-remove" data-index="${idx}"></i>
                                 </span>
                             `).join('')}

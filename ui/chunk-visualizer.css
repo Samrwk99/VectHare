@@ -570,6 +570,16 @@
     color: var(--SmartThemeBodyColor);
     white-space: pre-wrap;
     word-break: break-word;
+    /* The same text box as the full-chunk window: a long chunk scrolls inside
+       it, and the word count stays just below it. */
+    overflow-wrap: anywhere;
+    max-height: min(320px, 40vh);
+    overflow-y: auto;
+    padding: 10px 12px;
+    border-radius: 6px;
+    background: var(--black30alpha);
+    line-height: 1.5;
+    user-select: text;
 }
 
 .vecthare-detail-text-meta {
@@ -590,10 +600,7 @@
 }
 
 .vecthare-detail-text[contenteditable="true"]:focus {
-    background: color-mix(in srgb, var(--vecthare-primary) 5%, transparent);
-    border-radius: 6px;
-    padding: 8px;
-    margin: -8px;
+    background: color-mix(in srgb, var(--vecthare-primary) 8%, var(--black30alpha));
 }
 
 .vecthare-detail-save-btn {
@@ -1936,10 +1943,29 @@
     padding: 10px 16px;
 }
 
-/* The full-text window above the Vectorize dialog (its own scrolling box). */
+/* The full-text window above the Vectorize dialog: its own full-screen layer
+   on the page body, so nothing around it can shift it. */
 .vecthare-chunk-text-viewer.vecthare-chunk-text-viewer-fixed {
     position: fixed;
-    z-index: 10003;
+    top: 0;
+    left: 0;
+    right: auto;
+    bottom: auto;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    margin: 0;
+    padding: 16px;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10010;
+}
+.vecthare-chunk-text-viewer.vecthare-chunk-text-viewer-fixed .vecthare-editor-dialog {
+    max-height: calc(100vh - 32px);
+    max-height: calc(100dvh - 32px);
+    margin: 0;
 }
 
 .vecthare-cv-preview-chunk[data-preview-index] {
