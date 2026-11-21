@@ -721,17 +721,19 @@ export function renderSettings(containerId, settings, callbacks) {
                             <small class="vecthare_hint">Where recalled memories go in the prompt</small>
 
                             <div id="vecthare_injection_depth_row" style="margin-top: 12px; display: none;">
-                                <label for="vecthare_injection_depth">
-                                    <small>Injection Depth: <span id="vecthare_injection_depth_value">2</span></small>
-                                </label>
-                                <input type="range" id="vecthare_injection_depth" class="vecthare-slider" min="0" max="50" step="1" />
-                                <small class="vecthare_hint">How many messages from the end to insert memories. If that is above the orange context line, they are moved just below it so they aren't cut.</small>
-
-                                <label class="checkbox_label" for="vecthare_memories_at_context_top" style="margin-top: 8px;">
+                                <label class="checkbox_label" for="vecthare_memories_at_context_top">
                                     <input id="vecthare_memories_at_context_top" type="checkbox" class="checkbox" />
                                     <span>Place memories at the top of the context</span>
                                 </label>
-                                <small class="vecthare_hint">Insert memories just below the orange context line instead of at the depth above.</small>
+                                <small class="vecthare_hint">Insert memories just below the orange context line. Overrides injection depth, including per-collection and per-chunk depths.</small>
+
+                                <div id="vecthare_injection_depth_section" style="margin-top: 8px;">
+                                    <label for="vecthare_injection_depth">
+                                        <small>Injection Depth: <span id="vecthare_injection_depth_value">2</span></small>
+                                    </label>
+                                    <input type="range" id="vecthare_injection_depth" class="vecthare-slider" min="0" max="50" step="1" />
+                                    <small class="vecthare_hint">How many messages from the end to insert memories. If that is above the orange context line, they are moved just below it so they aren't cut.</small>
+                                </div>
                             </div>
 
                         </div>
@@ -2999,13 +3001,20 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
         });
     updateDedupDepthSection(settings.skip_in_context_memories !== false);
+    // Injection Depth does nothing while memories go to the top of the context.
+    const updateInjectionDepthSection = (topOn) => {
+        $('#vecthare_injection_depth_section').toggleClass('vecthare-subsection-disabled', topOn);
+        $('#vecthare_injection_depth').prop('disabled', topOn);
+    };
     $('#vecthare_memories_at_context_top')
         .prop('checked', settings.memories_at_context_top === true)
         .on('change', function() {
             settings.memories_at_context_top = $(this).prop('checked');
+            updateInjectionDepthSection(settings.memories_at_context_top);
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
+    updateInjectionDepthSection(settings.memories_at_context_top === true);
     refreshContextReadout();
 
     $('#vecthare_apply_prompt_regex_to_memories')

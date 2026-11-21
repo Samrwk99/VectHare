@@ -910,6 +910,9 @@ function describeInContextCheck(data) {
 /** Search Debug note when the context moved the memories. */
 function describePlacement(placement) {
     const moves = placement.moves.map(m => `${m.from} → ${m.to}`).join(', ');
+    if (placement.mode === 'top-unknown') {
+        return `Top of the context is on, but the context line is not known: placed at depth 10 (${moves})`;
+    }
     return placement.mode === 'top'
         ? `Placed at the top of the context: depth ${moves} (${placement.inContext} message(s) in context; the memories, ${placement.memoryTokens} tokens, push out the oldest few)`
         : `Depth capped to stay inside the context: ${moves} (only ${placement.inContext} message(s) are in context; deeper memories would be cut with the oldest messages)`;

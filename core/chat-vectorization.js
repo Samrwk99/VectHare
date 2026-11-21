@@ -4412,10 +4412,27 @@ function resolveChunkInjectionPosition(chunk, settings) {
  * memories' own tokens push out (core/context-line.js). Nothing changes while
  * the line is not known, or (for the cap) while the limit is not reached.
  */
+/** "Place memories at the top of the context" with no context line known. */
+const TOP_FALLBACK_DEPTH = 10;
+
 async function placeInChatGroupsInsideContext(groups, settings, debugData, contextLine) {
     const inChat = groups.filter(group => Number(group.position) === extension_prompt_types.IN_CHAT);
-    if (!inChat.length || !contextLine?.known) return;
+    if (!inChat.length) return;
     const toTop = settings.memories_at_context_top === true;
+    if (!contextLine?.known) {
+        // "Top of the context" overrides every depth; with no line to place
+        // them by, memories go to a fixed depth of 10 (the user's choice).
+        if (!toTop) return;
+        const moves = [];
+        for (const group of inChat) {
+            const from = Number(group.depth);
+            if (from !== TOP_FALLBACK_DEPTH) moves.push({ from, to: TOP_FALLBACK_DEPTH, chunks: group.chunks.length });
+            group.depth = TOP_FALLBACK_DEPTH;
+        }
+        debugData.contextPlacement = { mode: 'top-unknown', inContext: 0, limitReached: false, memoryTokens: 0, deepestSafeDepth: TOP_FALLBACK_DEPTH, moves };
+        if (moves.length) addTrace(debugData, 'injection', `Context line not known: memories placed at depth ${TOP_FALLBACK_DEPTH}`, debugData.contextPlacement);
+        return;
+    }
     if (!toTop && !contextLine.limitReached) return;
     const blockText = buildNestedInjectionText(groups.flatMap(group => group.chunks), settings);
     const tokens = await countTokens(blockText);
