@@ -25,12 +25,17 @@ import { openTextCleaningManager } from './text-cleaning-manager.js';
 import { resetBackendHealth } from '../backends/backend-manager.js';
 import { getHealthIndicatorHtml, getHealthModalHtml, initializeHealthDashboard, checkBackendHealth } from './health-dashboard.js';
 import { getChatCollectionId } from '../core/chat-vectorization.js';
+import { isCollectionEnabled, isCollectionAutoSyncEnabled } from '../core/collection-metadata.js';
+import { getProviderSpecificParams } from '../backends/provider-params.js';
+import { describeContextLine } from '../core/context-line.js';
+import { getNewCollectionDefaults, clampBatchSize, clampKeywordWeight, getDefaultCleaningPreset } from '../core/collection-defaults.js';
+import { getCleaningSettings, saveCleaningSettings } from '../core/text-cleaning.js';
 import { doesChatHaveVectors, getCollectionRegistry, invalidateCollectionInventory } from '../core/collection-loader.js';
 import { parseRegistryKey } from '../core/collection-ids.js';
 import { getModelField } from '../core/providers.js';
 import { getChunkingStrategies } from '../core/content-types.js';
 import { fetchSecretStatus, setSecret } from '../core/secret-store.js';
-import { checkPluginCompatibility, readBackendServerInfo } from '../core/plugin-health.js';
+import { checkPluginCompatibility, readBackendServerInfo, readSillyTavernInfo } from '../core/plugin-health.js';
 
 /**
  * Applies the current settings snapshot without overwriting collection metadata
@@ -138,33 +143,49 @@ function bindSecretField(inputSelector, name, settings) {
  * @param {Function} callbacks.onRunDiagnostics - Called when "Run Diagnostics" is clicked
  */
 /**
- * Extension and plugin versions, in the style of the diagnostics header, with
- * whether the two work together (core/plugin-health.js). Used at the top of
- * Core Settings and in the diagnostics results.
+ * Extension, plugin, SillyTavern and (Qdrant / Milvus) versions, in the style of
+ * the diagnostics header (core/plugin-health.js). Each gets ✓ (works), ⚠ (works
+ * in part), ✗ (does not work) or ? (unknown); anything but ✓ is explained on a
+ * line below. Used at the top of Core Settings and in the diagnostics results.
  */
-function versionInfoHtml(c, server = null) {
+const VERSION_ICON = {
+    ok: '<i class="fa-solid fa-circle-check" style="color: var(--vecthare-success);"></i>',
+    partial: '<i class="fa-solid fa-triangle-exclamation" style="color: var(--vecthare-warning);"></i>',
+    bad: '<i class="fa-solid fa-circle-xmark" style="color: var(--vecthare-danger);"></i>',
+    unknown: '<i class="fa-solid fa-circle-question" style="color: var(--grey70);"></i>',
+};
+const VERSION_NOTE_COLOR = { partial: 'var(--vecthare-warning)', bad: 'var(--vecthare-danger)', unknown: 'inherit' };
+
+function versionInfoHtml(c, server = null, st = null) {
     if (!c) return '<i class="fa-solid fa-info-circle"></i> Checking versions…';
-    const plugin = c.pluginVersion ? `v${escapeHtml(c.pluginVersion)}` : (c.state === 'missing' ? 'Not installed' : 'Unknown');
+    const sep = '<span style="margin: 0 10px;">•</span>';
+    const items = [], notes = [];
+    const add = (label, value, kind, note) => {
+        items.push(`<strong>${escapeHtml(label)}:</strong> ${value}${kind ? ` ${VERSION_ICON[kind]}` : ''}`);
+        if (note && kind && kind !== 'ok') notes.push(`<div style="margin-top: 6px; color: ${VERSION_NOTE_COLOR[kind]};">${VERSION_ICON[kind]} ${escapeHtml(note)}</div>`);
+    };
     const extension = c.extensionVersion && c.extensionVersion !== 'unknown' ? `v${escapeHtml(c.extensionVersion)}` : 'Unknown';
-    const compatible = c.state === 'ok'
-        ? '<span style="margin-left: 6px; color: var(--vecthare-success);"><i class="fa-solid fa-circle-check"></i> compatible</span>' : '';
-    const status = c.state === 'ok' || c.state === 'unknown' ? ''
-        : `<div style="margin-top: 6px; color: var(--vecthare-warning);"><i class="fa-solid fa-triangle-exclamation"></i> ${escapeHtml(c.message)}</div>`;
-    // Qdrant / Milvus server version when that backend is selected
-    let serverItem = '', serverNote = '';
+    items.push(`<strong>Extension:</strong> ${extension}`);
+    // plugin: compatible / mismatch / missing / not answering
+    const plugin = c.pluginVersion ? `v${escapeHtml(c.pluginVersion)}` : (c.state === 'missing' ? 'Not installed' : 'Unknown');
+    const pluginKind = { ok: 'ok', 'plugin-older': 'partial', 'extension-older': 'partial', missing: 'bad', unknown: 'unknown' }[c.state] || 'unknown';
+    add('Plugin', c.state === 'ok' ? `${plugin} <span style="color: var(--vecthare-success);">compatible</span>` : plugin, pluginKind, c.message);
+    // SillyTavern
+    if (st) {
+        const kind = { ok: 'ok', partial: 'partial', unsupported: 'bad', unknown: 'unknown' }[st.state] || 'unknown';
+        add('SillyTavern', st.version ? `v${escapeHtml(st.version)}` : 'Unknown', kind, st.message);
+    }
+    // Qdrant / Milvus server when that backend is selected
     if (server) {
         const shown = String(server.version || '').replace(/^v(?=\d)/i, '');
-        const v = server.connected ? (shown ? `${/^\d/.test(shown) ? 'v' : ''}${escapeHtml(shown)}` : 'version unknown') : 'not connected';
-        const icon = !server.connected ? '' : server.writable === false
-            ? ' <i class="fa-solid fa-triangle-exclamation" style="color: var(--vecthare-warning);"></i>'
-            : server.version ? ' <i class="fa-solid fa-circle-check" style="color: var(--vecthare-success);"></i>' : '';
-        serverItem = `<span style="margin: 0 10px;">•</span><strong>${escapeHtml(server.name)}:</strong> ${v}${icon}`;
-        if (server.connected && server.writable === false) {
-            serverNote = `<div style="margin-top: 6px; color: var(--vecthare-warning);"><i class="fa-solid fa-triangle-exclamation"></i> ${escapeHtml(server.message)}</div>`;
-        }
+        const value = server.connected ? (shown ? `${/^\d/.test(shown) ? 'v' : ''}${escapeHtml(shown)}` : 'version unknown') : 'not connected';
+        const kind = !server.connected ? 'unknown' : server.writable === false ? 'partial' : server.version ? 'ok' : 'unknown';
+        const note = !server.connected ? server.message
+            : server.writable === false ? server.message
+            : server.version ? '' : `${server.name} did not report its version.`;
+        add(server.name, value, kind, note);
     }
-    return `<i class="fa-solid fa-info-circle"></i> <strong>Extension:</strong> ${extension}`
-        + `<span style="margin: 0 10px;">•</span><strong>Plugin:</strong> ${plugin}${compatible}${serverItem}${status}${serverNote}`;
+    return `<i class="fa-solid fa-info-circle"></i> ${items.join(sep)}${notes.join('')}`;
 }
 
 let versionInfoSettings = null;
@@ -174,9 +195,9 @@ async function refreshVersionInfo() {
     if (!el.length) return;
     try {
         const backend = versionInfoSettings?.vector_backend;
-        const [c, server] = await Promise.all([checkPluginCompatibility(), readBackendServerInfo(backend)]);
+        const [c, server, st] = await Promise.all([checkPluginCompatibility(), readBackendServerInfo(backend), readSillyTavernInfo()]);
         if (versionInfoSettings?.vector_backend !== backend) return; // switched meanwhile; a newer refresh follows
-        el.html(versionInfoHtml(c, server));
+        el.html(versionInfoHtml(c, server, st));
     } catch { el.html(versionInfoHtml({ state: 'unknown' })); }
 }
 
@@ -258,14 +279,14 @@ export function renderSettings(containerId, settings, callbacks) {
 
                                 <!-- Qdrant Multitenancy Setting -->
                                 <div style="margin-top: 10px; padding: 8px; background: rgba(0,0,0,0.1); border-radius: 4px;">
-                                    <label class="checkbox_label" title="When enabled, uses a single Qdrant collection with content_type filtering (multitenancy). When disabled, creates separate collections for each content type (better isolation).">
+                                    <label class="checkbox_label" title="Where NEW Qdrant collections go. Existing collections stay where they are.">
                                         <input type="checkbox" id="vecthare_qdrant_multitenancy" />
                                         <span>Use Multitenancy (Single Collection)</span>
                                     </label>
                                     <small class="vecthare_hint" style="display: block; margin-top: 4px;">
-                                        <strong>Multitenancy ON:</strong> new collections share one Qdrant collection per vector size, kept separate from each other server-side<br>
-                                        <strong>Multitenancy OFF:</strong> each new collection gets its own Qdrant collection (better isolation)<br>
-                                        The switch decides where NEW collections go; existing ones stay where they are (see Database Browser &gt; Storage). Chats in the old shared store are read-only: Vectorize offers a rebuild that moves them.
+                                        <strong>On:</strong> new collections share one Qdrant collection per vector size, kept apart on the server<br>
+                                        <strong>Off:</strong> each new collection gets its own Qdrant collection<br>
+                                        Only affects new collections; existing ones stay where they are.
                                     </small>
                                 </div>
                             </div>
@@ -309,9 +330,9 @@ export function renderSettings(containerId, settings, callbacks) {
                                         <span>Use Multitenancy (shared store per vector size)</span>
                                     </label>
                                     <small class="vecthare_hint" style="display: block; margin-top: 4px;">
-                                        <strong>ON (default):</strong> new collections share one Milvus collection per vector size, separated server-side (fits hosted Milvus collection limits)<br>
-                                        <strong>OFF:</strong> each new collection gets its own Milvus collection<br>
-                                        Needs the Similharity plugin that comes with this VectHare; existing collections stay where they are.
+                                        <strong>On (default):</strong> new collections share one Milvus collection per vector size, kept apart on the server (fits hosted Milvus limits)<br>
+                                        <strong>Off:</strong> each new collection gets its own Milvus collection<br>
+                                        Only affects new collections; existing ones stay where they are.
                                     </small>
                                 </div>
 
@@ -344,7 +365,7 @@ export function renderSettings(containerId, settings, callbacks) {
                             <option value="mistral">Mistral AI</option>
                             <option value="nomicai">Nomic AI</option>
                         </select>
-                            <small class="vecthare_hint">Changing the embedding provider, model or chunking settings applies to <b>new</b> collections only. Existing collections keep the settings they were created with.</small>
+                            <small class="vecthare_hint">Applies to <b>new</b> collections. Existing collections keep the provider and model they were made with.</small>
 
                         <!-- Provider-Specific Settings -->
                         <div id="vecthare_provider_settings">
@@ -553,31 +574,31 @@ export function renderSettings(containerId, settings, callbacks) {
                                 <small>Insert Batch Size: <span id="vecthare_insert_batch_size_value">50</span></small>
                             </label>
                             <input type="range" id="vecthare_insert_batch_size" class="vecthare-slider" min="1" max="100" step="1" />
-                            <small class="vecthare_hint">Chunks sent per embedding request (1-100). Once changed, chat Sync/Repair also take this many per pass (default 5, or 8 for local Transformers). Lower it if your embedding server rejects large requests.</small>
+                            <small class="vecthare_hint">Chunks per embedding request (1–100). Lower it if your embedding server rejects large requests.</small>
 
                             <label class="checkbox_label" style="margin-top: 16px;">
                                 <input type="checkbox" id="vecthare_debug_logging" />
                                 <span>Debug logging</span>
                             </label>
-                            <small class="vecthare_hint">Write VectHare's detailed progress lines to the browser console (off keeps the console quiet; warnings and errors are always shown)</small>
+                            <small class="vecthare_hint">Detailed progress in the browser console. Warnings and errors always show.</small>
 
                             <label for="vecthare_min_chat_length" style="margin-top: 16px;">
                                 <small>Minimum Messages Before Injection</small>
                             </label>
                             <input type="number" id="vecthare_min_chat_length" class="vecthare-input" min="0" max="100" step="1" placeholder="0" />
-                            <small class="vecthare_hint">Minimum number of messages in chat before RAG injection starts (0 = inject immediately)</small>
+                            <small class="vecthare_hint">Messages the chat needs before memories are recalled (0 = from the start)</small>
 
                             <label for="vecthare_rag_timeout_seconds" style="margin-top: 16px;">
                                 <small>Retrieval time limit (seconds)</small>
                             </label>
                             <input type="number" id="vecthare_rag_timeout_seconds" class="vecthare-input" min="0" max="300" step="1" placeholder="15" />
-                            <small class="vecthare_hint">If the embedding or vector backend does not answer within this time, the message is sent without memories (0 = wait as long as it takes)</small>
+                            <small class="vecthare_hint">If recall takes longer, the message is sent without memories (0 = no limit)</small>
 
                             <label for="vecthare_score_threshold">
                                 <small>Similarity Threshold: <span id="vecthare_threshold_value">0.25</span></small>
                             </label>
                             <input type="range" id="vecthare_score_threshold" class="vecthare-slider" min="0" max="1" step="0.05" />
-                            <small class="vecthare_hint">Minimum relevance score for retrieval</small>
+                            <small class="vecthare_hint">Memories scoring below this are not recalled</small>
 
                             <!-- Keyword Scoring Method -->
                             <label style="margin-top: 16px;">
@@ -666,18 +687,27 @@ export function renderSettings(containerId, settings, callbacks) {
                                 <small>Query Depth: <span id="vecthare_query_depth_value">2</span> messages</small>
                             </label>
                             <input type="range" id="vecthare_query_depth" class="vecthare-slider" min="1" max="20" step="1" />
-                            <small class="vecthare_hint">How many recent messages to include in search query</small>
+                            <small class="vecthare_hint">How many recent messages are used to search for memories</small>
 
-                            <label for="vecthare_deduplication_depth" style="margin-top: 12px;">
-                                <small>Dedup Depth: <span id="vecthare_deduplication_depth_value">50</span> messages</small>
+                            <label class="checkbox_label" for="vecthare_skip_in_context_memories" style="margin-top: 12px;">
+                                <input id="vecthare_skip_in_context_memories" type="checkbox" class="checkbox" />
+                                <span>Skip memories already in context</span>
                             </label>
-                            <input type="range" id="vecthare_deduplication_depth" class="vecthare-slider" min="0" max="500" step="10" />
-                            <small class="vecthare_hint">Recent messages to check for duplicates (0 = check all, lower = allow older content to resurface)</small>
+                            <small class="vecthare_hint">Don't recall this chat's messages that are still in the prompt (below SillyTavern's orange dashed line). Other collections are not affected.</small>
+                            <small class="vecthare_hint" id="vecthare_context_readout" style="display: block; margin-top: 4px;"></small>
+
+                            <div id="vecthare_dedup_depth_section">
+                                <label for="vecthare_deduplication_depth" style="margin-top: 12px;">
+                                    <small>Dedup Depth: <span id="vecthare_deduplication_depth_value">50</span> messages</small>
+                                </label>
+                                <input type="range" id="vecthare_deduplication_depth" class="vecthare-slider" min="0" max="500" step="10" />
+                                <small class="vecthare_hint">Skip memories that repeat one of the last N messages (0 = all). Only used when the option above is off.</small>
+                            </div>
 
                             <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
                                 <label for="vecthare_topk" style="margin:0; white-space:nowrap;"><small>Top K</small></label>
                                 <input id="vecthare_topk" type="number" class="vecthare-input" min="1" style="width:90px;" />
-                                <small class="vecthare_hint" style="margin-left:8px;">Number of results to retrieve per collection</small>
+                                <small class="vecthare_hint" style="margin-left:8px;">Most memories recalled per message, across all collections</small>
                             </div>
 
                             <label style="margin-top: 16px;">
@@ -688,56 +718,42 @@ export function renderSettings(containerId, settings, callbacks) {
                                 <option value="0">After Main Prompt</option>
                                 <option value="1">In-Chat @ Depth</option>
                             </select>
-                            <small class="vecthare_hint">Where retrieved chunks appear in the prompt</small>
+                            <small class="vecthare_hint">Where recalled memories go in the prompt</small>
 
                             <div id="vecthare_injection_depth_row" style="margin-top: 12px; display: none;">
-                                <label for="vecthare_injection_depth">
-                                    <small>Injection Depth: <span id="vecthare_injection_depth_value">2</span></small>
+                                <label class="checkbox_label" for="vecthare_memories_at_context_top">
+                                    <input id="vecthare_memories_at_context_top" type="checkbox" class="checkbox" />
+                                    <span>Place memories at the top of the context</span>
                                 </label>
-                                <input type="range" id="vecthare_injection_depth" class="vecthare-slider" min="0" max="50" step="1" />
-                                <small class="vecthare_hint">Messages from end of chat to insert at</small>
+                                <small class="vecthare_hint">Insert memories just below the orange context line. Overrides injection depth, including per-collection and per-chunk depths.</small>
+
+                                <div id="vecthare_injection_depth_section" style="margin-top: 8px;">
+                                    <label for="vecthare_injection_depth">
+                                        <small>Injection Depth: <span id="vecthare_injection_depth_value">2</span></small>
+                                    </label>
+                                    <input type="range" id="vecthare_injection_depth" class="vecthare-slider" min="0" max="50" step="1" />
+                                    <small class="vecthare_hint">How many messages from the end to insert memories. If that is above the orange context line, they are moved just below it so they aren't cut.</small>
+                                </div>
                             </div>
 
                         </div>
                     </div>
 
-                    <!-- Global Temporal Weighting Defaults Card -->
+                    <!-- New Collection Defaults Card -->
                     <div class="vecthare-card">
                         <div class="vecthare-card-header">
                             <h3 class="vecthare-card-title">
                                 <span class="vecthare-icon">
-                                    <i class="fa-solid fa-clock"></i>
+                                    <i class="fa-solid fa-sliders"></i>
                                 </span>
-                                Temporal Weighting Defaults
+                                New Collection Defaults
                             </h3>
-                            <p class="vecthare-card-subtitle">Default settings for new collections (can be overridden per-collection)</p>
+                            <p class="vecthare-card-subtitle">Starting settings when you vectorize something new. You can change them each time; existing collections keep their own.</p>
                         </div>
                         <div class="vecthare-card-body">
-
-                            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
-                                <input type="checkbox" id="vecthare_default_decay_enabled" />
-                                <label for="vecthare_default_decay_enabled" style="margin: 0;">
-                                    <small>Enable temporal weighting by default</small>
-                                </label>
-                            </div>
-
-                            <div id="vecthare_default_decay_type_section" class="vecthare-subsection-disabled">
-                                <label style="margin-bottom: 4px;">
-                                    <small>Default Type</small>
-                                </label>
-                                <div style="display: flex; gap: 12px; margin-bottom: 12px;">
-                                    <label style="display: flex; align-items: center; gap: 4px; margin: 0;">
-                                        <input type="radio" name="vecthare_default_decay_type" value="decay" />
-                                        <small>Decay (favor recent)</small>
-                                    </label>
-                                    <label style="display: flex; align-items: center; gap: 4px; margin: 0;">
-                                        <input type="radio" name="vecthare_default_decay_type" value="nostalgia" />
-                                        <small>Nostalgia (favor old)</small>
-                                    </label>
-                                </div>
-                            </div>
-
-                            <small class="vecthare_hint">These defaults apply to newly created collections. Existing collections keep their settings.</small>
+                            <button id="vecthare_open_collection_defaults" class="menu_button" style="width: 100%;">
+                                <i class="fa-solid fa-sliders"></i> Edit New Collection Defaults
+                            </button>
 
                         </div>
                     </div>
@@ -759,23 +775,29 @@ export function renderSettings(containerId, settings, callbacks) {
                                 <small>Global Context Prompt</small>
                             </label>
                             <textarea id="vecthare_rag_context" class="vecthare-textarea" rows="3" placeholder="e.g., The following information may be relevant to your conversation with {{user}}:"></textarea>
-                            <small class="vecthare_hint">Shown before all RAG content. Supports {{user}} and {{char}} variables.</small>
+                            <small class="vecthare_hint">Shown before all recalled memories. Supports {{user}} and {{char}}.</small>
 
                             <label for="vecthare_rag_xml_tag" style="margin-top: 12px;">
                                 <small>Global XML Tag (optional)</small>
                             </label>
                             <input type="text" id="vecthare_rag_xml_tag" class="vecthare-input" placeholder="e.g., retrieved_context" />
-                            <small class="vecthare_hint">Wraps all RAG content in &lt;tag&gt;...&lt;/tag&gt;. Leave empty for no wrapping.</small>
+                            <small class="vecthare_hint">Wraps all recalled memories in &lt;tag&gt;…&lt;/tag&gt;. Leave empty for none.</small>
 
                             <label class="checkbox_label" for="vecthare_include_keywords_in_rag_context" style="margin-top: 12px;">
                                 <input id="vecthare_include_keywords_in_rag_context" type="checkbox" class="checkbox" />
                                 <span>Include Keywords in RAG Context</span>
                             </label>
-                            <small class="vecthare_hint">Show stored keyword annotations in injected Qdrant RAG memories. Does not affect keyword searching or Semantic World Info.</small>
+                            <small class="vecthare_hint">Qdrant only: keep each memory's keyword list in the text sent to the AI.</small>
+
+                            <label class="checkbox_label" for="vecthare_apply_prompt_regex_to_memories" style="margin-top: 12px;">
+                                <input id="vecthare_apply_prompt_regex_to_memories" type="checkbox" class="checkbox" />
+                                <span>Apply "Alter Outgoing Prompt" Regex to Memories</span>
+                            </label>
+                            <small class="vecthare_hint">Runs your prompt regex scripts on recalled chat and lorebook memories, the same way they run on the prompt. Stored memories are not changed.</small>
 
                             <div class="vecthare_info" style="margin-top: 16px; padding: 8px 12px; border-radius: 4px; background: var(--SmartThemeBlurTintColor); font-size: 0.85em;">
                                 <i class="fa-solid fa-info-circle"></i>
-                                <span>Collection and chunk-level context can be set in the Database Browser and Chunk Visualizer respectively.</span>
+                                <span>Per-collection and per-chunk context can be set in the Database Browser and Chunk Visualizer.</span>
                             </div>
 
                         </div>
@@ -852,7 +874,7 @@ export function renderSettings(containerId, settings, callbacks) {
                                 </span>
                                 Chat Auto-Sync
                             </h3>
-                            <p class="vecthare-card-subtitle">Configure how chat messages are vectorized</p>
+                            <p class="vecthare-card-subtitle">This chat's auto-sync and how it was vectorized</p>
                         </div>
                         <div class="vecthare-card-body">
 
@@ -860,7 +882,7 @@ export function renderSettings(containerId, settings, callbacks) {
                                 <input type="checkbox" id="vecthare_autosync_enabled" />
                                 <span>Enable Auto-Sync</span>
                             </label>
-                            <small class="vecthare_hint">Automatically vectorize new chat messages</small>
+                            <small class="vecthare_hint">Add new messages of this chat to its memories as you go</small>
 
                             <!-- Collection lock moved to Database Browser (per-collection settings) -->
 
@@ -874,8 +896,7 @@ export function renderSettings(containerId, settings, callbacks) {
                                 <label style="margin-top: 8px;"><small>Text Cleaning</small></label>
                                 <div id="vecthare_chat_config_cleaning" class="vecthare_hint">Not Configured</div>
                                 <small class="vecthare_hint" style="margin-top: 4px; margin-bottom: 12px; display: block;">
-                                    This chat collection's original vectorization settings. To change them,
-                                    re-vectorize the chat from Vectorize Content.
+                                    How this chat was vectorized. To change it, re-vectorize the chat.
                                 </small>
                             </div>
 
@@ -1647,6 +1668,217 @@ function describeOriginalCleaning(config) {
         : `Preset: ${preset} · ${patterns} pattern${patterns === 1 ? '' : 's'}`;
 }
 
+/**
+ * New Collection Defaults window: chat chunking, text cleaning, keyword
+ * extraction and temporal weighting for collections created from now on.
+ * Each change is saved at once.
+ */
+export function openCollectionDefaults(settings) {
+    $('#vecthare_collection_defaults_modal').remove();
+    const html = `
+        <div id="vecthare_collection_defaults_modal" class="vecthare-modal">
+            <div class="vecthare-modal-overlay"></div>
+            <div class="vecthare-modal-content vecthare-collection-defaults-content">
+                <div class="vecthare-modal-header">
+                    <h3><i class="fa-solid fa-sliders"></i> New Collection Defaults</h3>
+                    <button class="vecthare-modal-close" id="vecthare_collection_defaults_close" title="Close">
+                        <i class="fa-solid fa-times"></i>
+                    </button>
+                </div>
+                <div class="vecthare-collection-defaults-body">
+                    <p class="vecthare_hint" style="margin-top: 0;">Starting settings when you vectorize something new. You can change them each time; existing collections keep their own.</p>
+
+                            <label for="vecthare_default_chunking"><small>Chunking Strategy (chats)</small></label>
+                            <select id="vecthare_default_chunking" class="vecthare-select">
+                                <option value="per_message">Per Message</option>
+                                <option value="conversation_turns">Conversation Turns</option>
+                                <option value="message_batch">Message Batch</option>
+                            </select>
+                            <div id="vecthare_default_turn_order_row" style="margin-top: 8px; display: none;">
+                                <label for="vecthare_default_turn_order"><small>Pairing Order</small></label>
+                                <select id="vecthare_default_turn_order" class="vecthare-select">
+                                    <option value="user_character">User → Character</option>
+                                    <option value="character_user">Character → User</option>
+                                </select>
+                            </div>
+                            <div id="vecthare_default_batch_row" style="margin-top: 8px; display: none;">
+                                <label for="vecthare_default_batch_size"><small>Messages per Batch</small></label>
+                                <input type="number" id="vecthare_default_batch_size" class="vecthare-input" min="2" max="20" step="1" />
+                            </div>
+                            <small class="vecthare_hint">Lorebooks, documents and other content use their own strategies.</small>
+
+                            <label for="vecthare_default_cleaning" style="margin-top: 12px;"><small>Text Cleaning</small></label>
+                            <div style="display: flex; gap: 8px; align-items: center;">
+                                <select id="vecthare_default_cleaning" class="vecthare-select" style="flex: 1;">
+                                    <option value="none">None</option>
+                                    <option value="html_formatting">Strip HTML Formatting</option>
+                                    <option value="metadata_blocks">Strip Metadata Blocks</option>
+                                    <option value="ai_reasoning">Strip AI Reasoning Tags</option>
+                                    <option value="comprehensive">Comprehensive Clean</option>
+                                    <option value="nuclear">Strip All HTML</option>
+                                    <option value="custom">Custom</option>
+                                </select>
+                                <button id="vecthare_default_cleaning_manage" class="menu_button" title="Manage cleaning patterns">
+                                    <i class="fa-solid fa-gear"></i>
+                                </button>
+                            </div>
+                            <small class="vecthare_hint">Removed from text before it is stored. Custom uses the patterns chosen with the gear button.</small>
+
+                            <label for="vecthare_default_keyword_level" style="margin-top: 12px;"><small>Keyword Extraction</small></label>
+                            <div style="display: flex; gap: 8px; align-items: center;">
+                                <select id="vecthare_default_keyword_level" class="vecthare-select" style="flex: 1;">
+                                    <option value="off">Off</option>
+                                    <option value="minimal">Minimal (3 max)</option>
+                                    <option value="balanced">Balanced (8 max)</option>
+                                    <option value="aggressive">Aggressive (15 max)</option>
+                                </select>
+                                <label for="vecthare_default_keyword_weight" style="margin: 0; white-space: nowrap;"><small>Weight</small></label>
+                                <input type="number" id="vecthare_default_keyword_weight" class="vecthare-input" min="0.01" max="3" step="0.01" style="width: 80px;" />
+                            </div>
+                            <small class="vecthare_hint">Keywords found in each chunk help matching searches. Weight sets how much (not used for chats).</small>
+
+                            <div style="display: flex; align-items: center; gap: 8px; margin: 12px 0;">
+                                <input type="checkbox" id="vecthare_default_decay_enabled" />
+                                <label for="vecthare_default_decay_enabled" style="margin: 0;">
+                                    <small>Temporal Weighting</small>
+                                </label>
+                            </div>
+
+                            <div id="vecthare_default_decay_type_section" class="vecthare-subsection-disabled">
+                                <div style="display: flex; gap: 12px; margin-bottom: 4px;">
+                                    <label style="display: flex; align-items: center; gap: 4px; margin: 0;">
+                                        <input type="radio" name="vecthare_default_decay_type" value="decay" />
+                                        <small>Decay (favor recent)</small>
+                                    </label>
+                                    <label style="display: flex; align-items: center; gap: 4px; margin: 0;">
+                                        <input type="radio" name="vecthare_default_decay_type" value="nostalgia" />
+                                        <small>Nostalgia (favor old)</small>
+                                    </label>
+                                </div>
+                            </div>
+                            <small class="vecthare_hint">For chats: newer (or older) memories score higher.</small>
+                </div>
+                <div class="vecthare-modal-footer">
+                    <button class="vecthare-btn-primary" id="vecthare_collection_defaults_done">Done</button>
+                </div>
+            </div>
+        </div>`;
+    $('body').append(html);
+    const modal = $('#vecthare_collection_defaults_modal');
+    // SillyTavern closes drawers on mousedown/touchstart; keep it inside.
+    modal.on('mousedown touchstart', e => e.stopPropagation());
+    const onKey = e => {
+        if (e.key !== 'Escape' || $('#vecthare_text_cleaning_modal').length) return;
+        e.preventDefault();
+        e.stopPropagation();
+        close();
+    };
+    const close = () => {
+        document.removeEventListener('keydown', onKey, true);
+        $(document).off('vecthare:cleaning-changed.defaults');
+        modal.fadeOut(150, function () { $(this).remove(); });
+    };
+    document.addEventListener('keydown', onKey, true);
+    $('#vecthare_collection_defaults_close, #vecthare_collection_defaults_done').on('click', (e) => { e.preventDefault(); close(); });
+    modal.find('.vecthare-modal-overlay').on('click', close);
+
+    // Global temporal weighting defaults
+    const updateDecayTypeSection = (enabled) => {
+        const $section = $('#vecthare_default_decay_type_section');
+        const $radios = $section.find('input[type="radio"]');
+
+        if (enabled) {
+            $section.removeClass('vecthare-subsection-disabled');
+            $radios.prop('disabled', false);
+            // Select the saved type (or default to 'decay') when enabling
+            const savedType = settings.default_decay_type || 'decay';
+            $(`input[name="vecthare_default_decay_type"][value="${savedType}"]`).prop('checked', true);
+        } else {
+            $section.addClass('vecthare-subsection-disabled');
+            $radios.prop('disabled', true).prop('checked', false);
+        }
+    };
+
+    $('#vecthare_default_decay_enabled')
+        .prop('checked', settings.default_decay_enabled || false)
+        .on('change', function() {
+            const enabled = $(this).prop('checked');
+            settings.default_decay_enabled = enabled;
+            updateDecayTypeSection(enabled);
+            applySettingsSnapshot(settings);
+            saveSettingsDebounced();
+        });
+
+    // Initialize the section state
+    updateDecayTypeSection(settings.default_decay_enabled || false);
+
+    $('input[name="vecthare_default_decay_type"]').on('change', function() {
+        settings.default_decay_type = $(this).val();
+        applySettingsSnapshot(settings);
+        saveSettingsDebounced();
+    });
+
+    // New Collection Defaults: chat chunking, text cleaning, keywords
+    const saveDefaults = () => { applySettingsSnapshot(settings); saveSettingsDebounced(); };
+    const showChunkingRows = (strategy) => {
+        $('#vecthare_default_turn_order_row').toggle(strategy === 'conversation_turns');
+        $('#vecthare_default_batch_row').toggle(strategy === 'message_batch');
+    };
+    const chatDefaults = getNewCollectionDefaults('chat');
+    $('#vecthare_default_chunking').val(chatDefaults.strategy).on('change', function() {
+        settings.chunking_strategy = String($(this).val());
+        showChunkingRows(settings.chunking_strategy);
+        saveDefaults();
+    });
+    showChunkingRows(chatDefaults.strategy);
+    $('#vecthare_default_turn_order').val(chatDefaults.conversation_turn_order).on('change', function() {
+        settings.conversation_turn_order = String($(this).val());
+        saveDefaults();
+    });
+    $('#vecthare_default_batch_size').val(chatDefaults.batchSize).on('change', function() {
+        settings.batch_size = clampBatchSize($(this).val());
+        $(this).val(settings.batch_size);
+        saveDefaults();
+    });
+    const showCleaningDefault = () => $('#vecthare_default_cleaning').val(getDefaultCleaningPreset());
+    showCleaningDefault();
+    $('#vecthare_default_cleaning').on('change', function() {
+        const cleaning = getCleaningSettings();
+        cleaning.selectedPreset = String($(this).val());
+        saveCleaningSettings(cleaning);
+        saveSettingsDebounced();
+    });
+    $('#vecthare_default_cleaning_manage').on('click', (event) => {
+        event.preventDefault();
+        openTextCleaningManager();
+    });
+    // The Text Cleaning manager also sets the default preset.
+    $(document).off('vecthare:cleaning-changed.defaults').on('vecthare:cleaning-changed.defaults', showCleaningDefault);
+    $('#vecthare_default_keyword_level').val(chatDefaults.keywordLevel).on('change', function() {
+        settings.keyword_extraction_level = String($(this).val());
+        saveDefaults();
+    });
+    $('#vecthare_default_keyword_weight').val(chatDefaults.keywordBaseWeight).on('change', function() {
+        settings.keyword_base_weight = clampKeywordWeight($(this).val());
+        $(this).val(settings.keyword_base_weight);
+        saveDefaults();
+    });
+
+    modal.fadeIn(150);
+}
+
+/** The context line readout under "Skip memories already in context". */
+export function refreshContextReadout() {
+    const element = $('#vecthare_context_readout');
+    if (!element.length) return;
+    try {
+        element.text(describeContextLine().text);
+    } catch (error) {
+        element.text('');
+        console.debug('VectHare: context readout failed:', error?.message || error);
+    }
+}
+
 export function refreshAutoSyncCheckbox(settings) {
     const requestId = ++autoSyncRefreshId;
     const chatId = getCurrentChatId();
@@ -2111,16 +2343,6 @@ function bindSettingsEvents(settings, callbacks) {
     // vectorizing or rebuilding. Shown from the collection's verified original
     // configuration only.
     refreshChatVectorizationConfig(settings);
-
-    // Chunk size (for adaptive strategy)
-    $('#vecthare_chunk_size')
-        .val(settings.chunk_size || 500)
-        .on('input', function() {
-            const value = Number($(this).val());
-            settings.chunk_size = value;
-            applySettingsSnapshot(settings);
-            saveSettingsDebounced();
-        });
 
     // Vector backend selection
     $('#vecthare_vector_backend')
@@ -2765,40 +2987,48 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
         });
 
-    // Global temporal weighting defaults
-    const updateDecayTypeSection = (enabled) => {
-        const $section = $('#vecthare_default_decay_type_section');
-        const $radios = $section.find('input[type="radio"]');
-
-        if (enabled) {
-            $section.removeClass('vecthare-subsection-disabled');
-            $radios.prop('disabled', false);
-            // Select the saved type (or default to 'decay') when enabling
-            const savedType = settings.default_decay_type || 'decay';
-            $(`input[name="vecthare_default_decay_type"][value="${savedType}"]`).prop('checked', true);
-        } else {
-            $section.addClass('vecthare-subsection-disabled');
-            $radios.prop('disabled', true).prop('checked', false);
-        }
+    // Dedup Depth is not used while "Skip memories already in context" is on.
+    const updateDedupDepthSection = (skipOn) => {
+        $('#vecthare_dedup_depth_section').toggleClass('vecthare-subsection-disabled', skipOn);
+        $('#vecthare_deduplication_depth').prop('disabled', skipOn);
     };
-
-    $('#vecthare_default_decay_enabled')
-        .prop('checked', settings.default_decay_enabled || false)
+    $('#vecthare_skip_in_context_memories')
+        .prop('checked', settings.skip_in_context_memories !== false)
         .on('change', function() {
-            const enabled = $(this).prop('checked');
-            settings.default_decay_enabled = enabled;
-            updateDecayTypeSection(enabled);
+            settings.skip_in_context_memories = $(this).prop('checked');
+            updateDedupDepthSection(settings.skip_in_context_memories);
+            applySettingsSnapshot(settings);
+            saveSettingsDebounced();
+        });
+    updateDedupDepthSection(settings.skip_in_context_memories !== false);
+    // Injection Depth does nothing while memories go to the top of the context.
+    const updateInjectionDepthSection = (topOn) => {
+        $('#vecthare_injection_depth_section').toggleClass('vecthare-subsection-disabled', topOn);
+        $('#vecthare_injection_depth').prop('disabled', topOn);
+    };
+    $('#vecthare_memories_at_context_top')
+        .prop('checked', settings.memories_at_context_top === true)
+        .on('change', function() {
+            settings.memories_at_context_top = $(this).prop('checked');
+            updateInjectionDepthSection(settings.memories_at_context_top);
+            applySettingsSnapshot(settings);
+            saveSettingsDebounced();
+        });
+    updateInjectionDepthSection(settings.memories_at_context_top === true);
+    refreshContextReadout();
+
+    $('#vecthare_apply_prompt_regex_to_memories')
+        .prop('checked', settings.apply_prompt_regex_to_memories !== false)
+        .on('change', function() {
+            settings.apply_prompt_regex_to_memories = $(this).prop('checked');
             applySettingsSnapshot(settings);
             saveSettingsDebounced();
         });
 
-    // Initialize the section state
-    updateDecayTypeSection(settings.default_decay_enabled || false);
-
-    $('input[name="vecthare_default_decay_type"]').on('change', function() {
-        settings.default_decay_type = $(this).val();
-        applySettingsSnapshot(settings);
-        saveSettingsDebounced();
+    // New Collection Defaults open in their own window
+    $('#vecthare_open_collection_defaults').on('click', (event) => {
+        event.preventDefault();
+        openCollectionDefaults(settings);
     });
 
     // Provider-specific settings
@@ -3216,7 +3446,7 @@ function renderDiagnosticsContent(results, filter = 'all') {
     const html = `
         <!-- Version Info -->
         <div class="vecthare-diagnostics-version" style="padding: 10px 15px; background: var(--black30alpha); border-radius: 8px; margin-bottom: 15px; font-size: 0.9em; color: var(--grey70);">
-            ${versionInfoHtml(results.version?.compatibility || { state: 'unknown', extensionVersion: results.version?.extension, pluginVersion: results.version?.plugin }, results.version?.server || null)}
+            ${versionInfoHtml(results.version?.compatibility || { state: 'unknown', extensionVersion: results.version?.extension, pluginVersion: results.version?.plugin }, results.version?.server || null, results.version?.sillytavern || null)}
         </div>
 
         <!-- Summary Stats Bar (Clickable Filters) -->
@@ -3415,19 +3645,31 @@ function copyDiagnosticsReport(results) {
     const source = settings.source || 'none';
     const modelField = getModelField(source);
     const model = modelField ? (settings[modelField] || 'not set') : 'n/a (provider handles it)';
-    const qdrantMode = settings.qdrant_mode || 'local';
+    // VH-115: these read settings that do not exist (qdrant_mode,
+    // qdrant_cloud_url), so the report always said "local" with the local
+    // address; and local providers showed a made-up default address.
+    const qdrantMode = settings.qdrant_use_cloud ? 'cloud' : 'local';
     const qdrantUrl = backend === 'qdrant'
-        ? (qdrantMode === 'cloud' ? settings.qdrant_cloud_url : settings.qdrant_url)
+        ? (settings.qdrant_use_cloud ? (settings.qdrant_url || 'not set')
+            : `${settings.qdrant_host || 'localhost'}:${settings.qdrant_port || 6333}`)
         : null;
 
-    // Build provider URL info
+    // Provider URL: the address real embedding uses
     let providerUrl = 'n/a';
-    if (settings.use_alt_endpoint && settings.alt_endpoint_url) {
-        providerUrl = settings.alt_endpoint_url;
-    } else if (['bananabread', 'ollama', 'llamacpp', 'koboldcpp', 'vllm'].includes(source)) {
-        // Local server providers - show their configured URL
-        providerUrl = settings.alt_endpoint_url || 'http://localhost:8008';
-    }
+    try {
+        const params = getProviderSpecificParams(settings);
+        providerUrl = params.apiUrl || params.extrasUrl || 'n/a';
+    } catch { /* n/a */ }
+
+    // VH-115: auto-sync is per chat (the old global switch is not used)
+    let chatReportLine = 'no chat open';
+    try {
+        const chatCollectionId = getChatCollectionId();
+        const key = chatCollectionId ? getCollectionRegistry().find(k => k === chatCollectionId || k.endsWith(`:${chatCollectionId}`)) : null;
+        chatReportLine = !chatCollectionId ? 'no chat open'
+            : !key ? 'not vectorized'
+            : `vectorized, ${isCollectionEnabled(key) ? 'enabled' : 'disabled'}, auto-sync ${isCollectionAutoSyncEnabled(key) ? 'on' : 'off'}`;
+    } catch { /* unknown */ }
 
     let report = `╔══════════════════════════════════════════════════════════════╗
 ║              VECTHARE DIAGNOSTICS REPORT                      ║
@@ -3444,10 +3686,9 @@ ${isFiltered ? `🔍 Filter: ${filterNames[filter]} (${filteredCount} of ${total
   Backend:           ${backend}${backend === 'qdrant' ? ` (${qdrantMode})` : ''}
   Embedding Source:  ${source}
   Model:             ${model}${providerUrl !== 'n/a' ? `\n  Provider URL:      ${providerUrl}` : ''}${qdrantUrl ? `\n  Qdrant URL:        ${qdrantUrl}` : ''}
-  Chunk Size:        ${settings.chunk_size || 500} chars (adaptive only)
   Score Threshold:   ${settings.score_threshold || 0.5}
   Query Depth:       ${settings.query || 3}
-  Chat Auto-Sync:    ${settings.enabled_chats ? 'enabled' : 'disabled'}
+  This Chat:         ${chatReportLine}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                          SUMMARY
@@ -3547,7 +3788,7 @@ const DIAGNOSTIC_FIXES = {
     cleanOrphanedMetadata: 'fix', cleanOrphanedGroupMembers: 'fix',
     vectorize_all: 'guide', revectorize: 'guide', configure_provider: 'guide', configure_url: 'guide',
     configure_api_key: 'guide', configure_qdrant: 'guide', install_lancedb: 'guide',
-    install_webllm: 'guide', update_webllm: 'guide', fix_qdrant_dimension: 'guide',
+    install_webllm: 'guide', update_webllm: 'guide',
 };
 function fixKind(action) { return DIAGNOSTIC_FIXES[action] || null; }
 
@@ -3644,9 +3885,6 @@ async function handleDiagnosticFix(check, silent = false) {
                     'Set the Qdrant address here (local default: localhost:6333)');
             case 'install_lancedb':
                 return done(false, 'LanceDB needs the Similharity plugin with its dependencies installed (npm install in its folder), then restart SillyTavern. Or choose another backend.', 'info');
-            case 'fix_qdrant_dimension':
-                if (!silent) showQdrantDimensionFixDialog();
-                return done(false, null);
             default:
                 return done(false, `No fix is available for "${action}"`);
         }
@@ -3656,98 +3894,6 @@ async function handleDiagnosticFix(check, silent = false) {
     }
 }
 
-/**
- * Shows a dialog with options to fix Qdrant dimension mismatch
- */
-async function showQdrantDimensionFixDialog() {
-    // Get the check data from the current diagnostics results
-    const check = currentDiagnosticResults?.checks?.find(c => c.fixAction === 'fix_qdrant_dimension');
-    const data = check?.data || {};
-
-    const collectionDim = data.collectionDimension || '?';
-    const currentDim = data.currentDimension || '?';
-    const sources = data.collectionSources?.join(', ') || 'unknown';
-    const models = data.collectionModels?.length > 0 ? data.collectionModels.join(', ') : '(not recorded)';
-    const pointsCount = data.pointsCount || 0;
-
-    const dialogHtml = `
-        <div class="vecthare-dimension-fix-dialog">
-            <h3 style="margin-top: 0; color: var(--vecthare-danger);">
-                <i class="fa-solid fa-triangle-exclamation"></i> Vector Dimension Mismatch
-            </h3>
-
-            <div class="vecthare-dimension-info" style="background: var(--SmartThemeBlurTintColor); padding: 12px; border-radius: 8px; margin-bottom: 16px;">
-                <p style="margin: 0 0 8px 0;"><strong>Your Qdrant collection:</strong></p>
-                <ul style="margin: 0; padding-left: 20px;">
-                    <li><strong>${collectionDim}</strong> dimensions</li>
-                    <li>Source: <strong>${escapeHtml(sources)}</strong></li>
-                    <li>Model: <strong>${escapeHtml(models)}</strong></li>
-                    <li><strong>${pointsCount.toLocaleString()}</strong> vectors stored</li>
-                </ul>
-
-                <p style="margin: 12px 0 8px 0;"><strong>Your current embedding model:</strong></p>
-                <ul style="margin: 0; padding-left: 20px;">
-                    <li><strong>${currentDim}</strong> dimensions</li>
-                </ul>
-            </div>
-
-            <p style="margin-bottom: 16px;">These dimensions don't match. You have two options:</p>
-
-            <div class="vecthare-dimension-options" style="display: flex; flex-direction: column; gap: 12px;">
-                <button id="vecthare_dim_fix_purge" class="vecthare-btn-danger" style="padding: 12px; text-align: left;">
-                    <i class="fa-solid fa-trash"></i>
-                    <strong>Start fresh</strong>
-                    <br><small style="opacity: 0.8;">How to remove the affected collections (${pointsCount.toLocaleString()} vectors) and re-vectorize with your current model</small>
-                </button>
-
-                <button id="vecthare_dim_fix_switch" class="vecthare-btn-secondary" style="padding: 12px; text-align: left;">
-                    <i class="fa-solid fa-rotate-left"></i>
-                    <strong>I'll switch my embedding model back</strong>
-                    <br><small style="opacity: 0.8;">Keep your vectors; change your embedding settings to match (${escapeHtml(sources)}${escapeHtml(models !== '(not recorded)' ? ': ' + models : '')})</small>
-                </button>
-
-                <button id="vecthare_dim_fix_cancel" class="vecthare-btn-secondary" style="padding: 12px; text-align: left;">
-                    <i class="fa-solid fa-clock"></i>
-                    <strong>Hold off for now</strong>
-                    <br><small style="opacity: 0.8;">I'll figure it out later</small>
-                </button>
-            </div>
-        </div>
-    `;
-
-    // Use callGenericPopup for the dialog
-    const { callGenericPopup, POPUP_TYPE } = await import('../../../../popup.js');
-
-    callGenericPopup(dialogHtml, POPUP_TYPE.TEXT, '', {
-        okButton: false,
-        cancelButton: false,
-        wide: false,
-        allowVerticalScrolling: true,
-    });
-
-    // Bind button handlers
-    $('#vecthare_dim_fix_purge').off('click').on('click', () => {
-        // H2: VectHare never drops a shared Qdrant store. This button used to
-        // call a plugin route that does not exist (so it always failed); it now
-        // says how to start fresh safely instead.
-        $('.popup-button-close').click();
-        toastr.info('To start fresh: delete the affected collections in the Database Browser (or use Purge All), then re-vectorize. VectHare never deletes a shared store directly.',
-            'VectHare', { timeOut: 12000 });
-        closeDiagnosticsModal();
-    });
-
-    $('#vecthare_dim_fix_switch').off('click').on('click', () => {
-        $('.popup-button-close').click();
-        toastr.info(`Switch your embedding provider to "${sources}"${models !== '(not recorded)' ? ` with model "${models}"` : ''} to match your stored vectors.`);
-        closeDiagnosticsModal();
-        // Scroll to provider settings
-        $('#vecthare_provider_settings')[0]?.scrollIntoView({ behavior: 'smooth' });
-    });
-
-    $('#vecthare_dim_fix_cancel').off('click').on('click', () => {
-        $('.popup-button-close').click();
-    });
-}
 
 /**
  * Hides diagnostics output

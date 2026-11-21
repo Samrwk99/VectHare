@@ -17,7 +17,6 @@ import {
     checkPluginEndpoints,
     checkLanceDBBackend,
     checkQdrantBackend,
-    checkQdrantDimensionMatch,
     checkEmbeddingProvider,
     checkTransformersMemoryLimits,
     checkApiKeys,
@@ -29,7 +28,6 @@ import {
 
 import {
     checkChatEnabled,
-    checkChunkSize,
     checkScoreThreshold,
     checkInsertQueryCounts,
     checkChatVectors,
@@ -70,7 +68,7 @@ import { testConditionalActivation } from './activation-tests.js';
 
 import { runVisualizerTests } from './visualizer-tests.js';
 import { cleanupTestCollections } from '../core/collection-loader.js';
-import { checkPluginCompatibility, readBackendServerInfo } from '../core/plugin-health.js';
+import { checkPluginCompatibility, readBackendServerInfo, readSillyTavernInfo } from '../core/plugin-health.js';
 
 /**
  * Runs all diagnostic checks
@@ -96,6 +94,7 @@ export async function runDiagnostics(settings, includeProductionTests = false) {
         else if (compatibility.state !== 'missing') pluginVersion = 'Unknown';
     } catch { /* versions stay unknown */ }
     const server = await readBackendServerInfo(settings?.vector_backend).catch(() => null);
+    const sillytavern = await readSillyTavernInfo().catch(() => null);
 
     // Auto-clean any ghost test collections from the registry
     const testCollectionsCleaned = cleanupTestCollections();
@@ -117,7 +116,6 @@ export async function runDiagnostics(settings, includeProductionTests = false) {
     categories.infrastructure.push(await checkPluginEndpoints());
     categories.infrastructure.push(await checkLanceDBBackend(settings));
     categories.infrastructure.push(await checkQdrantBackend(settings));
-    categories.infrastructure.push(await checkQdrantDimensionMatch(settings));
     categories.infrastructure.push(await checkEmbeddingProvider(settings));
 
     // WASM memory warning for Transformers users
@@ -152,7 +150,6 @@ export async function runDiagnostics(settings, includeProductionTests = false) {
 
     // ========== CONFIGURATION CHECKS ==========
     categories.configuration.push(checkChatEnabled(settings));
-    categories.configuration.push(checkChunkSize(settings));
     categories.configuration.push(checkScoreThreshold(settings));
     categories.configuration.push(checkInsertQueryCounts(settings));
     categories.configuration.push(await checkChatVectors(settings));
@@ -242,6 +239,7 @@ export async function runDiagnostics(settings, includeProductionTests = false) {
             plugin: pluginVersion,
             compatibility,
             server,
+            sillytavern,
         },
         categories,
         checks: allChecks,

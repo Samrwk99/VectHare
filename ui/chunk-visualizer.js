@@ -34,6 +34,7 @@ import { getStringHash } from '../../../../utils.js';
 import { noteManualVectorChange } from '../core/chat-vectorization.js';
 import { withLease } from '../core/leases.js';
 import { parseRegistryKey } from '../core/collection-ids.js';
+import { stripGeneratedKeywordSuffix } from '../utils/keyword-suffix.js';
 // 8C: edits here take the collection's cross-tab lease, like Sync and Repair.
 const leaseIdOf = id => parseRegistryKey(id).collectionId || id;
 import {
@@ -77,6 +78,7 @@ let selectedHashes = new Set();
 let hasUnsavedChanges = false;
 let pendingChanges = new Map(); // hash -> {keywords, enabled, conditions, etc.}
 let plaintextKeywordMode = false; // Toggle for plaintext keyword editing
+let lastDetailChunkId = null; // the chunk the detail panel last showed
 let activeTab = 'chunks'; // 'chunks' or 'scenes'
 
 // ============================================================================
@@ -127,6 +129,17 @@ function normalizeKeywords(keywords) {
     }).filter(Boolean);
 }
 
+/** VH-119: Qdrant stores " [KEYWORDS: ...]" after a chunk's text (vectorizing adds it). */
+function isQdrantCollection() {
+    return (parseRegistryKey(String(currentCollectionId || ''))?.backend || currentSettings?.vector_backend) === 'qdrant';
+}
+
+/** The text as vectorizing would store it on Qdrant: text + generated keyword list. */
+function withGeneratedKeywordSuffix(text, keywords) {
+    const list = (keywords || []).map(kw => kw?.text ?? kw).filter(Boolean);
+    return isQdrantCollection() && list.length ? `${text} [KEYWORDS: ${list.join(' ')}]` : text;
+}
+
 function getChunkData(chunk) {
     const stored = getChunkMetadata(chunk.hash, currentCollectionId) || {};
 
@@ -134,10 +147,17 @@ function getChunkData(chunk) {
     const dbKeywords = chunk.metadata?.keywords || chunk.keywords || [];
     const keywords = stored.keywords !== undefined ? stored.keywords : dbKeywords;
 
+    // VH-119: the memory's own text - without Qdrant's generated keyword list,
+    // which showed as editable text (deleting it quietly took the keywords out
+    // of the embedding); it is added back from the keywords when text is saved.
+    const text = isQdrantCollection() && typeof chunk.text === 'string'
+        ? String(stripGeneratedKeywordSuffix(chunk.text, dbKeywords.length ? dbKeywords : keywords) ?? chunk.text)
+        : chunk.text;
+
     return {
         hash: chunk.hash,
         index: chunk.index,
-        text: chunk.text,
+        text,
         score: chunk.score || 1,
         similarity: chunk.similarity || 1,
         messageAge: chunk.messageAge,
@@ -193,7 +213,10 @@ async function saveAllChanges() {
                 }
                 // Text changed - requires re-embedding
                 await noteManualVectorChange(currentCollectionId, (await settingsFor()), [hash]);
-                const result = await updateChunkText(currentCollectionId, hash, updates.text, (await settingsFor()));
+                const currentKeywords = updates.keywords !== undefined ? updates.keywords
+                    : (allChunks.find(c => String(c.hash) === String(hash))?.data?.keywords || []);
+                const result = await updateChunkText(currentCollectionId, hash,
+                    withGeneratedKeywordSuffix(updates.text, currentKeywords), (await settingsFor()));
                 if (result?.newHash !== undefined && result.newHash !== null && String(result.newHash) !== String(hash)) {
                     rehashChunkReferences(hash, result.newHash);
                     hash = result.newHash;
@@ -1421,8 +1444,103 @@ function updateStatusBar() {
 // DETAIL PANEL RENDERING
 // ============================================================================
 
+/**
+ * Keyword controls. Each change redraws only the keyword section, so the
+ * panel does not jump and an unsaved text edit above it is kept.
+ */
+function bindKeywordEvents(chunk) {
+    const refreshKeywords = () => {
+        $('#vecthare_keywords_container').html(renderKeywordsInner(chunk.data));
+        $('#vecthare_keyword_mode i').attr('class', `fa-solid ${plaintextKeywordMode ? 'fa-tag' : 'fa-code'}`);
+        bindKeywordItemEvents(chunk, refreshKeywords);
+        renderChunkList();
+    };
+    // Keyword mode toggle (plaintext vs tags)
+    $('#vecthare_keyword_mode').off('click').on('click', function() {
+        // If in plaintext mode, parse and save before switching
+        if (plaintextKeywordMode) {
+            const plaintext = $('#vecthare_keywords_plaintext').val();
+            chunk.data.keywords = parsePlaintextKeywords(plaintext);
+            updateChunkData(chunk.hash, { keywords: chunk.data.keywords });
+        }
+        plaintextKeywordMode = !plaintextKeywordMode;
+        refreshKeywords();
+    });
+    bindKeywordItemEvents(chunk, refreshKeywords);
+}
+
+function bindKeywordItemEvents(chunk, refreshKeywords) {
+    // Plaintext keywords - save on blur
+    $('#vecthare_keywords_plaintext').on('blur', function() {
+        const plaintext = $(this).val();
+        chunk.data.keywords = parsePlaintextKeywords(plaintext);
+        updateChunkData(chunk.hash, { keywords: chunk.data.keywords });
+    });
+
+    // Keywords - add new
+    $('#vecthare_add_keyword').on('click', function() {
+        $(this).replaceWith('<input type="text" class="vecthare-keyword-input" id="vecthare_keyword_input" placeholder="Enter keyword...">');
+        let done = false;
+        const finish = () => { if (!done) { done = true; refreshKeywords(); } };
+        $('#vecthare_keyword_input').focus().on('keydown', function(e) {
+            if (e.key === 'Enter') {
+                const keyword = $(this).val().trim();
+                if (keyword && !chunk.data.keywords.some(k => k.text === keyword)) {
+                    chunk.data.keywords.push({ text: keyword, weight: 1.5 }); // Default 1.5x boost
+                    updateChunkData(chunk.hash, { keywords: chunk.data.keywords });
+                }
+                finish();
+            } else if (e.key === 'Escape') {
+                finish();
+            }
+        }).on('blur', finish);
+    });
+
+    // Keyword remove button
+    $('.vecthare-keyword-remove').on('click', function() {
+        const index = $(this).data('index');
+        chunk.data.keywords.splice(index, 1);
+        updateChunkData(chunk.hash, { keywords: chunk.data.keywords });
+        refreshKeywords();
+    });
+}
+
+/** A keyword weight for display: at most two decimals (1.9911649563701288 → 1.99). */
+function shortWeight(weight) {
+    const n = Number(weight);
+    return Number.isFinite(n) ? Number(n.toFixed(2)) : weight;
+}
+
+/** The keyword list (tags, or plain text) inside the chunk detail panel. */
+function renderKeywordsInner(data) {
+    return `
+                    ${plaintextKeywordMode ? `
+                        <textarea class="vecthare-keyword-plaintext" id="vecthare_keywords_plaintext" placeholder="keyword:1.5x, another:2x, plain">${escapeHtml(data.keywords.map(k => k.weight !== 1.0 ? `${k.text}:${shortWeight(k.weight)}x` : k.text).join(', '))}</textarea>
+                        <div class="vecthare-keyword-plaintext-hint">Format: keyword:2x for boost, or just keyword (defaults to 1.5x)</div>
+                    ` : `
+                        <div class="vecthare-keywords-list">
+                            ${data.keywords.map((k, idx) => `
+                                <span class="vecthare-keyword-tag" data-index="${idx}">
+                                    <span class="vecthare-keyword-tag-text">${escapeHtml(k.text || 'unnamed')}</span>
+                                    <span class="vecthare-keyword-tag-weight">${escapeHtml(String(shortWeight(k.weight)))}x</span>
+                                    <i class="fa-solid fa-xmark vecthare-keyword-remove" data-index="${idx}"></i>
+                                </span>
+                            `).join('')}
+                        </div>
+                        <button class="vecthare-keyword-add" id="vecthare_add_keyword">+ Add keyword...</button>
+                    `}`;
+}
+
 function renderDetailPanel() {
     const panel = $('#vecthare_detail_panel');
+    // Redrawing the same chunk (keyword mode, add/remove keyword, ...) keeps
+    // the panel where it was instead of jumping back to the top.
+    const sameChunk = selectedChunkId && lastDetailChunkId === selectedChunkId;
+    const keepScroll = sameChunk ? {
+        panel: panel.scrollTop(),
+        content: panel.find('.vecthare-detail-content').scrollTop(),
+    } : null;
+    lastDetailChunkId = selectedChunkId;
 
     if (!selectedChunkId) {
         panel.html('<div class="vecthare-detail-empty">Select a chunk to view details</div>');
@@ -1501,6 +1619,19 @@ function renderDetailPanel() {
                 </div>
             </div>
 
+            <!-- Keywords Section -->
+            <div class="vecthare-detail-section">
+                <div class="vecthare-detail-section-header">
+                    <span class="vecthare-detail-section-title">Keywords <span class="vecthare-section-hint">(boost when query matches)</span></span>
+                    <button class="vecthare-keyword-mode-toggle" id="vecthare_keyword_mode" title="Toggle plaintext mode">
+                        <i class="fa-solid ${plaintextKeywordMode ? 'fa-tag' : 'fa-code'}"></i>
+                    </button>
+                </div>
+                <div class="vecthare-detail-keywords" id="vecthare_keywords_container">
+                    ${renderKeywordsInner(data)}
+                </div>
+            </div>
+
             <!-- Status Section -->
             <div class="vecthare-detail-section">
                 <div class="vecthare-detail-section-title">Status</div>
@@ -1552,33 +1683,6 @@ function renderDetailPanel() {
                                min="0" max="50" step="1" value="${data.depth ?? 2}">
                     </div>
                     <div class="vecthare-context-hint">Supports {{user}} and {{char}}. XML tag wraps just this chunk.</div>
-                </div>
-            </div>
-
-            <!-- Keywords Section -->
-            <div class="vecthare-detail-section">
-                <div class="vecthare-detail-section-header">
-                    <span class="vecthare-detail-section-title">Keywords <span class="vecthare-section-hint">(boost when query matches)</span></span>
-                    <button class="vecthare-keyword-mode-toggle" id="vecthare_keyword_mode" title="Toggle plaintext mode">
-                        <i class="fa-solid ${plaintextKeywordMode ? 'fa-tag' : 'fa-code'}"></i>
-                    </button>
-                </div>
-                <div class="vecthare-detail-keywords" id="vecthare_keywords_container">
-                    ${plaintextKeywordMode ? `
-                        <textarea class="vecthare-keyword-plaintext" id="vecthare_keywords_plaintext" placeholder="keyword:1.5x, another:2x, plain">${escapeHtml(data.keywords.map(k => k.weight !== 1.0 ? `${k.text}:${k.weight}x` : k.text).join(', '))}</textarea>
-                        <div class="vecthare-keyword-plaintext-hint">Format: keyword:2x for boost, or just keyword (defaults to 1.5x)</div>
-                    ` : `
-                        <div class="vecthare-keywords-list">
-                            ${data.keywords.map((k, idx) => `
-                                <span class="vecthare-keyword-tag" data-index="${idx}">
-                                    <span class="vecthare-keyword-tag-text">${escapeHtml(k.text || 'unnamed')}</span>
-                                    <span class="vecthare-keyword-tag-weight">${k.weight}x</span>
-                                    <i class="fa-solid fa-xmark vecthare-keyword-remove" data-index="${idx}"></i>
-                                </span>
-                            `).join('')}
-                        </div>
-                        <button class="vecthare-keyword-add" id="vecthare_add_keyword">+ Add keyword...</button>
-                    `}
                 </div>
             </div>
 
@@ -1660,6 +1764,10 @@ function renderDetailPanel() {
     `);
 
     bindDetailEvents();
+    if (keepScroll) {
+        panel.scrollTop(keepScroll.panel);
+        panel.find('.vecthare-detail-content').scrollTop(keepScroll.content);
+    }
 }
 
 function formatConditionRule(rule) {
@@ -1856,6 +1964,9 @@ async function replaceChunkText(chunk, newText) {
             hash: newHash, // keep as number for Qdrant compatibility
             text: newText,
             index: chunk.index,
+            // VH-119: Qdrant builds its " [KEYWORDS: ...]" list from the item's
+            // keywords; inside metadata only, the edited chunk lost the list.
+            ...(carried.keywords !== undefined ? { keywords: carried.keywords } : {}),
             metadata: carried,
             __vecthareProvenanceHint: { writer: 'chunk-visualizer', sourceType: 'manual-edit' },
         }], editSettings);
@@ -1996,51 +2107,7 @@ function bindDetailEvents() {
         toastr.success(enabled ? 'Chunk enabled' : 'Chunk disabled: it will not be retrieved', 'VectHare');
     });
 
-    // Keyword mode toggle (plaintext vs badge)
-    $('#vecthare_keyword_mode').on('click', function() {
-        // If in plaintext mode, parse and save before switching
-        if (plaintextKeywordMode) {
-            const plaintext = $('#vecthare_keywords_plaintext').val();
-            chunk.data.keywords = parsePlaintextKeywords(plaintext);
-            updateChunkData(chunk.hash, { keywords: chunk.data.keywords });
-        }
-        plaintextKeywordMode = !plaintextKeywordMode;
-        renderDetailPanel();
-    });
-
-    // Plaintext keywords - save on blur
-    $('#vecthare_keywords_plaintext').on('blur', function() {
-        const plaintext = $(this).val();
-        chunk.data.keywords = parsePlaintextKeywords(plaintext);
-        updateChunkData(chunk.hash, { keywords: chunk.data.keywords });
-    });
-
-    // Keywords - add new
-    $('#vecthare_add_keyword').on('click', function() {
-        $(this).replaceWith('<input type="text" class="vecthare-keyword-input" id="vecthare_keyword_input" placeholder="Enter keyword...">');
-        $('#vecthare_keyword_input').focus().on('keydown', function(e) {
-            if (e.key === 'Enter') {
-                const keyword = $(this).val().trim();
-                if (keyword && !chunk.data.keywords.some(k => k.text === keyword)) {
-                    chunk.data.keywords.push({ text: keyword, weight: 1.5 }); // Default 1.5x boost
-                    updateChunkData(chunk.hash, { keywords: chunk.data.keywords });
-                }
-                renderDetailPanel();
-            } else if (e.key === 'Escape') {
-                renderDetailPanel();
-            }
-        }).on('blur', function() {
-            renderDetailPanel();
-        });
-    });
-
-    // Keyword remove button
-    $('.vecthare-keyword-remove').on('click', function() {
-        const index = $(this).data('index');
-        chunk.data.keywords.splice(index, 1);
-        updateChunkData(chunk.hash, { keywords: chunk.data.keywords });
-        renderDetailPanel();
-    });
+    bindKeywordEvents(chunk);
 
     // Conditions
     $('#vecthare_conditions_enabled').on('change', function() {

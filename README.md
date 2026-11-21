@@ -157,7 +157,9 @@ For example, with half-life = 50:
 | 150 | 12.5% |
 
 ### Configuration Options
+Temporal weighting is set **per collection** (Database Browser → collection settings); the settings panel sets the default for new collections.
 - **Enabled**: Toggle decay on/off (default: OFF)
+- **Type**: Decay (favour recent) or Nostalgia (favour older memories)
 - **Mode**: Exponential or Linear
 - **Half-life**: Messages until 50% relevance (default: 50)
 - **Floor**: Minimum relevance, prevents complete forgetting (default: 0.3)
@@ -244,16 +246,30 @@ This fork ships with `auto_update: false` in its manifest, so SillyTavern will n
 ### 💬 Chat Vectorization
 | Setting | Description |
 |---------|-------------|
-| **Enable Auto-Sync** | Automatically vectorize new messages |
-| **Chunking Strategy** | Per Message, Conversation Turns, Message Batch, Per Scene |
-| **Score Threshold** | Minimum similarity to include chunk (0.0-1.0) |
-| **Query Depth** | How many chunks to retrieve |
-| **Insert Count** | How many chunks to inject into prompt |
+| **Enable Auto-Sync** | Add new messages of this chat to its memories as you go (per chat) |
+| **Score Threshold** | Memories scoring below this are not recalled (0.0-1.0) |
+| **Query Depth** | How many recent messages are used to search for memories |
+| **Top K** | Most memories recalled per message, across all collections |
+| **Skip Memories Already in Context** | Don't recall this chat's messages that are still in the prompt (below SillyTavern's orange dashed line). Other collections are not affected. The panel shows where the line is (on by default) |
+| **Dedup Depth** | Skip memories that repeat one of the last N messages. Only used with the option above off |
+| **Injection Depth** | For In-Chat @ Depth: how many messages from the end. If that is above the orange context line, memories are moved just below it so they aren't cut |
+| **Place Memories at the Top of the Context** | Insert in-chat memories just below the orange context line. Overrides injection depth, including per-collection and per-chunk depths (off by default) |
+| **Apply "Alter Outgoing Prompt" Regex to Memories** | Runs your prompt regex scripts on recalled chat and lorebook memories (on by default) |
 
-### ⏰ Temporal Decay
+### 🆕 New Collection Defaults
+Starting settings when you vectorize something new; you can change them each time, and existing collections keep their own.
 | Setting | Description |
 |---------|-------------|
-| **Enabled** | Toggle decay system |
+| **Chunking Strategy (chats)** | Per Message, Conversation Turns (with pairing order) or Message Batch (with batch size) |
+| **Text Cleaning** | Preset, or Custom patterns from the Text Cleaning manager |
+| **Keyword Extraction** | Off / Minimal / Balanced / Aggressive, and the keyword weight |
+| **Temporal Weighting** | Off, Decay or Nostalgia |
+
+### ⏰ Temporal Decay (per collection)
+| Setting | Description |
+|---------|-------------|
+| **Enabled** | Toggle decay or nostalgia for the collection |
+| **Type** | Decay (recent first) or Nostalgia (older first) |
 | **Mode** | Exponential or Linear |
 | **Half-life** | Messages until 50% relevance |
 | **Floor** | Minimum relevance multiplier |
@@ -287,10 +303,9 @@ This fork ships with `auto_update: false` in its manifest, so SillyTavern will n
 ## 🐛 Troubleshooting
 
 ### "No embeddings available"
-1. Enable Vectors extension in main ST settings
-2. Select embedding provider in VectHare settings
-3. Add API key if using cloud provider
-4. Run Diagnostics to verify connectivity
+1. Select embedding provider in VectHare settings
+2. Add API key if using cloud provider
+3. Run Diagnostics to verify connectivity
 
 ### Chunks not being retrieved
 1. Click "Vectorize" button to index current chat

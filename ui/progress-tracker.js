@@ -1,4 +1,6 @@
 import { vhLog } from '../utils/log.js';
+import { getModelField } from '../core/providers.js';
+import { extension_settings } from '../../../../extensions.js';
 /**
  * ============================================================================
  * VECTHARE PROGRESS TRACKER
@@ -1295,15 +1297,21 @@ export function phaseText(phase, n, total) {
  */
 export function describeEffectiveSettings(settings, extra = {}) {
     if (!settings || typeof settings !== 'object') return { ...extra };
-    const model = settings.openai_model || settings.ollama_model || settings.llamacpp_model ||
-        settings.vllm_model || settings.webllm_model || settings.togetherai_model ||
-        settings.cohere_model || settings.nomicai_model || settings.mistral_model ||
-        settings.palm_model || settings.koboldcpp_model || '';
-    const cleaning = settings.__collectionCleaningPatterns
-        ? `${settings.__collectionCleaningPatterns.length} pattern(s) from the collection`
-        : settings.text_cleaning_enabled === false
-            ? 'off'
-            : settings.text_cleaning_preset || 'default';
+    // VH-115: the selected provider's model (this took the first model setting of
+    // ANY provider, so with OpenAI's default it showed text-embedding-ada-002 for
+    // everyone), and the real text-cleaning setting (it read two settings that
+    // do not exist and always said "default").
+    const modelField = getModelField(settings.source || 'transformers');
+    const model = modelField ? String(settings[modelField] || '') : '';
+    const preset = extension_settings?.vecthare?.cleaning?.selectedPreset || 'none';
+    // Per-collection cleaning: the collection's saved rules, or (a new
+    // collection) the preset chosen in the Vectorize dialog.
+    const runPreset = settings.__collectionCleaningPreset;
+    const patternCount = Array.isArray(settings.__collectionCleaningPatterns) ? settings.__collectionCleaningPatterns.length : null;
+    const cleaning = patternCount === null
+        ? (preset === 'none' ? 'off' : preset)
+        : (patternCount === 0 ? 'off'
+            : `${runPreset && runPreset !== 'custom' ? runPreset : 'custom'} (${patternCount} pattern(s))`);
     const out = {
         'Backend': settings.vector_backend || 'standard',
         'Embedding source': settings.source || 'transformers',
@@ -1317,7 +1325,6 @@ export function describeEffectiveSettings(settings, extra = {}) {
         out['Pairing order'] = settings.conversation_turn_order === 'character_user'
             ? 'Character → User' : 'User → Character';
     }
-    if (settings.chunk_size) out['Chunk size'] = settings.chunk_size;
     out['Text cleaning'] = cleaning;
     if (settings.embedding_batch_size) out['Embedding batch'] = settings.embedding_batch_size;
     else if (settings.insert_batch_size_set === true || (settings.insert_batch_size && settings.insert_batch_size !== 50)) {

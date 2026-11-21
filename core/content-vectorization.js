@@ -17,7 +17,7 @@ import { chunkText } from './chunking.js';
 import { DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP } from './constants.js';
 import { insertVectorItems, getSavedHashes, purgeVectorIndex } from './core-vector-api.js';
 import {
-    setCollectionMeta, getCollectionMeta, getDefaultDecayForType,
+    setCollectionMeta, getCollectionMeta, getDefaultDecayForType, hasOwnDecaySettings,
     canRecordInitialVectorizationConfig, createInitialVectorizationConfig,
     saveInitialVectorizationConfig,
     requireCollectionOperationSettings, resolveCollectionOperationSettings,
@@ -41,9 +41,21 @@ import {
 } from './collection-ids.js';
 import { extractLorebookKeywords, extractTextKeywords, extractChatKeywords, extractBM25Keywords, EXTRACTION_LEVELS, DEFAULT_EXTRACTION_LEVEL, DEFAULT_BASE_WEIGHT } from './keyword-boost.js';
 import { cleanText, cleanMessages } from './text-cleaning.js';
+import { getCleaningPatternsFor, getDefaultCleaningPreset, clampBatchSize } from './collection-defaults.js';
 import { progressTracker, describeEffectiveSettings } from '../ui/progress-tracker.js';
 import { extension_settings, getContext } from '../../../../extensions.js';
 import { getStringHash } from '../../../../utils.js';
+
+/**
+ * The Vectorize dialog's text cleaning for a collection it creates. Not set:
+ * the default (New Collection Defaults). The default itself is not changed.
+ */
+function applyDialogCleaning(target, dialogSettings) {
+    const preset = dialogSettings?.cleaningPreset || getDefaultCleaningPreset();
+    target.__collectionCleaningPatterns = getCleaningPatternsFor(preset)
+        .map(({ pattern, flags, replacement }) => ({ pattern, flags: flags || 'g', replacement: replacement || '' }));
+    target.__collectionCleaningPreset = preset;
+}
 
 /** The same effective Content Vectorizer options are used by insertion and pre-purge checks. */
 export function getContentVectorizerChunkingConfig(contentType, settings) {
@@ -59,7 +71,8 @@ export function getContentVectorizerChunkingConfig(contentType, settings) {
         pipeline: 'content-vectorizer', contentType, ...chunkOptions,
         chunkSize: chunkOptions.chunkSize === undefined ? DEFAULT_CHUNK_SIZE : chunkOptions.chunkSize,
         chunkOverlap: chunkOptions.chunkOverlap === undefined ? DEFAULT_CHUNK_OVERLAP : chunkOptions.chunkOverlap,
-        batchSize: 4,
+        // Batch size only means something for Message Batch (others record 4, as before).
+        batchSize: chunkOptions.strategy === 'message_batch' ? clampBatchSize(settings.batchSize) : 4,
         ...(contentType === 'character' ? {
             fields: settings.fields || getContentTypeDefaults('character').fields,
         } : {}),
@@ -106,6 +119,8 @@ export async function vectorizeContent({ contentType, source, settings }) {
         }
         const liveSettings = snapshotCollectionOperationSettings(vecthareSettings);
         liveSettings.chunking_strategy = settings.strategy || type.defaultStrategy;
+        liveSettings.vecthare_chat_chunking_chosen = true; // VH-117: the dialog's choice, kept for a new chat
+        applyDialogCleaning(liveSettings, settings);
         liveSettings.conversation_turn_order = settings.conversation_turn_order || 'user_character';
         liveSettings.keyword_extraction_level = settings.keywordLevel || liveSettings.keyword_extraction_level;
         if (liveSettings.chunking_strategy === 'message_batch') {
@@ -155,6 +170,9 @@ export async function vectorizeContent({ contentType, source, settings }) {
                 chunkCount: rebuild.chunkCount };
         }
 
+        // An existing chat keeps its own temporal weighting (the dialog shows
+        // the defaults, not this chat's setting); a new one gets the dialog's.
+        const keepsOwnDecay = hasOwnDecaySettings(binding.collectionId);
         const { vectorizeAll, getSyncBatchSize } = await import('./chat-vectorization.js');
         const result = await vectorizeAll(liveSettings, getSyncBatchSize(liveSettings), true);
         if (!result?.success) throw new Error('Live chat Sync was stopped or could not complete');
@@ -175,7 +193,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
                 conversation_turn_order: settings.conversation_turn_order,
                 chunkSize: settings.chunkSize,
             },
-            temporalDecay: settings.temporalDecay || getDefaultDecayForType(contentType),
+            ...(keepsOwnDecay ? {} : { temporalDecay: settings.temporalDecay || getDefaultDecayForType(contentType) }),
         });
         return { ...result, collectionId: binding.collectionId, handledBySyncChat: true };
     }
@@ -188,7 +206,8 @@ export async function vectorizeContent({ contentType, source, settings }) {
     let createdByThisRun = null;
     let createdSettings = null;
     progressTracker.setRunSettings(
-        describeEffectiveSettings(vecthareSettings, { 'Content': type.label || contentType }),
+        describeEffectiveSettings({ ...vecthareSettings, chunking_strategy: settings.strategy || type.defaultStrategy },
+            { 'Content': type.label || contentType }),
         'as selected for this run');
     progressTracker.updateCurrentItem(sourceName);
 
@@ -210,17 +229,29 @@ export async function vectorizeContent({ contentType, source, settings }) {
         const resolved = await resolveCollectionOperationSettings(collectionId, vecthareSettings,
             'content-vectorizer', getContentVectorizerChunkingConfig(contentType, settings), { allowNew: true });
         vecthareSettings = resolved.settings;
+        // A new collection is cleaned as chosen in the dialog (default: New
+        // Collection Defaults); an existing one keeps its saved cleaning.
+        if (resolved.status === 'new' && !resolved.config) applyDialogCleaning(vecthareSettings, settings);
         if (vecthareSettings.__collectionCleaningPatterns) {
             settings.__collectionCleaningPatterns = vecthareSettings.__collectionCleaningPatterns;
         }
         if (resolved.status === 'compatible') {
-            for (const key of ['strategy', 'chunkSize', 'chunkOverlap', 'fields', 'keywordLevel', 'keywordBaseWeight']) {
+            for (const key of ['strategy', 'chunkSize', 'chunkOverlap', 'fields', 'keywordLevel', 'keywordBaseWeight', 'batchSize']) {
                 if (resolved.chunking[key] !== undefined) settings[key] = resolved.chunking[key];
             }
             if (resolved.chunking.conversationTurnOrder !== undefined) {
                 settings.conversation_turn_order = resolved.chunking.conversationTurnOrder;
             }
         }
+        // The chunking this content uses (not the chat chunking settings).
+        progressTracker.setRunSettings(
+            describeEffectiveSettings({
+                ...vecthareSettings,
+                chunking_strategy: settings.strategy || type.defaultStrategy,
+                batch_size: clampBatchSize(settings.batchSize),
+                conversation_turn_order: settings.conversation_turn_order || 'user_character',
+            }, { 'Content': type.label || contentType }),
+            resolved.config ? 'from this collection\'s saved configuration' : 'as selected for this run');
         initialConfig = createInitialVectorizationConfig(vecthareSettings,
             getContentVectorizerChunkingConfig(contentType, settings));
 
@@ -235,6 +266,7 @@ export async function vectorizeContent({ contentType, source, settings }) {
             chunkSize: settings.chunkSize || type.defaults.chunkSize,
             chunkOverlap: settings.chunkOverlap || type.defaults.chunkOverlap,
             conversationTurnOrder: settings.conversation_turn_order || 'user_character',
+            batchSize: (settings.strategy || type.defaultStrategy) === 'message_batch' ? clampBatchSize(settings.batchSize) : 4,
         };
         // Step 2: Prepare and chunk
         progressTracker.updateProgress(2, 'Chunking content...');

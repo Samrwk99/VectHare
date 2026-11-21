@@ -178,7 +178,7 @@ export class StandardBackend extends VectorBackend {
             // Warn if keywords will be lost
             if (!usePluginApi && chunksWithKeywords > 0) {
                 console.warn(`⚠️ VectHare: ${chunksWithKeywords} chunks have keywords, but native ST API doesn't support metadata!`);
-                console.warn(`⚠️ VectHare: Install the Similharity plugin to save keywords: https://github.com/SillyTavern/SillyTavern-Extras-Similharity-plugin`);
+                console.warn(`⚠️ VectHare: Install the Similharity plugin to save keywords: https://github.com/Samrwk99/Similharity-VectHare-Plugin`);
             }
 
             if (!usePluginApi && !this._provenanceNativeWarned) {

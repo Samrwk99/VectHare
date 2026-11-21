@@ -137,3 +137,61 @@ export async function readBackendServerInfo(backend) {
         : `${name} ${version ?? '(version unknown)'} is connected.`;
     return { name, connected: true, version, writable, message: message.replace(/\s+/g, ' ') };
 }
+
+// ---------------------------------------------------------------------------
+// SillyTavern version, shown beside the versions above. The ranges come from a
+// check of what VectHare and Similharity use against each SillyTavern release
+// (2026-11-20, up to 1.19.1). Update them when a newer release is checked.
+// ---------------------------------------------------------------------------
+const ST_CHECKED_UP_TO = '1.19.1'; // newest release checked
+const ST_FULL_FROM = '1.18.0';     // fully supported from here
+const ST_PARTIAL_FROM = '1.12.0';  // older than this does not work
+const ST_GOOGLE_FROM = '1.13.2';   // Google embeddings through the plugin
+
+function parseVersion(text) {
+    const m = /^(\d+)\.(\d+)\.(\d+)/.exec(String(text || ''));
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+function compareVersions(a, b) {
+    for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] - b[i];
+    return 0;
+}
+
+/**
+ * SillyTavern's version and what it means for VectHare:
+ * { state: 'ok' | 'partial' | 'unsupported' | 'unknown', version, branch, message }
+ * message is empty for 'ok'.
+ */
+export async function readSillyTavernInfo() {
+    let data = null;
+    try {
+        const response = await fetch('/version');
+        if (response.ok) data = await response.json();
+    } catch { /* unknown below */ }
+    const version = typeof data?.pkgVersion === 'string' && data.pkgVersion !== 'UNKNOWN' ? data.pkgVersion : null;
+    const branch = typeof data?.gitBranch === 'string' ? data.gitBranch : null;
+    const v = parseVersion(version);
+    const use = `Use SillyTavern ${ST_FULL_FROM} or newer.`;
+    if (!v) {
+        return { state: 'unknown', version, branch, message: 'SillyTavern did not report its version, so compatibility could not be checked.' };
+    }
+    if (compareVersions(v, parseVersion(ST_PARTIAL_FROM)) < 0) {
+        return { state: 'unsupported', version, branch,
+            message: `SillyTavern ${version} is too old for VectHare: it lacks the per-user data folders and extension features VectHare and the plugin need. ${use}` };
+    }
+    if (compareVersions(v, parseVersion(ST_FULL_FROM)) < 0) {
+        const google = compareVersions(v, parseVersion(ST_GOOGLE_FROM)) < 0
+            ? ' Google (Gemini/Vertex) embeddings also do not work through the plugin.' : '';
+        return { state: 'partial', version, branch,
+            message: `SillyTavern ${version} works, but renaming a chat disconnects it from its memories and locks (renaming it back reconnects them).${google} ${use}` };
+    }
+    if (compareVersions(v, parseVersion(ST_CHECKED_UP_TO)) > 0) {
+        return { state: 'unknown', version, branch,
+            message: `SillyTavern ${version} is newer than the releases this VectHare was checked with (up to ${ST_CHECKED_UP_TO}). It should work; report anything that doesn't.` };
+    }
+    if (branch && branch !== 'release' && branch !== 'HEAD' && compareVersions(v, parseVersion(ST_CHECKED_UP_TO)) === 0) {
+        return { state: 'unknown', version, branch,
+            message: `This is a development build of SillyTavern (${branch}), with changes after release ${ST_CHECKED_UP_TO}. It should work; report anything that doesn't.` };
+    }
+    return { state: 'ok', version, branch, message: '' };
+}

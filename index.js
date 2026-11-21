@@ -26,6 +26,7 @@ import { debounce } from '../../../utils.js';
 import { debounce_timeout } from '../../../constants.js';
 
 // VectHare modules - Core
+import { noteGenerationType, recordContextLine, forgetContextLine } from './core/context-line.js';
 import { synchronizeChat, rearrangeChat, vectorizeAll, repairChatVectors, checkUnfinishedVectorization, isVectorizationActive, isChatSynchronizationActive, consumeWasLastRunStoppedByUser, flagImmediateReverseSync, parseRegistryKey, noteChatSwitch, planChatVectorizationRebuild, getSyncBatchSize } from './core/chat-vectorization.js';
 import {
     ensureChatBinding, chatFileExists, deletionCandidates, anotherChatClaimsCollection,
@@ -46,7 +47,7 @@ import { softDeleteChatCollection, purgeDeletedChats, DELETED_CHAT_KEEP_DAYS } f
 import AsyncUtils from './utils/async-utils.js';
 
 // VectHare modules - UI
-import { renderSettings, openDiagnosticsModal, loadWebLlmModels, updateWebLlmStatus, refreshAutoSyncCheckbox, updateContinueVectorizationButton, updateVectorizationStatus, openPurgeOptionsDialog } from './ui/ui-manager.js';
+import { renderSettings, openDiagnosticsModal, loadWebLlmModels, updateWebLlmStatus, refreshAutoSyncCheckbox, updateContinueVectorizationButton, updateVectorizationStatus, openPurgeOptionsDialog, refreshContextReadout } from './ui/ui-manager.js';
 import { progressTracker } from './ui/progress-tracker.js';
 import { initializeVisualizer } from './ui/chunk-visualizer.js';
 import { initializeDatabaseBrowser } from './ui/database-browser.js';
@@ -107,7 +108,6 @@ const defaultSettings = {
     conversation_turn_order: 'user_character', // Pairing order for conversation_turns
     depth: 2,
     position: extension_prompt_types.IN_PROMPT,
-    protect: 5,
     insert: 3,
     min_chat_length: 0, // Minimum number of messages in chat before injection starts (0 = no minimum)
     rag_timeout_seconds: 15, // VH-019: retrieval at generation gives up after this many seconds (0 = no limit)
@@ -115,10 +115,13 @@ const defaultSettings = {
     top_k: 3,
     query: 2,
     chunk_size: 500, // For adaptive strategy only
+    apply_prompt_regex_to_memories: true, // SillyTavern "Alter Outgoing Prompt" regex on recalled memories
     score_threshold: 0.25,
 
     // Deduplication settings
     deduplication_depth: 50, // Number of recent messages to check for duplicates (0 = check all)
+    skip_in_context_memories: true, // Skip memories of the open chat inside SillyTavern's context line (replaces Dedup Depth while the line is known)
+    memories_at_context_top: false, // In-chat memories go just inside the context line
 
     // Keyword scoring method
     keyword_scoring_method: 'keyword', // 'keyword', 'bm25', or 'hybrid'
@@ -129,6 +132,7 @@ const defaultSettings = {
 
     // Keyword extraction level for chat messages
     keyword_extraction_level: 'balanced', // 'off', 'minimal', 'balanced', 'aggressive'
+    keyword_base_weight: 1.5, // Default base weight for extracted keywords (new collections)
 
     // Hybrid Search settings (combines vector + full-text search)
     hybrid_search_enabled: false,       // Enable hybrid search mode
@@ -190,8 +194,8 @@ const onChatEvent = debounce(async () => await moduleWorker.update(), debounce_t
 /**
  * Generation interceptor - searches and injects relevant messages
  */
-async function vecthare_rearrangeChat(chat, _contextSize, _abort, type) {
-    await rearrangeChat(chat, settings, type);
+async function vecthare_rearrangeChat(chat, contextSize, _abort, type) {
+    await rearrangeChat(chat, settings, type, contextSize);
 }
 
 // Export to window for ST to call
@@ -934,8 +938,6 @@ jQuery(async () => {
 
     // Delegation runs after the controls' own settings update handlers.
     const savedStatusSettingsSelector = [
-        '#vecthare_chunking_strategy', '#vecthare_turn_order',
-        '#vecthare_batch_size', '#vecthare_chunk_size',
         '#vecthare_vector_backend', '#vecthare_source',
         '#vecthare_qdrant_use_cloud', '#vecthare_qdrant_host',
         '#vecthare_qdrant_port', '#vecthare_qdrant_url',
@@ -1045,6 +1047,20 @@ jQuery(async () => {
     // Note: Semantic WI injection happens in the generate_interceptor (rearrangeChat), not here
     eventSource.on(event_types.MESSAGE_SENT, onChatEvent);
     eventSource.on(event_types.MESSAGE_RECEIVED, onChatEvent);
+    // SillyTavern's context line (the orange dashed line): read right after it
+    // is set for each prompt (core/context-line.js), shown in the panel.
+    if (event_types.GENERATION_STARTED) {
+        eventSource.on(event_types.GENERATION_STARTED, (type, _params, dryRun) => noteGenerationType(type, dryRun));
+    }
+    if (event_types.GENERATE_AFTER_DATA) {
+        eventSource.on(event_types.GENERATE_AFTER_DATA, (_data, dryRun) => {
+            recordContextLine(dryRun);
+            refreshContextReadout();
+        });
+    }
+    for (const name of ['MESSAGE_SENT', 'MESSAGE_RECEIVED', 'MESSAGE_DELETED', 'MESSAGE_SWIPED', 'GENERATION_ENDED']) {
+        if (event_types[name]) eventSource.on(event_types[name], () => refreshContextReadout());
+    }
     // SillyTavern supplies a filename, not an owner. Inspect all candidates:
     // same-named chats belonging to other owners must never be purged.
     const onChatDeleted = async (filename, type) => {
@@ -1131,6 +1147,8 @@ jQuery(async () => {
         // #7: make any chat switch detectable to in-flight operations, even
         // when the host reuses the same chat array (A -> B -> A).
         noteChatSwitch();
+        forgetContextLine();
+        refreshContextReadout();
         // Invalidate all cached status and outstanding reads for the prior chat.
         invalidateSavedVectorizationStatus();
         // Safe, idempotent, one-time identity discovery. Never enable writes

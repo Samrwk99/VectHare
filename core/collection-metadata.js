@@ -500,8 +500,13 @@ export function setCollectionMeta(collectionId, data) {
     const key = resolveStoredCollectionKey(collectionId) || collectionId;
     const existing = vecthareState().collections[key];
 
+    // A new record does not take the generic "off" temporal weighting: a
+    // collection's own weighting is written when it is created (Vectorize
+    // dialog, or the defaults for a chat created by Sync). Reads still fall
+    // back to the generic default.
+    const { temporalDecay: _genericDecay, ...newRecordDefaults } = defaultCollectionMeta;
     vecthareState().collections[key] = {
-        ...defaultCollectionMeta,
+        ...newRecordDefaults,
         // VH-021: when this record came into being, so a recorded deletion can
         // tell a re-created collection from a stale copy of the deleted one.
         ...(existing ? {} : { recordCreatedAt: Date.now() }),
@@ -643,7 +648,7 @@ function buildInitialVectorizationConfig(settings, chunking) {
         hashing: { algorithm: 'getStringHash', input: hashInput },
         textCleaning: {
             applied: cleaningApplied,
-            preset: cleaning?.selectedPreset || 'none',
+            preset: settings.__collectionCleaningPreset || cleaning?.selectedPreset || 'none',
             activePatterns: cleaningApplied
                 ? (settings.__collectionCleaningPatterns ?? getActivePatterns()).map(({ pattern, flags, replacement }) => ({
                     pattern, flags: flags || 'g', replacement: replacement || '',
@@ -1603,6 +1608,11 @@ export async function resolveCollectionOperationSettings(collectionId, currentSe
         // changing the user's current cleaning preset.
         settings.__collectionCleaningPatterns = snapshotCollectionOperationSettings(
             original.textCleaning.activePatterns);
+        settings.__collectionCleaningPreset = original.textCleaning.preset;
+    } else {
+        // Saved without cleaning: no cleaning chosen for a new collection applies.
+        delete settings.__collectionCleaningPatterns;
+        delete settings.__collectionCleaningPreset;
     }
     if (original.keywordExtraction) {
         settings.keyword_extraction_level = original.keywordExtraction.level;
@@ -3054,6 +3064,27 @@ export function setCollectionDecaySettings(collectionId, decaySettings) {
  * @param {string} collectionId Collection identifier
  * @returns {boolean} Whether collection has custom decay configuration
  */
+/**
+ * A collection created by Sync gets the New Collection Defaults' temporal
+ * weighting, unless its record already holds its own (the Vectorize dialog
+ * writes one). Without this, Sync-created chats had no saved weighting and
+ * fell back to "off" whatever the default said.
+ */
+export function adoptDefaultDecayForNewCollection(collectionId, collectionType) {
+    if (!collectionId || !ensureCollectionsObject()) return;
+    const key = resolveStoredCollectionKey(collectionId);
+    const stored = key ? vecthareState().collections[key] : null;
+    if (stored?.temporalDecay) return;
+    setCollectionMeta(collectionId, { temporalDecay: getDefaultDecayForType(collectionType) });
+}
+
+/** Whether the collection's record holds its own temporal weighting. */
+export function hasOwnDecaySettings(collectionId) {
+    if (!collectionId || !ensureCollectionsObject()) return false;
+    const key = resolveStoredCollectionKey(collectionId);
+    return !!(key && vecthareState().collections[key]?.temporalDecay);
+}
+
 export function hasCustomDecaySettings(collectionId) {
     const meta = getCollectionMeta(collectionId);
     return meta.temporalDecay !== undefined && meta.temporalDecay !== null;

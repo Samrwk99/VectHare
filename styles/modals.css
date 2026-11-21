@@ -2291,3 +2291,18 @@
     word-break: break-word;
     text-align: right;
 }
+
+/* New Collection Defaults window */
+.vecthare-collection-defaults-content {
+    width: 90%;
+    max-width: 520px;
+}
+
+.vecthare-collection-defaults-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 16px 20px;
+    display: flex;
+    flex-direction: column;
+}
