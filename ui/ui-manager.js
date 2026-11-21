@@ -725,13 +725,13 @@ export function renderSettings(containerId, settings, callbacks) {
                                     <small>Injection Depth: <span id="vecthare_injection_depth_value">2</span></small>
                                 </label>
                                 <input type="range" id="vecthare_injection_depth" class="vecthare-slider" min="0" max="50" step="1" />
-                                <small class="vecthare_hint">How many messages from the end to insert memories. If that is above the orange line, they are moved just below it so they aren't cut.</small>
+                                <small class="vecthare_hint">How many messages from the end to insert memories. If that is above the orange context line, they are moved just below it so they aren't cut.</small>
 
                                 <label class="checkbox_label" for="vecthare_memories_at_context_top" style="margin-top: 8px;">
                                     <input id="vecthare_memories_at_context_top" type="checkbox" class="checkbox" />
                                     <span>Place memories at the top of the context</span>
                                 </label>
-                                <small class="vecthare_hint">Insert memories just below the orange line instead of at the depth above.</small>
+                                <small class="vecthare_hint">Insert memories just below the orange context line instead of at the depth above.</small>
                             </div>
 
                         </div>
@@ -749,76 +749,9 @@ export function renderSettings(containerId, settings, callbacks) {
                             <p class="vecthare-card-subtitle">Starting settings when you vectorize something new. You can change them each time; existing collections keep their own.</p>
                         </div>
                         <div class="vecthare-card-body">
-
-                            <label for="vecthare_default_chunking"><small>Chunking Strategy (chats)</small></label>
-                            <select id="vecthare_default_chunking" class="vecthare-select">
-                                <option value="per_message">Per Message</option>
-                                <option value="conversation_turns">Conversation Turns</option>
-                                <option value="message_batch">Message Batch</option>
-                            </select>
-                            <div id="vecthare_default_turn_order_row" style="margin-top: 8px; display: none;">
-                                <label for="vecthare_default_turn_order"><small>Pairing Order</small></label>
-                                <select id="vecthare_default_turn_order" class="vecthare-select">
-                                    <option value="user_character">User → Character</option>
-                                    <option value="character_user">Character → User</option>
-                                </select>
-                            </div>
-                            <div id="vecthare_default_batch_row" style="margin-top: 8px; display: none;">
-                                <label for="vecthare_default_batch_size"><small>Messages per Batch</small></label>
-                                <input type="number" id="vecthare_default_batch_size" class="vecthare-input" min="2" max="20" step="1" />
-                            </div>
-                            <small class="vecthare_hint">Lorebooks, documents and other content use their own strategies.</small>
-
-                            <label for="vecthare_default_cleaning" style="margin-top: 12px;"><small>Text Cleaning</small></label>
-                            <div style="display: flex; gap: 8px; align-items: center;">
-                                <select id="vecthare_default_cleaning" class="vecthare-select" style="flex: 1;">
-                                    <option value="none">None</option>
-                                    <option value="html_formatting">Strip HTML Formatting</option>
-                                    <option value="metadata_blocks">Strip Metadata Blocks</option>
-                                    <option value="ai_reasoning">Strip AI Reasoning Tags</option>
-                                    <option value="comprehensive">Comprehensive Clean</option>
-                                    <option value="nuclear">Strip All HTML</option>
-                                    <option value="custom">Custom</option>
-                                </select>
-                                <button id="vecthare_default_cleaning_manage" class="menu_button" title="Manage cleaning patterns">
-                                    <i class="fa-solid fa-gear"></i>
-                                </button>
-                            </div>
-                            <small class="vecthare_hint">Removed from text before it is stored. Custom uses the patterns chosen with the gear button.</small>
-
-                            <label for="vecthare_default_keyword_level" style="margin-top: 12px;"><small>Keyword Extraction</small></label>
-                            <div style="display: flex; gap: 8px; align-items: center;">
-                                <select id="vecthare_default_keyword_level" class="vecthare-select" style="flex: 1;">
-                                    <option value="off">Off</option>
-                                    <option value="minimal">Minimal (3 max)</option>
-                                    <option value="balanced">Balanced (8 max)</option>
-                                    <option value="aggressive">Aggressive (15 max)</option>
-                                </select>
-                                <label for="vecthare_default_keyword_weight" style="margin: 0; white-space: nowrap;"><small>Weight</small></label>
-                                <input type="number" id="vecthare_default_keyword_weight" class="vecthare-input" min="0.01" max="3" step="0.01" style="width: 80px;" />
-                            </div>
-                            <small class="vecthare_hint">Keywords found in each chunk help matching searches. Weight sets how much (not used for chats).</small>
-
-                            <div style="display: flex; align-items: center; gap: 8px; margin: 12px 0;">
-                                <input type="checkbox" id="vecthare_default_decay_enabled" />
-                                <label for="vecthare_default_decay_enabled" style="margin: 0;">
-                                    <small>Temporal Weighting</small>
-                                </label>
-                            </div>
-
-                            <div id="vecthare_default_decay_type_section" class="vecthare-subsection-disabled">
-                                <div style="display: flex; gap: 12px; margin-bottom: 4px;">
-                                    <label style="display: flex; align-items: center; gap: 4px; margin: 0;">
-                                        <input type="radio" name="vecthare_default_decay_type" value="decay" />
-                                        <small>Decay (favor recent)</small>
-                                    </label>
-                                    <label style="display: flex; align-items: center; gap: 4px; margin: 0;">
-                                        <input type="radio" name="vecthare_default_decay_type" value="nostalgia" />
-                                        <small>Nostalgia (favor old)</small>
-                                    </label>
-                                </div>
-                            </div>
-                            <small class="vecthare_hint">For chats: newer (or older) memories score higher.</small>
+                            <button id="vecthare_open_collection_defaults" class="menu_button" style="width: 100%;">
+                                <i class="fa-solid fa-sliders"></i> Edit New Collection Defaults
+                            </button>
 
                         </div>
                     </div>
@@ -1731,6 +1664,205 @@ function describeOriginalCleaning(config) {
     const preset = cleaning.preset || 'none';
     return patterns === null ? `Preset: ${preset}`
         : `Preset: ${preset} · ${patterns} pattern${patterns === 1 ? '' : 's'}`;
+}
+
+/**
+ * New Collection Defaults window: chat chunking, text cleaning, keyword
+ * extraction and temporal weighting for collections created from now on.
+ * Each change is saved at once.
+ */
+export function openCollectionDefaults(settings) {
+    $('#vecthare_collection_defaults_modal').remove();
+    const html = `
+        <div id="vecthare_collection_defaults_modal" class="vecthare-modal">
+            <div class="vecthare-modal-overlay"></div>
+            <div class="vecthare-modal-content vecthare-collection-defaults-content">
+                <div class="vecthare-modal-header">
+                    <h3><i class="fa-solid fa-sliders"></i> New Collection Defaults</h3>
+                    <button class="vecthare-modal-close" id="vecthare_collection_defaults_close" title="Close">
+                        <i class="fa-solid fa-times"></i>
+                    </button>
+                </div>
+                <div class="vecthare-collection-defaults-body">
+                    <p class="vecthare_hint" style="margin-top: 0;">Starting settings when you vectorize something new. You can change them each time; existing collections keep their own.</p>
+
+                            <label for="vecthare_default_chunking"><small>Chunking Strategy (chats)</small></label>
+                            <select id="vecthare_default_chunking" class="vecthare-select">
+                                <option value="per_message">Per Message</option>
+                                <option value="conversation_turns">Conversation Turns</option>
+                                <option value="message_batch">Message Batch</option>
+                            </select>
+                            <div id="vecthare_default_turn_order_row" style="margin-top: 8px; display: none;">
+                                <label for="vecthare_default_turn_order"><small>Pairing Order</small></label>
+                                <select id="vecthare_default_turn_order" class="vecthare-select">
+                                    <option value="user_character">User → Character</option>
+                                    <option value="character_user">Character → User</option>
+                                </select>
+                            </div>
+                            <div id="vecthare_default_batch_row" style="margin-top: 8px; display: none;">
+                                <label for="vecthare_default_batch_size"><small>Messages per Batch</small></label>
+                                <input type="number" id="vecthare_default_batch_size" class="vecthare-input" min="2" max="20" step="1" />
+                            </div>
+                            <small class="vecthare_hint">Lorebooks, documents and other content use their own strategies.</small>
+
+                            <label for="vecthare_default_cleaning" style="margin-top: 12px;"><small>Text Cleaning</small></label>
+                            <div style="display: flex; gap: 8px; align-items: center;">
+                                <select id="vecthare_default_cleaning" class="vecthare-select" style="flex: 1;">
+                                    <option value="none">None</option>
+                                    <option value="html_formatting">Strip HTML Formatting</option>
+                                    <option value="metadata_blocks">Strip Metadata Blocks</option>
+                                    <option value="ai_reasoning">Strip AI Reasoning Tags</option>
+                                    <option value="comprehensive">Comprehensive Clean</option>
+                                    <option value="nuclear">Strip All HTML</option>
+                                    <option value="custom">Custom</option>
+                                </select>
+                                <button id="vecthare_default_cleaning_manage" class="menu_button" title="Manage cleaning patterns">
+                                    <i class="fa-solid fa-gear"></i>
+                                </button>
+                            </div>
+                            <small class="vecthare_hint">Removed from text before it is stored. Custom uses the patterns chosen with the gear button.</small>
+
+                            <label for="vecthare_default_keyword_level" style="margin-top: 12px;"><small>Keyword Extraction</small></label>
+                            <div style="display: flex; gap: 8px; align-items: center;">
+                                <select id="vecthare_default_keyword_level" class="vecthare-select" style="flex: 1;">
+                                    <option value="off">Off</option>
+                                    <option value="minimal">Minimal (3 max)</option>
+                                    <option value="balanced">Balanced (8 max)</option>
+                                    <option value="aggressive">Aggressive (15 max)</option>
+                                </select>
+                                <label for="vecthare_default_keyword_weight" style="margin: 0; white-space: nowrap;"><small>Weight</small></label>
+                                <input type="number" id="vecthare_default_keyword_weight" class="vecthare-input" min="0.01" max="3" step="0.01" style="width: 80px;" />
+                            </div>
+                            <small class="vecthare_hint">Keywords found in each chunk help matching searches. Weight sets how much (not used for chats).</small>
+
+                            <div style="display: flex; align-items: center; gap: 8px; margin: 12px 0;">
+                                <input type="checkbox" id="vecthare_default_decay_enabled" />
+                                <label for="vecthare_default_decay_enabled" style="margin: 0;">
+                                    <small>Temporal Weighting</small>
+                                </label>
+                            </div>
+
+                            <div id="vecthare_default_decay_type_section" class="vecthare-subsection-disabled">
+                                <div style="display: flex; gap: 12px; margin-bottom: 4px;">
+                                    <label style="display: flex; align-items: center; gap: 4px; margin: 0;">
+                                        <input type="radio" name="vecthare_default_decay_type" value="decay" />
+                                        <small>Decay (favor recent)</small>
+                                    </label>
+                                    <label style="display: flex; align-items: center; gap: 4px; margin: 0;">
+                                        <input type="radio" name="vecthare_default_decay_type" value="nostalgia" />
+                                        <small>Nostalgia (favor old)</small>
+                                    </label>
+                                </div>
+                            </div>
+                            <small class="vecthare_hint">For chats: newer (or older) memories score higher.</small>
+                </div>
+                <div class="vecthare-modal-footer">
+                    <button class="vecthare-btn-primary" id="vecthare_collection_defaults_done">Done</button>
+                </div>
+            </div>
+        </div>`;
+    $('body').append(html);
+    const modal = $('#vecthare_collection_defaults_modal');
+    // SillyTavern closes drawers on mousedown/touchstart; keep it inside.
+    modal.on('mousedown touchstart', e => e.stopPropagation());
+    const onKey = e => {
+        if (e.key !== 'Escape' || $('#vecthare_text_cleaning_modal').length) return;
+        e.preventDefault();
+        e.stopPropagation();
+        close();
+    };
+    const close = () => {
+        document.removeEventListener('keydown', onKey, true);
+        $(document).off('vecthare:cleaning-changed.defaults');
+        modal.fadeOut(150, function () { $(this).remove(); });
+    };
+    document.addEventListener('keydown', onKey, true);
+    $('#vecthare_collection_defaults_close, #vecthare_collection_defaults_done').on('click', (e) => { e.preventDefault(); close(); });
+    modal.find('.vecthare-modal-overlay').on('click', close);
+
+    // Global temporal weighting defaults
+    const updateDecayTypeSection = (enabled) => {
+        const $section = $('#vecthare_default_decay_type_section');
+        const $radios = $section.find('input[type="radio"]');
+
+        if (enabled) {
+            $section.removeClass('vecthare-subsection-disabled');
+            $radios.prop('disabled', false);
+            // Select the saved type (or default to 'decay') when enabling
+            const savedType = settings.default_decay_type || 'decay';
+            $(`input[name="vecthare_default_decay_type"][value="${savedType}"]`).prop('checked', true);
+        } else {
+            $section.addClass('vecthare-subsection-disabled');
+            $radios.prop('disabled', true).prop('checked', false);
+        }
+    };
+
+    $('#vecthare_default_decay_enabled')
+        .prop('checked', settings.default_decay_enabled || false)
+        .on('change', function() {
+            const enabled = $(this).prop('checked');
+            settings.default_decay_enabled = enabled;
+            updateDecayTypeSection(enabled);
+            applySettingsSnapshot(settings);
+            saveSettingsDebounced();
+        });
+
+    // Initialize the section state
+    updateDecayTypeSection(settings.default_decay_enabled || false);
+
+    $('input[name="vecthare_default_decay_type"]').on('change', function() {
+        settings.default_decay_type = $(this).val();
+        applySettingsSnapshot(settings);
+        saveSettingsDebounced();
+    });
+
+    // New Collection Defaults: chat chunking, text cleaning, keywords
+    const saveDefaults = () => { applySettingsSnapshot(settings); saveSettingsDebounced(); };
+    const showChunkingRows = (strategy) => {
+        $('#vecthare_default_turn_order_row').toggle(strategy === 'conversation_turns');
+        $('#vecthare_default_batch_row').toggle(strategy === 'message_batch');
+    };
+    const chatDefaults = getNewCollectionDefaults('chat');
+    $('#vecthare_default_chunking').val(chatDefaults.strategy).on('change', function() {
+        settings.chunking_strategy = String($(this).val());
+        showChunkingRows(settings.chunking_strategy);
+        saveDefaults();
+    });
+    showChunkingRows(chatDefaults.strategy);
+    $('#vecthare_default_turn_order').val(chatDefaults.conversation_turn_order).on('change', function() {
+        settings.conversation_turn_order = String($(this).val());
+        saveDefaults();
+    });
+    $('#vecthare_default_batch_size').val(chatDefaults.batchSize).on('change', function() {
+        settings.batch_size = clampBatchSize($(this).val());
+        $(this).val(settings.batch_size);
+        saveDefaults();
+    });
+    const showCleaningDefault = () => $('#vecthare_default_cleaning').val(getDefaultCleaningPreset());
+    showCleaningDefault();
+    $('#vecthare_default_cleaning').on('change', function() {
+        const cleaning = getCleaningSettings();
+        cleaning.selectedPreset = String($(this).val());
+        saveCleaningSettings(cleaning);
+        saveSettingsDebounced();
+    });
+    $('#vecthare_default_cleaning_manage').on('click', (event) => {
+        event.preventDefault();
+        openTextCleaningManager();
+    });
+    // The Text Cleaning manager also sets the default preset.
+    $(document).off('vecthare:cleaning-changed.defaults').on('vecthare:cleaning-changed.defaults', showCleaningDefault);
+    $('#vecthare_default_keyword_level').val(chatDefaults.keywordLevel).on('change', function() {
+        settings.keyword_extraction_level = String($(this).val());
+        saveDefaults();
+    });
+    $('#vecthare_default_keyword_weight').val(chatDefaults.keywordBaseWeight).on('change', function() {
+        settings.keyword_base_weight = clampKeywordWeight($(this).val());
+        $(this).val(settings.keyword_base_weight);
+        saveDefaults();
+    });
+
+    modal.fadeIn(150);
 }
 
 /** The context line readout under "Skip memories already in context". */
@@ -2884,86 +3016,10 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
         });
 
-    // Global temporal weighting defaults
-    const updateDecayTypeSection = (enabled) => {
-        const $section = $('#vecthare_default_decay_type_section');
-        const $radios = $section.find('input[type="radio"]');
-
-        if (enabled) {
-            $section.removeClass('vecthare-subsection-disabled');
-            $radios.prop('disabled', false);
-            // Select the saved type (or default to 'decay') when enabling
-            const savedType = settings.default_decay_type || 'decay';
-            $(`input[name="vecthare_default_decay_type"][value="${savedType}"]`).prop('checked', true);
-        } else {
-            $section.addClass('vecthare-subsection-disabled');
-            $radios.prop('disabled', true).prop('checked', false);
-        }
-    };
-
-    $('#vecthare_default_decay_enabled')
-        .prop('checked', settings.default_decay_enabled || false)
-        .on('change', function() {
-            const enabled = $(this).prop('checked');
-            settings.default_decay_enabled = enabled;
-            updateDecayTypeSection(enabled);
-            applySettingsSnapshot(settings);
-            saveSettingsDebounced();
-        });
-
-    // Initialize the section state
-    updateDecayTypeSection(settings.default_decay_enabled || false);
-
-    $('input[name="vecthare_default_decay_type"]').on('change', function() {
-        settings.default_decay_type = $(this).val();
-        applySettingsSnapshot(settings);
-        saveSettingsDebounced();
-    });
-
-    // New Collection Defaults: chat chunking, text cleaning, keywords
-    const saveDefaults = () => { applySettingsSnapshot(settings); saveSettingsDebounced(); };
-    const showChunkingRows = (strategy) => {
-        $('#vecthare_default_turn_order_row').toggle(strategy === 'conversation_turns');
-        $('#vecthare_default_batch_row').toggle(strategy === 'message_batch');
-    };
-    const chatDefaults = getNewCollectionDefaults('chat');
-    $('#vecthare_default_chunking').val(chatDefaults.strategy).on('change', function() {
-        settings.chunking_strategy = String($(this).val());
-        showChunkingRows(settings.chunking_strategy);
-        saveDefaults();
-    });
-    showChunkingRows(chatDefaults.strategy);
-    $('#vecthare_default_turn_order').val(chatDefaults.conversation_turn_order).on('change', function() {
-        settings.conversation_turn_order = String($(this).val());
-        saveDefaults();
-    });
-    $('#vecthare_default_batch_size').val(chatDefaults.batchSize).on('change', function() {
-        settings.batch_size = clampBatchSize($(this).val());
-        $(this).val(settings.batch_size);
-        saveDefaults();
-    });
-    const showCleaningDefault = () => $('#vecthare_default_cleaning').val(getDefaultCleaningPreset());
-    showCleaningDefault();
-    $('#vecthare_default_cleaning').on('change', function() {
-        const cleaning = getCleaningSettings();
-        cleaning.selectedPreset = String($(this).val());
-        saveCleaningSettings(cleaning);
-        saveSettingsDebounced();
-    });
-    $('#vecthare_default_cleaning_manage').on('click', (event) => {
+    // New Collection Defaults open in their own window
+    $('#vecthare_open_collection_defaults').on('click', (event) => {
         event.preventDefault();
-        openTextCleaningManager();
-    });
-    // The Text Cleaning manager also sets the default preset.
-    $(document).off('vecthare:cleaning-changed.defaults').on('vecthare:cleaning-changed.defaults', showCleaningDefault);
-    $('#vecthare_default_keyword_level').val(chatDefaults.keywordLevel).on('change', function() {
-        settings.keyword_extraction_level = String($(this).val());
-        saveDefaults();
-    });
-    $('#vecthare_default_keyword_weight').val(chatDefaults.keywordBaseWeight).on('change', function() {
-        settings.keyword_base_weight = clampKeywordWeight($(this).val());
-        $(this).val(settings.keyword_base_weight);
-        saveDefaults();
+        openCollectionDefaults(settings);
     });
 
     // Provider-specific settings

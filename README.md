@@ -252,8 +252,8 @@ This fork ships with `auto_update: false` in its manifest, so SillyTavern will n
 | **Top K** | Most memories recalled per message, across all collections |
 | **Skip Memories Already in Context** | Don't recall this chat's messages that are still in the prompt (below SillyTavern's orange dashed line). Other collections are not affected. The panel shows where the line is (on by default) |
 | **Dedup Depth** | Skip memories that repeat one of the last N messages. Only used with the option above off |
-| **Injection Depth** | For In-Chat @ Depth: how many messages from the end. If that is above the orange line, memories are moved just below it so they aren't cut |
-| **Place Memories at the Top of the Context** | Insert in-chat memories just below the orange line (off by default) |
+| **Injection Depth** | For In-Chat @ Depth: how many messages from the end. If that is above the orange context line, memories are moved just below it so they aren't cut |
+| **Place Memories at the Top of the Context** | Insert in-chat memories just below the orange context line (off by default) |
 | **Apply "Alter Outgoing Prompt" Regex to Memories** | Runs your prompt regex scripts on recalled chat and lorebook memories (on by default) |
 
 ### 🆕 New Collection Defaults

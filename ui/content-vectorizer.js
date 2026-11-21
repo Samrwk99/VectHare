@@ -32,6 +32,7 @@ import { getChatUUID } from '../core/chat-vectorization.js';
 import { callGenericPopup, POPUP_TYPE } from '../../../../popup.js';
 import { openTextCleaningManager } from './text-cleaning-manager.js';
 import { getNewCollectionDefaults, clampBatchSize, getCleaningPatternsFor } from '../core/collection-defaults.js';
+import { openTextViewer } from './text-viewer.js';
 
 // ============================================================================
 // STATE
@@ -2509,6 +2510,7 @@ async function previewChunks() {
 
         // Calculate total chars for average
         const avgChars = Math.round(totalChars / chunks.length);
+        const shown = chunks.slice(0, 10).map(chunk => String(chunk?.text ?? chunk ?? ''));
 
         container.html(`
             <div class="vecthare-cv-preview-stats">
@@ -2516,10 +2518,9 @@ async function previewChunks() {
                 <span>~<strong>${escapeHtml(avgChars)}</strong> chars avg</span>
             </div>
             <div class="vecthare-cv-preview-list">
-                ${chunks.slice(0, 10).map((chunk, i) => {
-                    const chunkText = chunk.text || chunk;
+                ${shown.map((chunkText, i) => {
                     return `
-                    <div class="vecthare-cv-preview-chunk">
+                    <div class="vecthare-cv-preview-chunk" data-preview-index="${i}" role="button" tabindex="0" title="Show the full chunk">
                         <span class="vecthare-cv-preview-num">#${i + 1}</span>
                         <span class="vecthare-cv-preview-text">${escapeHtml(chunkText.substring(0, 150))}${chunkText.length > 150 ? '...' : ''}</span>
                         <span class="vecthare-cv-preview-size">${chunkText.length} chars</span>
@@ -2528,6 +2529,23 @@ async function previewChunks() {
                 ${chunks.length > 10 ? `<div class="vecthare-cv-preview-more">...and ${chunks.length - 10} more</div>` : ''}
             </div>
         `);
+        // A previewed chunk opens its full text in a window above the dialog.
+        const openFull = element => {
+            const index = Number(element.getAttribute('data-preview-index'));
+            if (!Number.isInteger(index) || shown[index] === undefined) return;
+            openTextViewer({
+                title: `Chunk #${index + 1} of ${chunks.length}`,
+                text: shown[index],
+                appendTo: $('#vecthare_content_vectorizer_modal'),
+                returnFocusTo: element,
+                fixed: true,
+            });
+        };
+        container.find('.vecthare-cv-preview-chunk')
+            .on('click', function () { openFull(this); })
+            .on('keydown', function (e) {
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openFull(this); }
+            });
 
     } catch (e) {
         if (generation !== previewGeneration) return;

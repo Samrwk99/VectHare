@@ -1935,3 +1935,18 @@
     gap: 8px;
     padding: 10px 16px;
 }
+
+/* The full-text window above the Vectorize dialog (its own scrolling box). */
+.vecthare-chunk-text-viewer.vecthare-chunk-text-viewer-fixed {
+    position: fixed;
+    z-index: 10003;
+}
+
+.vecthare-cv-preview-chunk[data-preview-index] {
+    cursor: pointer;
+}
+.vecthare-cv-preview-chunk[data-preview-index]:hover,
+.vecthare-cv-preview-chunk[data-preview-index]:focus-visible {
+    background: var(--vecthare-hover, rgba(255, 255, 255, 0.06));
+    outline: none;
+}
